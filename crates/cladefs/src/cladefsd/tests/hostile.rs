@@ -2281,7 +2281,7 @@ fn page_ins_in_flight_are_bounded() {
                 .write(ExtentId { cell: cell.id, sequence }, 0, &[VolatileSlice::from(&data[..])])
                 .unwrap();
         }
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         cell
     };
     let store = CellClient::connect(&socket, &path, 1 << 30).unwrap();

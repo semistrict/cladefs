@@ -73,7 +73,7 @@ fn public_bases_are_shared_read_only() {
     let base_bytes = pattern(3);
     let extent = ExtentId { cell: base.cell().id, sequence: 1 };
     base.write(extent, 0, &[cladefs::VolatileSlice::from(&base_bytes[..])]).unwrap();
-    base.commit(None).unwrap();
+    futures::executor::block_on(base.commit(None)).unwrap();
     base.make_public().unwrap();
     drop(base);
     let forks = [dir.path().join("one/fork"), dir.path().join("two/fork")];

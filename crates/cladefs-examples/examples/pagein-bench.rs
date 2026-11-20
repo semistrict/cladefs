@@ -68,7 +68,7 @@ fn round(mib: u64, mask: u8) -> (f64, f64) {
         store.write(extent, 0, &[VolatileSlice::from(&bytes[..])]).unwrap();
     }
     let window = store.create_dax_window(extents * len, None).unwrap();
-    store.commit(None).unwrap();
+    futures::executor::block_on(store.commit(None)).unwrap();
     for sequence in 1..=extents {
         let extent = ExtentId { cell: store.cell().id, sequence };
         store.map(extent, 0, len, (sequence - 1) * len).unwrap();

@@ -93,7 +93,7 @@ impl KeptImage {
         if let Some(failed) = self.uploader.failed() {
             return Err(anyhow::Error::new(failed).context("the image's cell is not uploaded"));
         }
-        self.uploader.wait_lag(self.store.last_commit()?)?;
+        futures::executor::block_on(self.uploader.lag(self.store.last_commit()?))?;
         if let Some(collecting) = &self.collecting {
             collecting.after_commit();
         }
@@ -103,7 +103,7 @@ impl KeptImage {
     /// Waits until the store's commits are uploaded: so a closed image's cell is whole in its
     /// bucket.
     pub fn wait_uploaded(&self) -> anyhow::Result<()> {
-        Ok(self.uploader.wait_uploaded(self.store.last_commit()?)?)
+        Ok(futures::executor::block_on(self.uploader.uploaded(self.store.last_commit()?))?)
     }
 
     /// Forks the store's cell, as of its last commit, to a new cell of its tenant's (TASK-364),
@@ -117,7 +117,7 @@ impl KeptImage {
         let version = bucket_cell::layout::NewVersion { id, keep_last: None };
         let epoch = self.store.commit_version(version, false).map_err(Error::new)?;
         drop(held);
-        self.uploader.wait_uploaded(epoch).map_err(Error::from)?;
+        futures::executor::block_on(self.uploader.uploaded(epoch)).map_err(Error::from)?;
         host_cell::fork_through(&self.store, &self.uploader, id, path, child, |_| Ok(()))
     }
 

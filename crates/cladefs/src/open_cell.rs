@@ -472,6 +472,16 @@ fn upload_errno(failure: local_cell::upload::Failure) -> Errno {
     })
 }
 
+/// cladefs: awaits `future` on a path of the daemon's that the async rewrite hasn't reached yet
+/// (doc-24, TASK-685.3), blocking the calling thread: one seam, so that what is left is one search,
+/// each use gone with its path's step. Under madsim, which runs on one thread, it fails at once.
+pub(crate) fn not_yet_async<F: std::future::Future>(future: F) -> F::Output {
+    #[cfg(madsim)]
+    panic!("not async yet: this path of the daemon blocks, which the simulation can't run");
+    #[cfg(not(madsim))]
+    futures::executor::block_on(future)
+}
+
 /// cladefs: the span of a commit's wait for object storage to hold the commits up to `epoch`, or
 /// as many of them as its lag allows (`bucket_cell::trace`, TASK-258).
 fn upload_wait(epoch: u64) -> trace::Span {
@@ -1085,7 +1095,7 @@ impl OpenCell {
             return host_cell::fork(&self.store, uploader, path, child, inherited);
         }
         let id = self.commit_version(None, quiescent)?;
-        self.make_uploaded()?;
+        not_yet_async(self.make_uploaded())?;
         failpoint!("fork::uploaded");
         host_cell::fork_through(&self.store, uploader, id, path, child, inherited)
     }
@@ -1407,11 +1417,11 @@ impl OpenCell {
 
     /// Writes as [`write`](Self::write) does, ordered with `barriers` (`WRITE`'s flags): one
     /// request, where each is a round trip from the guest.
-    pub fn write_with_barriers(
+    pub async fn write_with_barriers(
         &self,
         extent: ExtentId,
         offset: u64,
-        buffers: &[VolatileSlice],
+        buffers: &[VolatileSlice<'_>],
         barriers: WriteBarriers<'_>,
     ) -> Result<()> {
         // A root is set by the commit after the write: there is none to set it.
@@ -1419,12 +1429,12 @@ impl OpenCell {
             return Err(Errno::EINVAL);
         }
         if barriers.before {
-            self.commit_ordered(None)?;
+            self.commit_ordered(None).await?;
         }
         self.write(extent, offset, buffers)?;
         match barriers.after {
             None => Ok(()),
-            Some(commit) => self.commit_with(barriers.root, commit),
+            Some(commit) => self.commit_with(barriers.root, commit).await,
         }
     }
 
@@ -1469,29 +1479,29 @@ impl OpenCell {
     /// Commits what was written and freed, and `root` as the store's root if given, uploaded
     /// (`COMMIT` with `COMMIT_UPLOADED`). It seals the extents written before it; cladefs: no
     /// window maps any of them, and nothing in a window changes.
-    pub fn commit(&self, root: Option<&[u8]>) -> Result<()> {
-        self.commit_with(root, Commit::Uploaded)
+    pub async fn commit(&self, root: Option<&[u8]>) -> Result<()> {
+        self.commit_with(root, Commit::Uploaded).await
     }
 
     /// cladefs: commits as [`OpenCell::commit`] does, completing once local, synced to the
     /// host's disk, not waiting for the bucket (`COMMIT_LOCAL`, TASK-301).
-    pub fn commit_local(&self, root: Option<&[u8]>) -> Result<()> {
-        self.commit_with(root, Commit::Local)
+    pub async fn commit_local(&self, root: Option<&[u8]>) -> Result<()> {
+        self.commit_with(root, Commit::Local).await
     }
 
     /// cladefs: commits as [`OpenCell::commit`] does, but completing once ordered: a
     /// barrier, ordering what came before before what comes after (`COMMIT` without
     /// `COMMIT_UPLOADED`). [`OpenCell::flush`] makes the commits ordered so far local.
-    pub fn commit_ordered(&self, root: Option<&[u8]>) -> Result<()> {
-        self.commit_with(root, Commit::Ordered)
+    pub async fn commit_ordered(&self, root: Option<&[u8]>) -> Result<()> {
+        self.commit_with(root, Commit::Ordered).await
     }
 
     /// cladefs: closes the open segment at a commit, as a commit waiting for its upload does, and
     /// returns once every segment closed is framed: for tests of what framing costs (TASK-330.2).
     #[cfg(test)]
-    pub(crate) fn frame_open_segment(&self) -> Result<()> {
+    pub(crate) async fn frame_open_segment(&self) -> Result<()> {
         self.store.close_segment().map_err(errno)?;
-        self.commit_local(None)?;
+        self.commit_local(None).await?;
         self.store.wait_framed().map_err(errno)
     }
 
@@ -1530,11 +1540,12 @@ impl OpenCell {
     }
 
     /// Makes the commits ordered so far uploaded, if the store has an uploader; local, if not.
-    fn make_uploaded(&self) -> Result<()> {
+    async fn make_uploaded(&self) -> Result<()> {
         let epoch = self.make_local()?;
         match self.uploader.as_ref() {
             Some(uploader) => {
-                upload_wait(epoch).run(|| uploader.wait_uploaded(epoch).map_err(upload_errno))
+                let uploaded = uploader.uploaded(epoch);
+                upload_wait(epoch).run_async(uploaded).await.map_err(upload_errno)
             }
             None => Ok(()),
         }
@@ -1573,11 +1584,11 @@ impl OpenCell {
 
     /// cladefs: waits until every commit ordered so far is uploaded, as before
     /// a clean stop (TASK-39.7). `ENOTSUP` without an uploader.
-    pub fn wait_uploaded(&self) -> Result<()> {
+    pub async fn wait_uploaded(&self) -> Result<()> {
         if self.uploader.as_ref().is_none() {
             return Err(Errno::ENOTSUP);
         }
-        self.make_uploaded()
+        self.make_uploaded().await
     }
 
     /// Whether commits ordered are not local yet: waiting for [`OpenCell::flush`], or taken
@@ -1602,22 +1613,23 @@ impl OpenCell {
     /// cladefs: in a span of its own, `store.commit` (`bucket_cell::trace`, TASK-258), whose
     /// children are its phases: `commit.seal` and `commit.write`, the store's; then, local or
     /// uploaded, `store.flush`, and `commit.upload_wait` as it waits for object storage.
-    fn commit_with(&self, root: Option<&[u8]>, commit: Commit) -> Result<()> {
+    async fn commit_with(&self, root: Option<&[u8]>, commit: Commit) -> Result<()> {
         let span = trace::Span::start("store.commit");
         span.set_cell(self.cell());
         span.set(trace::LEVEL, commit.level());
-        span.run(|| {
+        span.run_async(async {
             self.admit(Changing::Contents)?;
             let started = std::time::Instant::now();
-            let committed = self.commit_and_wait(root, commit);
+            let committed = self.commit_and_wait(root, commit).await;
             stats::count_since(Counter::Commits, Counter::CommitNs, started);
             committed
         })
+        .await
     }
 
     /// Commits, and waits as `commit` says: for the uploader's lag, the host's disk, or object
     /// storage; the commit's phases, each counted ([`stats::Stats::commits`]).
-    fn commit_and_wait(&self, root: Option<&[u8]>, commit: Commit) -> Result<()> {
+    async fn commit_and_wait(&self, root: Option<&[u8]>, commit: Commit) -> Result<()> {
         /// What a commit waits for: a level of [`Commit`]'s, or replicated (doc-21).
         enum Waiting {
             Commit(Commit),
@@ -1642,12 +1654,15 @@ impl OpenCell {
             (commit, _) => Waiting::Commit(commit),
         };
         let waited = match commit {
-            Waiting::Replicated => self.make_replicated(),
+            Waiting::Replicated => self.make_replicated().await,
             // cladefs: each level including the one before (doc-12): local, as ordered, within the
             // lag; uploaded, past it.
-            Waiting::Commit(Commit::Uploaded) => self.make_uploaded(),
-            Waiting::Commit(Commit::Local) => self.flush().and_then(|()| self.within_lag()),
-            Waiting::Commit(Commit::Ordered) => self.within_lag(),
+            Waiting::Commit(Commit::Uploaded) => self.make_uploaded().await,
+            Waiting::Commit(Commit::Local) => match self.flush() {
+                Ok(()) => self.within_lag().await,
+                Err(errno) => Err(errno),
+            },
+            Waiting::Commit(Commit::Ordered) => self.within_lag().await,
         };
         stats::add_since(Counter::CommitWaitNs, waiting);
         waited
@@ -1657,22 +1672,23 @@ impl OpenCell {
     /// which every commit level waits for: a lost host costs what is past the bucket, no more, and
     /// the host's disk holds no more (doc-14). Fails once the uploader failed for good, as no commit
     /// made since is its cell's (TASK-550, TASK-582).
-    fn within_lag(&self) -> Result<()> {
+    async fn within_lag(&self) -> Result<()> {
         let Some(uploader) = self.uploader.as_ref() else { return Ok(()) };
         let epoch = self.store.last_commit().map_err(errno)?;
-        upload_wait(epoch).run(|| uploader.wait_lag(epoch).map_err(upload_errno))
+        upload_wait(epoch).run_async(uploader.lag(epoch)).await.map_err(upload_errno)
     }
 
     /// cladefs: makes the store's commits so far replicated (doc-21): local, then on f members
     /// besides this host, or in the bucket, and within the lag the uploader allows.
-    fn make_replicated(&self) -> Result<()> {
+    async fn make_replicated(&self) -> Result<()> {
         let epoch = self.make_local()?;
         let Some(uploader) = self.uploader.as_ref() else { return Ok(()) };
-        upload_wait(epoch).run(|| {
-            (uploader.wait_replicated(epoch))
-                .and_then(|()| uploader.wait_lag(epoch))
-                .map_err(upload_errno)
-        })
+        let (replicated, lag) = (uploader.replicated(epoch), uploader.lag(epoch));
+        let waited = async {
+            replicated.await?;
+            lag.await
+        };
+        upload_wait(epoch).run_async(waited).await.map_err(upload_errno)
     }
 
     /// The root as of the last commit, empty if none set one (`ROOT`).
@@ -2131,7 +2147,7 @@ impl OpenCell {
     #[cfg(test)]
     pub(crate) fn uploaded_version_at(&self, path: impl AsRef<Path>) -> Result<u64, Error> {
         let id = self.make_version(None)?;
-        self.make_uploaded()?;
+        not_yet_async(self.make_uploaded())?;
         self.open_version_at(path, id)?;
         Ok(id)
     }
@@ -2630,7 +2646,7 @@ mod tests {
 
     /// Commits what `store` wrote, local alone: its uploader not waited for.
     fn committed_here(store: &OpenCell) {
-        store.commit_ordered(None).unwrap();
+        futures::executor::block_on(store.commit_ordered(None)).unwrap();
         store.flush().unwrap();
     }
 
@@ -2731,13 +2747,13 @@ mod tests {
                             store.free(extent).unwrap();
                         }
                     }
-                    CellChange::Commit => store.commit(None).unwrap(),
+                    CellChange::Commit => futures::executor::block_on(store.commit(None)).unwrap(),
                     CellChange::Reopen => {
                         drop(store);
                         store = OpenCell::open(&path).unwrap();
                     }
                     CellChange::Fork => {
-                        store.commit(None).unwrap();
+                        futures::executor::block_on(store.commit(None)).unwrap();
                         let fork = dir.path().join(format!("fork-{done}"));
                         store.fork_to(&fork, crate::host_cell::fork_child(store.cell())).unwrap();
                         drop(store);
@@ -2757,7 +2773,7 @@ mod tests {
         write(&store, b, BLOCK as u64, &pattern(2, BLOCK)).unwrap();
         assert_eq!(read(&store, a, 0, 2 * BLOCK), Ok(pattern(1, 2 * BLOCK)));
         assert_eq!(read(&store, b, 0, 2 * BLOCK), Ok([vec![0; BLOCK], pattern(2, BLOCK)].concat()));
-        store.commit(Some(b"root")).unwrap();
+        futures::executor::block_on(store.commit(Some(b"root"))).unwrap();
         write(&store, id(&store, 3), 0, &pattern(3, BLOCK)).unwrap();
         store.free(b).unwrap();
 
@@ -2804,7 +2820,7 @@ mod tests {
         let a = id(&store, 1);
         let data = crate::test_data::noise(1, 2 * BLOCK);
         write(&store, a, 0, &data).unwrap();
-        store.commit(Some(b"root")).unwrap();
+        futures::executor::block_on(store.commit(Some(b"root"))).unwrap();
         let follower = store.follow();
         assert_eq!(read(&follower, a, 0, 2 * BLOCK), Ok(data.clone()));
         assert_eq!(read(&store, a, 0, 2 * BLOCK), Ok(data.clone()));
@@ -2854,7 +2870,7 @@ mod tests {
         let common = common.unwrap();
         assert!(!common.store.keys().is_empty());
         write(&common, id(&common, 1), 0, &pattern(2, BLOCK)).unwrap();
-        common.commit(None).unwrap();
+        futures::executor::block_on(common.commit(None)).unwrap();
         let into = crate::host_cell::named(6);
         let refused = common.fork_to(dir.path().join("into-none"), into).unwrap_err();
         assert_eq!(refused.errno(), Some(Errno::EACCES), "{refused:#}");
@@ -2884,7 +2900,7 @@ mod tests {
         let a = id(&store, 1);
         let data = crate::test_data::noise(1, 2 * BLOCK);
         write(&store, a, 0, &data).unwrap();
-        store.commit(Some(b"root")).unwrap();
+        futures::executor::block_on(store.commit(Some(b"root"))).unwrap();
         assert_eq!(read(&store, a, 0, 2 * BLOCK), Ok(data.clone()));
 
         let cell = store.cell();
@@ -2928,7 +2944,7 @@ mod tests {
         let before = stats::stats();
         assert_eq!(read(&store, extent, 0, 2 * BLOCK), Ok(pattern(1, 2 * BLOCK)));
         assert_eq!(stats::stats().since(&before).read_stored_bytes, 2 * BLOCK as u64);
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
 
         let before = stats::stats();
         let tail = [pattern(1, 2 * BLOCK)[BLOCK..].to_vec(), vec![0; BLOCK]].concat();
@@ -2955,12 +2971,12 @@ mod tests {
         let store = Arc::new(store);
         let (a, b) = (id(&store, 1), id(&store, 2));
         write(&store, a, 0, &pattern(1, BLOCK)).unwrap();
-        store.commit(Some(b"one")).unwrap();
+        futures::executor::block_on(store.commit(Some(b"one"))).unwrap();
         let follower = store.follow();
         assert_eq!(follower.access().role, CellRole::Follower);
         store.free(a).unwrap();
         write(&store, b, 0, &pattern(2, BLOCK)).unwrap();
-        store.commit(Some(b"two")).unwrap();
+        futures::executor::block_on(store.commit(Some(b"two"))).unwrap();
         assert_eq!(read(&follower, a, 0, BLOCK), Ok(pattern(1, BLOCK)));
         assert_eq!(read(&follower, b, 0, BLOCK), Err(Errno::ENOENT));
         assert_eq!(follower.root(), Ok(b"one".to_vec()));
@@ -2975,7 +2991,7 @@ mod tests {
         // Pinned, an extent stays, whatever commit the follower is as of.
         follower.pin(b).unwrap();
         store.free(b).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         let commit = follower.advance().unwrap();
         follower.let_go(commit).unwrap();
         assert_eq!(read(&follower, b, 0, BLOCK), Ok(pattern(2, BLOCK)));
@@ -2985,7 +3001,7 @@ mod tests {
         // Dropped, it leaves its writer's store open.
         drop(follower);
         write(&store, id(&store, 3), 0, &pattern(3, BLOCK)).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
     }
 
     /// TASK-165.8: a follower reads what its view's commit holds that the writer freed after it in
@@ -2998,10 +3014,10 @@ mod tests {
         let store = Arc::new(store);
         let a = id(&store, 1);
         write(&store, a, 0, &pattern(1, BLOCK)).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         let follower = store.follow();
         store.free(a).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         let segments =
             dir.path().join("store/segments").join(base32_id::Padded(store.cell().id).to_string());
         assert_eq!(std::fs::read_dir(&segments).unwrap().count(), 0, "segments left in the store");
@@ -3012,10 +3028,10 @@ mod tests {
         crate::test_checkpoints::after(&store, store.bucket(), || {
             for sequence in 2..2 + local_cell::upload::CHECKPOINT_EVERY {
                 write(&store, id(&store, sequence), 0, &pattern(sequence as u8, BLOCK)).unwrap();
-                store.commit(None).unwrap();
+                futures::executor::block_on(store.commit(None)).unwrap();
                 store.free(id(&store, sequence)).unwrap();
             }
-            store.commit(None).unwrap();
+            futures::executor::block_on(store.commit(None)).unwrap();
         });
         let options = bucket_cell::collector::Options { compact_below: 0.5, grace: 0 };
         let collected = bucket_cell::collector::collect(&**store.bucket(), 1, &options);
@@ -3035,12 +3051,12 @@ mod tests {
         let store = Arc::new(store);
         let a = id(&store, 1);
         write(&store, a, 0, &pattern(1, BLOCK)).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         let follower = store.follow();
         assert_eq!(write(&follower, id(&store, 2), 0, &pattern(2, BLOCK)), Err(Errno::EROFS));
         assert_eq!(follower.free(a), Err(Errno::EROFS));
-        assert_eq!(follower.commit(None), Err(Errno::EROFS));
-        assert_eq!(follower.commit_ordered(None), Err(Errno::EROFS));
+        assert_eq!(futures::executor::block_on(follower.commit(None)), Err(Errno::EROFS));
+        assert_eq!(futures::executor::block_on(follower.commit_ordered(None)), Err(Errno::EROFS));
         assert_eq!(follower.set_capacity(2 << 20), Err(Errno::EROFS));
         let forked = follower.fork_to(dir.path().join("fork"), host_cell::new_alone());
         assert_eq!(forked.map_err(|err| err.errno()), Err(Some(Errno::EROFS)));
@@ -3060,11 +3076,11 @@ mod tests {
         let ps = page_size();
         let a = id(&store, 1);
         write(&store, a, 0, &pattern(4, ps as usize)).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         let follower = store.follow();
         let b = id(&store, 2);
         write(&store, b, 0, &pattern(5, ps as usize)).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         let window = follower.create_dax_window(4 * ps, None).unwrap();
         follower.map(a, 0, ps, 0).unwrap();
         assert_eq!(follower.map(b, 0, ps, ps), Err(Errno::ENOENT));
@@ -3088,7 +3104,7 @@ mod tests {
         let a = id(&store, 1);
         write(&store, a, 0, &pattern(1, BLOCK)).unwrap();
         assert_eq!(store.take_over(), Err(Errno::EBUSY));
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         store.take_over().unwrap();
         let _window = store.create_dax_window(4 * page_size(), None).unwrap();
         follower.advance().unwrap();
@@ -3107,12 +3123,12 @@ mod tests {
     fn followers_hear_of_commits() {
         let (store, _dir) = store(1 << 20);
         let store = Arc::new(store);
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         let follower = store.follow();
         let commit = follower.view_commit().unwrap();
         assert_eq!(follower.newer(commit, std::time::Duration::from_millis(10)), None);
         write(&store, id(&store, 1), 0, &pattern(1, BLOCK)).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         let newer = follower.newer(commit, std::time::Duration::from_secs(10));
         assert_eq!(newer, Some(follower.advance().unwrap()));
     }
@@ -3127,7 +3143,7 @@ mod tests {
         write(&store, extent, 0, &pattern(5, len)).unwrap();
         assert_eq!(store.map(extent, 0, ps, 0), Err(Errno::ENOSYS));
         let window = store.create_dax_window(6 * ps, None).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         store.map(extent, 0, 2 * ps, ps).unwrap();
         // Past the extent, zeros.
         store.map(extent, 0, 3 * ps, 3 * ps).unwrap();
@@ -3179,7 +3195,7 @@ mod tests {
                     });
                 }
             });
-            store.commit_ordered(None).unwrap();
+            futures::executor::block_on(store.commit_ordered(None)).unwrap();
             let read = read(store, extent, 0, expected.len());
             assert_eq!(read, Ok(expected.to_vec()), "extent {sequence}");
         }
@@ -3200,7 +3216,7 @@ mod tests {
         let window = store.create_dax_window(2 * ps, None).unwrap();
         let (sealed, open, next) = (id(&store, 1), id(&store, 2), id(&store, 3));
         write(&store, sealed, 0, &pattern(1, BLOCK)).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         write(&store, open, 0, &pattern(2, BLOCK)).unwrap();
 
         crate::halt::tests::panic_holding("opening");
@@ -3211,7 +3227,7 @@ mod tests {
         assert_eq!(read(&store, sealed, 0, BLOCK), Err(Errno::EIO));
         assert_eq!(write(&store, next, 0, &pattern(4, BLOCK)), Err(Errno::EIO));
         assert_eq!(store.free(sealed), Err(Errno::EIO));
-        assert_eq!(store.commit(None), Err(Errno::EIO));
+        assert_eq!(futures::executor::block_on(store.commit(None)), Err(Errno::EIO));
         // The window's, which the panic didn't hold.
         assert_eq!(store.map(sealed, 0, ps, ps), Err(Errno::EIO));
         assert_eq!(store.unmap(0, ps), Err(Errno::EIO));
@@ -3234,7 +3250,7 @@ mod tests {
         assert_eq!(read(&store, sealed, 0, BLOCK), Ok(pattern(1, BLOCK)));
         assert_eq!(read(&store, open, 0, BLOCK), Err(Errno::ENOENT));
         write(&store, next, 0, &pattern(5, BLOCK)).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         assert_eq!(read(&store, next, 0, BLOCK), Ok(pattern(5, BLOCK)));
     }
 
@@ -3245,7 +3261,7 @@ mod tests {
         let (store, _dir) = store(1 << 26);
         let data = pattern(3, BLOCK);
         let write = |extent| write(&store, extent, 0, &data).unwrap();
-        let commit = |_: ExtentId| store.commit_ordered(None).unwrap();
+        let commit = |_: ExtentId| futures::executor::block_on(store.commit_ordered(None)).unwrap();
         race(&store, ROUNDS, |_| {}, &[&write, &commit], &data);
     }
 
@@ -3254,7 +3270,7 @@ mod tests {
     fn ordered_commits_wait_for_a_flush() {
         let (store, _dir) = store(1 << 20);
         write(&store, id(&store, 1), 0, &pattern(1, BLOCK)).unwrap();
-        store.commit_ordered(None).unwrap();
+        futures::executor::block_on(store.commit_ordered(None)).unwrap();
         assert!(store.flush_pending());
         store.flush().unwrap();
         assert!(!store.flush_pending());
@@ -3268,7 +3284,7 @@ mod tests {
         let ps = page_size();
         let sealed = id(&store, 1);
         write(&store, sealed, 0, &pattern(3, 2 * ps as usize)).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         let _window = store.create_dax_window(8 * ps, None).unwrap();
         store.map(sealed, ps, 3 * ps, 0).unwrap();
         store.map(sealed, 2 * ps, ps, 5 * ps).unwrap();
@@ -3292,7 +3308,7 @@ mod tests {
             write(&store, id(&store, sequence), 0, &pattern(sequence as u8, EXTENT as usize))
                 .unwrap();
         }
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         drop(store);
         let store = OpenCell::open_in(path, Some(arena.clone())).unwrap();
         let window = store.create_dax_window(extents * EXTENT, None).unwrap();
@@ -3442,7 +3458,7 @@ mod tests {
         let ps = page_size();
         let (sealed, open) = (id(&store, 1), id(&store, 2));
         write(&store, sealed, 0, &pattern(1, 2 * ps as usize)).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         let window = store.create_dax_window(8 * ps, None).unwrap();
         store.map(sealed, 0, 2 * ps, 0).unwrap();
         store.map(sealed, ps, ps, 4 * ps).unwrap();
@@ -3453,7 +3469,7 @@ mod tests {
         write(&store, open, 0, &pattern(2, ps as usize)).unwrap();
         assert_eq!(store.is_quiescent(), Ok(false));
         assert_eq!(store.map(open, 0, ps, 6 * ps), Err(Errno::EPERM), "an open extent mapped");
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         assert_eq!(store.is_quiescent(), Ok(true));
         store.map(open, 0, ps, 6 * ps).unwrap();
         let extent = |extent, offset| MappingContents::Extent { extent, offset };
@@ -3654,7 +3670,7 @@ mod tests {
         let part = extent_frame::PART;
         let len = 4 * part as usize;
         write(&base, extent, 0, &pattern(5, len)).unwrap();
-        base.commit(None).unwrap();
+        futures::executor::block_on(base.commit(None)).unwrap();
         let (first, second) = (dir.path().join("first"), dir.path().join("second"));
         base.fork_to(&first, crate::host_cell::fork_child(base.cell())).unwrap();
         base.fork_to(&second, crate::host_cell::fork_child(base.cell())).unwrap();
@@ -3701,7 +3717,7 @@ mod tests {
         write(&store, extent, 0, &pattern(5, len)).unwrap();
         let stage = Arc::new(RecordingSecondStage::default());
         let window = store.create_dax_window(len as u64, Some(stage.clone())).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         // Nothing of it is in memory: mapping it maps no page yet.
         store.map(extent, 0, len as u64, 0).unwrap();
         assert_eq!(*stage.0.lock().unwrap(), []);
@@ -3731,7 +3747,7 @@ mod tests {
         let len = parts * part;
         write(&base, extent, 0, &pattern(5, len as usize)).unwrap();
         let window = base.create_dax_window(len, None).unwrap();
-        base.commit(None).unwrap();
+        futures::executor::block_on(base.commit(None)).unwrap();
         let forked = dir.path().join("fork");
         base.fork_to(&forked, crate::host_cell::fork_child(base.cell())).unwrap();
         base.map(extent, 0, len, 0).unwrap();
@@ -3815,7 +3831,7 @@ mod tests {
                 let _window = store.create_dax_window(WINDOW, Some(stage)).unwrap();
                 let kept = id(&store, KEPT);
                 write(&store, kept, 0, &pattern(9, BLOCK)).unwrap();
-                store.commit(None).unwrap();
+                futures::executor::block_on(store.commit(None)).unwrap();
                 let mut forks = (1u64..).map(|fork| (dir.path().join(fork.to_string()), fork));
                 for request in requests {
                     let extent = |sequence| id(&store, sequence);
@@ -3825,7 +3841,7 @@ mod tests {
                         Request::Read(e, at, len) => read(&store, extent(e), at, len).map(drop),
                         Request::Map(e, at, len, to) => store.map(extent(e), at, len, to),
                         Request::Unmap(to, len) => store.unmap(to, len),
-                        Request::Commit => store.commit(None),
+                        Request::Commit => futures::executor::block_on(store.commit(None)),
                         Request::Free(e) => store.free(extent(e)),
                         Request::Fork => {
                             let (path, fork) = forks.next().unwrap();
@@ -3839,7 +3855,7 @@ mod tests {
                     };
                 }
                 // Nor leave a commit it can't make: a wedged store's guest gets nothing more done.
-                prop_assert_eq!(store.commit(None), Ok(()));
+                prop_assert_eq!(futures::executor::block_on(store.commit(None)), Ok(()));
                 prop_assert_eq!(read(&store, kept, 0, BLOCK), Ok(pattern(9, BLOCK)));
                 Ok(())
             })
@@ -3869,7 +3885,7 @@ mod tests {
         let first = OpenCell::create_kept_in(dir.path().join("first"), 1 << 20, &url).unwrap();
         let extent = id(&first, 1);
         write(&first, extent, 0, &pattern(7, len)).unwrap();
-        first.commit(None).unwrap();
+        futures::executor::block_on(first.commit(None)).unwrap();
         let cell = first.cell();
         drop(first);
 
@@ -3929,7 +3945,7 @@ mod tests {
         let take = || std::mem::take(&mut *stage.0.lock().unwrap());
         let extent = id(&store, 1);
         write(&store, extent, 0, &pattern(3, 2 * ps as usize)).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         store.map(extent, 0, 2 * ps, 0).unwrap();
         assert_eq!(take(), [], "pages not in memory mapped");
         block_on(window.fault(ps, Access::Read)).unwrap();
@@ -3938,7 +3954,7 @@ mod tests {
         store.map(extent, 0, ps, 3 * ps).unwrap();
         assert_eq!(take(), [("map", 3 * ps)]);
         write(&store, id(&store, 2), 0, &pattern(4, BLOCK)).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         assert_eq!(take(), [], "a commit changed the window");
         store.unmap(0, 2 * ps).unwrap();
         assert_eq!(take(), [("unmap", ps)]);
@@ -3973,7 +3989,7 @@ mod tests {
         let (sealed, kept) = (id(&store, 1), id(&store, 2));
         write(&store, sealed, 0, &pattern(1, 2 * ps as usize)).unwrap();
         write(&store, kept, 0, &pattern(2, ps as usize)).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         store.map(sealed, 0, 2 * ps, 0).unwrap();
         store.map(kept, 0, ps, 4 * ps).unwrap();
         assert!(window.is_mapped(0) && window.is_mapped(ps));
@@ -4017,7 +4033,7 @@ mod tests {
         let ps = page_size();
         let extent = id(&store, 1);
         write(&store, extent, 0, &pattern(6, ps as usize)).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         let copy_path = dir.path().join("copy");
         store.fork_to(&copy_path, crate::host_cell::fork_child(store.cell())).unwrap();
         let copy = OpenCell::open(&copy_path).unwrap();
@@ -4067,14 +4083,14 @@ mod tests {
         let ps = page_size();
         let extent = id(&store, 1);
         write(&store, extent, 0, &pattern(6, ps as usize)).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         let fork_path = dir.path().join("fork");
         store.fork_to(&fork_path, crate::host_cell::fork_child(store.cell())).unwrap();
         let fork = OpenCell::open(&fork_path).unwrap();
         assert_eq!(read(&fork, extent, 0, BLOCK), Ok(pattern(6, BLOCK)));
 
         store.free(extent).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         let window = store.create_dax_window(ps, None).unwrap();
         assert_eq!(store.map(extent, 0, ps, 0), Err(Errno::ENOENT));
         assert_eq!(write(&store, extent, 0, &pattern(7, BLOCK)), Err(Errno::EPERM));
@@ -4091,7 +4107,7 @@ mod tests {
         let ps = page_size();
         let extent = id(&base, 1);
         write(&base, extent, 0, &pattern(6, ps as usize)).unwrap();
-        base.commit(None).unwrap();
+        futures::executor::block_on(base.commit(None)).unwrap();
         let forks: Vec<OpenCell> = (1..=2)
             .map(|fork| {
                 let path = dir.path().join(format!("fork-{fork}"));
@@ -4106,7 +4122,7 @@ mod tests {
             fork.map(extent, 0, ps, 0).unwrap();
         }
         forks[0].free(extent).unwrap();
-        forks[0].commit(None).unwrap();
+        futures::executor::block_on(forks[0].commit(None)).unwrap();
         block_on(windows[1].fault(0, Access::Read)).unwrap();
         // SAFETY: The test faulted the page in, and nothing writes it.
         let mapped = unsafe { std::slice::from_raw_parts(windows[1].host_base(), ps as usize) };
@@ -4121,7 +4137,7 @@ mod tests {
         let ps = page_size();
         let extent = id(&store, 1);
         write(&store, extent, 0, &pattern(6, ps as usize)).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         assert_eq!(read(&store, extent, 0, BLOCK), Ok(pattern(6, BLOCK)));
         assert!(cached(extent).is_some());
         let closed = Arc::downgrade(&store.store);
@@ -4146,7 +4162,7 @@ mod tests {
         assert!(!window.is_mapped(0), "an open extent mapped");
         assert_eq!(store.map(id(&store, 3), 0, ps, 0), Err(Errno::ENOENT));
 
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         store.map(written, 0, 2 * ps, 0).unwrap();
         block_on(async {
             for page in 0..2 {
@@ -4170,7 +4186,7 @@ mod tests {
         for sequence in 1..=20 {
             write(&store, id(&store, sequence), 0, &pattern(sequence as u8, ps as usize)).unwrap();
         }
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         let window = store.create_dax_window(ps, None).unwrap();
         store.map(id(&store, 1), 0, ps, 0).unwrap();
         for sequence in 2..=20 {
@@ -4197,7 +4213,7 @@ mod tests {
         for sequence in 1..=mapped + looked_up {
             write(&store, id(&store, sequence), 0, &pattern(sequence as u8, ps as usize)).unwrap();
         }
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         let window = store.create_dax_window(mapped * ps, None).unwrap();
         for sequence in 1..=mapped {
             store.map(id(&store, sequence), 0, ps, (sequence - 1) * ps).unwrap();
@@ -4368,7 +4384,7 @@ mod tests {
         let publisher = made(&path.with_extension("publisher"), 1 << 20);
         let extent = id(&publisher, 1);
         write(&publisher, extent, 0, data).unwrap();
-        publisher.commit(None).unwrap();
+        futures::executor::block_on(publisher.commit(None)).unwrap();
         // A cell of its own, as a cell has one cell (doc-20).
         publisher.fork_to(path, crate::host_cell::fork_child(publisher.cell())).unwrap();
         let ancestry = OpenCell::open(path).unwrap().ancestry();
@@ -4475,7 +4491,7 @@ mod tests {
         let publisher = made(&publisher_path, 1 << 24);
         let extent = id(&publisher, 1);
         write(&publisher, extent, 0, &data).unwrap();
-        publisher.commit(None).unwrap();
+        futures::executor::block_on(publisher.commit(None)).unwrap();
         publisher.fork_to(&base, crate::host_cell::fork_child(publisher.cell())).unwrap();
         drop(publisher);
         OpenCell::open(&base).unwrap().make_public_attach_only().unwrap();
@@ -4529,7 +4545,7 @@ mod tests {
         let publisher = made(&publisher_path, 1 << 24);
         let extent = id(&publisher, 1);
         write(&publisher, extent, 0, &data).unwrap();
-        publisher.commit(None).unwrap();
+        futures::executor::block_on(publisher.commit(None)).unwrap();
         publisher.fork_to(&base, crate::host_cell::fork_child(publisher.cell())).unwrap();
         drop(publisher);
         let tenant = Arena::new();
@@ -4556,7 +4572,7 @@ mod tests {
         let (store, _dir) = store(1 << 20);
         let (reached, other) = (id(&store, 1), id(&store, 2));
         write(&store, other, 0, &[1; BLOCK]).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         let cached_in = CachedIn::Public(PublicReach(reached));
         drop(cache::cached(&store.store, cached_in, None, None, other, BLOCK as u64));
     }
@@ -4569,10 +4585,10 @@ mod tests {
         let publisher = made(&publisher_path, 1 << 20);
         let extent = id(&publisher, 1);
         write(&publisher, extent, 0, &pattern(5, BLOCK)).unwrap();
-        publisher.commit(None).unwrap();
+        futures::executor::block_on(publisher.commit(None)).unwrap();
         publisher.fork_to(&base, crate::host_cell::fork_child(publisher.cell())).unwrap();
         publisher.free(extent).unwrap();
-        publisher.commit(None).unwrap();
+        futures::executor::block_on(publisher.commit(None)).unwrap();
         assert_eq!(read(&publisher, extent, 0, BLOCK), Err(Errno::ENOENT));
 
         let ancestry = OpenCell::open(&base).unwrap().ancestry();
@@ -4592,7 +4608,7 @@ mod tests {
         let open = one_instance_each();
         store.open_bases(open.clone()).unwrap();
         store.attach_base(&base, &ancestry).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
 
         let fork = dir.path().join("fork");
         store.fork_to(&fork, crate::host_cell::fork_child(store.cell())).unwrap();
@@ -4642,7 +4658,7 @@ mod tests {
         let base = dir.path().join("base");
         let (extent, ancestry) = generation(&base, &pattern(8, BLOCK));
         let store = Arc::new(store);
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         let follower = store.follow();
         store.attach_base(&base, &ancestry).unwrap();
         assert_eq!(read(&follower, extent, 0, BLOCK), Ok(pattern(8, BLOCK)));
@@ -4656,7 +4672,7 @@ mod tests {
         let (store, dir) = store(1 << 20);
         let inherited = id(&store, 1);
         write(&store, inherited, 0, &pattern(9, BLOCK)).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         let (fork, base) = (dir.path().join("fork"), dir.path().join("base"));
         store.fork_to(&fork, crate::host_cell::fork_child(store.cell())).unwrap();
         let base_cell = crate::host_cell::fork_child(store.cell());
@@ -4666,7 +4682,7 @@ mod tests {
         assert!(!forked.bases.routes(inherited.cell));
         assert!(forked.bases.routes(base_cell.id));
         forked.free(inherited).unwrap();
-        forked.commit(None).unwrap();
+        futures::executor::block_on(forked.commit(None)).unwrap();
         assert_eq!(read(&forked, inherited, 0, BLOCK), Err(Errno::ENOENT));
     }
 
@@ -4705,7 +4721,7 @@ mod tests {
         let window = store.create_copying_dax_window(4 * ps, None, 2).unwrap();
         let (sealed, open, never) = (id(&store, 1), id(&store, 2), id(&store, 3));
         write(&store, sealed, 0, &pattern(1, BLOCK)).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         write(&store, open, 0, &pattern(2, BLOCK)).unwrap();
         assert_eq!(store.map(open, 0, ps, 0), Err(Errno::EPERM));
         assert_eq!(open_maps_refused(), 1, "an open extent's MAP uncounted");
@@ -4719,7 +4735,7 @@ mod tests {
         unsafe { *window.host_base() = 0xee };
         assert_eq!(store.private_pages(), Ok(1));
         assert_eq!(read(&store, sealed, 0, BLOCK), Ok(pattern(1, BLOCK)));
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         assert_eq!(store.private_pages(), Ok(1));
         // SAFETY: As above.
         assert_eq!(unsafe { *window.host_base() }, 0xee);
@@ -4743,7 +4759,7 @@ mod tests {
         let window = store.create_copying_dax_window(4 * ps, None, 2).unwrap();
         let (sealed, rebound) = (id(&store, 1), id(&store, 2));
         write(&store, sealed, 0, &pattern(1, BLOCK)).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         store.map(sealed, 0, ps, 0).unwrap();
         block_on(window.fault(0, Access::Write)).unwrap();
         // SAFETY: The page is mapped, private, and nothing else accesses it.
@@ -4761,7 +4777,7 @@ mod tests {
         let mut bytes = pattern(1, ps as usize);
         bytes[0] = 0xee;
         write(&store, rebound, 0, &bytes).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         store.map(rebound, 0, ps, 0).unwrap();
         assert_eq!(store.private_pages(), Ok(0));
         let contents = MappingContents::Extent { extent: rebound, offset: 0 };

@@ -1317,6 +1317,18 @@ impl Connection {
         };
         let answer = Answer::new(&self, message.header, guest.as_ref(), Some(charge));
         let turn = Turn::new(self.clone());
+        // cladefs: the request's span the parent of what serving it does (TASK-258).
+        let parent = answer.span.parent();
+        // cladefs: every request a future, served as one (TASK-685.3): one that waits for nothing
+        // is answered in its first poll, here, in its turn, as it was served before; one that
+        // waits, as a commit for its upload or a fault for its pages, is deferred (`serve_future`).
+        let serving = self.serve_message(message, answer);
+        serve_future(turn, crate::request::within(guest, parent.around(serving)));
+    }
+
+    /// cladefs: serves the request `message` is, as `answer` owes (TASK-685.3): refused if its
+    /// store halted, or it is malformed, or names a store its tenant doesn't hold.
+    async fn serve_message(self: Arc<Self>, message: Message, answer: Answer) {
         let refuse = |answer: Answer, errno| {
             let reply = answer.reply_header();
             answer.send(Err(errno), reply, Vec::new(), Vec::new())
@@ -1334,34 +1346,19 @@ impl Connection {
         if let Ok(request) = &request {
             traced(&answer.span, request);
         }
-        // cladefs: the request's span the parent of what serving it does (TASK-258).
-        let parent = answer.span.parent();
-        crate::request::within_now(guest.clone(), || match request {
+        match request {
             Err(Errno::EPROTONOSUPPORT) => refuse_version(&message.header, answer),
             Err(errno) => refuse(answer, errno),
-            Ok(Request::Fault(fault)) => serve_future(
-                turn,
-                crate::request::within(guest.clone(), parent.around(self.fault(fault, answer))),
-            ),
+            Ok(Request::Fault(fault)) => self.clone().fault(fault, answer).await,
             // cladefs: as a fault, which waits for its pages to be brought in (backlog doc-13).
-            Ok(Request::Private { window_offset, len }) => serve_future(
-                turn,
-                crate::request::within(
-                    guest.clone(),
-                    parent.around(self.make_private(window_offset, len, answer)),
-                ),
-            ),
-            Ok(Request::Open { path, opening }) if opening != codec::Opening::ReadOnly => {
-                serve_future(
-                    turn,
-                    crate::request::within(
-                        guest.clone(),
-                        parent.around(self.serve_open(path, opening, answer)),
-                    ),
-                )
+            Ok(Request::Private { window_offset, len }) => {
+                self.clone().make_private(window_offset, len, answer).await
             }
-            Ok(request) => self.serve(&request, answer),
-        })
+            Ok(Request::Open { path, opening }) if opening != codec::Opening::ReadOnly => {
+                self.clone().serve_open(path, opening, answer).await
+            }
+            Ok(request) => self.serve(&request, answer).await,
+        }
     }
 
     /// Serves the next request waiting, if any, on the [`Pool`], the last having been served; or,
@@ -1414,19 +1411,17 @@ impl Connection {
     }
 
     /// Serves `request`, and replies, as `answer` owes.
-    fn serve(&self, request: &Request<'_>, answer: Answer) {
+    async fn serve(&self, request: &Request<'_>, answer: Answer) {
         let mut reply = answer.reply_header();
         let mut payload = Vec::new();
         let mut fds = Vec::new();
-        let result = {
-            let _entered = answer.span.enter();
-            self.handle(request, &mut reply, &mut payload, &mut fds)
-        };
+        let handled = self.handle(request, &mut reply, &mut payload, &mut fds);
+        let result = answer.span.around(handled).await;
         answer.send(result, reply, payload, fds);
     }
 
     /// Serves `request`: what its reply says in `reply`, `payload` and `fds`.
-    fn handle<'a>(
+    async fn handle<'a>(
         &'a self,
         request: &Request<'_>,
         reply: &mut Header,
@@ -1475,7 +1470,7 @@ impl Connection {
                     }
                 };
                 // cladefs: within its disk and its tenant's limits, as its store admits it (doc-22).
-                store.write_with_barriers(*extent, *offset, &[data], *barriers)
+                store.write_with_barriers(*extent, *offset, &[data], *barriers).await
             }
             Request::Free(extent) => store.free(*extent),
             // cladefs: and those after it, in order (TASK-92.13).
@@ -1496,9 +1491,9 @@ impl Connection {
                 Ok(())
             }
             Request::Unmap { window_offset, len } => store.unmap(*window_offset, *len),
-            Request::Commit { commit: Commit::Uploaded, root } => store.commit(*root),
-            Request::Commit { commit: Commit::Local, root } => store.commit_local(*root),
-            Request::Commit { commit: Commit::Ordered, root } => store.commit_ordered(*root),
+            Request::Commit { commit: Commit::Uploaded, root } => store.commit(*root).await,
+            Request::Commit { commit: Commit::Local, root } => store.commit_local(*root).await,
+            Request::Commit { commit: Commit::Ordered, root } => store.commit_ordered(*root).await,
             Request::Root => store.root().map(|root| *payload = root),
             Request::Advance => {
                 store.advance().map(|commit| reply.args = Advanced { commit }.args())

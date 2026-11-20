@@ -702,7 +702,7 @@ impl Command {
             Self::Place { dir, token, force: true } => OpenCell::place_forced(&dir, token)?,
             Self::Sync { dir } => {
                 let store = OpenCell::open(&dir)?;
-                store.wait_uploaded()?;
+                futures::executor::block_on(store.wait_uploaded())?;
             }
             Self::Import { dir, capacity, image, reference } => {
                 let made = cladefs::import::store(&dir, capacity, &image, reference.as_deref());

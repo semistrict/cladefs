@@ -407,7 +407,7 @@ fn write_and_commit(store: &OpenCell) {
     let extent = ExtentId { cell: store.cell().id, sequence };
     let data = pattern(sequence as u8, BLOCK);
     store.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
-    store.commit(None).unwrap();
+    futures::executor::block_on(store.commit(None)).unwrap();
 }
 
 /// The store at `path`, opened, uploading only as a commit waits.
@@ -473,10 +473,10 @@ fn based(
         let len = BLOCK * (1 + (sequence.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 62) as usize);
         base.write(extent, 0, &[VolatileSlice::from(&blocks[..len])]).unwrap();
         if sequence % COMMIT_EVERY == 0 {
-            base.commit(None).unwrap();
+            futures::executor::block_on(base.commit(None)).unwrap();
         }
     }
-    base.commit(None).unwrap();
+    futures::executor::block_on(base.commit(None)).unwrap();
     drop(base);
     let base = open(&made.join("base"));
     let (version, asked, _) = run.asked(|| base.uploaded_version_at(made.join("copy")).unwrap());
@@ -746,7 +746,7 @@ fn uploads_after_restores() {
             writer.write(id, 0, &[VolatileSlice::from(&extent[..])]).unwrap();
         }
         let began = Instant::now();
-        writer.commit(None).unwrap();
+        futures::executor::block_on(writer.commit(None)).unwrap();
         let took = began.elapsed();
         println!(
             "UPLOADS restores={restores} round={round} mib={mib} commit-ms={} mib-per-s={:.0} \
@@ -819,7 +819,7 @@ fn versions_forked_on_a_host_of_another_bucket_make_children_there() {
     let extent = ExtentId { cell: cell.id, sequence: base.info().unwrap().sequence_floor };
     let data = pattern(3, BLOCK);
     base.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
-    base.commit(None).unwrap();
+    futures::executor::block_on(base.commit(None)).unwrap();
     drop(base);
     let base = open(&base_path);
     let version = base.uploaded_version_at(dir.path().join("version-a")).unwrap();

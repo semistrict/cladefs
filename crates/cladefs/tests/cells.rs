@@ -82,7 +82,7 @@ fn forks_and_takes_cells_in(url: &str) {
     let data = pattern(7, 5 << 20);
     let extent = ExtentId { cell: parent.cell().id, sequence: 1 };
     parent.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
-    parent.commit(Some(b"root")).unwrap();
+    futures::executor::block_on(parent.commit(Some(b"root"))).unwrap();
     let parent_cell = parent.cell();
     drop(parent);
 
@@ -154,7 +154,7 @@ fn places_and_syncs_stores_in(url: &str) {
     assert_eq!(made.parse::<cladefs::CellId>(), Ok(cell_id));
     let extent = ExtentId { cell: cell_id.id, sequence: 1 };
     store.write(extent, 0, &[VolatileSlice::from(&pattern(3, 1 << 20)[..])]).unwrap();
-    store.commit(Some(b"synced")).unwrap();
+    futures::executor::block_on(store.commit(Some(b"synced"))).unwrap();
     drop(store);
     cell(&url, &["place", &path("first"), "5"]);
     cell(&url, &["sync", &path("first")]);

@@ -815,7 +815,7 @@ mod tests {
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let cell = store.cell();
         write(&store, 1, &pattern(1, BLOCK));
-        store.commit(Some(b"first")).unwrap();
+        futures::executor::block_on(store.commit(Some(b"first"))).unwrap();
         // What it held before is uploaded on attaching.
         assert_eq!(
             uploaded(&bucket, cell),
@@ -826,10 +826,10 @@ mod tests {
         write(&store, 2, &pattern(2, 2 * BLOCK));
         write(&store, 3, &large);
         write(&store, 4, &pattern(4, BLOCK));
-        store.commit_ordered(None).unwrap();
+        futures::executor::block_on(store.commit_ordered(None)).unwrap();
         store.free(ExtentId { cell: cell.id, sequence: 1 }).unwrap();
         store.free(ExtentId { cell: cell.id, sequence: 4 }).unwrap();
-        store.commit(Some(b"second")).unwrap();
+        futures::executor::block_on(store.commit(Some(b"second"))).unwrap();
         assert_eq!(
             uploaded(&bucket, cell),
             (vec![(2, pattern(2, 2 * BLOCK)), (3, large.clone())], Some(b"second".to_vec()))
@@ -875,7 +875,7 @@ mod tests {
             segments
         );
         write(&store, 5, &pattern(5, BLOCK));
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         let (extents, root) = uploaded(&bucket, cell);
         assert_eq!(extents.iter().map(|(sequence, _)| *sequence).collect::<Vec<_>>(), [2, 3, 5]);
         assert_eq!(root, Some(b"second".to_vec()));
@@ -918,7 +918,7 @@ mod tests {
         // The store's commit is the cell's, its head as it was.
         write(&store, 1, &pattern(1, BLOCK));
         let epoch = store.uploader().unwrap().status().unwrap().taking.unwrap().epoch;
-        let committed = store.commit(Some(b"after"));
+        let committed = futures::executor::block_on(store.commit(Some(b"after")));
         let uploader = store.uploader().unwrap();
         assert_eq!((committed, uploader.failed()), (Ok(()), None));
         assert_eq!(uploader.status().unwrap().taking.unwrap().epoch, epoch);
@@ -970,7 +970,7 @@ mod tests {
         for sequence in 1..=16 {
             write(&store, sequence, &noise(sequence, EXTENT));
         }
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         for sequence in 4..=16 {
             store.free(ExtentId { cell: cell.id, sequence }).unwrap();
         }
@@ -1049,11 +1049,11 @@ mod tests {
         for sequence in 1..=16 {
             write(&parent, sequence, &noise(sequence, EXTENT));
         }
-        parent.commit(None).unwrap();
+        futures::executor::block_on(parent.commit(None)).unwrap();
         for sequence in 4..=16 {
             parent.free(ExtentId { cell: cell.id, sequence }).unwrap();
         }
-        parent.commit(None).unwrap();
+        futures::executor::block_on(parent.commit(None)).unwrap();
         let child = dir.path().join("child");
         let forked = crate::host_cell::fork_child(cell);
         assert_ne!(forked, cell, "a fork in a cell of its own");
@@ -1122,7 +1122,7 @@ mod tests {
         for sequence in 1..=16 {
             write(&store, sequence, &noise(sequence, EXTENT));
         }
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         for sequence in 4..=16 {
             store.free(ExtentId { cell: cell.id, sequence }).unwrap();
         }
@@ -1197,14 +1197,17 @@ mod tests {
             let data = pattern(sequence as u8, 2 * BLOCK);
             write(&store, sequence, &data);
             written.push((sequence, data));
-            store.commit_ordered(Some(format!("root {sequence}").as_bytes())).unwrap();
+            futures::executor::block_on(
+                store.commit_ordered(Some(format!("root {sequence}").as_bytes())),
+            )
+            .unwrap();
         }
         store.flush().unwrap();
         // Out of reach: the store holds what it committed, the bucket nothing of it.
         let behind = Arc::new(ObjectBucket::new(gated.store.clone(), ""));
         assert_eq!(uploaded(&behind, cell), (vec![], None));
         gated.shut.store(false, std::sync::atomic::Ordering::Relaxed);
-        store.wait_uploaded().unwrap();
+        futures::executor::block_on(store.wait_uploaded()).unwrap();
         let footers = footers(&bucket, cell);
         let commits: Vec<_> = footers.iter().map(|footer| footer.contents.commits.len()).collect();
         assert_eq!(commits, [1], "the segment of the commits");
@@ -1252,7 +1255,9 @@ mod tests {
         let stalled = std::sync::Arc::new(uploader);
         let waiting = stalled.clone();
         let (ended, end) = std::sync::mpsc::channel();
-        std::thread::spawn(move || ended.send(waiting.wait_lag(epoch)).unwrap());
+        std::thread::spawn(move || {
+            ended.send(futures::executor::block_on(waiting.lag(epoch))).unwrap()
+        });
         assert_eq!(end.recv_timeout(Duration::from_secs(30)), Ok(Ok(())));
         assert_eq!(store.wal_bytes().unwrap(), 0);
     }
@@ -1262,7 +1267,9 @@ mod tests {
     fn uploads_waited_for_end_with_their_segment_closed_for_room() {
         let (_dir, crate::host_cell::Opened { uploader, .. }, epoch) = closed_for_room(idle());
         let (ended, end) = std::sync::mpsc::channel();
-        std::thread::spawn(move || ended.send(uploader.wait_uploaded(epoch)).unwrap());
+        std::thread::spawn(move || {
+            ended.send(futures::executor::block_on(uploader.uploaded(epoch))).unwrap()
+        });
         assert_eq!(end.recv_timeout(Duration::from_secs(30)), Ok(Ok(())));
     }
 
@@ -1329,12 +1336,12 @@ mod tests {
             write(&store, sequence, &data);
             if sequence % 32 == 0 {
                 let committing = std::time::Instant::now();
-                store.commit_ordered(None).unwrap();
+                futures::executor::block_on(store.commit_ordered(None)).unwrap();
                 waited += committing.elapsed();
             }
         }
         let written = started.elapsed();
-        store.wait_uploaded().unwrap();
+        futures::executor::block_on(store.wait_uploaded()).unwrap();
         let took = started.elapsed();
         let stalls = store.uploader().unwrap().stalls();
         let rate = WRITTEN as f64 / took.as_secs_f64() / 1e6;
@@ -1427,10 +1434,10 @@ mod tests {
         for sequence in 1..=extents {
             write(&base, sequence, &data);
             if sequence % 1024 == 0 {
-                base.commit(None).unwrap();
+                futures::executor::block_on(base.commit(None)).unwrap();
             }
         }
-        base.commit(None).unwrap();
+        futures::executor::block_on(base.commit(None)).unwrap();
         let base_cell = base.cell().id;
         let parent = match version {
             false => base,
@@ -1555,11 +1562,11 @@ mod tests {
         for sequence in floor..floor + writes {
             write(writer, sequence, &data);
             if (sequence - floor + 1) % 1024 == 0 {
-                writer.commit(None).unwrap();
+                futures::executor::block_on(writer.commit(None)).unwrap();
             }
         }
-        writer.commit(None).unwrap();
-        writer.wait_uploaded().unwrap();
+        futures::executor::block_on(writer.commit(None)).unwrap();
+        futures::executor::block_on(writer.wait_uploaded()).unwrap();
         let own_after = local_cell::own_held();
         let own_written = own_after.entries - own_before.entries;
         assert!(idle.shares_extents_with(writer), "its bucket's layer, written over");
@@ -1595,9 +1602,9 @@ mod tests {
         for &extent in &frees {
             opened.free(extent).unwrap();
         }
-        opened.commit(None).unwrap();
+        futures::executor::block_on(opened.commit(None)).unwrap();
         crate::test_checkpoints::checkpointed(&opened, &bucket);
-        opened.wait_uploaded().unwrap();
+        futures::executor::block_on(opened.wait_uploaded()).unwrap();
         let (counted_after, _) = extents_counted();
         let counted = counted_after.bytes() - counted_before.bytes();
         let idle = closing(idle);
@@ -1648,7 +1655,7 @@ mod tests {
             for sequence in 1..=EXTENTS {
                 write(&base, sequence, &pattern(sequence as u8, BLOCK));
             }
-            base.commit(None).unwrap();
+            futures::executor::block_on(base.commit(None)).unwrap();
             let base_cell = base.cell().id;
             let inherited = |sequence| ExtentId { cell: base_cell, sequence };
             let parent = match version {
@@ -1694,7 +1701,7 @@ mod tests {
             });
             forks[0].free(freed).unwrap();
             let mine = write(&forks[0], own, &pattern(200, BLOCK));
-            forks[0].commit(None).unwrap();
+            futures::executor::block_on(forks[0].commit(None)).unwrap();
             // What a read of an extent a store holds not answers (`NoExtent`, as errno).
             let none = || Err("ENOENT (errno 2)".to_owned());
             assert_eq!(read(&forks[0], freed), none());
@@ -1728,10 +1735,10 @@ mod tests {
         for sequence in 1..=EXTENTS {
             write(&base, sequence, &pattern(sequence as u8, BLOCK));
             if sequence % 1024 == 0 {
-                base.commit(None).unwrap();
+                futures::executor::block_on(base.commit(None)).unwrap();
             }
         }
-        base.commit(None).unwrap();
+        futures::executor::block_on(base.commit(None)).unwrap();
         let base_cell = base.cell().id;
         let inherited = |sequence| ExtentId { cell: base_cell, sequence };
         let path = dir.path().join("fork");
@@ -1782,10 +1789,10 @@ mod tests {
         for sequence in 1..=extents {
             write(&base, sequence, &data);
             if sequence % 1024 == 0 {
-                base.commit(None).unwrap();
+                futures::executor::block_on(base.commit(None)).unwrap();
             }
         }
-        base.commit(None).unwrap();
+        futures::executor::block_on(base.commit(None)).unwrap();
         let base_cell = base.cell().id;
         let inherited = |sequence| ExtentId { cell: base_cell, sequence };
         let path = dir.path().join("fork");
@@ -1854,9 +1861,9 @@ mod tests {
         let cell = store.cell();
         write(&store, 1, &pattern(1, BLOCK));
         write(&store, 2, &pattern(2, 4 << 20));
-        store.commit(Some(b"one")).unwrap();
+        futures::executor::block_on(store.commit(Some(b"one"))).unwrap();
         write(&store, 3, &pattern(3, 2 * BLOCK));
-        store.commit(Some(b"two")).unwrap();
+        futures::executor::block_on(store.commit(Some(b"two"))).unwrap();
 
         // The store's files of `kind`, by their contents.
         let files = |kind: &str| -> Vec<Vec<u8>> {
@@ -1932,7 +1939,7 @@ mod tests {
         let cell = store.cell();
         // Stored on its own, raw, as it doesn't compress.
         let extent = write(&store, 1, &noise(1, 4 << 20));
-        store.commit_ordered(None).unwrap();
+        futures::executor::block_on(store.commit_ordered(None)).unwrap();
         // On the disk, as the store's page cache holds it written (TASK-433).
         local_cell::pages::shared().write_back_all().unwrap();
         let path = dir.path().join(format!(
@@ -1948,7 +1955,7 @@ mod tests {
         // Damaged behind the store's back: what the store's page cache holds of it, clean, goes,
         // so that its reads read the disk (TASK-433).
         local_cell::pages::shared().evict_to(0);
-        assert_eq!(store.commit(None), Err(crate::error::Errno::EIO));
+        assert_eq!(futures::executor::block_on(store.commit(None)), Err(crate::error::Errno::EIO));
         let listed = |prefix: String| -> Vec<String> {
             let listed = bucket_cell::Bucket::list(&*bucket, &prefix);
             futures::executor::block_on(listed).unwrap().into_iter().map(|meta| meta.key).collect()
@@ -1965,7 +1972,7 @@ mod tests {
         let store =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         write(&store, 1, &pattern(1, BLOCK));
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         let other = bucket_cell::Writer::open(
             bucket.clone(),
             store.cell(),
@@ -1974,7 +1981,7 @@ mod tests {
         );
         futures::executor::block_on(other).unwrap();
         write(&store, 2, &pattern(2, BLOCK));
-        assert_eq!(store.commit(None), Err(crate::Errno::EROFS));
+        assert_eq!(futures::executor::block_on(store.commit(None)), Err(crate::Errno::EROFS));
     }
 
     /// TASK-39.7: a store's copy takes its cell with its placement's fencing token: a later
@@ -1989,7 +1996,7 @@ mod tests {
         let cell = first.cell();
         OpenCell::place(&first_path, 1).unwrap();
         write(&first, 1, &pattern(1, BLOCK));
-        first.commit(Some(b"first")).unwrap();
+        futures::executor::block_on(first.commit(Some(b"first"))).unwrap();
 
         // The cell moves to another host, a later placement, while the first still runs.
         drop(kept_in(&second_path, (1 << 30, Some(cell)), &bucket, idle()).unwrap());
@@ -1997,7 +2004,7 @@ mod tests {
         let second = reopened(&second_path, idle()).unwrap();
         assert_eq!(second.root(), Ok(b"first".to_vec()));
         write(&first, 2, &pattern(2, BLOCK));
-        assert_eq!(first.commit(None), Err(crate::Errno::EROFS));
+        assert_eq!(futures::executor::block_on(first.commit(None)), Err(crate::Errno::EROFS));
         drop((first, second));
 
         // The first, restarted, takes it back no more: its token is the earlier.
@@ -2051,20 +2058,20 @@ mod tests {
         let cell = store.cell();
         OpenCell::place(&path, 1).unwrap();
         let kept = write(&store, 1, &pattern(1, BLOCK));
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         lose(&bucket, dir.path(), cell);
         // Ordered before its uploader finds the cell lost, which its next upload does: a loss
         // doc-4 accepts.
         write(&store, 2, &pattern(2, BLOCK));
-        store.commit_ordered(None).unwrap();
-        assert_eq!(store.wait_uploaded(), Err(EROFS));
+        futures::executor::block_on(store.commit_ordered(None)).unwrap();
+        assert_eq!(futures::executor::block_on(store.wait_uploaded()), Err(EROFS));
         assert!(store.uploader().unwrap().failed().is_some());
         let extent = ExtentId { cell: cell.id, sequence: 3 };
         let data = pattern(3, BLOCK);
         assert_eq!(store.write(extent, 0, &[VolatileSlice::from(&data[..])]), Err(EROFS));
         assert_eq!(store.free(kept), Err(EROFS));
-        assert_eq!(store.commit_ordered(None), Err(EROFS));
-        assert_eq!(store.commit_local(None), Err(EROFS));
+        assert_eq!(futures::executor::block_on(store.commit_ordered(None)), Err(EROFS));
+        assert_eq!(futures::executor::block_on(store.commit_local(None)), Err(EROFS));
         assert_eq!(store.make_version(None).err().and_then(|err| err.errno()), Some(EROFS));
         assert_eq!(store.set_capacity(2 << 30), Err(EROFS));
     }
@@ -2080,7 +2087,7 @@ mod tests {
         let store =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         write(&store, 1, &pattern(1, BLOCK));
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         for _ in 0..most {
             store.make_version(None).unwrap();
         }
@@ -2100,11 +2107,11 @@ mod tests {
         let store =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         write(&store, 1, &pattern(1, BLOCK));
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         for _ in 0..20 {
             store.make_version(Some(1)).unwrap();
         }
-        store.wait_uploaded().unwrap();
+        futures::executor::block_on(store.wait_uploaded()).unwrap();
         let last = store.make_version(Some(1)).unwrap();
         let named = store.versions().len();
         assert!(named <= 2, "{named} versions named");
@@ -2125,7 +2132,7 @@ mod tests {
         let cell = first.cell();
         OpenCell::place(&first_path, 1).unwrap();
         write(&first, 1, &pattern(1, BLOCK));
-        first.commit(Some(b"first")).unwrap();
+        futures::executor::block_on(first.commit(Some(b"first"))).unwrap();
         drop(first);
         // The cell moves to another host, a later placement.
         drop(kept_in(&second_path, (1 << 30, Some(cell)), &bucket, idle()).unwrap());
@@ -2135,7 +2142,7 @@ mod tests {
         let refused = OpenCell::delete(&first_path, Some(&bucket));
         assert_eq!(refused.err().and_then(|err| err.errno()), Some(crate::Errno::ESTALE));
         write(&second, 2, &pattern(2, BLOCK));
-        second.commit(Some(b"second")).unwrap();
+        futures::executor::block_on(second.commit(Some(b"second"))).unwrap();
         drop(second);
         let state =
             futures::executor::block_on(bucket_cell::recover(&*bucket, cell, None)).unwrap().state;
@@ -2170,7 +2177,7 @@ mod tests {
         let path = dir.path().join("store");
         let store = kept_in(&path, (1 << 30, None), &bucket, idle()).unwrap();
         write(&store, 1, &pattern(1, BLOCK));
-        store.commit(Some(b"acknowledged")).unwrap();
+        futures::executor::block_on(store.commit(Some(b"acknowledged"))).unwrap();
         drop(store);
         let other = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         naming(&path, &other);
@@ -2193,7 +2200,7 @@ mod tests {
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let cell = store.cell();
         write(&store, 1, &pattern(1, BLOCK));
-        store.commit_ordered(Some(b"ordered")).unwrap();
+        futures::executor::block_on(store.commit_ordered(Some(b"ordered"))).unwrap();
         // Not uploaded yet: the uploader waits an hour, unless asked.
         assert_eq!(uploaded(&bucket, cell), (vec![], None));
         drop(store);
@@ -2211,10 +2218,10 @@ mod tests {
         let store =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         write(&store, 1, &pattern(1, BLOCK));
-        store.commit_ordered(Some(b"ordered")).unwrap();
+        futures::executor::block_on(store.commit_ordered(Some(b"ordered"))).unwrap();
         // Not uploaded yet: the uploader waits an hour, unless asked.
         assert_eq!(uploaded(&bucket, store.cell()).1, None);
-        store.wait_uploaded().unwrap();
+        futures::executor::block_on(store.wait_uploaded()).unwrap();
         assert_eq!(
             uploaded(&bucket, store.cell()),
             (vec![(1, pattern(1, BLOCK))], Some(b"ordered".to_vec()))
@@ -2576,7 +2583,7 @@ mod tests {
         assert_eq!(uploader.failed(), None, "the uploader stopped");
         failing(&gated).store(false, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(third.join().unwrap(), Ok(()));
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         let (extents, _) = uploaded(&bucket, store.cell());
         assert_eq!(extents.iter().map(|(sequence, _)| *sequence).collect::<Vec<_>>(), [1, 2, 3]);
     }
@@ -2615,10 +2622,12 @@ mod tests {
                 for _ in 0..32 {
                     sequence += 1;
                     write(&store, sequence, &data);
-                    store.commit_ordered(None).unwrap();
+                    futures::executor::block_on(store.commit_ordered(None)).unwrap();
                 }
                 let committing = store.clone();
-                waiting.push(std::thread::spawn(move || committing.commit(None)));
+                waiting.push(std::thread::spawn(move || {
+                    futures::executor::block_on(committing.commit(None))
+                }));
             }
             // As many as the budget lets go at once: seven at least, or more of segments closed
             // short, as commits waiting close them.
@@ -2660,7 +2669,7 @@ mod tests {
                 let committing = store.clone();
                 let commit = std::thread::spawn(move || {
                     write(&committing, sequence, &pattern(sequence as u8, BLOCK));
-                    committing.commit(None)
+                    futures::executor::block_on(committing.commit(None))
                 });
                 gated.wait_held(sequence as usize);
                 commit
@@ -2696,7 +2705,7 @@ mod tests {
                 let committing = store.clone();
                 let commit = std::thread::spawn(move || {
                     write(&committing, sequence, &pattern(sequence as u8, BLOCK));
-                    committing.commit(None)
+                    futures::executor::block_on(committing.commit(None))
                 });
                 gated.wait_held(sequence as usize);
                 commit
@@ -2704,7 +2713,7 @@ mod tests {
             .collect();
         let ordered = local_cell::upload::IN_FLIGHT as u64 + 1;
         write(&store, ordered, &pattern(ordered as u8, BLOCK));
-        store.commit_ordered(None).unwrap();
+        futures::executor::block_on(store.commit_ordered(None)).unwrap();
         // The first lands alone: its commit is acknowledged; then the rest.
         let mut waiting = waiting.into_iter();
         gated.hold.send_replace(Hold::SegmentsFrom(1));
@@ -2718,7 +2727,7 @@ mod tests {
         let closed = futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, &prefix));
         let closed = closed.unwrap();
         assert_eq!(closed.len(), local_cell::upload::IN_FLIGHT);
-        store.wait_uploaded().unwrap();
+        futures::executor::block_on(store.wait_uploaded()).unwrap();
         let (extents, _) = uploaded(&bucket, cell);
         let sequences: Vec<_> = extents.iter().map(|(sequence, _)| *sequence).collect();
         assert_eq!(sequences, (1..=ordered).collect::<Vec<_>>());
@@ -2751,17 +2760,17 @@ mod tests {
         );
         let cell = lost.cell();
         write(&lost, 1, &pattern(1, BLOCK));
-        lost.commit(Some(b"durable")).unwrap();
+        futures::executor::block_on(lost.commit(Some(b"durable"))).unwrap();
         gated.shut.store(true, Relaxed);
         for sequence in 2..=1 + max_lag {
             write(&lost, sequence, &pattern(sequence as u8, BLOCK));
-            lost.commit_ordered(Some(b"ordered")).unwrap();
+            futures::executor::block_on(lost.commit_ordered(Some(b"ordered"))).unwrap();
         }
         let waiting = {
             let lost = lost.clone();
             std::thread::spawn(move || {
                 write(&lost, 2 + max_lag, &pattern(9, BLOCK));
-                lost.commit_ordered(None)
+                futures::executor::block_on(lost.commit_ordered(None))
             })
         };
         let uploader = lost.uploader().unwrap();
@@ -2807,7 +2816,7 @@ mod tests {
         let info = taken.info().unwrap();
         let sequence = info.next_sequence.max(info.sequence_floor);
         write(&taken, sequence, &pattern(3, BLOCK));
-        taken.commit(Some(b"taken")).unwrap();
+        futures::executor::block_on(taken.commit(Some(b"taken"))).unwrap();
         drop(taken);
         // The lag's commits, and no more, lost. Read back with a reactor, which a real bucket's
         // client needs.
@@ -2840,7 +2849,7 @@ mod tests {
         let extent = write(&lost, 1, &pattern(1, BLOCK));
         lost.free(extent).unwrap();
         write(&lost, 1, &pattern(2, BLOCK));
-        lost.commit(None).unwrap();
+        futures::executor::block_on(lost.commit(None)).unwrap();
         // The host is lost, what it committed in object storage.
         std::mem::forget(lost);
 
@@ -2902,7 +2911,9 @@ mod tests {
         let store = store.unwrap();
         for sequence in 1..=20 {
             write(&store, sequence, &pattern(sequence as u8, BLOCK));
-            measure("durable-commit", &mut || store.commit(None).unwrap());
+            measure("durable-commit", &mut || {
+                futures::executor::block_on(store.commit(None)).unwrap()
+            });
         }
         drop(store);
         for _ in 0..10 {
@@ -2943,10 +2954,10 @@ mod tests {
         let store =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         write(&store, 1, &pattern(1, BLOCK));
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         let before = bucket.stats();
         write(&store, 2, &pattern(2, BLOCK));
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         let after = bucket.stats();
         let asked: Vec<_> = (Request::ALL.iter())
             .map(|&request| (request.name(), after.requests(request) - before.requests(request)))
@@ -2980,7 +2991,7 @@ mod tests {
         // A segment of a MiB for each commit, uploaded as it is durable.
         for sequence in 1..=4 {
             write(&lost, sequence, &noise(sequence, 1 << 20));
-            lost.commit(None).unwrap();
+            futures::executor::block_on(lost.commit(None)).unwrap();
         }
         // The host is lost, its uploader stopping where it is, with no checkpoint.
         std::mem::forget(lost);
@@ -3045,7 +3056,11 @@ mod tests {
     fn commits_wait_at_the_lag_bound() {
         let interval = Duration::from_millis(1);
         let options = local_cell::upload::Options { interval, max_lag: 2, ..Default::default() };
-        waits_at_the_lag_bound(options, |gated| &gated.shut, |store| store.commit_ordered(None));
+        waits_at_the_lag_bound(
+            options,
+            |gated| &gated.shut,
+            |store| futures::executor::block_on(store.commit_ordered(None)),
+        );
     }
 
     /// TASK-582: a local commit, synced to the host's disk, waits at the lag bound as an ordered
@@ -3056,7 +3071,11 @@ mod tests {
     fn local_commits_wait_at_the_lag_bound() {
         let interval = Duration::from_millis(1);
         let options = local_cell::upload::Options { interval, max_lag: 2, ..Default::default() };
-        waits_at_the_lag_bound(options, |gated| &gated.shut, |store| store.commit_local(None));
+        waits_at_the_lag_bound(
+            options,
+            |gated| &gated.shut,
+            |store| futures::executor::block_on(store.commit_local(None)),
+        );
     }
 
     /// TASK-582: as [`local_commits_wait_at_the_lag_bound`], at a bound in bytes, as
@@ -3069,7 +3088,11 @@ mod tests {
             max_lag_bytes: 3 * BLOCK as u64,
             ..Default::default()
         };
-        waits_at_the_lag_bound(options, |gated| &gated.shut, |store| store.commit_local(None));
+        waits_at_the_lag_bound(
+            options,
+            |gated| &gated.shut,
+            |store| futures::executor::block_on(store.commit_local(None)),
+        );
     }
 
     #[test]
@@ -3085,7 +3108,11 @@ mod tests {
             max_lag_bytes: 3 * BLOCK as u64,
             ..Default::default()
         };
-        waits_at_the_lag_bound(options, |gated| &gated.shut, |store| store.commit_ordered(None));
+        waits_at_the_lag_bound(
+            options,
+            |gated| &gated.shut,
+            |store| futures::executor::block_on(store.commit_ordered(None)),
+        );
     }
 
     /// TASK-314: a bucket that keeps failing its writes, its disk full, holds its stores' commits
@@ -3095,7 +3122,11 @@ mod tests {
     fn commits_wait_at_the_lag_bound_while_the_bucket_is_full() {
         let interval = Duration::from_millis(1);
         let options = local_cell::upload::Options { interval, max_lag: 2, ..Default::default() };
-        waits_at_the_lag_bound(options, |gated| &gated.full, |store| store.commit_ordered(None));
+        waits_at_the_lag_bound(
+            options,
+            |gated| &gated.full,
+            |store| futures::executor::block_on(store.commit_ordered(None)),
+        );
     }
 
     /// A cell opens on a host without it: an empty store of it takes what the cell holds, and
@@ -3110,7 +3141,7 @@ mod tests {
         let large = pattern(2, 4 << 20);
         write(&first, 1, &pattern(1, BLOCK));
         write(&first, 2, &large);
-        first.commit(Some(b"root")).unwrap();
+        futures::executor::block_on(first.commit(Some(b"root"))).unwrap();
         drop(first);
 
         let second =
@@ -3124,7 +3155,7 @@ mod tests {
         let info = second.info().unwrap();
         let sequence = info.next_sequence.max(info.sequence_floor);
         write(&second, sequence, &pattern(3, BLOCK));
-        second.commit(None).unwrap();
+        futures::executor::block_on(second.commit(None)).unwrap();
         drop(second);
 
         // cladefs: the first, opened again, its write-ahead log empty, takes the cell as it is
@@ -3157,7 +3188,7 @@ mod tests {
             kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let cell = first.cell();
         write(&first, 1, &pattern(1, BLOCK));
-        first.commit(None).unwrap();
+        futures::executor::block_on(first.commit(None)).unwrap();
         drop(first);
         let second =
             kept_in(dir.path().join("second"), (1 << 30, Some(cell)), &bucket.clone(), idle())
@@ -3226,13 +3257,13 @@ mod tests {
         let first = kept_in(dir.path().join("first"), (1 << 30, None), &bucket, idle()).unwrap();
         let cell = first.cell();
         let before = write(&first, 1, &pattern(1, BLOCK));
-        first.commit(Some(b"before")).unwrap();
+        futures::executor::block_on(first.commit(Some(b"before"))).unwrap();
 
         made_for(&dir.path().join("second"), cell, &bucket);
         let second = open_racing(dir.path().join("second"), &gated, cell, || {
             write(&first, 2, &pattern(2, BLOCK));
             first.free(before).unwrap();
-            first.commit(Some(b"meanwhile")).unwrap();
+            futures::executor::block_on(first.commit(Some(b"meanwhile"))).unwrap();
         });
         let second = second.unwrap();
         assert_eq!(second.root(), Ok(b"meanwhile".to_vec()));
@@ -3269,11 +3300,11 @@ mod tests {
         let first = first.unwrap();
         let cell = first.cell();
         write(&first, 1, &pattern(1, BLOCK));
-        first.commit(Some(b"before")).unwrap();
+        futures::executor::block_on(first.commit(Some(b"before"))).unwrap();
         // A commit its log holds, durable on its disk alone, as its host dies: restarted with its
         // disk as it was, reaching the bucket again; what it had going does nothing more.
         write(&first, 2, &pattern(2, BLOCK));
-        first.commit_ordered(Some(b"local")).unwrap();
+        futures::executor::block_on(first.commit_ordered(Some(b"local"))).unwrap();
         first.flush().unwrap();
         let path = dir.path().join("first");
         restart(&lost, &path);
@@ -3290,7 +3321,7 @@ mod tests {
             let info = taken.info().unwrap();
             let sequence = info.next_sequence.max(info.sequence_floor);
             write(&taken, sequence, &pattern(3, BLOCK));
-            taken.commit(Some(b"meanwhile")).unwrap();
+            futures::executor::block_on(taken.commit(Some(b"meanwhile"))).unwrap();
         });
         assert_eq!(opened.err().and_then(|err| err.errno()), Some(crate::Errno::ESTALE));
         // The writer that committed meanwhile was fenced, its commit the cell's.
@@ -3322,7 +3353,7 @@ mod tests {
         let source =
             kept_in(dir.path().join("source"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let extent = write(&source, 1, &pattern(1, BLOCK));
-        source.commit(Some(b"root")).unwrap();
+        futures::executor::block_on(source.commit(Some(b"root"))).unwrap();
         let path = dir.path().join("copy");
         source.uploaded_version_at(&path).unwrap();
         drop(source);
@@ -3335,8 +3366,8 @@ mod tests {
             ("set_capacity", version.set_capacity(2 * capacity)),
             ("write", version.write(own, 0, &[VolatileSlice::from(&pattern(2, BLOCK)[..])])),
             ("free", version.free(extent)),
-            ("commit", version.commit(Some(b"changed"))),
-            ("commit_ordered", version.commit_ordered(None)),
+            ("commit", futures::executor::block_on(version.commit(Some(b"changed")))),
+            ("commit_ordered", futures::executor::block_on(version.commit_ordered(None))),
             ("take_over", version.take_over()),
         ];
         for (what, result) in refused {
@@ -3364,11 +3395,11 @@ mod tests {
         let source = dir.path().join("source");
         let source = kept_in(&source, (1 << 30, Some(of(1))), &bucket, idle()).unwrap();
         let extent = write(&source, 1, &pattern(1, BLOCK));
-        source.commit(Some(b"base")).unwrap();
+        futures::executor::block_on(source.commit(Some(b"base"))).unwrap();
         let path = dir.path().join("copy");
         let version = source.uploaded_version_at(&path).unwrap();
         source.free(extent).unwrap();
-        source.commit(Some(b"later")).unwrap();
+        futures::executor::block_on(source.commit(Some(b"later"))).unwrap();
         // Another fork, gone: a checkpoint past the version's, so that only the version, and its
         // forks, keep what it names.
         // Deleted as this process, no host, deletes them, of the first placement.
@@ -3432,11 +3463,11 @@ mod tests {
         let source = dir.path().join("source");
         let source = kept_in(&source, (1 << 30, Some(of(1))), &bucket, idle()).unwrap();
         let extent = write(&source, 1, &pattern(1, BLOCK));
-        source.commit(Some(b"base")).unwrap();
+        futures::executor::block_on(source.commit(Some(b"base"))).unwrap();
         let path = dir.path().join("copy");
         let version = source.uploaded_version_at(&path).unwrap();
         source.free(extent).unwrap();
-        source.commit(Some(b"later")).unwrap();
+        futures::executor::block_on(source.commit(Some(b"later"))).unwrap();
         let delete = |path: &std::path::Path| {
             crate::host_cell::delete(path, Some(&bucket), crate::host_cell::token).unwrap()
         };
@@ -3526,8 +3557,8 @@ mod tests {
                 let store = store.unwrap();
                 let data = noise(at as u64 + 1, 4 * BLOCK);
                 let extent = write(&store, 1, &data);
-                store.commit(None).unwrap();
-                store.wait_uploaded().unwrap();
+                futures::executor::block_on(store.commit(None)).unwrap();
+                futures::executor::block_on(store.wait_uploaded()).unwrap();
                 (store, extent, data)
             })
             .collect();
@@ -3562,7 +3593,10 @@ mod tests {
             [Err(crate::Errno::EACCES), Ok(true), Ok(true)]
         );
         assert_eq!(cached(), [false, true, true]);
-        assert_eq!(stores[0].0.commit(None), Err(crate::Errno::EACCES));
+        assert_eq!(
+            futures::executor::block_on(stores[0].0.commit(None)),
+            Err(crate::Errno::EACCES)
+        );
         // Nor what the control API changes of it: its capacity, its versions (TASK-611).
         let ours = &stores[0].0;
         assert_eq!(ours.set_capacity(2 << 30), Err(crate::Errno::EACCES));
@@ -3627,8 +3661,8 @@ mod tests {
                 let store = store.unwrap();
                 let data = noise(at as u64 + 1, 4 * BLOCK);
                 let extent = write(&store, 1, &data);
-                store.commit(None).unwrap();
-                store.wait_uploaded().unwrap();
+                futures::executor::block_on(store.commit(None)).unwrap();
+                futures::executor::block_on(store.wait_uploaded()).unwrap();
                 (store, extent, data)
             })
             .collect();
@@ -3708,8 +3742,8 @@ mod tests {
                 kept_in(dir.path().join(name), (1 << 30, Some(of(tenant))), &bucket, idle());
             let store = store.unwrap();
             write(&store, 1, &pattern(tenant as u8, BLOCK));
-            store.commit(Some(name.as_bytes())).unwrap();
-            store.wait_uploaded().unwrap();
+            futures::executor::block_on(store.commit(Some(name.as_bytes()))).unwrap();
+            futures::executor::block_on(store.wait_uploaded()).unwrap();
             store
         };
 
@@ -3756,7 +3790,7 @@ mod tests {
         let small = write(&parent, 1, &pattern(1, BLOCK));
         let own = write(&parent, 2, &large);
         // Committed, not yet durable: the fork makes it so, and uploads it, first.
-        parent.commit_ordered(Some(b"root")).unwrap();
+        futures::executor::block_on(parent.commit_ordered(Some(b"root"))).unwrap();
         let child = crate::host_cell::fork_child(parent.cell());
         let checkpoints = || {
             let prefix = bucket_cell::layout::checkpoints(parent.cell());
@@ -3767,7 +3801,7 @@ mod tests {
         // A checkpoint at the fork, which the child recovers from.
         assert_eq!(checkpoints().len(), 1);
         write(&parent, 3, &pattern(3, BLOCK));
-        parent.commit(None).unwrap();
+        futures::executor::block_on(parent.commit(None)).unwrap();
 
         let record =
             futures::executor::block_on(bucket_cell::head::get(&*bucket, child)).unwrap().unwrap();
@@ -3800,7 +3834,7 @@ mod tests {
         let info = forked.info().unwrap();
         let sequence = info.next_sequence.max(info.sequence_floor);
         let mine = write(&forked, sequence, &pattern(4, BLOCK));
-        forked.commit(None).unwrap();
+        futures::executor::block_on(forked.commit(None)).unwrap();
         drop(forked);
         let state =
             futures::executor::block_on(recover(&*bucket, child, Some(origin))).unwrap().state;
@@ -3828,7 +3862,7 @@ mod tests {
         );
         let cell = parent.cell();
         write(&parent, 1, &pattern(1, BLOCK));
-        parent.commit(Some(b"root")).unwrap();
+        futures::executor::block_on(parent.commit(Some(b"root"))).unwrap();
         // The fork's segment, after the commit's, lands after the next.
         let segment = |number| bucket_cell::layout::segment(cell, number, 1);
         let (forking, next) = (segment(1), segment(2));
@@ -3844,7 +3878,7 @@ mod tests {
             let parent = parent.clone();
             std::thread::spawn(move || {
                 write(&parent, 2, &pattern(2, BLOCK));
-                parent.commit(None)
+                futures::executor::block_on(parent.commit(None))
             })
         };
         let landed =
@@ -3874,11 +3908,11 @@ mod tests {
                 .unwrap();
             let cell = first.cell();
             let sealed = write(&first, 1, &pattern(1, BLOCK));
-            first.commit(Some(b"root")).unwrap();
+            futures::executor::block_on(first.commit(Some(b"root"))).unwrap();
             first.free(sealed).unwrap();
             let open = write(&first, 2, &pattern(2, BLOCK));
             first.free(open).unwrap();
-            first.commit(None).unwrap();
+            futures::executor::block_on(first.commit(None)).unwrap();
             // The store closing checkpoints the cell; a host lost doesn't.
             if checkpointed {
                 drop(first);
@@ -3906,9 +3940,9 @@ mod tests {
             kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let cell = first.cell();
         let sealed = write(&first, 1, &pattern(1, BLOCK));
-        first.commit_ordered(Some(b"root")).unwrap();
+        futures::executor::block_on(first.commit_ordered(Some(b"root"))).unwrap();
         first.free(sealed).unwrap();
-        first.commit(None).unwrap();
+        futures::executor::block_on(first.commit(None)).unwrap();
         let footers = footers(&bucket, cell);
         let last = footers.last().unwrap();
         let freed = storage_device::ExtentId::new(cell.id, sealed.sequence);
@@ -3943,11 +3977,11 @@ mod tests {
                 futures::executor::block_on(recovered).unwrap().state.capacity
             };
             assert_eq!(recovered(), None, "{checkpointed}");
-            first.commit(None).unwrap();
+            futures::executor::block_on(first.commit(None)).unwrap();
             assert_eq!(recovered(), Some(1 << 30), "{checkpointed}");
             write(&first, 1, &pattern(1, BLOCK));
             first.set_capacity(3 << 29).unwrap();
-            first.commit(None).unwrap();
+            futures::executor::block_on(first.commit(None)).unwrap();
             assert_eq!(recovered(), Some(3 << 29), "{checkpointed}");
             if checkpointed {
                 drop(first);
@@ -3960,7 +3994,7 @@ mod tests {
                     .unwrap();
             assert_eq!(taken.info().unwrap().capacity, 3 << 29, "{checkpointed}");
             taken.set_capacity(1 << 31).unwrap();
-            taken.commit(None).unwrap();
+            futures::executor::block_on(taken.commit(None)).unwrap();
             assert_eq!(recovered(), Some(1 << 31), "{checkpointed}");
         }
     }
@@ -3978,7 +4012,7 @@ mod tests {
             kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let cell = first.cell();
         write(&first, 1, &pattern(1, BLOCK));
-        first.commit(Some(b"root")).unwrap();
+        futures::executor::block_on(first.commit(Some(b"root"))).unwrap();
         drop(first);
         // A later release's record, whose format says first what follows, which this one can't
         // read.
@@ -4014,7 +4048,7 @@ mod tests {
         child: crate::CellId,
     ) -> bucket_cell::layout::Head {
         write(parent, 1, &pattern(1, BLOCK));
-        parent.commit(Some(b"root")).unwrap();
+        futures::executor::block_on(parent.commit(Some(b"root"))).unwrap();
         parent.fork_to(path, child).unwrap();
         futures::executor::block_on(bucket_cell::head::get(&**bucket, child)).unwrap().unwrap()
     }
@@ -4095,7 +4129,7 @@ mod tests {
     fn others(path: &std::path::Path, bucket: &Arc<ObjectBucket>, cell: crate::CellId) -> OpenCell {
         let others = kept_in(path, (1 << 30, Some(cell)), &bucket.clone(), idle()).unwrap();
         write(&others, 1, &pattern(3, BLOCK));
-        others.commit(Some(b"other")).unwrap();
+        futures::executor::block_on(others.commit(Some(b"other"))).unwrap();
         others
     }
 
@@ -4106,8 +4140,12 @@ mod tests {
     /// commits.
     fn live(others: &OpenCell, bucket: &Arc<ObjectBucket>) -> Committed {
         write(others, 2, &pattern(4, BLOCK));
-        let committed = others.commit(Some(b"again"));
-        (committed, others.wait_uploaded(), uploaded(bucket, others.cell()))
+        let committed = futures::executor::block_on(others.commit(Some(b"again")));
+        (
+            committed,
+            futures::executor::block_on(others.wait_uploaded()),
+            uploaded(bucket, others.cell()),
+        )
     }
 
     /// What [`live`] gives for a cell live still.
@@ -4129,14 +4167,14 @@ mod tests {
         let other = crate::host_cell::fork_child(parent.cell());
         let others = others(&dir.path().join("other"), &bucket, other);
         write(&parent, 1, &pattern(1, BLOCK));
-        parent.commit(Some(b"root")).unwrap();
+        futures::executor::block_on(parent.commit(Some(b"root"))).unwrap();
         let path = dir.path().join("child");
         let forked = parent.fork_to(&path, other).map_err(|err| err.errno());
         assert_eq!((forked, path.exists()), (Err(Some(crate::Errno::EEXIST)), false));
 
         // The parent commits and uploads on, its cell naming no fork.
-        parent.commit(Some(b"later")).unwrap();
-        assert_eq!(parent.wait_uploaded(), Ok(()));
+        futures::executor::block_on(parent.commit(Some(b"later"))).unwrap();
+        assert_eq!(futures::executor::block_on(parent.wait_uploaded()), Ok(()));
         let record = futures::executor::block_on(bucket_cell::head::get(&*bucket, other)).unwrap();
         assert_eq!((record.map(made), live(&others, &bucket)), (Some(OWN), lives()));
     }
@@ -4161,7 +4199,7 @@ mod tests {
         );
         let cell = parent.cell();
         write(&parent, 1, &pattern(1, BLOCK));
-        parent.commit(Some(b"root")).unwrap();
+        futures::executor::block_on(parent.commit(Some(b"root"))).unwrap();
         gated.hold.send_replace(Hold::Key(bucket_cell::layout::head(cell)));
         let child = crate::host_cell::fork_child(cell);
         let fork = {
@@ -4203,8 +4241,8 @@ mod tests {
         let record = futures::executor::block_on(bucket_cell::head::get(&*bucket, child)).unwrap();
         assert_eq!((record.map(made), live(&others, &bucket)), (Some(OWN), lives()));
         let parent = reopened(dir.path().join("parent"), idle()).unwrap();
-        parent.commit(Some(b"later")).unwrap();
-        assert_eq!(parent.wait_uploaded(), Ok(()));
+        futures::executor::block_on(parent.commit(Some(b"later"))).unwrap();
+        assert_eq!(futures::executor::block_on(parent.wait_uploaded()), Ok(()));
     }
 
     /// A store of a cell taken elsewhere keeps what it reads from the bucket in the host's cache,
@@ -4221,7 +4259,7 @@ mod tests {
         let cell = first.cell();
         let data = pattern(2, 2 << 20);
         let extent = write(&first, 1, &data);
-        first.commit(None).unwrap();
+        futures::executor::block_on(first.commit(None)).unwrap();
         drop(first);
 
         let second =

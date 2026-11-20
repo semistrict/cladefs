@@ -22,7 +22,7 @@ fn stores_hold_their_arenas() {
     let extent = ExtentId { cell: store.cell().id, sequence: 1 };
     let bytes = vec![0xa5; ps as usize];
     store.write(extent, 0, &[VolatileSlice::from(&bytes[..])]).unwrap();
-    store.commit(None).unwrap();
+    futures::executor::block_on(store.commit(None)).unwrap();
     drop(store);
 
     let held = Arena::new();

@@ -105,7 +105,7 @@ fn stores_are_deleted_while_their_forks_live(cladefsctl: Cladefsctl, dir: &Path)
     let store = OpenCell::create(&path, 1 << 24).unwrap();
     let extent = ExtentId { cell: store.cell().id, sequence: 1 };
     store.write(extent, 0, &[VolatileSlice::from(&[7; BLOCK][..])]).unwrap();
-    store.commit(None).unwrap();
+    futures::executor::block_on(store.commit(None)).unwrap();
     drop(store);
     let printed = cladefsctl.run(&[Path::new("fork"), &path, &fork]).unwrap();
     let cell: cladefs::CellId = printed.trim().parse().unwrap();
@@ -117,7 +117,7 @@ fn stores_are_deleted_while_their_forks_live(cladefsctl: Cladefsctl, dir: &Path)
     assert_eq!(read(&forked, extent), [7; BLOCK]);
     let own = ExtentId { cell: cell.id, sequence: 1 };
     forked.write(own, 0, &[VolatileSlice::from(&[9; BLOCK][..])]).unwrap();
-    forked.commit(None).unwrap();
+    futures::executor::block_on(forked.commit(None)).unwrap();
     drop(forked);
     // TASK-49: what the fork wrote, and what it inherited, which it shares.
     let stat = cladefsctl.run(&[Path::new("stat"), &fork]).unwrap();
@@ -233,7 +233,7 @@ fn stat_counts_extents(cladefsctl: Cladefsctl, dir: &Path) {
     // Written again, and grown: still three.
     write(&store, extent(&store, 1), 0, 9);
     write(&store, extent(&store, 2), block, 9);
-    store.commit(None).unwrap();
+    futures::executor::block_on(store.commit(None)).unwrap();
     drop(store);
     assert_eq!(held(&path), [4 * block, 0, 3, 0]);
 
@@ -246,7 +246,7 @@ fn stat_counts_extents(cladefsctl: Cladefsctl, dir: &Path) {
     }
     forked.free(inherited(2)).unwrap();
     forked.free(extent(&forked, 2)).unwrap();
-    forked.commit(None).unwrap();
+    futures::executor::block_on(forked.commit(None)).unwrap();
     drop(forked);
     assert_eq!(held(&fork), [block, 2 * block, 1, 2]);
     assert_eq!(held(&path), [4 * block, 0, 3, 0]);

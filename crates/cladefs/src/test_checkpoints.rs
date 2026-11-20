@@ -46,7 +46,7 @@ pub(crate) fn after(store: &OpenCell, bucket: &ObjectBucket, commits: impl FnOnc
 pub(crate) fn checkpointed(store: &OpenCell, bucket: &ObjectBucket) {
     after(store, bucket, || {
         for _ in 0..local_cell::upload::CHECKPOINT_EVERY {
-            store.commit(None).unwrap();
+            futures::executor::block_on(store.commit(None)).unwrap();
         }
     });
 }
