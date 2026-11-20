@@ -82,10 +82,10 @@ enum Phase<F> {
     /// cladefs: its framing failed, which failed the store: read from its raw file, which stays.
     Failed { raw: Arc<RawFile<F>>, log: Log<F>, error: String },
     /// cladefs: an ephemeral cell's, closed, never framed (doc-25, TASK-698.2): read
-    /// from its raw file, its log beside it, until its cell's next base covers it
+    /// from its raw file, its log beside it, until its cell's next local checkpoint covers it
     /// ([`crate::ephemeral`]), its commits recovered from its log meanwhile.
     Raw { raw: Arc<RawFile<F>>, log: Log<F> },
-    /// cladefs: an ephemeral cell's, its base covering it (doc-25, TASK-698.2): read in place from
+    /// cladefs: an ephemeral cell's, its local checkpoint covering it (doc-25, TASK-698.2): read in place from
     /// its raw file, in `kept/`, the runs of the extents freed in it given back, and let go of once
     /// no extent's data is in it.
     Kept { raw: Arc<RawFile<F>> },
@@ -189,7 +189,7 @@ impl<F> Segment<F> {
     /// closed and acknowledged in the bucket: the write-ahead log holds the rest (TASK-165.9).
     fn is_empty(&self) -> bool {
         let done = matches!(self.phase, Phase::Closed) && self.acknowledged.is_some();
-        // cladefs: or kept, its base covering it, which nothing writes (TASK-698.2).
+        // cladefs: or kept, its local checkpoint covering it, which nothing writes (TASK-698.2).
         let kept = matches!(self.phase, Phase::Kept { .. });
         (done || kept) && self.live == 0 && self.writers == 0
     }
@@ -289,7 +289,7 @@ pub(crate) struct Segments<F> {
     /// ahead of their framings ([`Segments::take_seeing`], TASK-400).
     seeing: Vec<(SegmentId, u64)>,
     /// cladefs: whether its cell is ephemeral (doc-25, TASK-698.2): segments closed stay raw
-    /// ([`Phase::Raw`]), never framed nor looked at ahead, until its base covers them
+    /// ([`Phase::Raw`]), never framed nor looked at ahead, until its local checkpoint covers them
     /// ([`Phase::Kept`]).
     ephemeral: bool,
     /// cladefs: the kept segments reaping let go of, whose files go ([`Segments::take_kept_reaped`]).
@@ -299,7 +299,7 @@ pub(crate) struct Segments<F> {
 }
 
 /// cladefs: an ephemeral cell's segment as its opening finds it (doc-25, TASK-698.2): closed raw, its
-/// log beside it; or kept, its base covering it, with its log's header, which says how its raw
+/// log beside it; or kept, its local checkpoint covering it, with its log's header, which says how its raw
 /// file is encrypted.
 pub(crate) enum EphemeralSegment {
     Raw,
@@ -1359,7 +1359,7 @@ impl<F: File> Segments<F> {
         self.ephemeral
     }
 
-    /// cladefs: the header of the log of segment `number`, closed raw ([`Phase::Raw`]): what its base
+    /// cladefs: the header of the log of segment `number`, closed raw ([`Phase::Raw`]): what its local checkpoint
     /// keeps of it once it covers it, which says how its raw file is encrypted (TASK-698.2).
     pub fn raw_header(&self, number: SegmentId) -> Option<Vec<u8>> {
         match &self.tracked.get(&number)?.phase {
@@ -1368,7 +1368,7 @@ impl<F: File> Segments<F> {
         }
     }
 
-    /// cladefs: segment `number`, closed raw, is kept from now on, its base covering it, its raw file
+    /// cladefs: segment `number`, closed raw, is kept from now on, its local checkpoint covering it, its raw file
     /// moved to `kept/` (doc-25, TASK-698.2): read in place, its log gone.
     pub fn kept(&mut self, number: SegmentId) {
         if !self.tracked.contains_key(&number) {

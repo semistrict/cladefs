@@ -4273,12 +4273,19 @@ mod tests {
         writer.upload(at).await.unwrap();
         writer.acknowledge().await.unwrap();
         let (origin, child, incarnation) = (Origin { parent: cell, at }, test_cell(9), 0x2a);
-        lifecycle::fork_ephemeral(&*bucket, child, 0xa, origin, incarnation).await.unwrap();
+        let keys = crate::keys::Parents::Held(writer.keys());
+        lifecycle::fork_ephemeral(&*bucket, child, 0xa, origin, (incarnation, keys)).await.unwrap();
+        // The cell's checkpoint at the version, which its openings start from (TASK-698.8).
+        let checkpoints = crate::bucket::list(&*bucket, &layout::checkpoints(cell)).await;
+        let at_version = |meta: &crate::bucket::Meta| matches!(layout::kind(&meta.key), layout::Kind::Checkpoint { segment, .. } if segment == at);
+        assert!(checkpoints.iter().any(at_version), "no checkpoint at the version");
         commit(&writer, Commit { tag: 3, frees: vec![extent], ..Commit::default() }).await;
         writer.checkpoint().await.unwrap();
         writer.drop_versions(&BTreeSet::from([0xa])).await.unwrap();
         // A fork of the version dropped is refused, and leaves no reference.
-        let refused = lifecycle::fork_ephemeral(&*bucket, test_cell(8), 0xa, origin, incarnation);
+        let keys = crate::keys::Parents::Held(writer.keys());
+        let refused =
+            lifecycle::fork_ephemeral(&*bucket, test_cell(8), 0xa, origin, (incarnation, keys));
         assert_eq!(refused.await, Err(Error::Deleted));
         match gone {
             Unreferred::No => {}

@@ -639,7 +639,7 @@ fn fork_failure(cell: CellId, err: Failure) -> anyhow::Error {
 /// kept on this host alone, whose store is made at `path` (doc-25, TASK-698.3): noted in the
 /// host's journal first ([`crate::ephemeral_host`]), then its reference written in the version's
 /// cell's bucket, whose head must name the version still (`Uploader::forked_ephemeral`), then its
-/// store made, `prepare` writing what the caller keeps beside it first, its base its version's
+/// store made, `prepare` writing what the caller keeps beside it first, its local checkpoint its version's
 /// state with its keys. A fork that fails leaves nothing: its directory gone, its reference
 /// retired, its note forgotten. `ENOTSUP` on a host keeping no ephemeral cells
 /// (`CLADEFSD_EPHEMERAL`); `EINVAL` of a store not at a version: ephemeral cells are forked from
@@ -670,12 +670,18 @@ pub(crate) async fn fork_ephemeral(
         Err(err) => Err(err),
         Ok(()) => match uploader.forked_ephemeral(child, inheriting, host.incarnation()).await {
             Err(err) => Err(fork_failure(cell, err)),
-            Ok(base) => upload::blocking(|| -> anyhow::Result<()> {
+            Ok(checkpoint) => upload::blocking(|| -> anyhow::Result<()> {
                 prepare(path)?;
                 let capacity = store.description().capacity;
                 let description = Description { block_size: BLOCK_SIZE, capacity, cell };
-                local_cell::create_host_ephemeral(path, description, &entry.bucket, kind, &base)
-                    .with_context(|| format!("forking to ephemeral cell {cell}: its store"))?;
+                local_cell::create_host_ephemeral(
+                    path,
+                    description,
+                    &entry.bucket,
+                    kind,
+                    &checkpoint,
+                )
+                .with_context(|| format!("forking to ephemeral cell {cell}: its store"))?;
                 local_cell::made_host(path)?;
                 let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
                 std::fs::File::open(parent.unwrap_or(Path::new(".")))?.sync_all()?;
@@ -772,10 +778,10 @@ pub(crate) async fn delete(
     // cladefs: an ephemeral cell's reference retired, its note forgotten (doc-25, TASK-698.3).
     if upload::blocking(|| is_ephemeral(path)) {
         return delete_with(path, async |dir, cell| {
-            let base = upload::blocking(|| local_cell::host_base(dir))?;
-            let base =
-                base.ok_or_else(|| Failure::msg(format!("{} has no base", dir.display())))?;
-            let parent = base.parent();
+            let checkpoint = upload::blocking(|| local_cell::host_local_checkpoint(dir))?;
+            let checkpoint = checkpoint
+                .ok_or_else(|| Failure::msg(format!("{} has no checkpoint", dir.display())))?;
+            let parent = checkpoint.parent();
             let origin = bucket_cell::layout::Origin { parent: parent.cell, at: parent.at };
             let host = crate::ephemeral_host::host().map_err(|errno| {
                 Failure::msg(format!(

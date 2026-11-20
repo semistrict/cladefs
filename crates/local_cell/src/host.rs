@@ -283,26 +283,32 @@ pub fn host_ephemeral(path: &Path) -> Result<bool, Error> {
     Ok(store_file(path)?.ephemeral)
 }
 
-/// cladefs: the base of the ephemeral cell's store at `path`, if it is one (doc-25, TASK-698.3):
+/// cladefs: the local checkpoint of the ephemeral cell's store at `path`, if it is one (doc-25, TASK-698.3):
 /// what deleting it reads its reference of.
-pub fn host_base(path: &Path) -> Result<Option<crate::Base>, Error> {
+pub fn host_local_checkpoint(path: &Path) -> Result<Option<crate::LocalCheckpoint>, Error> {
     if !store_file(path)?.ephemeral {
         return Ok(None);
     }
-    crate::Base::read(&HostDir::new(path)?).map(Some)
+    crate::LocalCheckpoint::read(&HostDir::new(path)?).map(Some)
 }
 
 /// cladefs: makes a new ephemeral cell's store at `path`, which must be a directory holding no
 /// store (doc-25, TASK-698.3), as `description` describes, naming `bucket`, its parent's, its
-/// cell of `kind`, its base `base`: unmade until its maker says it is whole ([`made_host`]).
+/// cell of `kind`, its local checkpoint `local-checkpoint`: unmade until its maker says it is whole ([`made_host`]).
 pub fn create_host_ephemeral(
     path: &Path,
     description: Description,
     bucket: &str,
     kind: Kind,
-    base: &crate::Base,
+    checkpoint: &crate::LocalCheckpoint,
 ) -> Result<(), Error> {
-    LocalCell::make_ephemeral(&HostDir::new(path)?, description, Some(bucket), Some(kind), base)
+    LocalCell::make_ephemeral(
+        &HostDir::new(path)?,
+        description,
+        Some(bucket),
+        Some(kind),
+        checkpoint,
+    )
 }
 
 /// The description of the store whose directory is `store`.

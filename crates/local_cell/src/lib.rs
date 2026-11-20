@@ -210,17 +210,18 @@ pub use cached::{CachedDir, CachedFile};
 #[cfg(any(test, feature = "unkept"))]
 pub use cell::UNKEPT_DEK;
 pub use cell::{
-    Base, BucketData, DirHold, EphemeralOpening, Info, LocalCell, NoSpace, NotQuiescent, Opening,
-    Options, Parent, Recovering, SpentExtent, TooLong, TooSmall, Unaligned, Unmade, Usage, Write,
+    BucketData, DirHold, EphemeralOpening, Info, LocalCell, LocalCheckpoint, NoSpace, NotQuiescent,
+    Opening, Options, Parent, Recovering, SpentExtent, TooLong, TooSmall, Unaligned, Unmade, Usage,
+    Write,
 };
 pub use dir::{Dir, DirFile, DiskDir, DiskFile, File, HostDir, HostFile, closed};
 /// cladefs: where a store's cell is: its tenant's cell, and its ID there (TASK-364).
 pub use extent_frame::segment::CellId;
 pub use framed::{Aligned, Located, Packed, Unpacked, read_object, read_whole, unpacked, unpacks};
 pub use host::{
-    create_host, create_host_at_version, create_host_ephemeral, delete_host, host_base,
-    host_bucket, host_cell, host_ephemeral, host_token, host_version, made_host, place, place_host,
-    remove_store_dir, unmade_host,
+    create_host, create_host_at_version, create_host_ephemeral, delete_host, host_bucket,
+    host_cell, host_ephemeral, host_local_checkpoint, host_token, host_version, made_host, place,
+    place_host, remove_store_dir, unmade_host,
 };
 pub use layout::{Description, Format, Place};
 pub use mem::{Io, MemDir, MemDisk, MemDiskFile, MemFile};

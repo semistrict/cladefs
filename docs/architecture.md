@@ -155,3 +155,20 @@ frozen, holds the pages it may still map until the daemon has killed it
 (TASK-79.9). It knows the process by the socket's pidfd (`SO_PEERPIDFD`, Linux
 6.5), or, on an older kernel, by the pid of the process that connected
 (`pidfd_open`).
+
+## Ephemeral cells
+
+An ephemeral cell (doc-25, TASK-698) is a fork of a version kept on one host's disk alone, the
+upper layer over its parent's version as a sandbox's overlay is over its image. Its store
+(`local_cell`'s `cell::ephemeral`) keeps its closed segments raw, never framed nor uploaded, and
+covers them in a local checkpoint as eight add up and as it closes: its state over its parent's
+version, with its keys. Its kept segments give back the runs of what it frees (`File::punch`), and
+its footprint counts their blocks allocated. It has no uploader: its commits are Local at most. A
+reference in its parent's bucket, naming the host's incarnation, keeps the version while it lives.
+The host's `CLADEFSD_EPHEMERAL` directory holds that incarnation and a journal, by which a daemon
+starting retires the references of cells it holds no more, and `DecommissionHost` retires those of
+a host gone for good. `MigrateCell` and `HandOverCell` move one live to another host over the
+daemons' peer network (`cladefsd::migration`): its kept segments are copied while its guest runs,
+the rest once its VM process is gone, the source giving the cell up before the target takes it
+over, as `specs/ephemeral` models.
+

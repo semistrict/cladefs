@@ -3,9 +3,9 @@
 // found in the LICENSE file.
 
 //! cladefs: live migration of an ephemeral cell from this host, the source, to another, the target
-//! (backlog doc-25, TASK-698.4; specs/ephemeral). An ephemeral cell's store is files: its base,
+//! (backlog doc-25, TASK-698.4; specs/ephemeral). An ephemeral cell's store is files: its local checkpoint,
 //! its kept segments, which never change once kept but for holes given back, and the rest, its
-//! raw segments after the base, their logs, its description and its write-ahead log's start. A
+//! raw segments after the local checkpoint, their logs, its description and its write-ahead log's start. A
 //! migration moves them, its rules as the spec names them:
 //!
 //! 1. **Prepare** (`MigrateCell`): the target notes the cell in its journal and writes its own
@@ -97,17 +97,17 @@ fn client(address: &str) -> Result<PeerClient<tonic::transport::Channel>, Errno>
 pub(super) async fn migrate(path: PathBuf, peer: String, to: String) -> Result<u64, Errno> {
     let host = ephemeral_host::host()?;
     let read = path.clone();
-    let (base, cell) = super::cells::blocking(move || {
-        let base = local_cell::host_base(&read).map_err(|_| Errno::ENOENT)?;
+    let (checkpoint, cell) = super::cells::blocking(move || {
+        let checkpoint = local_cell::host_local_checkpoint(&read).map_err(|_| Errno::ENOENT)?;
         let cell = local_cell::host_cell(&read).map_err(|_| Errno::ENOENT)?;
-        Ok((base.ok_or(Errno::EINVAL)?, cell))
+        Ok((checkpoint.ok_or(Errno::EINVAL)?, cell))
     })
     .await?;
     if OUTGOING.get().lock().unwrap().contains_key(&path) {
         return Err(Errno::EBUSY);
     }
     let entry = host.entry(cell).ok_or(Errno::ENOENT)?;
-    let parent = base.parent();
+    let parent = checkpoint.parent();
     let migration = rand::random::<u64>() | 1;
     let mut client = client(&peer)?;
     let prepare = MigratePrepareRequest {

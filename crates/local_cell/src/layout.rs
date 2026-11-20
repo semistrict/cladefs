@@ -84,7 +84,7 @@ pub(crate) struct CellFile {
     /// version, which nothing writes, as a store at a version (doc-18, TASK-476).
     pub version: Option<u64>,
     /// cladefs: whether its cell is ephemeral (doc-25, TASK-698.2): kept on this host's disk alone,
-    /// never uploaded, its closed segments raw, recovered from its base ([`crate::ephemeral`]).
+    /// never uploaded, its closed segments raw, recovered from its local checkpoint ([`crate::ephemeral`]).
     pub ephemeral: bool,
 }
 
@@ -202,13 +202,13 @@ pub(crate) const EXTENTS: &str = "extents";
 /// holds, appended and synced by the flushes that make them durable (TASK-165.9).
 pub(crate) const LOGS: &str = "logs";
 /// cladefs: the directory of an ephemeral cell's kept segments, raw, a directory for each cell's:
-/// segments its base covers, read in place, the runs of the extents freed in them given back
+/// segments its local checkpoint covers, read in place, the runs of the extents freed in them given back
 /// (doc-25, TASK-698.2).
 pub(crate) const KEPT: &str = "kept";
 
-/// cladefs: an ephemeral cell's base: its state as of the last segment it covers
-/// ([`crate::ephemeral::Base`], TASK-698.2).
-pub(crate) const BASE: &str = "base";
+/// cladefs: an ephemeral cell's local checkpoint: its state as of the last segment it covers
+/// ([`crate::ephemeral::LocalCheckpoint`], TASK-698.2).
+pub(crate) const LOCAL_CHECKPOINT: &str = "local-checkpoint";
 
 /// cladefs: the path of an ephemeral cell's kept segment ([`KEPT`]).
 pub(crate) fn kept_path(segment: SegmentId) -> String {

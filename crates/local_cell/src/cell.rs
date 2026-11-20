@@ -53,7 +53,7 @@ use std::time::{Duration, Instant};
 use storage_device::{ExtentId, OtherCell, SealedExtent};
 
 mod ephemeral;
-pub use ephemeral::{Base, EphemeralOpening, Parent};
+pub use ephemeral::{EphemeralOpening, LocalCheckpoint, Parent};
 
 /// The error of a write the store has no room for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -262,7 +262,7 @@ pub struct LocalCell<D: Dir> {
     /// cladefs: of a replicated cell's writer, what sends each flush's commits to the members of
     /// its configuration (doc-21, TASK-537.3.3), once it started.
     replicator: std::sync::Mutex<Option<Arc<Replicator>>>,
-    /// cladefs: of an ephemeral cell, its base as it stands, and what its next checkpoint covers
+    /// cladefs: of an ephemeral cell, its local checkpoint as it stands, and what its next checkpoint covers
     /// (doc-25, TASK-698.2): held by a checkpoint, one at a time.
     ephemeral: Option<std::sync::Mutex<ephemeral::Ephemeral>>,
 }
@@ -1738,7 +1738,7 @@ impl<D: Dir> LocalCell<D> {
             None => self.flush(),
         };
         drop(flushing);
-        // cladefs: an ephemeral cell's closed segments covered, all of them, its base what its next
+        // cladefs: an ephemeral cell's closed segments covered, all of them, its local checkpoint what its next
         // opening starts from (TASK-698.2).
         let flushed = match flushed {
             Ok(()) if self.ephemeral.is_some() && !self.lock().standing.is_closed() => {
@@ -3740,7 +3740,7 @@ impl<D: Dir> LocalCell<D> {
 
     /// cladefs: the bytes of frees views keep, which count as used ([`Usage::kept_for_views`]):
     /// found as [`LocalCell::info`] finds what it says, at once, without [`LocalCell::usage`]'s walk of
-    /// every extent the cell holds, its base's with them, which holds the state meanwhile
+    /// every extent the cell holds, its local checkpoint's with them, which holds the state meanwhile
     /// (TASK-92.17).
     pub fn kept_for_views(&self) -> Result<u64, Error> {
         Ok(self.state()?.kept.for_views())

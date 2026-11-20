@@ -198,7 +198,8 @@ fn held(entry: &Entry) -> bool {
     if !entry.path.exists() || local_cell::unmade_host(&entry.path) {
         return false;
     }
-    let ephemeral = local_cell::host_base(&entry.path).is_ok_and(|base| base.is_some());
+    let ephemeral =
+        local_cell::host_local_checkpoint(&entry.path).is_ok_and(|checkpoint| checkpoint.is_some());
     ephemeral && local_cell::host_cell(&entry.path).is_ok_and(|cell| cell == entry.child)
 }
 

@@ -190,7 +190,8 @@ fn ephemeral_cells_migrate_live_between_hosts() {
 }
 
 /// A hand-over the target never answers leaves the cell given up on the source, its store opened
-/// there no more; the target restarted gives up the migration it was taking, and its reference;
+/// there no more, the source restarted too; the target restarted gives up the migration it was
+/// taking, and its reference;
 /// asked again, it refuses, and the source serves the cell again, holding all it held, the only
 /// one referring to its origin.
 #[test]
@@ -202,7 +203,8 @@ fn hand_overs_refused_leave_the_source_serving() {
         std::fs::create_dir(path).unwrap();
     }
     let [source_at, target_at] = addresses();
-    let source = daemon(&hosts[0], &bucket, &[source_at.clone(), target_at.clone()]);
+    let source_peers = [source_at.clone(), target_at.clone()];
+    let source = daemon(&hosts[0], &bucket, &source_peers);
     let target_peers = [target_at.clone(), source_at];
     let target = daemon(&hosts[1], &bucket, &target_peers);
 
@@ -231,6 +233,11 @@ fn hand_overs_refused_leave_the_source_serving() {
     let unanswered = source.control.hand_over_cell(&here).unwrap_err();
     assert_eq!(unanswered.errno(), Some(cladefs::Errno::ENOTCONN));
     assert!(CellClient::connect(&source.vms, &here, CAPACITY).is_err(), "given up, it opens not");
+    // The source restarted keeps the cell given up, its reference with it.
+    drop(source);
+    let source = daemon(&hosts[0], &bucket, &source_peers);
+    assert!(CellClient::connect(&source.vms, &here, CAPACITY).is_err(), "given up, it opens not");
+    assert_eq!(referring(&bucket).len(), 2, "the source's kept as it started again");
 
     let target = daemon(&hosts[1], &bucket, &target_peers);
     assert_eq!(referring(&bucket).len(), 1, "the target's given up as it started again");
@@ -243,6 +250,72 @@ fn hand_overs_refused_leave_the_source_serving() {
     let store = CellClient::connect(&source.vms, &here, CAPACITY).unwrap();
     assert!(read(&store, inherited) == data(1));
     for sequence in 1..=4 {
+        assert!(read(&store, own(sequence)) == data(sequence), "extent {sequence} read otherwise");
+    }
+}
+
+/// A target missing a file the hand-over names refuses it, dropping what it took and its
+/// reference, and the source serves the cell again: a kept segment the rounds sent, gone from the
+/// target's staging before the hand-over.
+#[test]
+fn hand_overs_naming_files_the_target_lacks_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let bucket = dir.path().join("bucket");
+    let hosts = [dir.path().join("source"), dir.path().join("target")];
+    for path in [&bucket, &hosts[0], &hosts[1]] {
+        std::fs::create_dir(path).unwrap();
+    }
+    let [source_at, target_at] = addresses();
+    let source = daemon(&hosts[0], &bucket, &[source_at.clone(), target_at.clone()]);
+    let target = daemon(&hosts[1], &bucket, &[target_at.clone(), source_at]);
+    let base = hosts[0].join("base");
+    let store = CellClient::connect(&source.vms, &base, CAPACITY).unwrap();
+    write(&store, ExtentId { cell: store.cell(), sequence: 1 });
+    drop(store);
+    let version = source.control.make_version(&base, None).unwrap();
+    source.control.sync_cell(&base).unwrap();
+    let stated = source.control.stat_cell(&base).unwrap();
+    let from = cladefs::CellVersion { tenant: stated.tenant, cell: stated.cell, version };
+    let here = hosts[0].join("ephemeral-cell");
+    let child = source.control.fork_ephemeral(from, &here).unwrap();
+    let own = |sequence| ExtentId { cell: child.id, sequence };
+    let store = CellClient::connect(&source.vms, &here, CAPACITY).unwrap();
+    for sequence in 1..=BEFORE {
+        write(&store, own(sequence));
+    }
+    drop(store);
+    let there = hosts[1].join("ephemeral-cell");
+    let migration = source.control.migrate_cell(&here, &target_at, &there).unwrap();
+    let staged = hosts[1].join(format!(".ephemeral-cell.migrating-{migration:x}"));
+    let kept = |dir: &Path| -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut dirs = vec![dir.join("kept")];
+        while let Some(at) = dirs.pop() {
+            for entry in std::fs::read_dir(&at).into_iter().flatten() {
+                let path = entry.unwrap().path();
+                match path.is_dir() {
+                    true => dirs.push(path),
+                    false => found.push(path),
+                }
+            }
+        }
+        found
+    };
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while kept(&staged).len() < kept(&here).len() || kept(&here).is_empty() {
+        assert!(Instant::now() < deadline, "the rounds never sent the kept segments");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    std::fs::remove_file(&kept(&staged)[0]).unwrap();
+    let refused = source.control.hand_over_cell(&here).unwrap_err();
+    assert_eq!(refused.errno(), Some(cladefs::Errno::EAGAIN));
+    assert!(!there.exists() && !staged.exists(), "the target dropped what it took");
+    let noted =
+        |daemon: &Daemon| std::fs::read_dir(daemon.ephemeral.join("cells")).unwrap().count();
+    assert_eq!((noted(&source), noted(&target)), (1, 0), "the cell is the source's alone");
+    assert_eq!(referring(&bucket).len(), 1);
+    let store = CellClient::connect(&source.vms, &here, CAPACITY).unwrap();
+    for sequence in [1, BEFORE / 2, BEFORE] {
         assert!(read(&store, own(sequence)) == data(sequence), "extent {sequence} read otherwise");
     }
 }

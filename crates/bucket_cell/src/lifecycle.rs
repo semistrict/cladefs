@@ -248,15 +248,18 @@ async fn take_back(bucket: &impl Bucket, origin: Origin, child: CellId, found: &
 /// TASK-698.3; specs/ephemeral): its reference's index entry, then its reference, written before
 /// the cell's head is read (`forksReferFirst`), which must name the version there
 /// ([`Error::Deleted`] otherwise), shared if `child` is another tenant's ([`Error::NotShared`]);
-/// refused, or the head not to be read, its reference goes again. Nothing else: no head of the
-/// child's, no checkpoint, its host keeping its state. A host crashing part way leaves the
-/// reference, which it retires starting again, or its decommissioning does.
+/// refused, or the head not to be read, its reference goes again. Then the cell's checkpoint at the
+/// version's segment, made if none is there, sealed under `keys`, as a fork into another cell's is
+/// (`recovery::checkpoint_at`): the child's openings recover its parent's state from there, one
+/// decoded state for all of them (TASK-698.8), not from an earlier one, replaying the segments
+/// between each time. No head of the child's: its host keeps its state. A host crashing part way
+/// leaves the reference, which it retires starting again, or its decommissioning does.
 pub async fn fork_ephemeral(
     bucket: &impl Bucket,
     child: CellId,
     version: u64,
     origin: Origin,
-    incarnation: u64,
+    (incarnation, keys): (u64, Parents<'_>),
 ) -> Result<(), Error> {
     refer_ephemeral(bucket, origin, incarnation, child).await;
     failpoint!("ephemeral::referred");
@@ -272,6 +275,10 @@ pub async fn fork_ephemeral(
                 Some(_) => None,
             }
         }
+    };
+    let refused = match refused {
+        None => recovery::checkpoint_at(bucket, cell, origin.at, keys).await.err(),
+        refused => refused,
     };
     match refused {
         None => Ok(()),

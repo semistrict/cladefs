@@ -3,7 +3,7 @@ id: doc-25
 title: 'Ephemeral cells: host-local children of a version, migrated live'
 type: specification
 created_date: '2026-11-20 16:20'
-updated_date: '2026-11-20 19:38'
+updated_date: '2026-11-20 19:43'
 ---
 # Ephemeral cells: host-local children of a version, migrated live
 
@@ -48,7 +48,7 @@ bucket (CONTEXT.md, Cell), and its sync, syncfs and unmount wait for an upload (
   its reference. Its store's description says it is ephemeral (`ephemeral yes`).
 - **Its keys:** what a fork's head would get (`keys::Inheriting::given`): a cell KEK of its own,
   wrapped by its tenant's KEK, its first DEK and the DEKs it inherits, rewrapped under its KEK. They
-  are kept wrapped in its base, and opening it unwraps them through the host's KMS, as a fork's
+  are kept wrapped in its local checkpoint, and opening it unwraps them through the host's KMS, as a fork's
   head would be (`upload::open_ephemeral`). Shredding the tenant makes it unreadable, as it does any
   cell.
 - **Its levels:** Ordered and Local only. It has no uploader, so its sync, syncfs and unmount wait
@@ -58,7 +58,7 @@ bucket (CONTEXT.md, Cell), and its sync, syncfs and unmount wait for an upload (
   (`Phase::Raw`): read from its raw file, its log beside it, never framed nor looked at ahead, never
   in a write-ahead log an uploader takes. Its extents are all in segments: none is stored on its
   own (`large_extent` is unbounded for it).
-- **Its base**, `base`: its state as of the last segment a checkpoint covered, over its parent's
+- **Its local checkpoint**, `local-checkpoint`: its state as of the last segment a checkpoint covered, over its parent's
   version: its own extents, where they are in its kept segments, keyed by segment number at epoch
   0 (recovery stamps footers anew, so their chain's numbers can't key runs); the parent's extents it
   freed; its root, sequence numbers, spent set and capacity; the headers of its kept segments' logs,
@@ -67,8 +67,8 @@ bucket (CONTEXT.md, Cell), and its sync, syncfs and unmount wait for an upload (
   with `recovery::recover_version` under the child's ring and shared as the version's layer).
 - **A checkpoint** covers the closed segments whose commits are local, once eight wait
   (`CHECKPOINT_SEGMENTS`), or all of them as the store closes. In order: their footers applied to
-  the base; their raw files synced, since a flush that sealed little made their runs durable in
-  their logs alone (`LogRecord`'s held runs); the base written whole; each raw file linked into
+  the local checkpoint; their raw files synced, since a flush that sealed little made their runs durable in
+  their logs alone (`LogRecord`'s held runs); the local checkpoint written whole; each raw file linked into
   `kept/` and that directory synced; then their old names and logs removed and those directories
   synced; then the write-ahead log's start moved past them. Linking before removing matters because
   a crash may keep each directory's entries apart. The next opening finishes a checkpoint a crash
@@ -80,15 +80,15 @@ bucket (CONTEXT.md, Cell), and its sync, syncfs and unmount wait for an upload (
   after punches it (`File::punch`: `FALLOC_FL_PUNCH_HOLE` on Linux, `F_PUNCHHOLE` on macOS). Raw
   segments are written in whole 4 KiB XTS sectors, so every run is whole blocks and no compaction
   is needed. A kept segment with nothing left in it is unlinked. The runs a checkpoint gave back are
-  also written in the base, and the next opening punches them again: punching is idempotent, and
+  also written in the local checkpoint, and the next opening punches them again: punching is idempotent, and
   a crash may have cut it short.
 - **Its footprint** counts a kept segment by the blocks it has allocated (`File::allocated`,
   `st_blocks`), so that a punched hole gives its space back to the tenant's allotment (doc-22).
 - **Its recovery:** settle, then recover the write-ahead log as any store does. The runs that the
   raw segments' logs held are written back into their raw files (`Recovered::restore_raw`), the
-  base is applied over the parent's version, the recovered footers are applied over that, and the
+  local checkpoint is applied over the parent's version, the recovered footers are applied over that, and the
   runs the last checkpoint gave back are punched again. Recovery reads only the raw segments after
-  the base, at most a checkpoint's worth.
+  the local checkpoint, at most a checkpoint's worth.
 
 ## Forking one
 
@@ -108,7 +108,7 @@ bucket (CONTEXT.md, Cell), and its sync, syncfs and unmount wait for an upload (
    after it.
 4. **The parent's head is read**, and must name the version (`ENOENT`), shared if the child is
    another tenant's (`EACCES`). If it doesn't, the reference and index entry are deleted.
-5. The child's store is made: its base is the version's state, with its keys.
+5. The child's store is made: its local checkpoint is the version's state, with its keys.
 
 A fork that fails leaves nothing: its directory is removed, its reference retired, and its note
 forgotten. `DeleteCell` of an ephemeral store retires its reference, then forgets its note.
@@ -125,7 +125,7 @@ the incarnation's index entries and retires each reference.
 ## Live migration
 
 Host S migrates an ephemeral cell to host T, both daemons with `CLADEFSD_EPHEMERAL` and peer
-addresses (`CLADEFSD_PEER_ADDRESS`). Since everything an ephemeral store holds past its base is
+addresses (`CLADEFSD_PEER_ADDRESS`). Since everything an ephemeral store holds past its local checkpoint is
 files, and its kept segments never change once kept but for holes, a migration copies its store's
 files rather than streaming its log (`cladefsd::migration`):
 

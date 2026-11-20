@@ -2,8 +2,8 @@
 id: doc-12
 title: The fsync durability contract
 type: other
-created_date: 2026-10-31 22:17
-updated_date: '2026-11-19T16:04:00Z'
+created_date: '2026-10-31 22:17'
+updated_date: '2026-11-20 19:43'
 ---
 # What an acknowledged fsync survives (TASK-66)
 
@@ -109,6 +109,22 @@ as above. With f = 1 (three members):
 StatCell says `degraded`, `members_up` and `active_replicas`; `/metrics` says
 `cladefsd_replication_degraded{cell}` and `cladefsd_replication_members_up{cell}`, and the daemon
 logs a warning as a cell is degraded and as it is no more.
+
+### An ephemeral cell's (doc-25, TASK-698)
+
+*Added 2026-11-20 (TASK-698.6):* an ephemeral cell is never uploaded, so it has no level past
+Local. It has no uploader, so its sync family's `COMMIT_UPLOADED` returns once the commit is Local
+(`OpenCell`'s commits wait for Local without an uploader), and its fsync waits for Ordered or Local
+as asked. Every row keeps ordering, as above.
+
+| Failure | fsync (Local) acknowledged | sync acknowledged | Tested by |
+|---|---|---|---|
+| Guest crash, VMM killed | kept | kept | the rows above |
+| cladefsd killed, or the host rebooted, disk kept | kept: the opening finishes a checkpoint cut short, then recovers from the local checkpoint and the raw segments' logs after it, the runs a flush held in its logs alone written back into their raw files | kept | local_cell's `crashes_at_every_step_keep_what_was_committed` (a crash at each of the first 400 disk operations, through two checkpoints) |
+| The host's disk lost | lost, with the cell: no copy is anywhere else. Its reference stays until the host's incarnation is decommissioned (`DecommissionHost`) | lost | cladefs's `ephemeral_cells_fork_from_versions_and_retire_their_references` (decommissioning) |
+| The bucket failing | kept: nothing of the cell's goes to the bucket; reads of what it inherits wait for the bucket or the part cache | kept | (by construction: no uploader) |
+| Live migration, the target lost mid-migration | kept on the source: it serves the cell again once the target, restarted, refuses the hand-over; given up and not answered, it opens the cell nowhere until asked again | kept | cladefs's `hand_overs_refused_leave_the_source_serving` |
+| Live migration accepted | kept on the target: it accepts only holding every file the source named, the source having stopped serving before | kept | cladefs's `ephemeral_cells_migrate_live_between_hosts` |
 
 ## What a guest sees meanwhile
 

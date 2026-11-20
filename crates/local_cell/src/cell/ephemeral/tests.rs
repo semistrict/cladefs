@@ -47,10 +47,13 @@ fn keys() -> Arc<Ring> {
 
 /// A new ephemeral cell's store in `dir`, of the child's, forked from the parent's version.
 fn make(dir: &MemDir) {
-    let base =
-        Base::fork(Parent { cell: PARENT, version: 7, at: 3 }, &parent(), b"wrapped".to_vec());
+    let checkpoint = LocalCheckpoint::fork(
+        Parent { cell: PARENT, version: 7, at: 3 },
+        &parent(),
+        b"wrapped".to_vec(),
+    );
     let description = Description { block_size: BLOCK as u32, capacity: 1 << 30, cell: CHILD };
-    LocalCell::make_ephemeral(dir, description, Some("memory:///p"), Some(Kind::Fxfs), &base)
+    LocalCell::make_ephemeral(dir, description, Some("memory:///p"), Some(Kind::Fxfs), &checkpoint)
         .unwrap();
 }
 
@@ -58,7 +61,7 @@ fn make(dir: &MemDir) {
 fn open(dir: &MemDir) -> LocalCell<MemDir> {
     let recovering = LocalCell::recover_unmade(dir.clone()).unwrap();
     assert!(recovering.is_ephemeral());
-    assert_eq!(recovering.base().unwrap().keys(), b"wrapped");
+    assert_eq!(recovering.local_checkpoint().unwrap().keys(), b"wrapped");
     let opening = EphemeralOpening { parent: parent(), keys: keys(), cache: None, held: None };
     let store = recovering.open_ephemeral(options(), opening).unwrap();
     store.made().unwrap();
@@ -97,7 +100,7 @@ fn allocated(dir: &MemDir, number: u64) -> u64 {
 
 /// An ephemeral cell reads its parent's extents in the bucket, and its own here; its segments
 /// close raw, never framed, and a checkpoint covers them once eight are closed, moving them to
-/// `kept/`, its base naming them; it reopens as it was.
+/// `kept/`, its local checkpoint naming them; it reopens as it was.
 #[test]
 fn an_ephemeral_cell_keeps_its_segments_raw_and_checkpoints_them() {
     let dir = MemDir::new();
@@ -123,9 +126,9 @@ fn an_ephemeral_cell_keeps_its_segments_raw_and_checkpoints_them() {
         let left = numbers(&dir, kind);
         assert_eq!(left[0], 8, "the open segment's, and the next's if prepared: {left:?}");
     }
-    let base = Base::read(&dir).unwrap();
-    assert_eq!((base.through, base.own.len(), base.kept.len()), (Some(7), 8, 8));
-    assert_eq!(base.last_commit, Some(tag(0, 18)), "the parent's commit 10, then eight");
+    let checkpoint = LocalCheckpoint::read(&dir).unwrap();
+    assert_eq!((checkpoint.through, checkpoint.own.len(), checkpoint.kept.len()), (Some(7), 8, 8));
+    assert_eq!(checkpoint.last_commit, Some(tag(0, 18)), "the parent's commit 10, then eight");
     for sequence in 0..8 {
         assert_eq!(byte_of(&store, sequence), Some(sequence as u8 + 1));
     }
@@ -162,9 +165,9 @@ fn checkpoints_give_back_what_was_freed() {
     }
     assert_eq!(byte_of(&store, 0), None);
     assert!(!numbers(&dir, KEPT).contains(&0), "segment 0 held extent 0 alone: it goes");
-    let base = Base::read(&dir).unwrap();
-    assert_eq!(base.freed, vec![inherited()]);
-    assert!(base.own.iter().all(|(extent, _)| *extent != own(0)));
+    let checkpoint = LocalCheckpoint::read(&dir).unwrap();
+    assert_eq!(checkpoint.freed, vec![inherited()]);
+    assert!(checkpoint.own.iter().all(|(extent, _)| *extent != own(0)));
     drop(store);
 
     let store = open(&dir);
