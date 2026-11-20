@@ -721,10 +721,10 @@ mod host {
             if happened.host_lost {
                 // As another host takes what was the lost host's, from the bucket alone.
                 let base = self.ledger.base.context("no base")?;
-                control.create_cell(&self.paths.base(), CAPACITY, base, token)?;
+                control.create_cell(&self.paths.base(), CAPACITY, base, (token, false))?;
                 for slot in 0..SLOTS {
                     let cell = self.ledger.slots[slot].cell.context("a slot with no store")?;
-                    control.create_cell(&self.paths.slot(slot), CAPACITY, cell, token)?;
+                    control.create_cell(&self.paths.slot(slot), CAPACITY, cell, (token, false))?;
                 }
                 self.say("every cell taken again from the bucket");
             }
