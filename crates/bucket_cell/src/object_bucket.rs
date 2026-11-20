@@ -1345,6 +1345,10 @@ fn error(error: &object_store::Error) -> Error {
         object_store::Error::Precondition { .. } | object_store::Error::NotModified { .. } => {
             Error::Precondition
         }
+        // cladefs: an answer, not a failure to answer (TASK-699).
+        object_store::Error::NotImplemented { .. } | object_store::Error::NotSupported { .. } => {
+            Error::Unsupported
+        }
         _ => Error::Unavailable,
     }
 }
@@ -1802,31 +1806,79 @@ fn backoff(failures: u32) -> std::time::Duration {
 
 /// Checks that `bucket` honours the conditional writes cells rely on, with an object of its
 /// own at `probe/<nonce>`, which it removes: a create where an object is fails, so does an update
-/// of a version that is not the object's, and one of the object's version succeeds.
+/// of a version that is not the object's, and one of the object's version succeeds. cladefs: a step
+/// failing as a bucket out of reach does, `Unavailable`, says nothing of what the store honours:
+/// the probe begins again, with an object of its own anew, as a conditional write that failed so
+/// may or may not have landed, backing off as the bucket's requests do (TASK-699).
 pub async fn probe(bucket: &impl Bucket, nonce: u64) -> Result<(), String> {
+    let mut failures = 0;
+    loop {
+        match probe_once(bucket, nonce.wrapping_add(failures.into())).await {
+            Probed::Answered(answer) => return answer,
+            Probed::Unavailable(key) => {
+                failures += 1;
+                log::info!("object storage: probing conditional writes: out of reach, again");
+                // Best effort: what is left of a probe is its own object, which no cell names.
+                let _ = bucket.delete(&key).await;
+                tokio::time::sleep(backoff(failures)).await;
+            }
+        }
+    }
+}
+
+/// What a probe of conditional writes found ([`probe`]): an answer, or the bucket out of reach at
+/// a step, its object's key.
+enum Probed {
+    Answered(Result<(), String>),
+    Unavailable(String),
+}
+
+/// A probe of conditional writes, once, as [`probe`] makes it.
+async fn probe_once(bucket: &impl Bucket, nonce: u64) -> Probed {
     let key = format!("probe/{}", base32_id::Padded(nonce));
     let refused = |what: &str, result: &dyn std::fmt::Debug| {
-        format!("the store does not honour conditional writes: {what} gave {result:?}")
+        Probed::Answered(Err(format!(
+            "the store does not honour conditional writes: {what} gave {result:?}"
+        )))
     };
+    let unavailable = |result: &Result<Version, Error>| result == &Err(Error::Unavailable);
     let created = bucket.put(&key, bytes::Bytes::from_static(b"probe"), PutMode::Create).await;
-    let version = created.map_err(|error| format!("creating {key}: {error}"))?;
+    if unavailable(&created) {
+        return Probed::Unavailable(key);
+    }
+    let version = match created {
+        Ok(version) => version,
+        Err(error) => return Probed::Answered(Err(format!("creating {key}: {error}"))),
+    };
     let again = bucket.put(&key, bytes::Bytes::from_static(b"again"), PutMode::Create).await;
+    if unavailable(&again) {
+        return Probed::Unavailable(key);
+    }
     if again != Err(Error::AlreadyExists) {
-        return Err(refused("a create where an object is", &again));
+        return refused("a create where an object is", &again);
     }
     // No store makes this ETag; GCS's generation 0 is no object's.
     let other =
         Version { e_tag: Some("\"cladefs-probe\"".to_owned()), version: Some("0".to_owned()) };
     let stale = bucket.put(&key, bytes::Bytes::from_static(b"stale"), PutMode::Update(other)).await;
+    if unavailable(&stale) {
+        return Probed::Unavailable(key);
+    }
     if stale != Err(Error::Precondition) {
-        return Err(refused("an update of another version", &stale));
+        return refused("an update of another version", &stale);
     }
     let updated =
         bucket.put(&key, bytes::Bytes::from_static(b"updated"), PutMode::Update(version)).await;
-    if updated.is_err() {
-        return Err(refused("an update of the object's version", &updated));
+    if unavailable(&updated) {
+        return Probed::Unavailable(key);
     }
-    bucket.delete(&key).await.map_err(|error| format!("removing {key}: {error}"))
+    if updated.is_err() {
+        return refused("an update of the object's version", &updated);
+    }
+    match bucket.delete(&key).await {
+        Err(Error::Unavailable) => Probed::Unavailable(key),
+        removed => Probed::Answered(removed.map_err(|error| format!("removing {key}: {error}"))),
+    }
 }
 
 #[cfg(test)]
@@ -3352,6 +3404,90 @@ pub(crate) mod tests {
         assert_eq!(sim.keys(), ["probe/0000000000002"]);
     }
 
+    /// A bucket that fails its writes as one out of reach does, `Unavailable`, as `fails` says of
+    /// each in turn: before it lands (`Some(false)`), after (`Some(true)`), or not (`None`).
+    struct OutOfReach(
+        crate::testing::Direct,
+        std::sync::Mutex<std::collections::VecDeque<Option<bool>>>,
+    );
+
+    impl Bucket for OutOfReach {
+        fn get(&self, key: &str) -> impl Future<Output = Result<Object, Error>> + Send {
+            self.0.get(key)
+        }
+
+        fn get_range(
+            &self,
+            key: &str,
+            range: ByteRange,
+        ) -> impl Future<Output = Result<Vec<u8>, Error>> + Send {
+            self.0.get_range(key, range)
+        }
+
+        fn head(&self, key: &str) -> impl Future<Output = Result<Meta, Error>> + Send {
+            self.0.head(key)
+        }
+
+        fn list(&self, prefix: &str) -> impl Future<Output = Result<Vec<Meta>, Error>> + Send {
+            self.0.list(prefix)
+        }
+
+        fn list_delimited(
+            &self,
+            prefix: &str,
+            page: crate::bucket::Page<'_>,
+        ) -> impl Future<Output = Result<Listing, crate::bucket::Error>> + Send {
+            self.0.list_delimited(prefix, page)
+        }
+
+        fn put(
+            &self,
+            key: &str,
+            bytes: bytes::Bytes,
+            mode: PutMode,
+        ) -> impl Future<Output = Result<Version, Error>> + Send {
+            let fails = self.1.lock().unwrap().pop_front().flatten();
+            let put = self.0.put(key, bytes, mode);
+            async move {
+                match fails {
+                    None => put.await,
+                    Some(false) => Err(Error::Unavailable),
+                    Some(true) => put.await.and(Err(Error::Unavailable)),
+                }
+            }
+        }
+
+        fn delete(&self, key: &str) -> impl Future<Output = Result<(), Error>> + Send {
+            self.0.delete(key)
+        }
+
+        fn now(&self) -> u64 {
+            self.0.now()
+        }
+    }
+
+    /// TASK-699: a probe meeting the bucket out of reach at its steps, its writes failing before
+    /// they land or after, begins again, and finds a bucket that honours conditional writes does,
+    /// whichever step met it: the create, the stale update, the update after landing. Nothing of
+    /// its probes is left.
+    #[tokio::test(start_paused = true)]
+    async fn probes_ride_out_a_bucket_out_of_reach() {
+        use crate::testing::{Direct, SimBucket};
+        let sim = SimBucket::new();
+        // Each attempt's writes: create, create again, stale update, update.
+        let fails = [
+            vec![Some(false)],
+            vec![None, None, Some(false)],
+            vec![None, None, None, Some(true)],
+            vec![Some(true)],
+        ];
+        let fails = fails.into_iter().flatten().collect();
+        let bucket = OutOfReach(Direct(sim.clone()), std::sync::Mutex::new(fails));
+        assert_eq!(probe(&bucket, 1).await, Ok(()));
+        assert!(bucket.1.lock().unwrap().is_empty(), "every failure met");
+        assert_eq!(sim.keys(), Vec::<String>::new());
+    }
+
     #[test]
     fn honours_conditional_writes() {
         futures::executor::block_on(probe(&*memory(), 1)).unwrap();
@@ -3684,7 +3820,7 @@ pub(crate) mod tests {
         assert_eq!(
             refused,
             "the store does not honour conditional writes: an update of another version gave \
-             Err(Unavailable)"
+             Err(Unsupported)"
         );
         futures::executor::block_on(probe(&*file(dir.path()), 2)).unwrap();
     }

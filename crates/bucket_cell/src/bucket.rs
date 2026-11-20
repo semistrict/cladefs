@@ -154,6 +154,10 @@ pub enum Error {
     /// The request failed. It may or may not have taken effect.
     #[error("the store is unavailable")]
     Unavailable,
+    /// cladefs: the store does not do what the request asks, as a filesystem's store an update of
+    /// a version (TASK-699): an answer, never retried, where [`Error::Unavailable`] is none.
+    #[error("the store does not do what the request asks")]
+    Unsupported,
 }
 
 /// Which bytes of an object a ranged read reads: an object shorter than the range reads short.
