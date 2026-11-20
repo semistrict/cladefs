@@ -690,6 +690,7 @@ pub(crate) async fn fork_ephemeral(
         },
     };
     let Err(err) = made else { return Ok(()) };
+    log::warn!("cladefs: forking ephemeral cell {cell} at {}: {err:#}", path.display());
     upload::blocking(|| discard(path));
     if let Err(why) = host.retire(&entry).await {
         log::warn!("cladefs: retiring ephemeral cell {cell}'s reference, its fork failed: {why:#}");

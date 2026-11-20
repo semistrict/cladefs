@@ -956,8 +956,12 @@ pub(super) async fn fork_ephemeral_of_version(
 ) -> Result<CellId, Errno> {
     let _child = hold_to_fork(&to).await?;
     let capacity = OpenCell::BLOCK_SIZE as u64;
-    let from = opened_version(cell, version, capacity).await?;
-    let (kept, _) = kept_or_open(&from, capacity).await?;
+    let from = opened_version(cell, version, capacity).await.inspect_err(|errno| {
+        log::warn!("cladefsd: version {version:x} of {cell} for an ephemeral fork: {errno:?}")
+    })?;
+    let (kept, _) = kept_or_open(&from, capacity).await.inspect_err(|errno| {
+        log::warn!("cladefsd: opening {} for an ephemeral fork: {errno:?}", from.display())
+    })?;
     let tenant = tenant.unwrap_or(kept.store.cell().tenant);
     let forked = kept.store.fork_ephemeral(&to, tenant).await.map_err(|err| {
         errno_of(format_args!("forking {} ephemerally to {}", from.display(), to.display()), err)
