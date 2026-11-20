@@ -843,6 +843,8 @@ impl Drop for Running {
 
 impl World {
     pub fn new(seed: u64, profile: Profile) -> Self {
+        // cladefs: the code's buggify sites, on as the seed says, for this run alone (doc-24).
+        bucket_cell::buggify::enable(seed);
         let pool = LocalPool::new();
         let spawner = pool.spawner();
         let mut world = Self {

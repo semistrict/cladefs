@@ -715,7 +715,9 @@ impl<F: File> Segments<F> {
     pub fn due(&self, options: &Options) -> bool {
         let open = &self.tracked[&self.open];
         let old = open.len > 0 && self.opened.elapsed() >= options.segment_age;
-        open.writers == 0 && (open.len >= options.segment_size || old || self.close_wanted)
+        // cladefs: or, in a simulation, at any commit, closing segments of any size (doc-24).
+        let early = open.len > 0 && bucket_cell::buggify!(0.1);
+        open.writers == 0 && (open.len >= options.segment_size || old || self.close_wanted || early)
     }
 
     /// Closes the open segment, after commit `epoch`, the cell's next sequence number

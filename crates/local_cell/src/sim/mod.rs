@@ -32,7 +32,11 @@ use world::{Profile, Weights, World};
 fn violations(seed: u64, profile: Profile) -> (Vec<String>, String) {
     let mut world = World::new(seed, profile);
     world.run();
-    let description = if world.violations.is_empty() { String::new() } else { world.describe() };
+    let description = match world.violations.is_empty() {
+        true => String::new(),
+        // cladefs: and the buggify sites the run asked about, on or off (doc-24).
+        false => format!("{}\nbuggify: {:#?}", world.describe(), bucket_cell::buggify::sites()),
+    };
     (world.violations, description)
 }
 
@@ -287,6 +291,23 @@ fn seeds_replay() {
     for profile in profiles {
         replays(profile, 0..20);
     }
+}
+
+/// cladefs: every buggify site the code has is asked about by the simulation (doc-24): a site no
+/// run reaches makes no run do its unusual thing, as FoundationDB reports a probe no run hits.
+#[test]
+fn buggify_sites_are_reached() {
+    let sites = ["segments.rs", "upload.rs", "writer.rs"];
+    let mut asked = std::collections::BTreeSet::<&str>::new();
+    for seed in 0..20 {
+        let mut world = World::new(seed, Profile::default());
+        world.run();
+        for site in bucket_cell::buggify::sites() {
+            asked.extend(sites.iter().copied().filter(|file| site.contains(file)));
+        }
+    }
+    bucket_cell::buggify::disable();
+    assert_eq!(asked.len(), sites.len(), "reached only {asked:?} of {sites:?}");
 }
 
 /// Everything, at the default rates.

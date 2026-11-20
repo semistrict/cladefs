@@ -54,6 +54,7 @@ compile_error!(
 pub mod batch;
 pub mod bucket;
 pub mod bucket_kms;
+pub mod buggify;
 pub mod cache;
 pub mod cell;
 pub mod checkpoint;

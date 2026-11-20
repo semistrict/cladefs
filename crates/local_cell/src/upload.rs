@@ -1149,6 +1149,11 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
 
     /// Waits until the uploader is woken, or `interval` runs out first: whether it was woken.
     async fn woken(&self, interval: Duration) -> bool {
+        // cladefs: in a simulation, the interval run out at once, uploading what it holds now, of
+        // any size (doc-24).
+        if bucket_cell::buggify!() {
+            return false;
+        }
         let notified = std::pin::pin!(self.wake.notified());
         let ran_out = (self.clock)(interval);
         matches!(futures::future::select(notified, ran_out).await, Either::Left(_))
@@ -2007,7 +2012,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 return Ok(None);
             }
             // Of f = 0, what was told replicated uploaded at once.
-            if f == 0 && waits.is_multiple_of(URGE_EVERY) {
+            // cladefs: in a simulation, at any wait (doc-24).
+            if f == 0 && (waits.is_multiple_of(URGE_EVERY) || bucket_cell::buggify!()) {
                 self.eager();
             }
             waits += 1;

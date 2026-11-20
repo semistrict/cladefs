@@ -358,7 +358,9 @@ impl<B: Bucket> Writer<B> {
                 Created::Exists(_) => Err(Error::Corrupt(format!("{key} holds another extent"))),
             }
         });
-        if let Err(error) = creates.buffer_unordered(OWN_AT_ONCE).try_collect::<()>().await {
+        // cladefs: in a simulation, one at a time, as a host short of connections would (doc-24).
+        let at_once = if crate::buggify!(0.5) { 1 } else { OWN_AT_ONCE };
+        if let Err(error) = creates.buffer_unordered(at_once).try_collect::<()>().await {
             return Err(self.stop(error));
         }
         let key = layout::segment(self.cell, segment, self.epoch);
