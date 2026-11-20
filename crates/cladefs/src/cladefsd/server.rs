@@ -2592,6 +2592,7 @@ impl Parking {
     pub(super) fn wait(&self) {
         let mut parked = self.0.parked.lock().unwrap();
         while *parked > 0 {
+            local_cell::blocks!("a shrink, waiting for pages VM processes reach to be freed");
             parked = self.0.freed.wait(parked).unwrap();
         }
     }

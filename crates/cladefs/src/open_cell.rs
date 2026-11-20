@@ -476,9 +476,7 @@ fn upload_errno(failure: local_cell::upload::Failure) -> Errno {
 /// (doc-24, TASK-685.3), blocking the calling thread: one seam, so that what is left is one search,
 /// each use gone with its path's step. Under madsim, which runs on one thread, it fails at once.
 pub(crate) fn not_yet_async<F: std::future::Future>(future: F) -> F::Output {
-    #[cfg(madsim)]
-    panic!("not async yet: this path of the daemon blocks, which the simulation can't run");
-    #[cfg(not(madsim))]
+    local_cell::blocks!("a path of the daemon's not async yet (open_cell::not_yet_async)");
     futures::executor::block_on(future)
 }
 

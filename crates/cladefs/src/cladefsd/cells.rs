@@ -365,6 +365,7 @@ fn keep(hold: &Hold, store: OpenCell) -> Arc<HeldCell> {
 fn close_kept_blocking(kept: Option<Kept>) {
     let Some(Kept { store, closed, .. }) = kept else { return };
     drop(store);
+    local_cell::blocks!("a kept store's close, waiting for the forks forking it");
     let _ = futures::executor::block_on(closed);
 }
 

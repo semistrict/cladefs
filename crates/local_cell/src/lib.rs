@@ -122,6 +122,20 @@
 /// TASK-44.10): the function it is in returns an error there, or whatever a test set the failpoint
 /// to do happens. Nothing without the crate's `failpoints` feature, which `cladefs/failpoints` turns
 /// on.
+/// cladefs: marks a wait on another task's or thread's work, which the daemon's paths must not reach
+/// under madsim, whose one thread it would stop for good (doc-24, TASK-685.3): under
+/// `--cfg madsim`, fails at once, naming `$what`, so that a path not async yet is found the moment
+/// a simulation reaches it, and the rewrite's work left is what the simulation finds; built
+/// normally, nothing.
+#[macro_export]
+macro_rules! blocks {
+    ($what:expr) => {
+        if cfg!(madsim) {
+            panic!("would block the simulation's one thread: {} (doc-24, TASK-685.3)", $what);
+        }
+    };
+}
+
 macro_rules! failpoint {
     ($name:literal) => {
         fail::fail_point!($name, |_| Err(anyhow::anyhow!("failpoint {}", $name)))
