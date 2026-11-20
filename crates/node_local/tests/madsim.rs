@@ -58,3 +58,44 @@ fn nodes_keep_their_own_statics_and_start_again_with_none() {
         assert_eq!(*seen.lock().unwrap(), [(1, 3), (2, 5), (2, 5)]);
     });
 }
+
+/// TASK-685.9: each node reads the environment it was given, and, killed and started again,
+/// what its restart gives it; the test's own code, the process's.
+#[test]
+fn nodes_read_the_environments_they_are_given() {
+    let runtime = madsim::runtime::Runtime::new();
+    runtime.add_simulator::<node_local::Plugin>();
+    runtime.block_on(async {
+        let handle = madsim::runtime::Handle::current();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let boots = Arc::new(AtomicU64::new(0));
+        let mut nodes = Vec::new();
+        for host in 1..=2u8 {
+            let (seen, boots) = (seen.clone(), boots.clone());
+            let node = handle
+                .create_node()
+                .name(format!("host{host}"))
+                .ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, host)))
+                .init(move || {
+                    let (seen, boot) = (seen.clone(), boots.fetch_add(1, Ordering::Relaxed));
+                    async move {
+                        // Before it is given one, the process's.
+                        let before = node_local::env::var("NODE_LOCAL_HOST").ok();
+                        node_local::env::set_vars([("NODE_LOCAL_HOST", format!("{host}.{boot}"))]);
+                        let after = node_local::env::var("NODE_LOCAL_HOST").ok();
+                        seen.lock().unwrap().push((before, after));
+                    }
+                })
+                .build();
+            nodes.push(node);
+        }
+        madsim::time::sleep(Duration::from_secs(1)).await;
+        // host 2 killed and started again: it reads nothing given before its restart gives it.
+        handle.kill(nodes[1].id());
+        handle.restart(nodes[1].id());
+        madsim::time::sleep(Duration::from_secs(1)).await;
+        let given = |value: &str| (None, Some(value.to_owned()));
+        assert_eq!(*seen.lock().unwrap(), [given("1.0"), given("2.1"), given("2.2")]);
+        assert_eq!(node_local::env::var_os("NODE_LOCAL_HOST"), None);
+    });
+}

@@ -38,7 +38,7 @@ pub fn host_token() -> Result<u64, Failure> {
              system's control plane, which fences earlier placements",
         )
     };
-    match std::env::var("CLADEFSD_TOKEN") {
+    match node_local::env::var("CLADEFSD_TOKEN") {
         Ok(token) if !token.is_empty() => match token.parse() {
             Ok(0) => Err(missing()),
             Ok(token) => Ok(token),

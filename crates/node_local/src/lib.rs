@@ -16,8 +16,13 @@
 //! A node's value is leaked, as a static's is: a value let go of at its node's kill stays where
 //! its holders, the node's tasks, which the kill dropped, left it. A simulation leaks a value of
 //! each static its killed nodes used, no more.
+//!
+//! A process's environment is its state too, which a daemon's configuration is read from: [`env`]
+//! reads it, the process's normally, and, in a simulated node given one, the node's.
 
 use std::sync::OnceLock;
+
+pub mod env;
 
 /// A static of a daemon's, one value per process, or, in the simulation, per node: see the crate's
 /// docs. Declared with [`node_local!`].

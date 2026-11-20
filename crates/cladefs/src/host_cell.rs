@@ -188,7 +188,7 @@ pub(crate) fn host_bucket_url() -> Option<String> {
     if let Some(url) = HOST_BUCKET.lock().unwrap().clone() {
         return Some(url);
     }
-    std::env::var("CLADEFSD_BUCKET").ok().filter(|url| !url.is_empty())
+    node_local::env::var("CLADEFSD_BUCKET").ok().filter(|url| !url.is_empty())
 }
 
 /// cladefs: the host's bucket's URL as a test made it ([`use_host_bucket`]).
@@ -238,7 +238,7 @@ pub(crate) fn keeps_own_bucket(store: &LocalCell<HostDir>) -> bool {
 /// is a host of cladefs's system (`CLADEFSD_TOKEN`, [`crate::bucket::host_token`]); else the
 /// first placement's. So the daemon and the cladefs CLI on one host take each other's cells.
 pub(crate) fn token() -> Result<u64, Failure> {
-    match std::env::var_os("CLADEFSD_TOKEN").filter(|token| !token.is_empty()) {
+    match node_local::env::var_os("CLADEFSD_TOKEN").filter(|token| !token.is_empty()) {
         Some(_) => crate::bucket::host_token(),
         None => Ok(FIRST_PLACEMENT),
     }

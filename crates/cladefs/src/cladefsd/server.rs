@@ -978,7 +978,8 @@ fn roots() -> Option<&'static [PathBuf]> {
     ROOTS
         .get()
         .get_or_init(|| {
-            let roots = std::env::var_os("CLADEFSD_ROOTS").filter(|roots| !roots.is_empty())?;
+            let roots =
+                node_local::env::var_os("CLADEFSD_ROOTS").filter(|roots| !roots.is_empty())?;
             Some(
                 std::env::split_paths(&roots)
                     .filter_map(|root| match root.canonicalize() {

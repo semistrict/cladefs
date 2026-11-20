@@ -95,7 +95,7 @@ pub fn start(
     let asking = Peers::new(address, move |peer| link(&linking, peer, (&linked, region)));
     asking.set(peers);
     crate::bucket::ask_peers(bucket.clone(), asking)?;
-    let replicas = match std::env::var_os("CLADEFSD_REPLICAS") {
+    let replicas = match node_local::env::var_os("CLADEFSD_REPLICAS") {
         Some(dir) => Some(replicas(std::path::Path::new(&dir)).map_err(|err| failed(&err))?),
         None => None,
     };

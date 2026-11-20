@@ -627,7 +627,7 @@ fn keeping() -> Result<local_cell::upload::Options, Errno> {
 /// seconds `CLADEFSD_REPLACE_AFTER` says, a positive number, or 30. Read at the daemon's start, to
 /// refuse what it can't use, and as each store opens.
 pub fn replace_after() -> Result<std::time::Duration, String> {
-    let Some(set) = std::env::var_os("CLADEFSD_REPLACE_AFTER") else {
+    let Some(set) = node_local::env::var_os("CLADEFSD_REPLACE_AFTER") else {
         return Ok(local_cell::upload::Options::default().replace_after);
     };
     match set.to_str().and_then(|seconds| seconds.parse::<u64>().ok()) {
@@ -1459,7 +1459,7 @@ impl FollowerStats {
 /// that it changed. cladefs: what it keeps but the bucket's, it looks at only to keep it in the file
 /// (TASK-92.17).
 fn watch_stats(bucket: std::sync::Weak<bucket_cell::object_bucket::ObjectBucket>) {
-    let file = std::env::var_os("CLADEFSD_STATS").filter(|file| !file.is_empty());
+    let file = node_local::env::var_os("CLADEFSD_STATS").filter(|file| !file.is_empty());
     let file = file.map(PathBuf::from);
     let watching = std::thread::Builder::new().name("cladefsd stats".into()).spawn(move || {
         let mut logged = Stats::default();
@@ -1673,7 +1673,7 @@ static STATS_WRITTEN: AtomicU64 = AtomicU64::new(0);
 /// (doc-22). Read at the daemon's start, to refuse what it can't use, and again by its first store
 /// to open.
 pub fn cache_config() -> Result<Option<(std::path::PathBuf, u64)>, String> {
-    let set = |var| std::env::var_os(var).filter(|value| !value.is_empty());
+    let set = |var| node_local::env::var_os(var).filter(|value| !value.is_empty());
     let dir = set("CLADEFSD_PART_CACHE");
     let capacity = match set("CLADEFSD_PART_CACHE_BYTES") {
         None => u64::MAX,

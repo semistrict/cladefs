@@ -39,7 +39,7 @@ pub const INTERVAL: Duration = Duration::from_millis(100);
 /// `CLADEFSD_HEADROOM` bytes, or a sixteenth of the host's memory, 1 GiB at least: room for
 /// VMs' memory to grow into between looks, and for the host's own.
 pub fn headroom(total: u64) -> Result<u64, String> {
-    match std::env::var("CLADEFSD_HEADROOM") {
+    match node_local::env::var("CLADEFSD_HEADROOM") {
         Ok(bytes) if !bytes.is_empty() => {
             bytes.parse().map_err(|_| format!("CLADEFSD_HEADROOM is bytes, not {bytes:?}"))
         }

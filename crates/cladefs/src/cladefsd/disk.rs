@@ -263,7 +263,7 @@ pub struct DiskConfig {
 impl DiskConfig {
     /// As the environment says it: refused, naming the variable, if it says what isn't one.
     pub fn from_env() -> Result<Self, String> {
-        let var = |name| std::env::var(name).ok();
+        let var = |name| node_local::env::var(name).ok();
         let headroom = super::governor::disk_headroom_of(var("CLADEFSD_DISK_HEADROOM").as_deref())?;
         let fixed = match var("CLADEFSD_DISK_BYTES").filter(|value| !value.is_empty()) {
             None => None,

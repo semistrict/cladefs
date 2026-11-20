@@ -56,7 +56,7 @@ pub const DEFAULT_BOUND: Duration = Duration::from_secs(60);
 
 /// How long a drain takes at most: `CLADEFSD_DRAIN` seconds, or [`DEFAULT_BOUND`].
 pub fn bound() -> Result<Duration, String> {
-    match std::env::var("CLADEFSD_DRAIN") {
+    match node_local::env::var("CLADEFSD_DRAIN") {
         Err(std::env::VarError::NotPresent) => Ok(DEFAULT_BOUND),
         Ok(secs) => secs
             .parse()

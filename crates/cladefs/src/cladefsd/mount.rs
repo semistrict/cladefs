@@ -38,7 +38,7 @@ pub struct Config {
 impl Config {
     /// The mount the environment names: none without `CLADEFSD_MOUNT`.
     pub fn from_env() -> Result<Option<Self>, String> {
-        Self::from_vars(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
+        Self::from_vars(|name| node_local::env::var(name).ok().filter(|value| !value.is_empty()))
     }
 
     /// The mount the variables `var` gives name, as [`Config::from_env`] reads them.
