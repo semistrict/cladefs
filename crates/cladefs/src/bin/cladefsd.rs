@@ -150,11 +150,14 @@ fn main() -> anyhow::Result<()> {
     cladefs::stacks::on_sigquit().context("handling SIGQUIT")?;
     let drain = cladefs::cladefsd::drain::bound().map_err(anyhow::Error::msg)?;
     drain_on_sigterm(drain).context("handling SIGTERM")?;
-    // cladefs: its spans, recorded for /z/tracez (TASK-672.1), and over OTLP too if
-    // CLADEFSD_TRACES says so (TASK-258): its exporter's threads made after SIGTERM is blocked, as
-    // every thread but the drain's.
-    if cladefs::cladefsd::otel::from_env().map_err(anyhow::Error::msg)? {
-        log::info!("cladefsd: exporting spans over OTLP");
+    // cladefs: its spans, recorded for /z/tracez (TASK-672.1), and over OTLP too, or not made at
+    // all, as CLADEFSD_TRACES says (TASK-258, TASK-707): its exporter's threads made after SIGTERM
+    // is blocked, as every thread but the drain's.
+    use cladefs::cladefsd::otel::Tracing;
+    match cladefs::cladefsd::otel::from_env().map_err(anyhow::Error::msg)? {
+        Tracing::Off => log::info!("cladefsd: spans off (CLADEFSD_TRACES=off)"),
+        Tracing::Recorded => {}
+        Tracing::Exported => log::info!("cladefsd: exporting spans over OTLP"),
     }
     cladefs::cladefsd::raise_open_files_limit().context("raising the limit of open files")?;
     let mut args = std::env::args().skip(1);

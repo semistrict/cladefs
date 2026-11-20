@@ -3,7 +3,8 @@
 `cladefsd` makes spans of what it does: the requests it serves, the commits they cause and each
 commit's phases, uploads to the bucket and each bucket request, store opens and forks,
 extent-cache page-ins, and memory-relief passes. It records every span in its own memory and shows
-them at `/z/tracez` (see [z-pages](#z-pages)). It exports them over OTLP only when told to.
+them at `/z/tracez` (see [z-pages](#z-pages)), unless `CLADEFSD_TRACES=off`. It exports them over
+OTLP only when told to.
 The code is `crates/bucket_cell/src/trace.rs`, which makes the spans,
 `crates/cladefs/src/cladefsd/otel.rs`, which starts the recorder and the exporter (TASK-258), and
 `crates/cladefs/src/cladefsd/zpages/`, which serves the pages (TASK-672).
@@ -12,7 +13,7 @@ The code is `crates/bucket_cell/src/trace.rs`, which makes the spans,
 
 | Variable | Meaning | Default |
 |---|---|---|
-| `CLADEFSD_TRACES` | `otlp` exports spans. Any other value except empty makes the daemon refuse to start. Spans are recorded for `/z/tracez` either way. | not exported |
+| `CLADEFSD_TRACES` | `otlp` exports spans. `off` makes none: nothing is recorded or exported, `/z/tracez` says spans are off, and each span costs a load, as before `/z/tracez` (TASK-707). Any other value except empty makes the daemon refuse to start. Unset, or `otlp`, spans are recorded for `/z/tracez`. | recorded, not exported |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | The collector, OTLP over HTTP with protobuf. `/v1/traces` is appended. `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` names the full URL instead. | `http://localhost:4318` |
 | `OTEL_SERVICE_NAME` | The service the spans belong to. | `cladefsd` |
 | `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG` | OpenTelemetry's standard sampler variables. | see Sampling |

@@ -109,7 +109,12 @@ fn encoded(value: &str) -> String {
 
 /// Each span name's counts, by latency bucket, failed and running, each linking to what it counts.
 fn summary(recorder: &Recorder, html: &mut String) {
-    html.push_str("<h1>tracez</h1>\n<p>Spans by latency, wall clock, since the daemon started. ");
+    html.push_str("<h1>tracez</h1>\n");
+    // cladefs: none made, CLADEFSD_TRACES=off (TASK-707): an empty table says nothing else.
+    if !bucket_cell::trace::enabled() {
+        html.push_str("<p>Spans are off: <code>CLADEFSD_TRACES=off</code>.</p>\n");
+    }
+    html.push_str("<p>Spans by latency, wall clock, since the daemon started. ");
     let bucket = format!("name=cache.page_in&tag={}", encoded(&format!("{SOURCE}=bucket")));
     let _ = write!(
         html,
@@ -351,5 +356,14 @@ mod tests {
         .collect();
         assert_eq!(shown, ["0", "700ns", "10µs", "1.5ms", "12.3ms", "2s", "100s"]);
         assert_eq!(bucket_name(3), ">1ms");
+    }
+
+    /// With spans off (`CLADEFSD_TRACES=off`, as in a test's process, which turns none on), the
+    /// summary says so, its table empty (TASK-707).
+    #[test]
+    fn the_summary_says_spans_are_off() {
+        assert!(!bucket_cell::trace::enabled());
+        let html = render(&Recorder::default(), &Query::parse(""));
+        assert!(html.contains("<p>Spans are off: <code>CLADEFSD_TRACES=off</code>.</p>"), "{html}");
     }
 }

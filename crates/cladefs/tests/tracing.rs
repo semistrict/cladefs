@@ -4,7 +4,7 @@
 
 //! TASK-258: the daemon's binary exports its spans over OTLP, to the collector
 //! `OTEL_EXPORTER_OTLP_ENDPOINT` names, with `CLADEFSD_TRACES=otlp`; and sends nothing
-//! without. The collector is one of the test's own, which takes OTLP over HTTP as a real one does
+//! without, nor with `CLADEFSD_TRACES=off` (TASK-707), which makes no spans at all. The collector is one of the test's own, which takes OTLP over HTTP as a real one does
 //! (`docs/tracing.md` runs Jaeger's), and keeps what it is sent.
 
 #![cfg(target_os = "linux")]
@@ -152,5 +152,14 @@ fn the_daemon_exports_its_spans_over_otlp() {
 fn the_daemon_exports_nothing_unless_told_to() {
     let dir = tempfile::tempdir().unwrap();
     let exports = serve_and_drain(dir.path(), None);
+    assert_eq!(exports.len(), 0);
+}
+
+/// TASK-707: `off` makes no spans, so sends none; the daemon serves and drains as it does with
+/// them.
+#[test]
+fn the_daemon_exports_nothing_with_traces_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let exports = serve_and_drain(dir.path(), Some("off"));
     assert_eq!(exports.len(), 0);
 }

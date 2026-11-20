@@ -8,7 +8,8 @@
 //! (`bucket_cell::trace`, which makes them).
 //!
 //! cladefs: made always, every one, and kept in the daemon's memory for `/z/tracez`
-//! (`super::zpages::tracez`, TASK-672.1); exported only if `CLADEFSD_TRACES` is `otlp`
+//! (`super::zpages::tracez`, TASK-672.1), unless `CLADEFSD_TRACES` is `off`, which makes none,
+//! each span then a load (TASK-707); exported only if `CLADEFSD_TRACES` is `otlp`
 //! ([`from_env`]), then configured by OpenTelemetry's own variables:
 //! `OTEL_EXPORTER_OTLP_ENDPOINT` (or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`) the collector they go
 //! to, over HTTP, protobuf (`http://localhost:4318` by default), `OTEL_SERVICE_NAME` their service
@@ -27,8 +28,21 @@ use opentelemetry_sdk::trace::{
 };
 use std::sync::OnceLock;
 
-/// The variable that exports the daemon's spans: `otlp`, or nothing.
+/// The variable that says what the daemon does with its spans ([`Tracing`]): `otlp`, `off`, or
+/// nothing.
 pub const OPTION: &str = "CLADEFSD_TRACES";
+
+/// What the daemon does with its spans, as `CLADEFSD_TRACES` says ([`from_env`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tracing {
+    /// None made (`off`): each costs a load, as before `/z/tracez` (TASK-707), and the page shows
+    /// none.
+    Off,
+    /// Every one made and recorded for `/z/tracez` (unset).
+    Recorded,
+    /// Recorded, and exported over OTLP (`otlp`).
+    Exported,
+}
 
 /// The ratio of the traces the daemon exports, unless `OTEL_TRACES_SAMPLER` or
 /// `OTEL_TRACES_SAMPLER_ARG` says otherwise: one in a hundred.
@@ -49,12 +63,14 @@ pub const ERRNO: &str = "cladefs.errno";
 /// The tracer provider spans go to, once started ([`install`]): what [`shutdown`] flushes.
 static PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 
-/// Starts the daemon's spans, recorded for `/z/tracez`, and exported too if `CLADEFSD_TRACES`
-/// says to: `otlp`, to the collector OpenTelemetry's variables name. Returns whether they are
-/// exported; an error for another value of it, or for OpenTelemetry's variables it can't take.
-pub fn from_env() -> Result<bool, String> {
+/// Starts the daemon's spans as `CLADEFSD_TRACES` says ([`Tracing`]): recorded for `/z/tracez`
+/// unless it is `off`, and exported too if it is `otlp`, to the collector OpenTelemetry's
+/// variables name. An error for another value of it, or for OpenTelemetry's variables it can't
+/// take.
+pub fn from_env() -> Result<Tracing, String> {
     let option = std::env::var(OPTION).unwrap_or_default();
     let export = match option.as_str() {
+        "off" => return Ok(Tracing::Off),
         "" => None,
         "otlp" => {
             let exporter = opentelemetry_otlp::SpanExporter::builder()
@@ -63,11 +79,11 @@ pub fn from_env() -> Result<bool, String> {
                 .map_err(|err| format!("making the OTLP exporter: {err}"))?;
             Some(Export::new(BatchSpanProcessor::builder(exporter).build(), export_sampler()?))
         }
-        other => return Err(format!("{OPTION} must be `otlp` or unset, not `{other}`")),
+        other => return Err(format!("{OPTION} must be `otlp`, `off` or unset, not `{other}`")),
     };
-    let exported = export.is_some();
+    let tracing = if export.is_some() { Tracing::Exported } else { Tracing::Recorded };
     install(export);
-    Ok(exported)
+    Ok(tracing)
 }
 
 /// Makes spans from now on, every one, recorded for `/z/tracez` and exported by `export`, if
@@ -184,25 +200,36 @@ mod tests {
         }
     }
 
-    /// Another value than `otlp` is refused, spans started not; none, spans start, recorded alone.
+    /// Another value than `otlp` or `off` is refused, spans started not; none, spans start,
+    /// recorded alone.
     #[test]
     fn spans_are_exported_only_if_the_option_says_otlp() {
         set(OPTION, Some("jaeger"));
         assert_eq!(
             from_env(),
-            Err("CLADEFSD_TRACES must be `otlp` or unset, not `jaeger`".to_owned())
+            Err("CLADEFSD_TRACES must be `otlp`, `off` or unset, not `jaeger`".to_owned())
         );
         assert!(!bucket_cell::trace::enabled());
         set(OPTION, None);
-        assert_eq!(from_env(), Ok(false));
+        assert_eq!(from_env(), Ok(Tracing::Recorded));
         assert!(bucket_cell::trace::enabled(), "spans are recorded, for /z/tracez");
+    }
+
+    /// `off` makes no spans: none recorded, none exported, no tracer provider installed
+    /// (TASK-707).
+    #[test]
+    fn off_makes_no_spans() {
+        set(OPTION, Some("off"));
+        assert_eq!(from_env(), Ok(Tracing::Off));
+        assert!(!bucket_cell::trace::enabled());
+        assert!(PROVIDER.get().is_none());
     }
 
     #[test]
     fn otlp_starts_tracing() {
         set(OPTION, Some("otlp"));
         set("OTEL_EXPORTER_OTLP_ENDPOINT", Some("http://localhost:4318"));
-        assert_eq!(from_env(), Ok(true));
+        assert_eq!(from_env(), Ok(Tracing::Exported));
         assert!(bucket_cell::trace::enabled());
         shutdown();
         assert!(!bucket_cell::trace::enabled());
