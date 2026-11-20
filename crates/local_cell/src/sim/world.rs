@@ -40,7 +40,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, Weak, mpsc};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use storage_device::ExtentId;
 
@@ -717,7 +717,7 @@ struct Session {
     uploader: Arc<Uploader>,
     intervals: Arc<Intervals>,
     /// What opening the store gave, once it did.
-    started: mpsc::Receiver<Result<Arc<LocalCell<MemDir>>, Failure>>,
+    started: futures::channel::oneshot::Receiver<Result<Arc<LocalCell<MemDir>>, Failure>>,
     /// The store, once open.
     store: Option<Arc<LocalCell<MemDir>>>,
     /// The uploader's task.
@@ -1223,13 +1223,13 @@ impl World {
                     self.follow_restore(host, cell, &from);
                     changed = true;
                 }
-                let session = &self.hosts[host].sessions[&cell];
+                let session = self.hosts[host].sessions.get_mut(&cell).unwrap();
                 if session.store.is_none() {
                     match session.started.try_recv() {
-                        Ok(Ok(store)) => self.opened(host, cell, store),
-                        Ok(Err(failure)) => self.refused(host, cell, failure),
-                        Err(mpsc::TryRecvError::Empty) => continue,
-                        Err(mpsc::TryRecvError::Disconnected) => {
+                        Ok(Some(Ok(store))) => self.opened(host, cell, store),
+                        Ok(Some(Err(failure))) => self.refused(host, cell, failure),
+                        Ok(None) => continue,
+                        Err(futures::channel::oneshot::Canceled) => {
                             unreachable!("an uploader stopped without saying how its store opened")
                         }
                     }
@@ -1415,7 +1415,7 @@ impl World {
         let keeping = kept.clone();
         let spawn: Spawn = Arc::new(move |task| keeping.lock().unwrap().push(task));
         let uploader = Shared::new(options, uploads, (intervals.clock(), spawn), keys);
-        let (started, start) = mpsc::channel();
+        let (started, start) = futures::channel::oneshot::channel();
         let (running, bucket) = (uploader.clone(), self.host_bucket(host));
         let running = self.spawn_uploader(async move {
             let recovering = (recovering, None);

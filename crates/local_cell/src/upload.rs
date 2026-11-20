@@ -221,8 +221,8 @@ impl<T> Retried<T> {
 /// (TASK-39.4). Deleting it again does nothing. A later placement's cell, whose token is higher,
 /// is not deleted (`bucket_cell::Error::Stale`, TASK-45.1).
 ///
-pub fn delete_cell(bucket: &ObjectBucket, cell: CellId, token: u64) -> Result<(), Failure> {
-    Ok(block_on(lifecycle::delete(bucket, cell, rand::random(), token))??)
+pub async fn delete_cell(bucket: &ObjectBucket, cell: CellId, token: u64) -> Result<(), Failure> {
+    Ok(lifecycle::delete(bucket, cell, rand::random(), token).await?)
 }
 
 /// Why uploading stopped, or a cell could not be uploaded to, or opened: the error as it was,
@@ -439,8 +439,9 @@ impl Default for Options {
 /// docs): as `holder` of the cell's head, which must differ from every other taking's, with
 /// `store_options`, its uploader uploading as `options` say, on `runtime`. Returns the store and
 /// its uploader; or why it can't be opened: its log diverged, its cell deleted, a later
-/// placement's, or out of reach.
-pub fn open<D: Dir>(
+/// placement's, or out of reach. cladefs: once its uploader, a task, opened it, holding no thread
+/// meanwhile (TASK-685.3); dropped before, the uploader stops, as the opener is gone.
+pub async fn open<D: Dir>(
     recovering: Recovering<D>,
     store_options: crate::Options,
     bucket: Arc<ObjectBucket>,
@@ -452,8 +453,8 @@ pub fn open<D: Dir>(
     let spawn: Spawn = Arc::new(move |task| drop(handle.spawn(task)));
     let uploads = runtime.uploads.clone();
     let shared = Shared::new(options, uploads, (sleep, spawn), runtime.keys.clone());
-    let (started, start) = std::sync::mpsc::channel();
-    let (stop, stopped) = std::sync::mpsc::channel();
+    let (started, start) = futures::channel::oneshot::channel();
+    let (stop, stopped) = futures::channel::oneshot::channel();
     let (uploader, uploads) = (shared.clone(), bucket.clone());
     // What the host learned for this opening, taken as it begins (TASK-449's review).
     let learned = learned(&*bucket, &recovering);
@@ -467,7 +468,8 @@ pub fn open<D: Dir>(
                 let recovering = (recovering, learned);
                 uploader.run(recovering, store_options, uploads, holder, started).await
             }
-            Err(err) => started.send(Err(Failure::msg(err))).unwrap(),
+            // Its opener gone or not, it says why it stopped to whoever listens.
+            Err(err) => drop(started.send(Err(Failure::msg(err)))),
         }
         // The store let go of before the uploader says it stopped: so that dropping this returns
         // with nothing of the uploader's holding the store open, which the process may open again
@@ -478,11 +480,10 @@ pub fn open<D: Dir>(
         let _ = stop.send(());
         fail::fail_point!("upload::stopped");
     });
-    crate::blocks!("a store's opening, waiting for its uploader to start");
-    let opened = match start.recv() {
+    let opened = match start.await {
         Ok(Ok(store)) => store,
         Ok(Err(err)) => {
-            let _ = stopped.recv();
+            let _ = stopped.await;
             return Err(err);
         }
         Err(_) => return Err(Failure::msg("the uploader stopped")),
@@ -499,8 +500,8 @@ pub struct Uploader<D: Dir> {
     shared: Arc<Shared<D>>,
     /// The bucket the store's cell is kept in.
     bucket: Arc<ObjectBucket>,
-    /// Says the uploader stopped, once it has.
-    stopped: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    /// Says the uploader stopped, once it has: taken by [`Uploader::close`], which waits for it.
+    stopped: Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
     /// The store's directory, held taken for this process until the uploader stopped, last of its
     /// fields to go (TASK-129).
     _dir: DirHold<D>,
@@ -574,9 +575,10 @@ pub(crate) type Spawn = Arc<dyn Fn(BoxFuture<'static, ()>) + Send + Sync>;
 
 /// Runs `work`, which blocks on the store's disk, on the uploaders' runtime: on its thread, which
 /// hands its other tasks to another meanwhile; or as it is, on a thread no runtime runs, as the
-/// simulation's (`tokio::task::block_in_place` runs it so there).
+/// simulation's (`tokio::task::block_in_place` runs it so there). cladefs: the daemon's async paths'
+/// disk work too, a store's making, opening and forking (TASK-685.3).
 #[allow(clippy::disallowed_methods, reason = "the work waits on the disk alone")]
-fn blocking<T>(work: impl FnOnce() -> T) -> T {
+pub fn blocking<T>(work: impl FnOnce() -> T) -> T {
     // TASK-685.1: madsim's one thread runs it as it is.
     #[cfg(madsim)]
     return work();
@@ -888,7 +890,7 @@ impl<D: Dir> Uploader<D> {
     /// a KEK from the host's pool, its DEK and those it inherits, rewrapped under that KEK
     /// (TASK-411.4). Failing, the fork fails, which its host deletes. It says what it left of the
     /// child's head to the child's store's first opening here ([`Learned`], TASK-449).
-    pub fn forked(&self, child: Child, inheriting: keys::Inheriting) -> Result<(), Failure> {
+    pub async fn forked(&self, child: Child, inheriting: keys::Inheriting) -> Result<(), Failure> {
         failing!("upload::forked");
         let at = self.shared.at_version.get().expect("a fork is of a store at a version");
         let keys = keys::Parents::Held(&at.sealing);
@@ -901,7 +903,7 @@ impl<D: Dir> Uploader<D> {
             given,
             keys,
         );
-        let made = match block_on(forking)? {
+        let made = match forking.await {
             Err(bucket_cell::Error::Deleted) => return Err(Failure::VersionDropped),
             Err(err) => return Err(err.into()),
             Ok(made) => made,
@@ -921,9 +923,9 @@ impl<D: Dir> Uploader<D> {
     /// store's keys, which it inherits, and a KEK for the child's cell from the host's pool. Refused
     /// if the host's KMS last heard a tenant of theirs revoked or destroyed, or as the KMS refuses
     /// a KEK (`keys::inheriting`). No KMS call is made with the pool not empty.
-    pub fn inheriting(&self, child: Child) -> Result<keys::Inheriting, Failure> {
+    pub async fn inheriting(&self, child: Child) -> Result<keys::Inheriting, Failure> {
         let source = self.store().keys();
-        Ok(block_on(keys::inheriting(&self.shared.keys.kms, source, child))??)
+        Ok(keys::inheriting(&self.shared.keys.kms, source, child).await?)
     }
 
     /// Deletes `child` in object storage, a fork of the version the store is at that
@@ -931,11 +933,11 @@ impl<D: Dir> Uploader<D> {
     /// would keep what it inherited for ever, no store holding it. Only a cell the fork made is
     /// deleted, its record naming the fork's owner: one of another's, which took the child's ID, is
     /// left as it is (TASK-79.82). It is deleted as the host's placement (`Options::token`).
-    pub fn unfork(&self, child: Child) -> Result<(), Failure> {
+    pub async fn unfork(&self, child: Child) -> Result<(), Failure> {
         let (holder, token) = (self.shared.holder(), self.shared.options.token);
         let deleting =
             lifecycle::delete_fork(&*self.bucket, child.cell, child.owner, (holder, token));
-        if !block_on(deleting)?? {
+        if !deleting.await? {
             log::warn!(
                 "cladefs: leaving cell {} in object storage, another's: a fork to its ID failed \
                  here",
@@ -949,9 +951,9 @@ impl<D: Dir> Uploader<D> {
     /// as its writer last swapped it, oldest first; then those its commits cut that the head names
     /// not yet, local, each by its commit's number, which [`Remote::uploaded`] waits for. None of a
     /// version's or a store at a version, which has no writer.
-    pub fn versions(&self) -> Versions {
+    pub async fn versions(&self) -> Versions {
         let uploaded = match self.shared.writer() {
-            Some(writer) => block_on(writer.versions()).unwrap_or_default(),
+            Some(writer) => writer.versions().await,
             None => Vec::new(),
         };
         let local = self.store().local_versions(self.last_uploaded());
@@ -964,18 +966,18 @@ impl<D: Dir> Uploader<D> {
     /// cladefs: drops the versions `ids` names, uploaded or local: the head swapped to name them
     /// no more, and no acknowledgement naming those local (`Writer::drop_versions`, TASK-476).
     /// Fails with no writer, of a version's or a store at a version.
-    pub fn drop_versions(&self, ids: &BTreeSet<u64>) -> Result<(), Failure> {
+    pub async fn drop_versions(&self, ids: &BTreeSet<u64>) -> Result<(), Failure> {
         failing!("upload::drop_versions");
         let writer = self.shared.writer().ok_or_else(|| Failure::msg("no writer: no versions"))?;
         self.store().forget_versions(ids);
-        Ok(block_on(writer.drop_versions(ids))??)
+        Ok(writer.drop_versions(ids).await?)
     }
 
     /// cladefs: shares the uploaded version `id`, if `shared`, or no longer: other tenants' cells may
     /// restore it while it is (`Writer::share_version`, TASK-476).
-    pub fn share_version(&self, id: u64, shared: bool) -> Result<(), Failure> {
+    pub async fn share_version(&self, id: u64, shared: bool) -> Result<(), Failure> {
         let writer = self.shared.writer().ok_or_else(|| Failure::msg("no writer: no versions"))?;
-        Ok(block_on(writer.share_version(id, shared))??)
+        Ok(writer.share_version(id, shared).await?)
     }
 
     /// Whether the store is a store at a version: nothing it does goes to object storage but its
@@ -1033,12 +1035,27 @@ impl<D: Dir> Uploader<D> {
     }
 }
 
+impl<D: Dir> Uploader<D> {
+    /// cladefs: stops it, as dropping it does, and returns once it stopped: its store's open segment
+    /// closed, if its store is open still, what the store made durable uploaded, and nothing of it
+    /// holding the store open, which may be opened again at once (TASK-685.3). Holds no thread
+    /// while it waits, as the daemon closes its stores: dropping it, unclosed, blocks.
+    pub async fn close(mut self) {
+        self.shared.stop();
+        if let Some(stopped) = self.stopped.get_mut().unwrap().take() {
+            let _ = stopped.await;
+        }
+    }
+}
+
 impl<D: Dir> Drop for Uploader<D> {
     fn drop(&mut self) {
         self.shared.stop();
         if let Some(stopped) = self.stopped.get_mut().unwrap().take() {
-            crate::blocks!("an uploader's drop, waiting for it to stop");
-            let _ = stopped.recv();
+            crate::blocks!(
+                "an uploader dropped unclosed, waiting for it to stop (Uploader::close)"
+            );
+            let _ = futures::executor::block_on(stopped);
         }
     }
 }
@@ -1236,7 +1253,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         options: crate::Options,
         bucket: Arc<B>,
         holder: u64,
-        started: std::sync::mpsc::Sender<Result<Arc<LocalCell<D>>, Failure>>,
+        started: futures::channel::oneshot::Sender<Result<Arc<LocalCell<D>>, Failure>>,
     ) {
         let interval = self.options.interval;
         self.holders.lock().unwrap().0 = holder;
@@ -1248,10 +1265,14 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                         Arc::downgrade(self) as _;
                     disk.on_pressure(urged);
                 }
-                started.send(Ok(self.store().clone())).unwrap();
+                // cladefs: its opener gone, as an opening's future dropped, nothing waits for the
+                // store: it stops, as it would were it dropped (TASK-685.3).
+                if started.send(Ok(self.store().clone())).is_err() {
+                    return;
+                }
                 writer
             }
-            Err(err) => return started.send(Err(err)).unwrap(),
+            Err(err) => return drop(started.send(Err(err))),
         };
         // A version's store has nothing to upload.
         let Some(writer) = writer else {
@@ -2501,9 +2522,14 @@ mod tests {
         runtime.block_on(lifecycle::create(&*bucket, CELL, 1)).unwrap();
         let options = Options { token: 5, ..Options::default() };
         let recovering = LocalCell::recover_unmade(dir).unwrap();
-        let (store, uploader) =
-            open(recovering, crate::Options::default(), bucket.clone(), (1, options), &host)
-                .unwrap();
+        let (store, uploader) = futures::executor::block_on(open(
+            recovering,
+            crate::Options::default(),
+            bucket.clone(),
+            (1, options),
+            &host,
+        ))
+        .unwrap();
         store.made().unwrap();
         let head = runtime.block_on(bucket_cell::head::get(&*bucket, CELL)).unwrap().unwrap();
         assert_eq!((head.epoch, head.holder, head.token), (1, 1, 5));
@@ -2545,9 +2571,14 @@ mod tests {
         let hour = Duration::from_secs(3600);
         let options = Options { interval: hour, filling_wait: hour, ..Options::default() };
         let recovering = LocalCell::recover_unmade(dir).unwrap();
-        let (store, uploader) =
-            open(recovering, crate::Options::default(), bucket.clone(), (1, options), &host)
-                .unwrap();
+        let (store, uploader) = futures::executor::block_on(open(
+            recovering,
+            crate::Options::default(),
+            bucket.clone(),
+            (1, options),
+            &host,
+        ))
+        .unwrap();
         store.made().unwrap();
         store.write(ExtentId::new(CELL.id, 1), 0, &[1; 4096]).unwrap();
         store.commit(None).unwrap();
@@ -2584,9 +2615,14 @@ mod tests {
         runtime.block_on(lifecycle::create(&*bucket, CELL, 1)).unwrap();
         let options = Options { interval: Duration::from_millis(20), ..Options::default() };
         let recovering = LocalCell::recover_unmade(dir).unwrap();
-        let (store, uploader) =
-            open(recovering, crate::Options::default(), bucket.clone(), (1, options), &host)
-                .unwrap();
+        let (store, uploader) = futures::executor::block_on(open(
+            recovering,
+            crate::Options::default(),
+            bucket.clone(),
+            (1, options),
+            &host,
+        ))
+        .unwrap();
         store.made().unwrap();
         fail::cfg("wal::start", "return").unwrap();
         store.write(ExtentId::new(CELL.id, 1), 0, &[1; 4096]).unwrap();
@@ -2622,9 +2658,14 @@ mod tests {
         // Its uploader uploads nothing it is not asked to within the hour: the test gathers.
         let options = Options { interval: Duration::from_secs(3600), ..Options::default() };
         let recovering = LocalCell::recover_unmade(dir).unwrap();
-        let (store, uploader) =
-            open(recovering, crate::Options::default(), bucket.clone(), (1, options), &host)
-                .unwrap();
+        let (store, uploader) = futures::executor::block_on(open(
+            recovering,
+            crate::Options::default(),
+            bucket.clone(),
+            (1, options),
+            &host,
+        ))
+        .unwrap();
         store.made().unwrap();
         // Each commit closes its segment.
         let closed = 2 * IN_FLIGHT + 1;
@@ -2814,11 +2855,11 @@ mod shuttle_tests {
 
     /// Waits, giving the scheduler turns, for what `receiver` gets: a thread of Shuttle's blocking
     /// on the channel would hold up every other.
-    fn received<T>(receiver: &std::sync::mpsc::Receiver<T>) -> T {
+    fn received<T>(receiver: &mut futures::channel::oneshot::Receiver<T>) -> T {
         loop {
             match receiver.try_recv() {
-                Ok(received) => return received,
-                Err(std::sync::mpsc::TryRecvError::Empty) => shuttle::thread::yield_now(),
+                Ok(Some(received)) => return received,
+                Ok(None) => shuttle::thread::yield_now(),
                 Err(err) => panic!("{err}"),
             }
         }
@@ -2886,7 +2927,7 @@ mod shuttle_tests {
                 (never, spawn),
                 bucket_cell::keys::testing::host(),
             );
-            let (started, start) = std::sync::mpsc::channel();
+            let (started, mut start) = futures::channel::oneshot::channel();
             let running = {
                 let (uploader, bucket) = (uploader.clone(), bucket.clone());
                 shuttle::thread::spawn(move || {
@@ -2895,7 +2936,7 @@ mod shuttle_tests {
                     shuttle::future::block_on(running)
                 })
             };
-            let store = received(&start).unwrap();
+            let store = received(&mut start).unwrap();
             store.made().unwrap();
             let next = uploader.next_sequence();
             Self { uploader, running, store, cell, holds: BTreeMap::new(), next }

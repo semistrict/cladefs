@@ -108,7 +108,10 @@ fn stores_open_once() {
         format!("{again:#}"),
         "taking the store's directory: this process has the store open"
     );
-    assert!(delete_host(&path, |_| Ok(())).is_err(), "deleted an open store");
+    assert!(
+        futures::executor::block_on(delete_host(&path, async |_| Ok(()))).is_err(),
+        "deleted an open store"
+    );
     assert!(started.elapsed() < std::time::Duration::from_secs(1), "waited for itself");
     drop(store);
     drop(open_host(&path).unwrap());
@@ -189,7 +192,8 @@ fn deleting_stores() {
     store.commit(None).unwrap();
     drop(store);
     let deleted = std::cell::Cell::new(None);
-    delete_host(&path, |cell| Ok(deleted.set(Some(cell)))).unwrap();
+    futures::executor::block_on(delete_host(&path, async |cell| Ok(deleted.set(Some(cell)))))
+        .unwrap();
     assert_eq!((deleted.get(), path.exists()), (Some(CELL), false));
     assert!(open_host(&path).is_err(), "the deleted store opened");
 }
