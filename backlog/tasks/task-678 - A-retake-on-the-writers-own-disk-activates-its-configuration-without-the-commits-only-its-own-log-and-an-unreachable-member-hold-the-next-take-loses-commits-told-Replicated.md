@@ -4,11 +4,11 @@ title: >-
   A retake on the writer's own disk activates its configuration without the
   commits only its own log and an unreachable member hold: the next take loses
   commits told Replicated
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-20 00:42'
-updated_date: '2026-11-20 01:04'
+updated_date: '2026-11-20 04:25'
 labels:
   - durability
   - peers
@@ -33,15 +33,27 @@ Found 2026-11-19 checking specs/replication against the code. doc-21 Take step 5
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 retakes_on_the_writers_disk_install_what_its_own_log_holds passes
-- [ ] #2 A take activates its configuration only once f of its members hold every commit it recovered, its own write-ahead log's included
-- [ ] #3 A replacement after such a take installs those commits too, or waits for the bucket to hold them
-- [ ] #4 doc-21's Take steps 5-6 'As built' note corrected; specs/replication's installOwn rule and InstallMembersOnly mutation kept
+- [x] #1 retakes_on_the_writers_disk_install_what_its_own_log_holds passes
+- [x] #2 A replacement after such a take installs those commits too, or waits for the bucket to hold them
+- [x] #3 doc-21's Take steps 5-6 'As built' note corrected; specs/replication's installOwn rule and InstallMembersOnly mutation kept
+- [x] #4 A take whose own log holds commits past what its members can be given activates its configuration only by the acknowledgement that names them all (Writer::configure_past), the head naming the configuration before until then, nothing told Replicated meanwhile (decided over installing the own log on the members: OPEN_QUESTIONS.md)
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+AC evidence: retakes_on_the_writers_disk_install_what_its_own_log_holds passes; activation deferred (Shared::replicate's configure_past; spec RecoverAlone with f=F, deferQuiet, ReplicationDefer and ReplicationDeferCommits hold, DeferTellsReplicated violates); a replacement waits for the switch (keep's stale; deep ReplicationDeferReplaces holds, the replicated simulation's replacements); doc-21 Take 5-6 corrected; installOwn/InstallMembersOnly kept. The verifying review found a retake could give c+1 an earlier writer's logs: fixed (Recovering::holds_commits), test retakes_give_their_configurations_no_earlier_writers_logs caught by a hand mutant. Verified on the branch, landed as c9c8234ac..522dcce5b: macOS workspace 2812/2812 and local_cell/bucket_cell/cladefs 1125/1125 (every simulation); ubu1 under fxjob clippy + workspace 3124/3124; TLC on the Mac: every non-deep replication model holds, all 15 mutations violate, deep ReplicationDeferReplaces holds (21.4M states); scripts/upstream-changes.py --check passes.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+A take whose own write-ahead log held commits past what the members it fenced gave (a retake on the writer's disk, the member holding them out of reach) activated c+1 at once, none of its members holding commits told Replicated: the next take elsewhere lost them. Now such a take defers its configuration's activation to the acknowledgement naming them (head names c until then, nothing told Replicated meanwhile, keeper uploads at once), and gives c+1's members the old configuration's logs only if they are its own history. Rule bucket_cell::Rules::installs_own (the simulation finds the loss without it). Verified on the branch, landed as c9c8234ac..522dcce5b: macOS workspace 2812/2812 and local_cell/bucket_cell/cladefs 1125/1125 (every simulation); ubu1 under fxjob clippy + workspace 3124/3124; TLC on the Mac: every non-deep replication model holds, all 15 mutations violate, deep ReplicationDeferReplaces holds (21.4M states); scripts/upstream-changes.py --check passes.
+<!-- SECTION:FINAL_SUMMARY:END -->

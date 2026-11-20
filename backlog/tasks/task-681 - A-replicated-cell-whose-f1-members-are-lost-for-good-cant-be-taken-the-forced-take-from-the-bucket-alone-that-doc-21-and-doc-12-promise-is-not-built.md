@@ -3,11 +3,11 @@ id: TASK-681
 title: >-
   A replicated cell whose f+1 members are lost for good can't be taken: the
   forced take from the bucket alone that doc-21 and doc-12 promise is not built
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-20 00:59'
-updated_date: '2026-11-20 01:04'
+updated_date: '2026-11-20 04:25'
 labels:
   - durability
   - peers
@@ -29,14 +29,26 @@ Found 2026-11-19 comparing with FoundationDB's forced recovery (forceRecovery, K
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The control API and cladefsctl can take a replicated cell from the bucket alone, by an explicit force, which logs and reports the commits it may lose
-- [ ] #2 A forced take still fences the members it reaches and recovers what they hold
-- [ ] #3 A test loses f+1 hosts of a configuration and takes the cell by force; without it, the take is refused
+- [x] #1 The control API and cladefsctl can take a replicated cell from the bucket alone, by an explicit force, which logs and reports the commits it may lose
+- [x] #2 A forced take still fences the members it reaches and recovers what they hold
+- [x] #3 A test loses f+1 hosts of a configuration and takes the cell by force; without it, the take is refused
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+AC evidence: PlaceCell's and CreateCell's force, cladefsctl place/take --force, upload::Options::force; forced_after (StatCell, optional, the bucket's last commit) noted in the store's description with its placement; takes_of_cells_whose_members_are_lost_go_on_by_force (local_cell: refused without force, forced recovers; cladefs e2e on ubu1: refused EIO, forced, forced_after = the bucket's last, writes on). Verified on the branch, landed as c9c8234ac..522dcce5b: macOS workspace 2812/2812 and local_cell/bucket_cell/cladefs 1125/1125 (every simulation); ubu1 under fxjob clippy + workspace 3124/3124; TLC on the Mac: every non-deep replication model holds, all 15 mutations violate, deep ReplicationDeferReplaces holds (21.4M states); scripts/upstream-changes.py --check passes.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+A replicated cell whose f+1 members are lost for good can be taken by force: PlaceCell/CreateCell force (cladefsctl place/take --force). The take fences the members that answer and recovers what they hold; StatCell's forced_after names the bucket's last commit, past which commits told Replicated may be lost, kept in the store's description for that placement. Verified on the branch, landed as c9c8234ac..522dcce5b: macOS workspace 2812/2812 and local_cell/bucket_cell/cladefs 1125/1125 (every simulation); ubu1 under fxjob clippy + workspace 3124/3124; TLC on the Mac: every non-deep replication model holds, all 15 mutations violate, deep ReplicationDeferReplaces holds (21.4M states); scripts/upstream-changes.py --check passes.
+<!-- SECTION:FINAL_SUMMARY:END -->
