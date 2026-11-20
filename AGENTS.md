@@ -27,6 +27,10 @@ of a batch.
 - Then: `cargo build` (or `cargo check`) once, `cargo clippy`, the macOS suite
   (`scripts/test.sh`), and one ubu1 run of the workspace and the guest cases.
 - While a batch's ubu1 run goes, write the next batch rather than wait for it.
+- Between, the unit tests alone, about a minute: `cargo nextest run --workspace --profile unit`
+  (`CLADEFS_TEST_PARTS=unit scripts/test.sh`). They leave out the simulations, the fault
+  explorations and every test that takes 5 s or more (`.config/nextest.toml`), which the suite
+  runs.
 - Measure a change on its own only when isolating it is the point of the measurement (an A/B on
   one test host).
 

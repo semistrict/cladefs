@@ -11,7 +11,9 @@
 # part a job.
 # Arguments are passed to the suite's and the simulation's `cargo nextest run`. CLADEFS_TEST_PARTS
 # names the parts to run, separated by spaces (default: all of clippy, workspace, sim, shuttle,
-# scripts, go, and guest and firecracker on Linux).
+# scripts, go, and guest and firecracker on Linux). The part unit, in no default, runs the
+# workspace's unit tests alone, about a minute: the workspace part's tests but the slow ones the
+# nextest profile unit leaves out (.config/nextest.toml).
 #
 # Unicode tests compare against the Unicode Character Database, which is
 # downloaded and checksummed on first use.
@@ -71,6 +73,9 @@ sim='package(local_cell) & test(/^sim::/)'
 if part workspace; then
     UCD_ZIP="$zip" cargo nextest run --manifest-path "$root/Cargo.toml" --workspace \
         -E "not ($sim)" "$@"
+fi
+if part unit; then
+    UCD_ZIP="$zip" cargo nextest run --manifest-path "$root/Cargo.toml" --workspace --profile unit "$@"
 fi
 if part sim; then
     cargo nextest run --manifest-path "$root/Cargo.toml" --cargo-profile sim -p local_cell \
