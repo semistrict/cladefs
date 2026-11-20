@@ -468,8 +468,10 @@ impl World {
                 // cladefs: no reference stays: the cell that took the fork's child's ID holds
                 // none, the fork's writers having taken back the one they wrote (TASK-395.10).
                 Kind::Reference { .. } => true,
-                // cladefs: nor a mirror's pin, hold or marker, in a test of one bucket (TASK-633.8).
+                // cladefs: nor a mirror's pin, hold or marker, in a test of one bucket (TASK-633.8);
+                // nor an ephemeral cell's reference or index entry, none forked here (doc-25).
                 Kind::Pin { .. } | Kind::Hold { .. } | Kind::Mirror { .. } => true,
+                Kind::Ephemeral { .. } | Kind::EphemeralIndex { .. } => true,
                 // A deleted cell's head stays, final, fencing its writers (TASK-407), but with its
                 // dead cell, removed whole, if its ID is an allocator's (TASK-455): gone, it is not
                 // listed.

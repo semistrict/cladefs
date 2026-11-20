@@ -502,16 +502,7 @@ pub(crate) async fn fork(
         _ => Error::new(anyhow::Error::new(err).context(format!("creating {}", path.display()))),
     })?;
     let cell = child.cell;
-    let failed = |err: Failure| match err {
-        Failure::Bucket(bucket_cell::Error::IdTaken(_)) => taken(cell),
-        Failure::VersionDropped => anyhow::Error::new(Errno::ENOENT)
-            .context(format!("forking to cell {cell}: the version was deleted")),
-        // cladefs: another tenant's version, not shared (TASK-395.7).
-        Failure::Bucket(refused @ bucket_cell::Error::NotShared(_)) => {
-            anyhow::Error::new(Errno::EACCES).context(format!("forking to cell {cell}: {refused}"))
-        }
-        err => anyhow::anyhow!("forking to cell {cell}: {err}"),
-    };
+    let failed = |err| fork_failure(cell, err);
     let made = match uploader.forked(child, inheriting).await {
         Err(err) => Err(failed(err)),
         Ok(()) => upload::blocking(|| -> anyhow::Result<()> {
@@ -629,6 +620,105 @@ pub(crate) async fn fork_through(
     Ok(())
 }
 
+/// cladefs: the error of a fork to `cell` that failed with `err`: `EEXIST` for an ID another cell
+/// has, `ENOENT` for a version deleted, `EACCES` for another tenant's version not shared.
+fn fork_failure(cell: CellId, err: Failure) -> anyhow::Error {
+    match err {
+        Failure::Bucket(bucket_cell::Error::IdTaken(_)) => taken(cell),
+        Failure::VersionDropped => anyhow::Error::new(Errno::ENOENT)
+            .context(format!("forking to cell {cell}: the version was deleted")),
+        // cladefs: another tenant's version, not shared (TASK-395.7).
+        Failure::Bucket(refused @ bucket_cell::Error::NotShared(_)) => {
+            anyhow::Error::new(Errno::EACCES).context(format!("forking to cell {cell}: {refused}"))
+        }
+        err => anyhow::anyhow!("forking to cell {cell}: {err}"),
+    }
+}
+
+/// cladefs: forks `store`, at a version, its uploader `uploader`, to `child`, an ephemeral cell
+/// kept on this host alone, whose store is made at `path` (doc-25, TASK-698.3): noted in the
+/// host's journal first ([`crate::ephemeral_host`]), then its reference written in the version's
+/// cell's bucket, whose head must name the version still (`Uploader::forked_ephemeral`), then its
+/// store made, `prepare` writing what the caller keeps beside it first, its base its version's
+/// state with its keys. A fork that fails leaves nothing: its directory gone, its reference
+/// retired, its note forgotten. `ENOTSUP` on a host keeping no ephemeral cells
+/// (`CLADEFSD_EPHEMERAL`); `EINVAL` of a store not at a version: ephemeral cells are forked from
+/// versions alone.
+pub(crate) async fn fork_ephemeral(
+    store: &LocalCell<HostDir>,
+    uploader: &Uploader<HostDir>,
+    path: &Path,
+    child: Child,
+    prepare: impl FnOnce(&Path) -> anyhow::Result<()> + Send,
+) -> Result<(), Error> {
+    may_fork_into(store.description().cell, uploader, child.cell.tenant)?;
+    let origin = uploader.at_version_origin().ok_or(Errno::EINVAL)?;
+    let host = crate::ephemeral_host::host()?;
+    let url = store.bucket().map(str::to_owned).ok_or(Errno::EINVAL)?;
+    let kind = store.kind().ok_or(Errno::EINVAL)?;
+    let inheriting = uploader.inheriting(child).await?;
+    make_dir(path)?;
+    let cell = child.cell;
+    let entry =
+        crate::ephemeral_host::Entry { child: cell, origin, path: path.to_owned(), bucket: url };
+    let made = match upload::blocking(|| host.note(&entry)) {
+        Err(err) => Err(err),
+        Ok(()) => match uploader.forked_ephemeral(child, inheriting, host.incarnation()).await {
+            Err(err) => Err(fork_failure(cell, err)),
+            Ok(base) => upload::blocking(|| -> anyhow::Result<()> {
+                prepare(path)?;
+                let capacity = store.description().capacity;
+                let description = Description { block_size: BLOCK_SIZE, capacity, cell };
+                local_cell::create_host_ephemeral(path, description, &entry.bucket, kind, &base)
+                    .with_context(|| format!("forking to ephemeral cell {cell}: its store"))?;
+                local_cell::made_host(path)?;
+                let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
+                std::fs::File::open(parent.unwrap_or(Path::new(".")))?.sync_all()?;
+                Ok(())
+            }),
+        },
+    };
+    let Err(err) = made else { return Ok(()) };
+    upload::blocking(|| discard(path));
+    if let Err(why) = host.retire(&entry).await {
+        log::warn!("cladefs: retiring ephemeral cell {cell}'s reference, its fork failed: {why:#}");
+    }
+    Err(Error::new(err))
+}
+
+/// cladefs: makes the directory at `path` for a fork's store: `EEXIST` if anything is there.
+fn make_dir(path: &Path) -> Result<(), Error> {
+    upload::blocking(|| std::fs::create_dir(path)).map_err(|err| match err.kind() {
+        std::io::ErrorKind::AlreadyExists => {
+            Error::new(anyhow::Error::new(err).context(Errno::EEXIST))
+        }
+        _ => Error::new(anyhow::Error::new(err).context(format!("creating {}", path.display()))),
+    })
+}
+
+/// cladefs: opens the ephemeral cell's store at `path` (doc-25, TASK-698.3), with `keeping`'s cache
+/// and held parts, its parent's extents read in the bucket its description names: the store, and
+/// that bucket. No uploader: nothing of it goes to a bucket.
+pub(crate) async fn open_ephemeral(
+    path: &Path,
+    keeping: &upload::Options,
+) -> Result<(Arc<LocalCell<HostDir>>, Arc<ObjectBucket>), Failure> {
+    let recovering =
+        upload::blocking(|| -> Result<_, Failure> { Ok(LocalCell::recover(host_dir(path)?)?) })?;
+    let url = recovering.bucket().map(str::to_owned);
+    let url = url.ok_or_else(|| Failure::msg(format!("{} names no bucket", path.display())))?;
+    let bucket = bucket(&url).with_context(|| format!("opening the bucket {url}"))?;
+    let runtime = crate::bucket::runtime()?;
+    let held = (keeping.cache.clone(), keeping.held.clone());
+    let store = upload::open_ephemeral(recovering, options(), bucket.clone(), &runtime, held);
+    Ok((store.await?, bucket))
+}
+
+/// cladefs: whether the store at `path` is an ephemeral cell's (doc-25, TASK-698.3).
+pub(crate) fn is_ephemeral(path: &Path) -> bool {
+    local_cell::host_ephemeral(path).unwrap_or(false)
+}
+
 /// The error of a fork to `cell`, whose ID another cell has in the bucket.
 fn taken(cell: CellId) -> anyhow::Error {
     let refused = format!("forking to cell {cell}: another cell has its ID");
@@ -673,6 +763,32 @@ pub(crate) async fn delete(
     bucket: Option<&ObjectBucket>,
     token: impl Fn() -> Result<u64, Failure>,
 ) -> Result<(), Error> {
+    // cladefs: an ephemeral cell's reference retired, its note forgotten (doc-25, TASK-698.3).
+    if upload::blocking(|| is_ephemeral(path)) {
+        return delete_with(path, async |dir, cell| {
+            let base = upload::blocking(|| local_cell::host_base(dir))?;
+            let base =
+                base.ok_or_else(|| Failure::msg(format!("{} has no base", dir.display())))?;
+            let parent = base.parent();
+            let origin = bucket_cell::layout::Origin { parent: parent.cell, at: parent.at };
+            let host = crate::ephemeral_host::host().map_err(|errno| {
+                Failure::msg(format!(
+                    "deleting ephemeral cell {cell}: no CLADEFSD_EPHEMERAL: {errno}"
+                ))
+            })?;
+            let url = upload::blocking(|| local_cell::host_bucket(dir))?;
+            let url =
+                url.ok_or_else(|| Failure::msg(format!("{} names no bucket", dir.display())))?;
+            let entry = crate::ephemeral_host::Entry {
+                child: cell,
+                origin,
+                path: dir.to_owned(),
+                bucket: url,
+            };
+            host.retire(&entry).await.map_err(|err| Failure::msg(format!("{err:#}")))
+        })
+        .await;
+    }
     // As this copy's placement, or this host's, deletes it: not from under a later one (`ESTALE`).
     // A store at a version deletes nothing in the bucket: the version is its cell's.
     delete_with(path, async |dir, cell| match bucket {

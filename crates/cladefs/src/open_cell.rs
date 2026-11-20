@@ -765,8 +765,17 @@ impl OpenCell {
         let span = trace::Span::start("store.open");
         span.set_with(trace::STORE, || path.display().to_string());
         let opened = async {
-            let opened = host_cell::open(path, opening.keeping.clone()).await?;
-            let store = Self::new(path, opened, opening).await?;
+            // cladefs: an ephemeral cell's, with no uploader (doc-25, TASK-698.3).
+            let store = match local_cell::upload::blocking(|| host_cell::is_ephemeral(path)) {
+                true => {
+                    let (store, bucket) = host_cell::open_ephemeral(path, &opening.keeping).await?;
+                    Self::assemble(path, (store, bucket, None), opening).await?
+                }
+                false => {
+                    let opened = host_cell::open(path, opening.keeping.clone()).await?;
+                    Self::new(path, opened, opening).await?
+                }
+            };
             span.set_cell(store.cell());
             Ok(store)
         };
@@ -817,23 +826,41 @@ impl OpenCell {
     /// The store `opened` at `path`, opened as `opening` says, of whose cell and those it was
     /// forked from the cells `public` are public ([`cell_dir::public_cells`]).
     async fn new(path: &Path, opened: host_cell::Opened, opening: Opening) -> Result<Self, Error> {
+        let host_cell::Opened { store, bucket, uploader } = opened;
+        Self::assemble(path, (store, bucket, Some(uploader)), opening).await
+    }
+
+    /// cladefs: the store `store` at `path`, its cell's extents read in `bucket`, with its uploader
+    /// if it has one (an ephemeral cell's has none, doc-25), opened as `opening` says: as
+    /// [`OpenCell::new`] has it.
+    async fn assemble(
+        path: &Path,
+        (store, bucket, uploader): (
+            Arc<LocalCell<HostDir>>,
+            Arc<bucket_cell::object_bucket::ObjectBucket>,
+            Option<local_cell::upload::Uploader<HostDir>>,
+        ),
+        opening: Opening,
+    ) -> Result<Self, Error> {
         // cladefs: what may fail of it first, its store closed if it does (TASK-685.3).
         let made = local_cell::upload::blocking(|| -> Result<_, Error> {
             cache::relieve_pressure();
             let public = cell_dir::public_cells(path)?;
             let forked_from = Arc::new(cell_dir::ancestry(path)?);
             let cache = opening.keeping.cache.clone();
-            let fetcher = crate::bucket::HostFetcher::new(opened.bucket.clone(), cache)?;
+            let fetcher = crate::bucket::HostFetcher::new(bucket.clone(), cache)?;
             Ok((public, forked_from, fetcher))
         });
         let (public, forked_from, fetcher) = match made {
             Ok(made) => made,
             Err(err) => {
-                opened.close().await;
+                drop((store, bucket));
+                if let Some(uploader) = uploader {
+                    uploader.close().await;
+                }
                 return Err(err);
             }
         };
-        let host_cell::Opened { store, bucket, uploader } = opened;
         let Opening { arena, profiled, keeping: _ } = opening;
         let arenas = Arenas { own: arena, public: Arc::new(public) };
         let profiling = profiled.then(|| Self::profile(&store, &arenas, &forked_from, &fetcher));
@@ -847,7 +874,7 @@ impl OpenCell {
             path: path.to_owned(),
             bases: Default::default(),
             dax: CellMutex::new("dax", None),
-            uploader: Some(uploader),
+            uploader,
             opening: StoreRwLock::new("opening", ()),
             following: None,
             committed: event_listener::Event::new(),
@@ -1117,6 +1144,30 @@ impl OpenCell {
     pub async fn fork(&self, path: impl AsRef<Path>, tenant: u64) -> Result<CellId, Error> {
         let cell = self.new_child(tenant).await?;
         self.fork_to(path, cell).await?;
+        Ok(cell)
+    }
+
+    /// cladefs: forks the store, at a version, to a new cell of `tenant`'s, an ephemeral cell kept on
+    /// this host alone, whose store is made at `path` (doc-25, TASK-698.3;
+    /// `host_cell::fork_ephemeral`), and returns its cell: `EINVAL` of a store at no version,
+    /// `ENOTSUP` on a host keeping no ephemeral cells.
+    pub async fn fork_ephemeral(
+        &self,
+        path: impl AsRef<Path>,
+        tenant: u64,
+    ) -> Result<CellId, Error> {
+        let uploader = self.uploader.as_ref().ok_or(Errno::EROFS)?;
+        if !uploader.is_at_version() {
+            return Err(Errno::EINVAL.into());
+        }
+        let cell = self.new_child(tenant).await?;
+        let child = bucket_cell::layout::Child { cell, owner: rand::random() };
+        let inherited = |to: &Path| -> anyhow::Result<()> {
+            Ok(cell_dir::inherit(&self.path, self.cell().id, &self.forked_from, to)?)
+        };
+        let forking =
+            host_cell::fork_ephemeral(&self.store, uploader, path.as_ref(), child, inherited);
+        self.fork_span(cell).run_async(forking).await?;
         Ok(cell)
     }
 

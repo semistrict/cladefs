@@ -243,6 +243,100 @@ async fn take_back(bucket: &impl Bucket, origin: Origin, child: CellId, found: &
     }
 }
 
+/// cladefs: a fork of the version `version` of the cell `origin` names, at the segment it names, to
+/// `child`, an ephemeral cell kept on the host of incarnation `incarnation` alone (doc-25,
+/// TASK-698.3; specs/ephemeral): its reference's index entry, then its reference, written before
+/// the cell's head is read (`forksReferFirst`), which must name the version there
+/// ([`Error::Deleted`] otherwise), shared if `child` is another tenant's ([`Error::NotShared`]);
+/// refused, or the head not to be read, its reference goes again. Nothing else: no head of the
+/// child's, no checkpoint, its host keeping its state. A host crashing part way leaves the
+/// reference, which it retires starting again, or its decommissioning does.
+pub async fn fork_ephemeral(
+    bucket: &impl Bucket,
+    child: CellId,
+    version: u64,
+    origin: Origin,
+    incarnation: u64,
+) -> Result<(), Error> {
+    refer_ephemeral(bucket, origin, incarnation, child).await;
+    failpoint!("ephemeral::referred");
+    let cell = origin.parent;
+    let crosses = cell.tenant != child.tenant && cell.tenant != layout::DEFAULT_TENANT;
+    let refused = match head::get(bucket, cell).await {
+        Err(error) => Some(error),
+        Ok(head) => {
+            let named = head.as_ref().and_then(|head| head.version(version));
+            match named.filter(|named| named.at == origin.at) {
+                None => Some(Error::Deleted),
+                Some(named) if crosses && !named.shared => Some(Error::NotShared(cell)),
+                Some(_) => None,
+            }
+        }
+    };
+    match refused {
+        None => Ok(()),
+        Some(error) => {
+            unrefer_ephemeral(bucket, origin, incarnation, child).await;
+            Err(error)
+        }
+    }
+}
+
+/// cladefs: writes the reference of `child`, an ephemeral cell of the host of incarnation
+/// `incarnation`, to `origin` ([`layout::ephemeral_reference`]), its index entry first
+/// ([`layout::ephemeral_index`]), so that decommissioning the incarnation finds every reference
+/// of its.
+pub async fn refer_ephemeral(
+    bucket: &impl Bucket,
+    origin: Origin,
+    incarnation: u64,
+    child: CellId,
+) {
+    let index = layout::ephemeral_index(incarnation, origin.parent, origin.at, child);
+    bucket::create(bucket, &index, Vec::new()).await;
+    let reference = layout::ephemeral_reference(origin.parent, origin.at, incarnation, child);
+    bucket::create(bucket, &reference, Vec::new()).await;
+}
+
+/// cladefs: deletes the reference of `child`, an ephemeral cell of the host of incarnation
+/// `incarnation`, to `origin`, then its index entry: its cell gone, or never made, or its host
+/// gone for good ([`decommission`]).
+pub async fn unrefer_ephemeral(
+    bucket: &impl Bucket,
+    origin: Origin,
+    incarnation: u64,
+    child: CellId,
+) {
+    let reference = layout::ephemeral_reference(origin.parent, origin.at, incarnation, child);
+    bucket::delete(bucket, &reference).await;
+    let index = layout::ephemeral_index(incarnation, origin.parent, origin.at, child);
+    bucket::delete(bucket, &index).await;
+}
+
+/// cladefs: the references of the ephemeral cells of the host of incarnation `incarnation`, by
+/// their index (doc-25): each child, with its origin.
+pub async fn ephemeral_references(bucket: &impl Bucket, incarnation: u64) -> Vec<(Origin, CellId)> {
+    let listed = bucket::list(bucket, &layout::ephemeral_indexes(incarnation)).await;
+    (listed.iter())
+        .filter_map(|meta| layout::ephemeral_indexed(&meta.key))
+        .filter(|&(of, ..)| of == incarnation)
+        .map(|(_, parent, at, child)| (Origin { parent, at }, child))
+        .collect()
+}
+
+/// cladefs: decommissions the host of incarnation `incarnation`, gone for good, its disk lost (doc-25,
+/// TASK-698.3; specs/ephemeral): the references of its ephemeral cells, which no host holds any
+/// more, deleted, each with its index entry. Returns how many. Its operator's to call, for an
+/// incarnation no host has: a host of it still holding its cells would read what it no longer
+/// keeps.
+pub async fn decommission(bucket: &impl Bucket, incarnation: u64) -> usize {
+    let references = ephemeral_references(bucket, incarnation).await;
+    for &(origin, child) in &references {
+        unrefer_ephemeral(bucket, origin, incarnation, child).await;
+    }
+    references.len()
+}
+
 /// cladefs: a restore of the version `version` of the cell `origin` names, at the segment it
 /// names, to `child`, whose owner is `owner` (doc-18, TASK-476): the child's head made, being
 /// made ([`Made::Forking`]), then its reference to its origin, then the cell's head read, which

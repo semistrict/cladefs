@@ -505,6 +505,48 @@ pub async fn open<D: Dir>(
     Ok((opened, uploader))
 }
 
+/// cladefs: an ephemeral cell's keys, as its base keeps them (doc-25, TASK-698.3): its owner, and
+/// what its fork gave it, wrapped, as a fork's head holds them: its cell's KEK under its tenant's,
+/// its first DEK and the keys it inherits under its cell's KEK.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct EphemeralKeys {
+    owner: u64,
+    kek: Option<keys::Kek>,
+    deks: Vec<keys::Dek>,
+    inherited: Vec<keys::InheritedDek>,
+}
+
+/// cladefs: opens the ephemeral cell's store `recovering` recovered (doc-25, TASK-698.3), with
+/// `store_options`: its keys, as its base keeps them, unwrapped through the host's KMS as its
+/// fork's head would give them; its parent's state at its version recovered from `bucket`, its
+/// parent's, under them, which its store starts from. No uploader: nothing of it goes to a bucket.
+/// Its parent's extents are read through `cache`, the host's, if it has one.
+pub async fn open_ephemeral<D: Dir>(
+    recovering: Recovering<D>,
+    store_options: crate::Options,
+    bucket: Arc<ObjectBucket>,
+    runtime: &Runtime,
+    (cache, held): (Option<Arc<Cache>>, Option<Arc<HeldParts>>),
+) -> Result<Arc<LocalCell<D>>, Failure> {
+    let base = recovering.base()?;
+    let (parent, cell) = (base.parent(), recovering.cell());
+    let EphemeralKeys { owner, kek, deks, inherited } =
+        bucket_cell::layout::decode(base.keys()).map_err(Failure::from)?;
+    let origin = Origin { parent: parent.cell, at: parent.at };
+    let mut head = Head::of(bucket_cell::record::Made::Clone(origin), owner);
+    head.keks.extend(kek);
+    (head.deks, head.inherited) = (deks, inherited);
+    let cell_keys = CellKeys::of(cell, &head, runtime.keys.kms.clone());
+    let ring = keys::ring(&*bucket, &cell_keys, cell, &head, true).await?;
+    let recovering_parent =
+        bucket_cell::recovery::recover_version(&*bucket, parent.cell, parent.at, &ring);
+    let recovered = recovering_parent.await?;
+    let state = recovered.layer.unwrap_or_else(|| Arc::new(recovered.state));
+    let opening = crate::EphemeralOpening { parent: state, keys: ring, cache, held };
+    let store = blocking(|| recovering.open_ephemeral(store_options, opening))?;
+    Ok(Arc::new(store))
+}
+
 /// cladefs: what says an uploader stopped (TASK-685.3): awaited by [`Uploader::close`], waited for,
 /// blocking, by its drop, which may come anywhere, a panic unwinding through an executor among them,
 /// where blocking on a future would nest executors.
@@ -660,6 +702,9 @@ struct Fenced {
 struct AtVersion {
     origin: Origin,
     version: u64,
+    /// cladefs: its cell's state at the version, decoded: what an ephemeral cell forked from it
+    /// starts from (doc-25, TASK-698.3).
+    state: Arc<bucket_cell::State>,
     /// The ring its forks' checkpoints at the version are sealed under, its cell's newest DEK,
     /// which the forks inherit.
     sealing: Arc<Ring>,
@@ -979,6 +1024,40 @@ impl<D: Dir> Uploader<D> {
         Ok(())
     }
 
+    /// cladefs: forks the version the store is at to `child`, an ephemeral cell kept on the host of
+    /// incarnation `incarnation` alone (doc-25, TASK-698.3): its reference written in the bucket
+    /// before the cell's head is read, which must name the version still
+    /// (`lifecycle::fork_ephemeral`); then what `inheriting` gives it, its keys, kept in its base,
+    /// which it returns, its state the version's. Fails as [`Uploader::forked`] does.
+    pub async fn forked_ephemeral(
+        &self,
+        child: Child,
+        inheriting: keys::Inheriting,
+        incarnation: u64,
+    ) -> Result<crate::Base, Failure> {
+        failing!("upload::forked_ephemeral");
+        let at = self.shared.at_version.get().expect("a fork is of a store at a version");
+        let forking = lifecycle::fork_ephemeral(
+            &*self.bucket,
+            child.cell,
+            at.version,
+            at.origin,
+            incarnation,
+        );
+        match forking.await {
+            Err(bucket_cell::Error::Deleted) => return Err(Failure::VersionDropped),
+            Err(err) => return Err(err.into()),
+            Ok(()) => {}
+        }
+        let given = inheriting.given();
+        let (deks, inherited) = given.deks.unwrap_or_default();
+        let keys = EphemeralKeys { owner: child.owner, kek: given.kek, deks, inherited };
+        inheriting.made();
+        let parent =
+            crate::Parent { cell: at.origin.parent, version: at.version, at: at.origin.at };
+        Ok(crate::Base::fork(parent, &at.state, bucket_cell::layout::encode(&keys)))
+    }
+
     /// cladefs: what a fork of the store to `child` gives its child, asked for before anything of the
     /// fork is made, its commit or its head, so that a fork refused makes nothing (TASK-411.4): the
     /// store's keys, which it inherits, and a KEK for the child's cell from the host's pool. Refused
@@ -1043,6 +1122,11 @@ impl<D: Dir> Uploader<D> {
 
     /// Whether the store is a store at a version: nothing it does goes to object storage but its
     /// forks' records.
+    pub fn at_version_origin(&self) -> Option<Origin> {
+        self.shared.at_version.get().map(|at| at.origin)
+    }
+
+    /// Whether its store is at a version, which nothing writes (TASK-476).
     pub fn is_at_version(&self) -> bool {
         self.shared.at_version.get().is_some()
     }
@@ -2295,7 +2379,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // (TASK-411.28); its forks' checkpoints sealed under its cell's.
         let sealing = keys.clone();
         let keys = keys.for_version(cell);
-        let _ = self.at_version.set(AtVersion { origin, version: id, sealing });
+        let state = (recovered.layer.clone()).unwrap_or_else(|| Arc::new(recovered.state.clone()));
+        let _ = self.at_version.set(AtVersion { origin, version: id, sealing, state });
         Ok((recovered, keys))
     }
 

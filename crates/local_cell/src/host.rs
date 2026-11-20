@@ -277,6 +277,34 @@ pub fn host_version(path: &Path) -> Result<Option<u64>, Error> {
     Ok(store_file(path)?.version)
 }
 
+/// cladefs: whether the store at `path` is an ephemeral cell's (doc-25, TASK-698.3), as its
+/// description says.
+pub fn host_ephemeral(path: &Path) -> Result<bool, Error> {
+    Ok(store_file(path)?.ephemeral)
+}
+
+/// cladefs: the base of the ephemeral cell's store at `path`, if it is one (doc-25, TASK-698.3):
+/// what deleting it reads its reference of.
+pub fn host_base(path: &Path) -> Result<Option<crate::Base>, Error> {
+    if !store_file(path)?.ephemeral {
+        return Ok(None);
+    }
+    crate::Base::read(&HostDir::new(path)?).map(Some)
+}
+
+/// cladefs: makes a new ephemeral cell's store at `path`, which must be a directory holding no
+/// store (doc-25, TASK-698.3), as `description` describes, naming `bucket`, its parent's, its
+/// cell of `kind`, its base `base`: unmade until its maker says it is whole ([`made_host`]).
+pub fn create_host_ephemeral(
+    path: &Path,
+    description: Description,
+    bucket: &str,
+    kind: Kind,
+    base: &crate::Base,
+) -> Result<(), Error> {
+    LocalCell::make_ephemeral(&HostDir::new(path)?, description, Some(bucket), Some(kind), base)
+}
+
 /// The description of the store whose directory is `store`.
 fn store_file(store: &Path) -> Result<CellFile, Error> {
     let text = std::fs::read_to_string(store.join(DESCRIPTION))

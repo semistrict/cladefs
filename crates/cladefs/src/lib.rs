@@ -130,6 +130,8 @@ mod cache;
 #[cfg(target_os = "linux")]
 pub mod cladefsd;
 mod dax;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod ephemeral_host;
 mod error;
 mod executor;
 pub mod faults;

@@ -2176,6 +2176,10 @@ impl Pass {
                 // its hold, under the cell's here, which that pass deletes.
                 | Kind::Pin { .. }
                 | Kind::Hold { .. }
+                // cladefs: an ephemeral cell's reference, and its index entry: its host's to delete
+                // (doc-25, TASK-698.3).
+                | Kind::Ephemeral { .. }
+                | Kind::EphemeralIndex { .. }
                 | Kind::Mirror { .. }
                 | Kind::ObjectIds { .. }
                 | Kind::Identity
@@ -4220,6 +4224,84 @@ mod tests {
     enum Dropped {
         No,
         Yes,
+    }
+
+    /// cladefs: an ephemeral cell's reference keeps its version's state, its cell having dropped the
+    /// version, freed what it named and checkpointed past it, as a child's reference does (doc-25,
+    /// TASK-698.3); deleted by its host, or by its host's decommissioning, the next sweep
+    /// reclaims it. Its index entry goes with it.
+    #[test]
+    fn ephemeral_references_keep_their_versions_until_their_hosts_let_go() {
+        for (gone, read) in [
+            (Unreferred::No, Ok(b"held".to_vec())),
+            (Unreferred::ByItsHost, Err(())),
+            (Unreferred::Decommissioned, Err(())),
+        ] {
+            let (found, indexes) = block_on(read_a_version_ephemerally(gone));
+            assert_eq!(found.map_err(drop), read, "{gone:?}");
+            assert_eq!(indexes, usize::from(gone == Unreferred::No), "{gone:?}");
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Unreferred {
+        No,
+        ByItsHost,
+        Decommissioned,
+    }
+
+    /// What a version of a cell reads, as [`read_a_version`] reads it, an ephemeral cell forked
+    /// from it, the version dropped, then its reference deleted as `gone` says; and how many index
+    /// entries of the ephemeral cells' host are left.
+    async fn read_a_version_ephemerally(gone: Unreferred) -> (Result<Vec<u8>, Error>, usize) {
+        let objects: Arc<InMemory> = Arc::new(InMemory::new());
+        let bucket = Arc::new(ObjectBucket::new(objects.clone(), ""));
+        let cell = test_cell(1);
+        lifecycle::create(&*bucket, cell, 0).await.unwrap();
+        let writer = Writer::open(bucket.clone(), cell, 10, 0).await.unwrap();
+        let extent = ExtentId::new(1, writer.chain().next_sequence());
+        commit(
+            &writer,
+            Commit { tag: 1, extents: vec![(extent, b"held".to_vec())], ..Commit::default() },
+        )
+        .await;
+        let cut = layout::NewVersion { id: 0xa, keep_last: None };
+        let cutting = SegmentBuilder::from(Commit { tag: 2, ..Commit::default() });
+        let at = writer
+            .add_segment(cutting.cut(cut, &mut writer.chain()).frame(writer.keys().encrypting()))
+            .unwrap();
+        writer.upload(at).await.unwrap();
+        writer.acknowledge().await.unwrap();
+        let (origin, child, incarnation) = (Origin { parent: cell, at }, test_cell(9), 0x2a);
+        lifecycle::fork_ephemeral(&*bucket, child, 0xa, origin, incarnation).await.unwrap();
+        commit(&writer, Commit { tag: 3, frees: vec![extent], ..Commit::default() }).await;
+        writer.checkpoint().await.unwrap();
+        writer.drop_versions(&BTreeSet::from([0xa])).await.unwrap();
+        // A fork of the version dropped is refused, and leaves no reference.
+        let refused = lifecycle::fork_ephemeral(&*bucket, test_cell(8), 0xa, origin, incarnation);
+        assert_eq!(refused.await, Err(Error::Deleted));
+        match gone {
+            Unreferred::No => {}
+            Unreferred::ByItsHost => {
+                lifecycle::unrefer_ephemeral(&*bucket, origin, incarnation, child).await
+            }
+            Unreferred::Decommissioned => {
+                assert_eq!(lifecycle::decommission(&*bucket, incarnation).await, 1)
+            }
+        }
+        let indexes = lifecycle::ephemeral_references(&*bucket, incarnation).await.len();
+        if let Err(error) = sweep(&*bucket).await {
+            return (Err(error), indexes);
+        }
+        let reader = Arc::new(ObjectBucket::new(objects, ""));
+        let checkpoints = Checkpoints::new(&*reader, 0);
+        let read = async {
+            let (state, _) = recovery::recover_at(&checkpoints, cell, at).await?;
+            let location = state.extents.get(&extent).cloned();
+            let location = location.ok_or_else(|| Error::Lost(format!("{extent:?} of {cell}")))?;
+            crate::testing::read(&reader, extent, &location).await
+        };
+        (read.await, indexes)
     }
 
     /// What a version of a cell reads of an extent the cell sealed before it and freed after,

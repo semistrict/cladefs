@@ -99,6 +99,10 @@ const RETIRED: &str = "retired/";
 const MIRRORS: &str = "mirrors/";
 /// cladefs: the last part of a mirror's pin's key, where a reference's names its child ([`pin`]).
 const PIN: &str = "mirror";
+/// cladefs: where an ephemeral cell's reference names its host's incarnation, before its child
+/// ([`ephemeral_reference`], doc-25); and, at the bucket's root, the prefix of the index of those
+/// references by incarnation ([`ephemeral_index`]).
+const EPHEMERAL: &str = "ephemeral";
 /// cladefs: the prefix of the blocks of object IDs taken ([`objectid_block`]).
 const OBJECTIDS: &str = "objectid/";
 /// cladefs: the bucket's identity object: its format and its number, written once by its formatting
@@ -322,6 +326,48 @@ pub fn reference(parent: CellId, at: u64, child: CellId) -> String {
     format!("{}{}", origin(parent, at), child_name(child))
 }
 
+/// cladefs: the reference of an ephemeral cell, `child`, kept on the host of incarnation
+/// `incarnation` alone, forked from `parent`'s version at the end of its segment `at` (doc-25,
+/// TASK-698.3): among the version's children's references, keeping the parent's state at the
+/// origin while it stands, as theirs do. No pass retires it, nor deletes it: no record of its
+/// child's is ever in a bucket. Its host deletes it, its cell gone, or, the host gone for good,
+/// its decommissioning ([`crate::lifecycle::decommission`]), by its index ([`ephemeral_index`]).
+pub fn ephemeral_reference(parent: CellId, at: u64, incarnation: u64, child: CellId) -> String {
+    format!("{}{EPHEMERAL}.{}.{}", origin(parent, at), Padded(incarnation), child_name(child))
+}
+
+/// cladefs: the prefix of the index of the ephemeral cells' references whose host is of
+/// incarnation `incarnation` ([`ephemeral_index`]).
+pub fn ephemeral_indexes(incarnation: u64) -> String {
+    format!("{EPHEMERAL}/{}/", Padded(incarnation))
+}
+
+/// cladefs: the index entry of the reference of the ephemeral cell `child` of incarnation
+/// `incarnation`'s host, forked from `parent`'s version at the end of its segment `at`
+/// ([`ephemeral_reference`]): at the bucket's root, by the incarnation, so that decommissioning it
+/// lists them. Written before the reference, and deleted after it.
+pub fn ephemeral_index(incarnation: u64, parent: CellId, at: u64, child: CellId) -> String {
+    format!(
+        "{}{}.{}.{}",
+        ephemeral_indexes(incarnation),
+        child_name(parent),
+        Padded(at),
+        child_name(child)
+    )
+}
+
+/// cladefs: the parent, origin and child an ephemeral cell's index entry names, by its key
+/// ([`ephemeral_index`]), if it is one.
+pub fn ephemeral_indexed(key: &str) -> Option<(u64, CellId, u64, CellId)> {
+    let rest = key.strip_prefix(EPHEMERAL)?.strip_prefix('/')?;
+    let (incarnation, rest) = rest.split_once('/')?;
+    let words: Vec<&str> = rest.split('.').collect();
+    let [parent_tenant, parent, at, tenant, child] = words[..] else { return None };
+    let parent = CellId { tenant: number(parent_tenant)?, id: number(parent)? };
+    let child = CellId { tenant: number(tenant)?, id: number(child)? };
+    Some((number(incarnation)?, parent, number(at)?, child))
+}
+
 /// cladefs: the pin of the mirror of `parent`'s version at the end of its segment `at` in another
 /// bucket (doc-23, Mirrors; TASK-633.8): a reference of the mirror's own, among those of the
 /// version's children there, which keeps the copy from that bucket's collector while it is made,
@@ -493,6 +539,19 @@ pub enum Kind<'a> {
         cell: CellId,
         at: u64,
     },
+    /// cladefs: an ephemeral cell's reference ([`ephemeral_reference`], doc-25): never a candidate,
+    /// its host's to delete.
+    Ephemeral {
+        parent: CellId,
+        at: u64,
+        incarnation: u64,
+        child: CellId,
+    },
+    /// cladefs: the index entry of an ephemeral cell's reference ([`ephemeral_index`]): no cell's,
+    /// never a candidate, its host's or its decommissioning's to delete.
+    EphemeralIndex {
+        incarnation: u64,
+    },
     Unknown,
 }
 
@@ -517,6 +576,8 @@ impl Kind<'_> {
             Self::Pin { .. } => "pin",
             Self::Hold { .. } => "hold",
             Self::Mirror { .. } => "mirror",
+            Self::Ephemeral { .. } => "ephemeral",
+            Self::EphemeralIndex { .. } => "ephemeral-index",
             Self::Unknown => "unknown",
         }
     }
@@ -535,10 +596,12 @@ pub fn owner(key: &str) -> Option<CellId> {
         | Kind::Retired { parent: cell, .. }
         | Kind::Pin { parent: cell, .. }
         | Kind::Hold { parent: cell, .. }
+        | Kind::Ephemeral { parent: cell, .. }
         | Kind::Mirror { cell, .. } => Some(cell),
         Kind::CollectorLease { cell } | Kind::Marks { cell, .. } => Some(cell),
         Kind::Moves { cell, .. } => Some(cell),
         Kind::ObjectIds { .. }
+        | Kind::EphemeralIndex { .. }
         | Kind::Identity
         | Kind::Buckets
         | Kind::Kek { .. }
@@ -565,6 +628,9 @@ pub fn kind(key: &str) -> Kind<'_> {
         }
         if let Some(block) = key.strip_prefix(OBJECTIDS) {
             return Some(Kind::ObjectIds { block: number(block)? });
+        }
+        if let Some((incarnation, ..)) = ephemeral_indexed(key) {
+            return Some(Kind::EphemeralIndex { incarnation });
         }
         if let Some(tenant) =
             (key.strip_prefix(TENANTS)).and_then(|rest| rest.strip_suffix(KEK)?.strip_suffix('/'))
@@ -599,6 +665,15 @@ pub fn kind(key: &str) -> Kind<'_> {
             {
                 let bucket = u16::from_str_radix(bucket, 16).ok()?;
                 return Some(Kind::Hold { parent: cell, at: number(at)?, bucket });
+            }
+            if let Some((at, rest)) = rest.split_once('/')
+                && let Some(rest) = rest.strip_prefix(EPHEMERAL).and_then(|r| r.strip_prefix('.'))
+            {
+                let (incarnation, child) = rest.split_once('.')?;
+                let (tenant, child) = child.split_once('.')?;
+                let child = CellId { tenant: number(tenant)?, id: number(child)? };
+                let (at, incarnation) = (number(at)?, number(incarnation)?);
+                return Some(Kind::Ephemeral { parent: cell, at, incarnation, child });
             }
             let (parent, at, child) = fork(rest)?;
             return Some(Kind::Reference { parent, at, child });
@@ -1302,6 +1377,19 @@ mod tests {
         assert!(pin(cell, 7).starts_with(&origin(cell, 7)));
         assert_eq!(retired_of(&pin(cell, 7)), None);
         assert_eq!(kind(&mirror(cell, 7)), Kind::Mirror { cell, at: 7 });
+        // cladefs: an ephemeral cell's reference, among its version's, and its index (doc-25).
+        let ephemeral = ephemeral_reference(cell, 7, 0x2a, child);
+        assert!(ephemeral.starts_with(&origin(cell, 7)));
+        assert_eq!(
+            kind(&ephemeral),
+            Kind::Ephemeral { parent: cell, at: 7, incarnation: 0x2a, child }
+        );
+        assert_eq!((owner(&ephemeral), retired_of(&ephemeral)), (Some(cell), None));
+        let index = ephemeral_index(0x2a, cell, 7, child);
+        assert!(index.starts_with(&ephemeral_indexes(0x2a)));
+        assert_eq!(ephemeral_indexed(&index), Some((0x2a, cell, 7, child)));
+        assert_eq!(kind(&index), Kind::EphemeralIndex { incarnation: 0x2a });
+        assert_eq!(owner(&index), None);
         assert!(mirror(cell, 7).starts_with(&mirrors(cell)));
         assert_eq!((owner(&pin(cell, 7)), owner(&mirror(cell, 7))), (Some(cell), Some(cell)));
         assert_eq!(kind(&format!("{}mirrors/x", cell.prefix())), Kind::Unknown);

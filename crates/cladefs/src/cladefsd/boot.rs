@@ -38,6 +38,13 @@ pub async fn boot(socket: &Path, memory: Option<u64>) -> anyhow::Result<()> {
     // says (doc-22, TASK-539.9).
     let disks = super::disk::DiskConfig::from_env().map_err(anyhow::Error::msg)?;
     super::disk::start(disks).map_err(anyhow::Error::msg)?;
+    // cladefs: its ephemeral cells' directory, if it keeps any (doc-25, TASK-698.3): the references
+    // of those it holds no more retired before it serves.
+    if let Some(dir) = set_os("CLADEFSD_EPHEMERAL") {
+        let ephemeral = crate::ephemeral_host::open(Path::new(&dir))?;
+        let retired = ephemeral.retire_stale().await?;
+        log::info!("cladefsd: retired {retired} references of ephemeral cells held no more");
+    }
     // cladefs: the hosts sharing its bucket, which it serves parts and asks for theirs (TASK-406.2).
     let peers = set("CLADEFSD_PEERS");
     if let Some(address) = set("CLADEFSD_PEER_ADDRESS") {

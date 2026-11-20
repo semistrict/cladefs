@@ -44,6 +44,8 @@ use serde::{Deserialize, Serialize};
 pub struct Parent {
     pub cell: CellId,
     pub version: u64,
+    /// The segment of the parent's the version is at: its origin.
+    pub at: u64,
 }
 
 /// An ephemeral cell's base (see the module's docs): its state, as of the last segment a checkpoint
@@ -85,7 +87,8 @@ impl Base {
             root: state.root.clone(),
             next_sequence: state.next_sequence,
             last_commit: state.last_commit,
-            spent: state.spent.clone(),
+            // The parent's spent are of its own extents, none of the child's.
+            spent: Spent::default(),
             capacity: state.capacity,
             kept: BTreeMap::new(),
             punch: Vec::new(),
@@ -124,7 +127,7 @@ impl Base {
     }
 
     /// The base in `dir`.
-    pub(crate) fn read<D: Dir>(dir: &D) -> Result<Self, Error> {
+    pub fn read<D: Dir>(dir: &D) -> Result<Self, Error> {
         let file = dir.open(BASE, false).context("opening an ephemeral cell's base")?;
         Self::decode(&read_file(&file)?)
     }

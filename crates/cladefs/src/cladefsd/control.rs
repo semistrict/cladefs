@@ -508,18 +508,32 @@ impl Cladefsd for Control {
         &self,
         request: Request<ForkCellRequest>,
     ) -> Result<Response<ForkCellResponse>, Status> {
-        let ForkCellRequest { from, to, version, tenant: of, cell } = request.into_inner();
+        let ForkCellRequest { from, to, version, tenant: of, cell, ephemeral } =
+            request.into_inner();
         let to = path(to)?;
         let tenant = self.grants.tenant_at(&to);
+        let of = crate::CellId { tenant: of, id: cell };
         let forked = match version {
+            // cladefs: ephemeral cells are forked from versions alone (doc-25, TASK-698.3).
+            0 if ephemeral => Err(Errno::EINVAL),
             0 => cells::fork(path(from)?, to, tenant).await,
             _ if !from.is_empty() || cell == 0 => Err(Errno::EINVAL),
-            _ => {
-                cells::fork_of_version(crate::CellId { tenant: of, id: cell }, version, to, tenant)
-                    .await
-            }
+            _ if ephemeral => cells::fork_ephemeral_of_version(of, version, to, tenant).await,
+            _ => cells::fork_of_version(of, version, to, tenant).await,
         };
         reply(forked.map(|forked| ForkCellResponse { tenant: forked.tenant, cell: forked.id }))
+    }
+
+    async fn decommission_host(
+        &self,
+        request: Request<DecommissionHostRequest>,
+    ) -> Result<Response<DecommissionHostResponse>, Status> {
+        let DecommissionHostRequest { incarnation } = request.into_inner();
+        let decommissioned = async {
+            let bucket = cells::daemon_bucket()?;
+            Ok(bucket_cell::lifecycle::decommission(&*bucket, incarnation).await as u64)
+        };
+        reply(decommissioned.await.map(|retired| DecommissionHostResponse { retired }))
     }
 
     async fn delete_cell(
@@ -1011,6 +1025,38 @@ impl Client {
         let what = format!("forking version {version} of cell {cell} to {}", to.display());
         let response = self.call(what, |mut c| async move { c.fork_cell(request).await })?;
         Ok(crate::CellId { tenant: response.tenant, id: response.cell })
+    }
+
+    /// cladefs: forks the version `from` to a new ephemeral cell at `to`, kept on the daemon's host
+    /// alone (doc-25), and returns its cell (`ForkCell`'s `ephemeral`).
+    pub fn fork_ephemeral(
+        &self,
+        from: crate::CellVersion,
+        to: &Path,
+    ) -> Result<crate::CellId, crate::Error> {
+        let crate::CellVersion { tenant, cell, version } = from;
+        let request = ForkCellRequest {
+            to: name(to)?,
+            version,
+            tenant,
+            cell,
+            ephemeral: true,
+            ..Default::default()
+        };
+        let what =
+            format!("forking version {version} of cell {cell} ephemerally to {}", to.display());
+        let response = self.call(what, |mut c| async move { c.fork_cell(request).await })?;
+        Ok(crate::CellId { tenant: response.tenant, id: response.cell })
+    }
+
+    /// cladefs: decommissions the host of incarnation `incarnation`, gone for good: its ephemeral
+    /// cells' references retired (doc-25, `DecommissionHost`). Returns how many.
+    pub fn decommission_host(&self, incarnation: u64) -> Result<u64, crate::Error> {
+        let request = DecommissionHostRequest { incarnation };
+        let what = format!("decommissioning incarnation {incarnation:x}");
+        let response =
+            self.call(what, |mut c| async move { c.decommission_host(request).await })?;
+        Ok(response.retired)
     }
 
     /// Makes a version of the cell of the store at `path`, keeping its newest `keep_last` if given,

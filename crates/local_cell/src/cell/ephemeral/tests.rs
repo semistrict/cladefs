@@ -47,7 +47,8 @@ fn keys() -> Arc<Ring> {
 
 /// A new ephemeral cell's store in `dir`, of the child's, forked from the parent's version.
 fn make(dir: &MemDir) {
-    let base = Base::fork(Parent { cell: PARENT, version: 7 }, &parent(), b"wrapped".to_vec());
+    let base =
+        Base::fork(Parent { cell: PARENT, version: 7, at: 3 }, &parent(), b"wrapped".to_vec());
     let description = Description { block_size: BLOCK as u32, capacity: 1 << 30, cell: CHILD };
     LocalCell::make_ephemeral(dir, description, Some("memory:///p"), Some(Kind::Fxfs), &base)
         .unwrap();

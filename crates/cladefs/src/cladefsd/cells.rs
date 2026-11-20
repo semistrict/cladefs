@@ -938,6 +938,28 @@ pub(super) async fn fork_of_version(
     local_cell::host_cell(&to).map_err(|_| Errno::EIO)
 }
 
+/// cladefs: forks the version `version` of `cell` to `to`, an ephemeral cell kept on this host alone
+/// (doc-25, TASK-698.3; `ForkCell`'s `ephemeral`), a new cell of `tenant`'s if given, else of
+/// `cell`'s tenant's, from the store kept open of the version, as [`fork_of_version`] forks it, the
+/// store at `to` held throughout: returns its cell.
+pub(super) async fn fork_ephemeral_of_version(
+    cell: CellId,
+    version: u64,
+    to: PathBuf,
+    tenant: Option<u64>,
+) -> Result<CellId, Errno> {
+    let _child = hold_to_fork(&to).await?;
+    let capacity = OpenCell::BLOCK_SIZE as u64;
+    let from = opened_version(cell, version, capacity).await?;
+    let (kept, _) = kept_or_open(&from, capacity).await?;
+    let tenant = tenant.unwrap_or(kept.store.cell().tenant);
+    let forked = kept.store.fork_ephemeral(&to, tenant).await.map_err(|err| {
+        errno_of(format_args!("forking {} ephemerally to {}", from.display(), to.display()), err)
+    });
+    release_held(kept).await;
+    forked
+}
+
 /// cladefs: `Ok` if `store`, at a restore's `path` already, holds what the version `version` of
 /// `cell` does ([`OpenCell::holds_what`]): the store the snapshot was taken of, written nothing
 /// since, or a fork of the version an earlier restore made, its VM having written nothing

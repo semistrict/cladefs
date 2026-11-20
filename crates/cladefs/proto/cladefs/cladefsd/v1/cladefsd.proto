@@ -223,6 +223,22 @@ service Cladefsd {
   // not the bucket KMS (CLADEFS_KMS names one) shreds nothing: FAILED_PRECONDITION (ENOTSUP); destroy
   // the tenant's KEK in that KMS, then ForgetTenantKeys.
   rpc ShredTenant(ShredTenantRequest) returns (ShredTenantResponse);
+  // Decommissions a host gone for good, of the incarnation given (backlog doc-25): the references
+  // of its ephemeral cells, which no host holds any more, retired in the daemon's bucket. For an
+  // incarnation no host has: a host of it still holding its cells would read what is collected.
+  rpc DecommissionHost(DecommissionHostRequest) returns (DecommissionHostResponse);
+}
+
+// A host's incarnation to decommission.
+message DecommissionHostRequest {
+  // The incarnation of the host's ephemeral cells' directory (CLADEFSD_EPHEMERAL).
+  uint64 incarnation = 1;
+}
+
+// What was retired.
+message DecommissionHostResponse {
+  // How many references of its ephemeral cells.
+  uint64 retired = 1;
 }
 
 // Makes an empty store.
@@ -346,6 +362,12 @@ message ForkCellRequest {
   uint64 tenant = 7;
   // The cell whose version is forked, by its ID.
   uint64 cell = 8;
+  // Whether the fork is an ephemeral cell (backlog doc-25): kept on the daemon's host alone, never
+  // uploaded, lost with the host's disk, with no versions of its own. Of `version` alone
+  // (INVALID_ARGUMENT otherwise); refused by a daemon keeping no ephemeral cells
+  // (CLADEFSD_EPHEMERAL; UNIMPLEMENTED, ENOTSUP). Its reference in the version's cell's bucket,
+  // naming the daemon's incarnation, keeps the version while it lives; DeleteCell retires it.
+  bool ephemeral = 9;
 }
 
 // The fork made.

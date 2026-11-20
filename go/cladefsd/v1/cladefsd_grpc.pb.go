@@ -116,6 +116,7 @@ const (
 	Cladefsd_ShredCell_FullMethodName         = "/cladefs.cladefsd.v1.Cladefsd/ShredCell"
 	Cladefsd_ForgetTenantKeys_FullMethodName  = "/cladefs.cladefsd.v1.Cladefsd/ForgetTenantKeys"
 	Cladefsd_ShredTenant_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/ShredTenant"
+	Cladefsd_DecommissionHost_FullMethodName  = "/cladefs.cladefsd.v1.Cladefsd/DecommissionHost"
 )
 
 // CladefsdClient is the client API for Cladefsd service.
@@ -274,6 +275,10 @@ type CladefsdClient interface {
 	// not the bucket KMS (CLADEFS_KMS names one) shreds nothing: FAILED_PRECONDITION (ENOTSUP); destroy
 	// the tenant's KEK in that KMS, then ForgetTenantKeys.
 	ShredTenant(ctx context.Context, in *ShredTenantRequest, opts ...grpc.CallOption) (*ShredTenantResponse, error)
+	// Decommissions a host gone for good, of the incarnation given (backlog doc-25): the references
+	// of its ephemeral cells, which no host holds any more, retired in the daemon's bucket. For an
+	// incarnation no host has: a host of it still holding its cells would read what is collected.
+	DecommissionHost(ctx context.Context, in *DecommissionHostRequest, opts ...grpc.CallOption) (*DecommissionHostResponse, error)
 }
 
 type cladefsdClient struct {
@@ -594,6 +599,16 @@ func (c *cladefsdClient) ShredTenant(ctx context.Context, in *ShredTenantRequest
 	return out, nil
 }
 
+func (c *cladefsdClient) DecommissionHost(ctx context.Context, in *DecommissionHostRequest, opts ...grpc.CallOption) (*DecommissionHostResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DecommissionHostResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_DecommissionHost_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CladefsdServer is the server API for Cladefsd service.
 // All implementations must embed UnimplementedCladefsdServer
 // for forward compatibility.
@@ -750,6 +765,10 @@ type CladefsdServer interface {
 	// not the bucket KMS (CLADEFS_KMS names one) shreds nothing: FAILED_PRECONDITION (ENOTSUP); destroy
 	// the tenant's KEK in that KMS, then ForgetTenantKeys.
 	ShredTenant(context.Context, *ShredTenantRequest) (*ShredTenantResponse, error)
+	// Decommissions a host gone for good, of the incarnation given (backlog doc-25): the references
+	// of its ephemeral cells, which no host holds any more, retired in the daemon's bucket. For an
+	// incarnation no host has: a host of it still holding its cells would read what is collected.
+	DecommissionHost(context.Context, *DecommissionHostRequest) (*DecommissionHostResponse, error)
 	mustEmbedUnimplementedCladefsdServer()
 }
 
@@ -852,6 +871,9 @@ func (UnimplementedCladefsdServer) ForgetTenantKeys(context.Context, *ForgetTena
 }
 func (UnimplementedCladefsdServer) ShredTenant(context.Context, *ShredTenantRequest) (*ShredTenantResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ShredTenant not implemented")
+}
+func (UnimplementedCladefsdServer) DecommissionHost(context.Context, *DecommissionHostRequest) (*DecommissionHostResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DecommissionHost not implemented")
 }
 func (UnimplementedCladefsdServer) mustEmbedUnimplementedCladefsdServer() {}
 func (UnimplementedCladefsdServer) testEmbeddedByValue()                  {}
@@ -1432,6 +1454,24 @@ func _Cladefsd_ShredTenant_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Cladefsd_DecommissionHost_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DecommissionHostRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CladefsdServer).DecommissionHost(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Cladefsd_DecommissionHost_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CladefsdServer).DecommissionHost(ctx, req.(*DecommissionHostRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Cladefsd_ServiceDesc is the grpc.ServiceDesc for Cladefsd service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1562,6 +1602,10 @@ var Cladefsd_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ShredTenant",
 			Handler:    _Cladefsd_ShredTenant_Handler,
+		},
+		{
+			MethodName: "DecommissionHost",
+			Handler:    _Cladefsd_DecommissionHost_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

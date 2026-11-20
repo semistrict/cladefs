@@ -6984,3 +6984,75 @@ fn a_racing_revoke_preserves_the_regranted_socket() {
     UnixStream::connect(socket).expect("the earlier revoke removed the new grant's socket");
     grants.revoke(1).unwrap();
 }
+
+/// doc-25, TASK-698.3: an ephemeral cell forked from a version reads what its parent's version
+/// held, writes its own, which no bucket gets, and holds them across closing and opening again;
+/// its reference, naming the host's incarnation, stands in the version's cell's bucket while it
+/// lives, and goes as it is deleted; a host starting retires the references of the cells it holds
+/// no more, and a host decommissioned all of its own.
+#[test]
+fn ephemeral_cells_fork_from_versions_and_retire_their_references() {
+    host();
+    let ps = page_size() as usize;
+    let dir = tempfile::tempdir().unwrap();
+    let ephemeral = crate::ephemeral_host::open(&dir.path().join("ephemeral")).unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let parent = CellClient::connect(&socket, dir.path().join("parent"), 1 << 24).unwrap();
+    let inherited = ExtentId { cell: parent.cell(), sequence: 1 };
+    write(&parent, inherited, 0, &pattern(1, ps)).unwrap();
+    parent.commit(Some(b"root")).unwrap();
+    let version = parent.make_version().unwrap();
+    let bucket = super::cells::daemon_bucket().unwrap();
+    let references = || {
+        let listing =
+            bucket_cell::lifecycle::ephemeral_references(&*bucket, ephemeral.incarnation());
+        let mut children: Vec<_> = control(listing).into_iter().map(|(_, child)| child).collect();
+        children.sort();
+        children
+    };
+    let fork = |name: &str| {
+        let at = dir.path().join(name);
+        control(super::cells::fork_ephemeral_of_version(
+            version_cell(version),
+            version.version,
+            at,
+            None,
+        ))
+    };
+    let path = dir.path().join("child");
+    let child = fork("child").unwrap();
+    assert!(local_cell::host_ephemeral(&path).unwrap());
+    assert_eq!(references(), vec![child]);
+    assert_eq!(fork("child"), Err(Errno::EEXIST));
+
+    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
+    assert_eq!((store.cell(), store.root().unwrap()), (child.id, b"root".to_vec()));
+    assert_eq!(read(&store, inherited, 0, ps).unwrap(), pattern(1, ps));
+    let own = ExtentId { cell: child.id, sequence: 1 };
+    write(&store, own, 0, &pattern(2, ps)).unwrap();
+    store.commit(None).unwrap();
+    drop(store);
+    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
+    assert_eq!(read(&store, own, 0, ps).unwrap(), pattern(2, ps));
+    assert_eq!(read(&store, inherited, 0, ps).unwrap(), pattern(1, ps));
+    drop(store);
+    let keys = control(bucket_cell::Bucket::list(&*bucket, "")).unwrap();
+    let theirs = keys.iter().filter(|meta| bucket_cell::layout::owner(&meta.key) == Some(child));
+    assert_eq!(theirs.count(), 0, "nothing of the ephemeral cell's is in the bucket");
+
+    // Deleted, its reference goes; a cell whose store went without its host retires it as the
+    // host starts again; a host decommissioned retires every one of its.
+    delete_cell(&path).unwrap();
+    assert_eq!(references(), vec![]);
+    let gone = fork("gone").unwrap();
+    let kept = fork("kept").unwrap();
+    local_cell::remove_store_dir(&dir.path().join("gone")).unwrap();
+    assert_eq!(control(ephemeral.retire_stale()).unwrap(), 1);
+    assert_eq!(references(), vec![kept]);
+    assert!(ephemeral.entry(gone).is_none());
+    let retired = control(bucket_cell::lifecycle::decommission(&*bucket, ephemeral.incarnation()));
+    assert_eq!(retired, 1);
+    assert_eq!(references(), vec![]);
+}
