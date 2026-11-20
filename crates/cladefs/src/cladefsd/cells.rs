@@ -202,7 +202,7 @@ async fn hold_alone(path: &Path) -> Result<Hold, Errno> {
 pub(super) async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, Errno> + Send + 'static,
 ) -> Result<T, Errno> {
-    tokio::task::spawn_blocking(work).await.unwrap_or_else(|err| {
+    super::run::off_the_runtime(work).await.unwrap_or_else(|err| {
         log::error!("cladefsd: a store's blocking work: {err}");
         Err(Errno::EIO)
     })
@@ -1445,9 +1445,9 @@ pub(super) fn uploads_when_asked() {
 /// Makes `bucket` the daemon's, before any store opens: for tests that put themselves between the
 /// daemon's stores and their objects. The stores naming `CLADEFSD_BUCKET`'s bucket open it
 /// (`host_cell::use_bucket`).
-#[cfg(test)]
-pub(super) fn use_bucket(bucket: bucket_cell::object_bucket::ObjectBucket) {
-    let bucket = Arc::new(bucket);
+#[cfg(any(test, madsim))]
+pub(super) fn use_bucket(bucket: impl Into<Arc<bucket_cell::object_bucket::ObjectBucket>>) {
+    let bucket = bucket.into();
     let host = crate::bucket::Host::from_env().expect("the daemon's host");
     crate::host_cell::use_bucket(&host.bucket, bucket.clone());
     assert!(BUCKET.get().set(bucket.clone()).is_ok(), "the daemon has its bucket already");

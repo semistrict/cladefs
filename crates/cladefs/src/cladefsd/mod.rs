@@ -110,6 +110,7 @@ pub mod otel;
 pub mod peers;
 mod pool;
 pub mod process;
+mod run;
 pub(crate) mod server;
 mod stats;
 pub(crate) mod wire;
@@ -120,6 +121,14 @@ use std::path::Path;
 
 #[cfg(target_os = "linux")]
 pub use boot::boot;
+
+/// cladefs: has the daemon of this simulated host keep its stores' cells in `bucket`, which the
+/// simulation's hosts share, an object store in the process (doc-24): before it boots, its
+/// `CLADEFSD_BUCKET` naming it.
+#[cfg(madsim)]
+pub fn use_bucket(bucket: std::sync::Arc<bucket_cell::object_bucket::ObjectBucket>) {
+    cells::use_bucket(bucket);
+}
 pub use cells::{cache_config, replace_after};
 pub use client::{CellClient, DaemonConnection, Unmapped, spawn_on_replies};
 pub use control::serve_control;

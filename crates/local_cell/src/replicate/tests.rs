@@ -32,29 +32,42 @@ impl Fake {
 }
 
 impl MemberLink for Fake {
-    fn append(&self, log: u64, offset: u64, bytes: &[u8]) -> Result<u64, LinkError> {
-        if let Some(error) = self.failing.lock().unwrap().clone() {
-            return Err(error);
-        }
-        self.appends.fetch_add(1, Ordering::Relaxed);
-        let mut logs = self.logs.lock().unwrap();
-        let held = logs.entry(log).or_default();
-        let end = held.len() as u64;
-        if offset > end {
-            return Ok(end);
-        }
-        held.truncate(offset as usize);
-        held.extend_from_slice(bytes);
-        Ok(held.len() as u64)
+    fn append<'a>(
+        &'a self,
+        log: u64,
+        offset: u64,
+        bytes: Vec<u8>,
+    ) -> futures::future::BoxFuture<'a, Result<u64, LinkError>> {
+        Box::pin(async move {
+            let bytes = &bytes[..];
+            if let Some(error) = self.failing.lock().unwrap().clone() {
+                return Err(error);
+            }
+            self.appends.fetch_add(1, Ordering::Relaxed);
+            let mut logs = self.logs.lock().unwrap();
+            let held = logs.entry(log).or_default();
+            let end = held.len() as u64;
+            if offset > end {
+                return Ok(end);
+            }
+            held.truncate(offset as usize);
+            held.extend_from_slice(bytes);
+            Ok(held.len() as u64)
+        })
     }
 
-    fn drop_through(&self, through: u64) -> Result<(), LinkError> {
-        if let Some(error) = self.failing.lock().unwrap().clone() {
-            return Err(error);
-        }
-        self.logs.lock().unwrap().retain(|&log, _| log > through);
-        *self.dropped.lock().unwrap() = Some(through);
-        Ok(())
+    fn drop_through<'a>(
+        &'a self,
+        through: u64,
+    ) -> futures::future::BoxFuture<'a, Result<(), LinkError>> {
+        Box::pin(async move {
+            if let Some(error) = self.failing.lock().unwrap().clone() {
+                return Err(error);
+            }
+            self.logs.lock().unwrap().retain(|&log, _| log > through);
+            *self.dropped.lock().unwrap() = Some(through);
+            Ok(())
+        })
     }
 }
 
@@ -251,12 +264,23 @@ fn own_extents_go_before_their_records() {
     #[derive(Default)]
     struct Ordered(Mutex<Vec<u64>>);
     impl MemberLink for Ordered {
-        fn append(&self, log: u64, offset: u64, bytes: &[u8]) -> Result<u64, LinkError> {
-            self.0.lock().unwrap().push(log);
-            Ok(offset + bytes.len() as u64)
+        fn append<'a>(
+            &'a self,
+            log: u64,
+            offset: u64,
+            bytes: Vec<u8>,
+        ) -> futures::future::BoxFuture<'a, Result<u64, LinkError>> {
+            Box::pin(async move {
+                let bytes = &bytes[..];
+                self.0.lock().unwrap().push(log);
+                Ok(offset + bytes.len() as u64)
+            })
         }
-        fn drop_through(&self, _: u64) -> Result<(), LinkError> {
-            Ok(())
+        fn drop_through<'a>(
+            &'a self,
+            _: u64,
+        ) -> futures::future::BoxFuture<'a, Result<(), LinkError>> {
+            Box::pin(async move { Ok(()) })
         }
     }
     let ordered = Arc::new(Ordered::default());

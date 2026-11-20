@@ -1124,6 +1124,7 @@ dependencies = [
  "local_cell",
  "log",
  "loom",
+ "madsim",
  "madsim-tokio",
  "madsim-tonic",
  "madsim-tonic-build",

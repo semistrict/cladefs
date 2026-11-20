@@ -161,7 +161,8 @@ fn main() -> anyhow::Result<()> {
     let socket = args.next().context("usage: cladefsd SOCKET [MEMORY_BYTES]")?;
     let memory = args.next().map(|memory| memory.parse::<u64>());
     let memory = memory.transpose().context("MEMORY_BYTES must be a number")?;
-    cladefs::cladefsd::boot(std::path::Path::new(&socket), memory)?;
+    // cladefs: its boot awaited at its outermost entry, the one place it blocks (doc-24).
+    local_cell::upload::wait_on(cladefs::cladefsd::boot(std::path::Path::new(&socket), memory))?;
     // Serving stops only as the daemon drains, whose thread exits the process once it has
     // (`drain_on_sigterm`): not here, its stores still closing.
     loop {

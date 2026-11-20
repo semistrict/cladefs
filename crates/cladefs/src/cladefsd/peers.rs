@@ -21,8 +21,8 @@ use proto::{
     GetPartRequest, GetPartResponse, IncarnationRequest, IncarnationResponse, LogEnd,
     ReadLogRequest, ReadLogResponse, ReplicaOf,
 };
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tonic::{Code, Request, Response, Status};
 
@@ -64,12 +64,12 @@ static SERVED: AtomicU64 = AtomicU64::new(0);
 static SERVED_MISSING: AtomicU64 = AtomicU64::new(0);
 
 /// Has the daemon serve the hosts sharing its bucket, at `address` (`CLADEFSD_PEER_ADDRESS`),
-/// on `listener`, bound there, and its stores' fetchers ask them, `peers` at first
-/// (`CLADEFSD_PEERS`), for the parts they own: before any store opens. It needs the host's
-/// part cache, which keeps what it serves.
-pub fn start(
+/// on `listening`, bound there (or, under madsim, its address on the simulated network), and its
+/// stores' fetchers ask them, `peers` at first (`CLADEFSD_PEERS`), for the parts they own: before
+/// any store opens. It needs the host's part cache, which keeps what it serves.
+pub async fn start(
     address: &str,
-    listener: std::net::TcpListener,
+    listening: Listening,
     peers: impl IntoIterator<Item = impl AsRef<str>>,
 ) -> Result<(), String> {
     let peers: Vec<String> = peers.into_iter().map(|peer| peer.as_ref().to_owned()).collect();
@@ -86,8 +86,7 @@ pub fn start(
             .to_owned()
     })?;
     // cladefs: its region, which peers of another never serve, nor it them (TASK-633.4).
-    let region = local_cell::upload::block_on(crate::bucket::peers::region(&bucket));
-    let region = region.map_err(|err| failed(&err.to_string()))?;
+    let region = crate::bucket::peers::region(&bucket).await;
     let region = region.map_err(|err| failed(&err.to_string()))?;
     let linked = url.clone();
     let runtime = crate::bucket::bucket_runtime().map_err(|err| failed(&err.to_string()))?;
@@ -100,7 +99,7 @@ pub fn start(
         None => None,
     };
     if let Some(replicas) = &replicas {
-        sweeping(replicas.clone(), bucket.clone(), &runtime)?;
+        sweeping(replicas.clone(), bucket.clone(), &runtime);
         let members = ReplicaMembers {
             bucket: url.clone(),
             me: address.to_owned(),
@@ -112,15 +111,26 @@ pub fn start(
     let serving = crate::bucket::serving_peers(bucket, cache);
     let serving = serving.map_err(|err| failed(&err.to_string()))?;
     let server = Server { bucket: url, region, serving, replicas };
-    listener.set_nonblocking(true).map_err(|err| failed(&err.to_string()))?;
-    let serving = std::thread::Builder::new().name("cladefsd peers".into()).spawn(move || {
-        if let Err(err) = serve(listener, server) {
+    #[cfg(not(madsim))]
+    listening.set_nonblocking(true).map_err(|err| failed(&err.to_string()))?;
+    // cladefs: on threads of its own, or under madsim a task (`super::run`, doc-24 step 12).
+    let serving = super::run::service("cladefsd peers", THREADS, move || async move {
+        if let Err(err) = serve(listening, server).await {
             log::error!("cladefsd: serving peers: {err}");
             std::process::exit(1);
         }
     });
-    serving.map(drop).map_err(|err| failed(&err.to_string()))
+    serving.map_err(|err| failed(&err.to_string()))
 }
+
+/// cladefs: what the daemon serves its peers on: a TCP listener, bound; under madsim, its address
+/// on the simulated network (doc-24's boundary).
+#[cfg(not(madsim))]
+pub type Listening = std::net::TcpListener;
+/// cladefs: what the daemon serves its peers on, under madsim: its address on the simulated
+/// network.
+#[cfg(madsim)]
+pub type Listening = std::net::SocketAddr;
 
 /// Has the hosts sharing the bucket be those at `addresses` (`SetPeers`): `EINVAL` if one is no
 /// `HOST:PORT`, `ENOTSUP` if the daemon serves no peers.
@@ -168,27 +178,20 @@ pub(super) fn line() -> Option<String> {
     ))
 }
 
-/// Serves `server` to the peers that connect to `listener`, until accepting fails.
-fn serve(listener: std::net::TcpListener, server: Server) -> std::io::Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(THREADS)
-        .thread_name("cladefsd peers")
-        .enable_all()
-        .build()?;
-    runtime.block_on(async {
-        let listener = tokio::net::TcpListener::from_std(listener)?;
-        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-        tonic::transport::Server::builder()
-            .tcp_nodelay(true)
-            .add_service(
-                PeerServer::new(server)
-                    .max_decoding_message_size(MESSAGE_MOST)
-                    .max_encoding_message_size(MESSAGE_MOST),
-            )
-            .serve_with_incoming(incoming)
-            .await
-            .map_err(std::io::Error::other)
-    })
+/// Serves `server` to the peers that connect to `listening`, until accepting fails.
+async fn serve(listening: Listening, server: Server) -> std::io::Result<()> {
+    let service = PeerServer::new(server)
+        .max_decoding_message_size(MESSAGE_MOST)
+        .max_encoding_message_size(MESSAGE_MOST);
+    let router = tonic::transport::Server::builder().tcp_nodelay(true).add_service(service);
+    #[cfg(not(madsim))]
+    let served = {
+        let listener = tokio::net::TcpListener::from_std(listening)?;
+        router.serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)).await
+    };
+    #[cfg(madsim)]
+    let served = router.serve(listening).await;
+    served.map_err(std::io::Error::other)
 }
 
 /// cladefs: the daemon's replica directory at `dir` (`CLADEFSD_REPLICAS`, doc-21), made if it is
@@ -204,22 +207,20 @@ fn replicas(dir: &std::path::Path) -> Result<Arc<Replicas<HostDir>>, String> {
 }
 
 /// cladefs: sweeps `replicas` against the heads of `bucket`'s cells now and every
-/// [`SWEEP_EVERY`] after, on a thread of its own, its reads on `runtime`.
+/// [`SWEEP_EVERY`] after, a task on `runtime`, the bucket runtime (doc-24 step 12).
 fn sweeping(
     replicas: Arc<Replicas<HostDir>>,
     bucket: Arc<bucket_cell::object_bucket::ObjectBucket>,
     runtime: &tokio::runtime::Handle,
-) -> Result<(), String> {
-    let runtime = runtime.clone();
-    let spawned = std::thread::Builder::new().name("cladefsd sweep".into()).spawn(move || {
+) {
+    drop(runtime.spawn(async move {
         loop {
-            if let Err(err) = runtime.block_on(sweep(&replicas, &*bucket)) {
+            if let Err(err) = sweep(&replicas, &*bucket).await {
                 log::warn!("cladefsd: sweeping the replica directory: {err}");
             }
-            std::thread::sleep(SWEEP_EVERY);
+            tokio::time::sleep(SWEEP_EVERY).await;
         }
-    });
-    spawned.map(drop).map_err(|err| format!("sweeping the replica directory: {err}"))
+    }));
 }
 
 /// cladefs: drops from `replicas` what the heads of `bucket`'s cells name no more: every
@@ -339,7 +340,7 @@ fn refused(err: replica::Error) -> Status {
 async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, replica::Error> + Send + 'static,
 ) -> Result<T, Status> {
-    match tokio::task::spawn_blocking(work).await {
+    match super::run::off_the_runtime(work).await {
         Ok(done) => done.map_err(refused),
         Err(err) => Err(Status::internal(format!("the replica directory's work: {err}"))),
     }
@@ -541,7 +542,95 @@ impl local_cell::upload::Members for ReplicaMembers {
         Ok(bucket_cell::layout::Member { address: self.me.clone(), incarnation: self.incarnation })
     }
 
-    fn pick(
+    fn pick<'a>(
+        &'a self,
+        cell: crate::CellId,
+        number: u64,
+        f: u8,
+        avoid: &'a [String],
+    ) -> BoxFuture<'a, Result<Vec<bucket_cell::layout::Member>, String>> {
+        Box::pin(self.picked(cell, number, f, avoid))
+    }
+
+    fn link(
+        &self,
+        cell: crate::CellId,
+        configuration: &bucket_cell::layout::Configuration,
+        member: &bucket_cell::layout::Member,
+    ) -> Arc<dyn local_cell::replicate::MemberLink> {
+        let of = self.of(cell, configuration, member);
+        let client = member_client(&self.runtime, &member.address);
+        Arc::new(GrpcMember { client, of, stream: tokio::sync::Mutex::default() })
+    }
+
+    fn fence<'a>(
+        &'a self,
+        cell: crate::CellId,
+        configuration: &'a bucket_cell::layout::Configuration,
+        whom: &'a bucket_cell::layout::Member,
+        epoch: u64,
+    ) -> BoxFuture<'a, Result<Vec<(u64, u64)>, String>> {
+        Box::pin(async move {
+            let request = FenceRequest { of: Some(self.of(cell, configuration, whom)), epoch };
+            let mut client = member(&self.runtime, &whom.address)?;
+            match tokio::time::timeout(DEADLINE, client.fence(request)).await {
+                Ok(Ok(answer)) => {
+                    Ok(answer.into_inner().logs.into_iter().map(|log| (log.log, log.end)).collect())
+                }
+                Ok(Err(status)) => Err(format!("{:?}: {}", status.code(), status.message())),
+                Err(_) => Err(format!("no answer within {DEADLINE:?}")),
+            }
+        })
+    }
+
+    fn read<'a>(
+        &'a self,
+        cell: crate::CellId,
+        configuration: &'a bucket_cell::layout::Configuration,
+        whom: &'a bucket_cell::layout::Member,
+        log: u64,
+    ) -> BoxFuture<'a, Result<Vec<u8>, String>> {
+        Box::pin(async move {
+            let request =
+                ReadLogRequest { of: Some(self.of(cell, configuration, whom)), log, offset: 0 };
+            let mut client = member(&self.runtime, &whom.address)?;
+            let reading = async move {
+                let mut pieces = client.read_log(request).await?.into_inner();
+                let mut bytes = Vec::new();
+                while let Some(piece) = pieces.message().await? {
+                    bytes.extend(piece.bytes);
+                }
+                Ok::<_, Status>(bytes)
+            };
+            reading.await.map_err(|status| format!("{:?}: {}", status.code(), status.message()))
+        })
+    }
+
+    fn drop_before<'a>(
+        &'a self,
+        cell: crate::CellId,
+        configuration: &'a bucket_cell::layout::Configuration,
+        whom: &'a bucket_cell::layout::Member,
+    ) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            // Named in the configuration the drop keeps, of the member's own incarnation.
+            let mut of = self.of(cell, configuration, whom);
+            of.incarnation = whom.incarnation;
+            let request = DropLogsRequest { of: Some(of), through: None };
+            let mut client = member(&self.runtime, &whom.address)?;
+            match tokio::time::timeout(DEADLINE, client.drop_logs(request)).await {
+                Ok(Ok(_)) => Ok(()),
+                Ok(Err(status)) => Err(format!("{:?}: {}", status.code(), status.message())),
+                Err(_) => Err(format!("no answer within {DEADLINE:?}")),
+            }
+        })
+    }
+}
+
+impl ReplicaMembers {
+    /// 2f members for configuration `number` of `cell`, as [`local_cell::upload::Members::pick`]
+    /// picks them: by rendezvous hashing, each that answers its incarnation.
+    async fn picked(
         &self,
         cell: crate::CellId,
         number: u64,
@@ -559,7 +648,7 @@ impl local_cell::upload::Members for ReplicaMembers {
             if picked.len() == wanted {
                 break;
             }
-            match self.incarnation_of(address) {
+            match self.incarnation_of(address).await {
                 Ok(incarnation) => picked
                     .push(bucket_cell::layout::Member { address: address.to_owned(), incarnation }),
                 Err(err) => log::warn!("cladefsd: {address} as a member of {key}: {err}"),
@@ -573,79 +662,6 @@ impl local_cell::upload::Members for ReplicaMembers {
             ));
         }
         Ok(picked)
-    }
-
-    fn link(
-        &self,
-        cell: crate::CellId,
-        configuration: &bucket_cell::layout::Configuration,
-        member: &bucket_cell::layout::Member,
-    ) -> Arc<dyn local_cell::replicate::MemberLink> {
-        let of = self.of(cell, configuration, member);
-        let client = member_client(&self.runtime, &member.address);
-        Arc::new(GrpcMember { runtime: self.runtime.clone(), client, of, stream: Mutex::default() })
-    }
-
-    fn fence(
-        &self,
-        cell: crate::CellId,
-        configuration: &bucket_cell::layout::Configuration,
-        whom: &bucket_cell::layout::Member,
-        epoch: u64,
-    ) -> Result<Vec<(u64, u64)>, String> {
-        let request = FenceRequest { of: Some(self.of(cell, configuration, whom)), epoch };
-        let mut client = member(&self.runtime, &whom.address)?;
-        let fencing = async move { tokio::time::timeout(DEADLINE, client.fence(request)).await };
-        match self.runtime.block_on(fencing) {
-            Ok(Ok(answer)) => {
-                Ok(answer.into_inner().logs.into_iter().map(|log| (log.log, log.end)).collect())
-            }
-            Ok(Err(status)) => Err(format!("{:?}: {}", status.code(), status.message())),
-            Err(_) => Err(format!("no answer within {DEADLINE:?}")),
-        }
-    }
-
-    fn read(
-        &self,
-        cell: crate::CellId,
-        configuration: &bucket_cell::layout::Configuration,
-        whom: &bucket_cell::layout::Member,
-        log: u64,
-    ) -> Result<Vec<u8>, String> {
-        let request =
-            ReadLogRequest { of: Some(self.of(cell, configuration, whom)), log, offset: 0 };
-        let mut client = member(&self.runtime, &whom.address)?;
-        let reading = async move {
-            let mut pieces = client.read_log(request).await?.into_inner();
-            let mut bytes = Vec::new();
-            while let Some(piece) = pieces.message().await? {
-                bytes.extend(piece.bytes);
-            }
-            Ok::<_, Status>(bytes)
-        };
-        self.runtime
-            .block_on(reading)
-            .map_err(|status| format!("{:?}: {}", status.code(), status.message()))
-    }
-
-    fn drop_before(
-        &self,
-        cell: crate::CellId,
-        configuration: &bucket_cell::layout::Configuration,
-        whom: &bucket_cell::layout::Member,
-    ) -> Result<(), String> {
-        // Named in the configuration the drop keeps, of the member's own incarnation.
-        let mut of = self.of(cell, configuration, whom);
-        of.incarnation = whom.incarnation;
-        let request = DropLogsRequest { of: Some(of), through: None };
-        let mut client = member(&self.runtime, &whom.address)?;
-        let dropping =
-            async move { tokio::time::timeout(DEADLINE, client.drop_logs(request)).await };
-        match self.runtime.block_on(dropping) {
-            Ok(Ok(_)) => Ok(()),
-            Ok(Err(status)) => Err(format!("{:?}: {}", status.code(), status.message())),
-            Err(_) => Err(format!("no answer within {DEADLINE:?}")),
-        }
     }
 }
 
@@ -672,13 +688,11 @@ impl ReplicaMembers {
 
 impl ReplicaMembers {
     /// The incarnation of the replica directory of the host at `address`, as it answers within
-    /// [`DEADLINE`]. Blocks.
-    fn incarnation_of(&self, address: &str) -> Result<u64, String> {
+    /// [`DEADLINE`].
+    async fn incarnation_of(&self, address: &str) -> Result<u64, String> {
         let mut client = member(&self.runtime, address)?;
         let asked = IncarnationRequest { bucket: self.bucket.clone() };
-        let asking = async move { tokio::time::timeout(DEADLINE, client.incarnation(asked)).await };
-        // Called by a take's `local_cell::upload::blocking` section, off any task's thread.
-        match self.runtime.block_on(asking) {
+        match tokio::time::timeout(DEADLINE, client.incarnation(asked)).await {
             Ok(Ok(answer)) => Ok(answer.into_inner().incarnation),
             Ok(Err(status)) => Err(format!("{:?}: {}", status.code(), status.message())),
             Err(_) => Err(format!("no answer within {DEADLINE:?}")),
@@ -697,10 +711,10 @@ fn member_client(
 /// cladefs: a member of a replicated cell's configuration, reached over gRPC (doc-21): one stream
 /// of appends, opened as it is first needed, and again after any failure.
 struct GrpcMember {
-    runtime: tokio::runtime::Handle,
     client: PeerClient<tonic::transport::Channel>,
     of: ReplicaOf,
-    stream: Mutex<Option<Appending>>,
+    /// Its one task's (`local_cell::replicate`), so never waited for.
+    stream: tokio::sync::Mutex<Option<Appending>>,
 }
 
 /// An open stream of appends to a member: where they go, and its answers.
@@ -726,14 +740,42 @@ impl local_cell::replicate::MemberLink for GrpcMember {
         &self,
         log: u64,
         offset: u64,
-        bytes: &[u8],
+        bytes: Vec<u8>,
+    ) -> BoxFuture<'_, Result<u64, local_cell::replicate::LinkError>> {
+        Box::pin(self.appended(log, offset, bytes))
+    }
+
+    fn drop_through(
+        &self,
+        through: u64,
+    ) -> BoxFuture<'_, Result<(), local_cell::replicate::LinkError>> {
+        let request = DropLogsRequest { of: Some(self.of.clone()), through: Some(through) };
+        let mut client = self.client.clone();
+        Box::pin(async move {
+            match tokio::time::timeout(DEADLINE, client.drop_logs(request)).await {
+                Ok(Ok(_)) => Ok(()),
+                Ok(Err(status)) => Err(link_error(&status)),
+                Err(_) => Err(local_cell::replicate::LinkError::Down(format!(
+                    "no answer within {DEADLINE:?}"
+                ))),
+            }
+        })
+    }
+}
+
+impl GrpcMember {
+    /// Appends `bytes` at `offset` of log `log` on the member, through its stream of appends,
+    /// opened if it isn't: the log's end there, as it answers.
+    async fn appended(
+        &self,
+        log: u64,
+        offset: u64,
+        bytes: Vec<u8>,
     ) -> Result<u64, local_cell::replicate::LinkError> {
         use local_cell::replicate::LinkError;
-        // One replicating thread per member calls this: the lock is never waited on.
-        let mut stream = self.stream.lock().unwrap();
-        let request =
-            AppendRequest { of: Some(self.of.clone()), log, offset, bytes: bytes.to_vec() };
-        let answered = self.runtime.block_on(async {
+        let mut stream = self.stream.lock().await;
+        let request = AppendRequest { of: Some(self.of.clone()), log, offset, bytes };
+        let answered = async {
             if stream.is_none() {
                 let (sending, sent) = tokio::sync::mpsc::channel(4);
                 let mut client = self.client.clone();
@@ -753,25 +795,12 @@ impl local_cell::replicate::MemberLink for GrpcMember {
                 Ok(None) => Err(LinkError::Down("the member ended the stream".into())),
                 Err(status) => Err(link_error(&status)),
             }
-        });
+        }
+        .await;
         if answered.is_err() {
             *stream = None;
         }
         answered
-    }
-
-    fn drop_through(&self, through: u64) -> Result<(), local_cell::replicate::LinkError> {
-        let request = DropLogsRequest { of: Some(self.of.clone()), through: Some(through) };
-        let mut client = self.client.clone();
-        let dropping =
-            async move { tokio::time::timeout(DEADLINE, client.drop_logs(request)).await };
-        match self.runtime.block_on(dropping) {
-            Ok(Ok(_)) => Ok(()),
-            Ok(Err(status)) => Err(link_error(&status)),
-            Err(_) => Err(local_cell::replicate::LinkError::Down(format!(
-                "no answer within {DEADLINE:?}"
-            ))),
-        }
     }
 }
 

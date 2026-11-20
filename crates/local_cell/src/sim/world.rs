@@ -496,36 +496,38 @@ impl Members for SimMembers {
 
     /// The first 2f by a hash of the configuration of the hosts this one reaches, those at `avoid`
     /// aside.
-    fn pick(
-        &self,
+    fn pick<'a>(
+        &'a self,
         cell: bucket_cell::layout::CellId,
         number: u64,
         f: u8,
-        avoid: &[String],
-    ) -> Result<Vec<bucket_cell::layout::Member>, String> {
-        let net = self.net.lock().unwrap();
-        let mut others: Vec<usize> = (0..net.replicas.len())
-            .filter(|&host| host != self.me && !net.blocked.contains(&(self.me, host)))
-            .filter(|&host| !avoid.contains(&address(host)))
-            .collect();
-        let rank = |host: &usize| {
-            let mut bytes = [0; 32];
-            bytes[..8].copy_from_slice(&cell.tenant.to_le_bytes());
-            bytes[8..16].copy_from_slice(&cell.id.to_le_bytes());
-            bytes[16..24].copy_from_slice(&number.to_le_bytes());
-            bytes[24..].copy_from_slice(&(*host as u64).to_le_bytes());
-            rapidhash::rapidhash(&bytes)
-        };
-        others.sort_by_key(rank);
-        let wanted = 2 * usize::from(f);
-        if others.len() < wanted {
-            return Err(format!("{} of the {wanted} members answered", others.len()));
-        }
-        let member = |host: usize| bucket_cell::layout::Member {
-            address: address(host),
-            incarnation: net.replicas[host].incarnation(),
-        };
-        Ok(others.into_iter().take(wanted).map(member).collect())
+        avoid: &'a [String],
+    ) -> futures::future::BoxFuture<'a, Result<Vec<bucket_cell::layout::Member>, String>> {
+        Box::pin(async move {
+            let net = self.net.lock().unwrap();
+            let mut others: Vec<usize> = (0..net.replicas.len())
+                .filter(|&host| host != self.me && !net.blocked.contains(&(self.me, host)))
+                .filter(|&host| !avoid.contains(&address(host)))
+                .collect();
+            let rank = |host: &usize| {
+                let mut bytes = [0; 32];
+                bytes[..8].copy_from_slice(&cell.tenant.to_le_bytes());
+                bytes[8..16].copy_from_slice(&cell.id.to_le_bytes());
+                bytes[16..24].copy_from_slice(&number.to_le_bytes());
+                bytes[24..].copy_from_slice(&(*host as u64).to_le_bytes());
+                rapidhash::rapidhash(&bytes)
+            };
+            others.sort_by_key(rank);
+            let wanted = 2 * usize::from(f);
+            if others.len() < wanted {
+                return Err(format!("{} of the {wanted} members answered", others.len()));
+            }
+            let member = |host: usize| bucket_cell::layout::Member {
+                address: address(host),
+                incarnation: net.replicas[host].incarnation(),
+            };
+            Ok(others.into_iter().take(wanted).map(member).collect())
+        })
     }
 
     fn link(
@@ -539,50 +541,56 @@ impl Members for SimMembers {
         Arc::new(SimLink { from: self.me, to, of, net: self.net.clone() })
     }
 
-    fn fence(
-        &self,
+    fn fence<'a>(
+        &'a self,
         cell: bucket_cell::layout::CellId,
-        configuration: &bucket_cell::layout::Configuration,
-        member: &bucket_cell::layout::Member,
+        configuration: &'a bucket_cell::layout::Configuration,
+        member: &'a bucket_cell::layout::Member,
         epoch: u64,
-    ) -> Result<Vec<(u64, u64)>, String> {
-        let (to, of) = (host_of(&member.address), Self::of(cell, configuration, member));
-        match Net::call(&self.net, (self.me, to), of, Call::Fence(epoch)) {
-            Ok(Answer::Ends(ends)) => Ok(ends),
-            Ok(_) => unreachable!("a fence answers ends"),
-            Err(failed) => Err(failed.to_string()),
-        }
-    }
-
-    fn read(
-        &self,
-        cell: bucket_cell::layout::CellId,
-        configuration: &bucket_cell::layout::Configuration,
-        member: &bucket_cell::layout::Member,
-        log: u64,
-    ) -> Result<Vec<u8>, String> {
-        let to = host_of(&member.address);
-        let replicas = {
-            let mut net = self.net.lock().unwrap();
-            match net.fate(self.me, to) {
-                Fate::Lands | Fate::Twice => net.replicas[to].clone(),
-                _ => return Err(format!("{} out of reach", member.address)),
+    ) -> futures::future::BoxFuture<'a, Result<Vec<(u64, u64)>, String>> {
+        Box::pin(async move {
+            let (to, of) = (host_of(&member.address), Self::of(cell, configuration, member));
+            match Net::call(&self.net, (self.me, to), of, Call::Fence(epoch)) {
+                Ok(Answer::Ends(ends)) => Ok(ends),
+                Ok(_) => unreachable!("a fence answers ends"),
+                Err(failed) => Err(failed.to_string()),
             }
-        };
-        let of = Self::of(cell, configuration, member);
-        replicas.read(of, log, 0, u64::MAX).map_err(|err| format!("{err:#}"))
+        })
     }
 
-    fn drop_before(
-        &self,
+    fn read<'a>(
+        &'a self,
         cell: bucket_cell::layout::CellId,
-        configuration: &bucket_cell::layout::Configuration,
-        member: &bucket_cell::layout::Member,
-    ) -> Result<(), String> {
-        let (to, of) = (host_of(&member.address), Self::of(cell, configuration, member));
-        Net::call(&self.net, (self.me, to), of, Call::Drop(None))
-            .map(drop)
-            .map_err(|failed| failed.to_string())
+        configuration: &'a bucket_cell::layout::Configuration,
+        member: &'a bucket_cell::layout::Member,
+        log: u64,
+    ) -> futures::future::BoxFuture<'a, Result<Vec<u8>, String>> {
+        Box::pin(async move {
+            let to = host_of(&member.address);
+            let replicas = {
+                let mut net = self.net.lock().unwrap();
+                match net.fate(self.me, to) {
+                    Fate::Lands | Fate::Twice => net.replicas[to].clone(),
+                    _ => return Err(format!("{} out of reach", member.address)),
+                }
+            };
+            let of = Self::of(cell, configuration, member);
+            replicas.read(of, log, 0, u64::MAX).map_err(|err| format!("{err:#}"))
+        })
+    }
+
+    fn drop_before<'a>(
+        &'a self,
+        cell: bucket_cell::layout::CellId,
+        configuration: &'a bucket_cell::layout::Configuration,
+        member: &'a bucket_cell::layout::Member,
+    ) -> futures::future::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            let (to, of) = (host_of(&member.address), Self::of(cell, configuration, member));
+            Net::call(&self.net, (self.me, to), of, Call::Drop(None))
+                .map(drop)
+                .map_err(|failed| failed.to_string())
+        })
     }
 
     fn drives(&self, replicator: &Arc<Replicator>) -> bool {
@@ -614,15 +622,26 @@ impl SimLink {
 }
 
 impl MemberLink for SimLink {
-    fn append(&self, log: u64, offset: u64, bytes: &[u8]) -> Result<u64, LinkError> {
-        match self.call(Call::Append { log, offset, bytes: bytes.to_vec() })? {
-            Answer::End(end) => Ok(end),
-            _ => unreachable!("an append answers its end"),
-        }
+    fn append<'a>(
+        &'a self,
+        log: u64,
+        offset: u64,
+        bytes: Vec<u8>,
+    ) -> futures::future::BoxFuture<'a, Result<u64, LinkError>> {
+        Box::pin(async move {
+            let bytes = &bytes[..];
+            match self.call(Call::Append { log, offset, bytes: bytes.to_vec() })? {
+                Answer::End(end) => Ok(end),
+                _ => unreachable!("an append answers its end"),
+            }
+        })
     }
 
-    fn drop_through(&self, through: u64) -> Result<(), LinkError> {
-        self.call(Call::Drop(Some(through))).map(drop)
+    fn drop_through<'a>(
+        &'a self,
+        through: u64,
+    ) -> futures::future::BoxFuture<'a, Result<(), LinkError>> {
+        Box::pin(async move { self.call(Call::Drop(Some(through))).map(drop) })
     }
 }
 

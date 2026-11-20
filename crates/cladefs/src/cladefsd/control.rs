@@ -29,6 +29,13 @@ pub mod proto {
     tonic::include_proto!("cladefs.cladefsd.v1");
 }
 
+/// cladefs: what a gRPC service names itself by: tonic's trait, or, under madsim, its tonic's
+/// (doc-24, TASK-685.13).
+#[cfg(not(madsim))]
+use tonic::server::NamedService;
+#[cfg(madsim)]
+use tonic::transport::NamedService;
+
 /// The metadata entry of a failed call's status holding the errno it failed with, a decimal
 /// number.
 pub const ERRNO: &str = "cladefs-errno";
@@ -45,6 +52,7 @@ pub const BLOCKING_THREADS: usize = 32;
 /// the daemon's FUSE mount of cells, if it has one ([`super::mount`], TASK-475.2): its calls,
 /// counted and refused as the daemon drains as the API's are; without a mount, they fail
 /// `UNIMPLEMENTED`.
+#[cfg(not(madsim))]
 pub fn serve_control(
     listener: std::os::unix::net::UnixListener,
     tenants: impl Into<PathBuf>,
@@ -83,6 +91,32 @@ pub fn serve_control(
             .await
             .map_err(std::io::Error::other)
     })
+}
+
+/// cladefs: serves the control API, as [`serve_control`] does, on the simulated network at
+/// `address`, under madsim, which has no Unix sockets: the socket is a deployment detail (doc-24's
+/// boundary, TASK-685.13). The health service, tonic's, which madsim's tonic doesn't serve, isn't;
+/// its status is reported all the same, as the daemon's drain waits for it. No FUSE mount's
+/// service: FUSE is outside the simulation.
+#[cfg(madsim)]
+pub async fn serve_control(
+    address: std::net::SocketAddr,
+    tenants: impl Into<PathBuf>,
+) -> std::io::Result<()> {
+    let control = Control { grants: Arc::new(Grants::new(tenants.into())) };
+    let mut serving = super::SERVING.get().subscribe();
+    super::REPORTED.get().send_replace(*serving.borrow_and_update());
+    tokio::spawn(async move {
+        while serving.changed().await.is_ok() {
+            super::REPORTED.get().send_replace(*serving.borrow_and_update());
+        }
+    });
+    CONTROL_SERVING.get().store(true, std::sync::atomic::Ordering::Release);
+    tonic::transport::Server::builder()
+        .add_service(Drained(CladefsdServer::new(control)))
+        .serve(address)
+        .await
+        .map_err(std::io::Error::other)
 }
 
 /// cladefs: `stats`, as the API has it (TASK-111.4).
@@ -128,16 +162,34 @@ pub(super) static CALLS: super::drain::Work = super::drain::Work::new();
 #[derive(Clone)]
 struct Drained<S>(S);
 
-impl<S: tonic::server::NamedService> tonic::server::NamedService for Drained<S> {
+impl<S: NamedService> NamedService for Drained<S> {
     const NAME: &'static str = S::NAME;
 }
 
-impl<S, B, Answer> tower::Service<http::Request<B>> for Drained<S>
+/// cladefs: what a service answers a call it refuses with: tonic's, an HTTP response saying the
+/// status; madsim's tonic's, the status itself (TASK-685.13).
+trait Refusal {
+    fn refused(status: Status) -> Self;
+}
+
+impl<Answer: Default, E> Refusal for Result<http::Response<Answer>, E> {
+    fn refused(status: Status) -> Self {
+        Ok(status.into_http())
+    }
+}
+
+#[cfg(madsim)]
+impl<M> Refusal for Result<tonic::Response<M>, Status> {
+    fn refused(status: Status) -> Self {
+        Err(status)
+    }
+}
+
+impl<S, Call> tower::Service<Call> for Drained<S>
 where
-    S: tower::Service<http::Request<B>, Response = http::Response<Answer>>,
+    S: tower::Service<Call>,
     S::Future: Send + 'static,
-    S::Error: Send + 'static,
-    Answer: Default + Send + 'static,
+    Result<S::Response, S::Error>: Refusal + Send + 'static,
 {
     type Response = S::Response;
     type Error = S::Error;
@@ -150,10 +202,10 @@ where
         self.0.poll_ready(cx)
     }
 
-    fn call(&mut self, request: http::Request<B>) -> Self::Future {
+    fn call(&mut self, request: Call) -> Self::Future {
         let Some(call) = CALLS.begin() else {
             let refused = Status::unavailable("the extent daemon drains, as it is about to exit");
-            return Box::pin(std::future::ready(Ok(refused.into_http())));
+            return Box::pin(std::future::ready(Refusal::refused(refused)));
         };
         let answered = self.0.call(request);
         Box::pin(async move {
@@ -177,8 +229,8 @@ pub(super) fn is_serving() -> bool {
 /// serves (TASK-48), `serving`: SERVING while it accepts VM processes' connections, NOT_SERVING
 /// as it starts and once it stops; the whole server's status, named "", and the control API's,
 /// alike. Its callers have it reported once it returns ([`super::stop_serving`] waits for that).
+#[cfg(not(madsim))]
 async fn report_health(reporter: &tonic_health::server::HealthReporter, serving: bool) {
-    use tonic::server::NamedService;
     use tonic_health::ServingStatus;
     let status = if serving { ServingStatus::Serving } else { ServingStatus::NotServing };
     reporter.set_service_status("", status).await;
@@ -188,6 +240,7 @@ async fn report_health(reporter: &tonic_health::server::HealthReporter, serving:
 
 /// A channel to the control API of the daemon listening at `socket`: for its clients, the API's
 /// and its health service's.
+#[cfg(not(madsim))]
 pub async fn channel(
     socket: impl AsRef<Path>,
 ) -> Result<tonic::transport::Channel, tonic::transport::Error> {
@@ -204,11 +257,48 @@ pub async fn channel(
         .await
 }
 
+/// cladefs: a channel to the control API of the daemon serving it at `address` on the simulated
+/// network ([`serve_control`], TASK-685.13).
+#[cfg(madsim)]
+pub async fn channel(
+    address: std::net::SocketAddr,
+) -> Result<tonic::transport::Channel, tonic::transport::Error> {
+    tonic::transport::Endpoint::from_shared(format!("http://{address}"))?.connect().await
+}
+
+/// cladefs: a channel to the control API at the Unix socket `socket`, as [`channel`] makes it: a
+/// blocking client's, cladefsctl's, outside the simulation, which has no Unix sockets (doc-24).
+pub(crate) async fn channel_socket(
+    socket: &Path,
+) -> Result<tonic::transport::Channel, tonic::transport::Error> {
+    #[cfg(not(madsim))]
+    return channel(socket).await;
+    #[cfg(madsim)]
+    panic!("{}: a Unix socket, which the simulation has none of", socket.display());
+}
+
+/// cladefs: a client of the control API at the Unix socket `socket` ([`channel_socket`]).
+async fn connect_socket(
+    socket: &Path,
+) -> Result<CladefsdClient<tonic::transport::Channel>, tonic::transport::Error> {
+    Ok(CladefsdClient::new(channel_socket(socket).await?))
+}
+
 /// A client of the control API of the daemon listening at `socket`.
+#[cfg(not(madsim))]
 pub async fn connect(
     socket: impl AsRef<Path>,
 ) -> Result<CladefsdClient<tonic::transport::Channel>, tonic::transport::Error> {
     Ok(CladefsdClient::new(channel(socket).await?))
+}
+
+/// cladefs: a client of the control API of the daemon serving it at `address` on the simulated
+/// network ([`serve_control`], TASK-685.13).
+#[cfg(madsim)]
+pub async fn connect(
+    address: std::net::SocketAddr,
+) -> Result<CladefsdClient<tonic::transport::Channel>, tonic::transport::Error> {
+    Ok(CladefsdClient::new(channel(address).await?))
 }
 
 /// The errno a call failed with, as its status's [`ERRNO`] entry has it, if it has one.
@@ -835,7 +925,7 @@ impl Client {
             .enable_all()
             .build()
             .map_err(crate::Error::new)?;
-        let client = runtime.block_on(connect(socket)).map_err(|err| {
+        let client = runtime.block_on(connect_socket(socket)).map_err(|err| {
             crate::Error::new(anyhow::Error::new(err).context(format!(
                 "connecting to the extent daemon's control socket at {}",
                 socket.display()

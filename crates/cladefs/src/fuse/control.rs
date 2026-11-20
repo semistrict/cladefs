@@ -12,7 +12,7 @@
 //! a cell is attached or detached whole, or not at all.
 
 use super::server::Server;
-use crate::cladefsd::control::{channel, errno, saying};
+use crate::cladefsd::control::{errno, saying};
 use crate::error::{Errno, Error};
 use crate::{CellId, CellOf, Filesystem, SetAttr, Storage};
 use base32_id::Padded;
@@ -43,6 +43,7 @@ pub struct Stores {
 /// The Mount service of `server`, a server of many stores, which attaches cells as `stores` says:
 /// what the daemon serves on its control socket, beside its other services, if it mounts cells
 /// (`crate::cladefsd::mount`, TASK-475.2).
+#[cfg(not(madsim))]
 pub(crate) fn service(
     server: &Arc<Server>,
     stores: Stores,
@@ -370,12 +371,13 @@ impl Client {
             .enable_all()
             .build()
             .map_err(Error::new)?;
-        let channel = runtime.block_on(channel(socket)).map_err(|err| {
-            Error::new(anyhow::Error::new(err).context(format!(
-                "connecting to the daemon's control socket at {}",
-                socket.display()
-            )))
-        })?;
+        let channel =
+            runtime.block_on(crate::cladefsd::control::channel_socket(socket)).map_err(|err| {
+                Error::new(anyhow::Error::new(err).context(format!(
+                    "connecting to the daemon's control socket at {}",
+                    socket.display()
+                )))
+            })?;
         Ok(Self { runtime, client: MountClient::new(channel) })
     }
 

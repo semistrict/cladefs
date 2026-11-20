@@ -290,17 +290,12 @@ pub fn start(config: DiskConfig) -> Result<(), String> {
     if STARTED.get().set(()).is_err() {
         return Ok(());
     }
-    std::thread::Builder::new()
-        .name("disk governor".into())
-        .spawn(move || {
-            let mut errors = std::collections::HashSet::new();
-            loop {
-                govern_once(config, &mut errors);
-                host_disk::wait_for_governor(super::governor::INTERVAL);
-            }
-        })
-        .map_err(|err| format!("starting the disk governor: {err}"))?;
-    Ok(())
+    let mut errors = std::collections::HashSet::new();
+    let governing = move || govern_once(config, &mut errors);
+    let (every, woken) = (super::governor::INTERVAL, host_disk::wait_for_governor);
+    // cladefs: a thread of its own, or under madsim a task (`super::run`, doc-24 step 12).
+    super::run::every("disk governor", every, woken, governing)
+        .map_err(|err| format!("starting the disk governor: {err}"))
 }
 
 /// cladefs: the disk governor's look at the host's disks, as `config` says (doc-22, TASK-539.9): each

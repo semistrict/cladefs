@@ -173,8 +173,9 @@ pub(crate) fn decoded_held() -> bucket_cell::recovery::Held {
 }
 
 /// Makes `bucket` this process's of `url`, before any store naming it opens, as the tests do the
-/// buckets they put themselves in front of; unless it is already, the same.
-#[cfg(test)]
+/// buckets they put themselves in front of, and the simulation the bucket its hosts share; unless it
+/// is already, the same.
+#[cfg(any(test, madsim))]
 pub(crate) fn use_bucket(url: &str, bucket: Arc<ObjectBucket>) {
     let mut buckets = BUCKETS.get().lock().unwrap();
     let had = buckets.entry(url.to_owned()).or_insert_with(|| bucket.clone());

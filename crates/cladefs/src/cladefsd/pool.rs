@@ -58,6 +58,20 @@ impl Pool {
     /// Runs `job` on a thread of the pool: an idle one, or a new one, unless it runs as many as it
     /// may already, when the job waits for one. Returns false if no worker could take it.
     pub(super) fn run(&'static self, job: Job) -> bool {
+        // cladefs: under madsim, a task of the simulated host's: its jobs block on nothing but the
+        // simulated disk, which is memory (doc-24 step 11).
+        #[cfg(madsim)]
+        {
+            drop(tokio::spawn(async move { job() }));
+            true
+        }
+        #[cfg(not(madsim))]
+        self.run_on_threads(job)
+    }
+
+    /// Runs `job` as [`Pool::run`] does, on a thread of the pool.
+    #[cfg(not(madsim))]
+    fn run_on_threads(&'static self, job: Job) -> bool {
         let mut state = self.state.lock().unwrap();
         if state.idle <= state.jobs.len() && state.threads < self.max {
             match std::thread::Builder::new().name(self.name.into()).spawn(move || self.work_on()) {

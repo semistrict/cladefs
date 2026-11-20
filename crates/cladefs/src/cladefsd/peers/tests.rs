@@ -29,7 +29,9 @@ fn serving_in(bucket: &Arc<ObjectBucket>, dir: &std::path::Path, region: Option<
     let address = listener.local_addr().unwrap().to_string();
     let serving = crate::bucket::serving_peers(bucket.clone(), cache).unwrap();
     let server = Server { bucket: URL.to_owned(), region, serving, replicas: None };
-    std::thread::spawn(move || serve(listener, server));
+    // On a runtime of its own, as the daemon serves its peers (`super::super::run::service`).
+    let serving = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    std::thread::spawn(move || serving.block_on(serve(listener, server)));
     address
 }
 
@@ -167,7 +169,9 @@ fn member(dir: &std::path::Path, with: bool) -> (String, Option<Arc<Replicas<Hos
     let serving = crate::bucket::serving_peers(bucket, cache).unwrap();
     let server =
         Server { bucket: URL.to_owned(), region: None, serving, replicas: replicas.clone() };
-    std::thread::spawn(move || serve(listener, server));
+    // On a runtime of its own, as the daemon serves its peers (`super::super::run::service`).
+    let serving = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    std::thread::spawn(move || serving.block_on(serve(listener, server)));
     (address, replicas)
 }
 
@@ -357,18 +361,23 @@ fn writers_append_to_members_through_their_links() {
         incarnation: replicas.incarnation(),
     };
     let link = members.link(cell, &configuration, &ours);
-    assert_eq!(link.append(log_of(1), 0, b"abc"), Ok(3));
-    assert_eq!(link.append(log_of(1), 3, b"def"), Ok(6));
-    assert_eq!(link.append(log_of(1), 9, b"gap"), Ok(6), "past the end: the end");
+    assert_eq!(runtime.block_on(link.append(log_of(1), 0, b"abc".to_vec())), Ok(3));
+    assert_eq!(runtime.block_on(link.append(log_of(1), 3, b"def".to_vec())), Ok(6));
+    assert_eq!(
+        runtime.block_on(link.append(log_of(1), 9, b"gap".to_vec())),
+        Ok(6),
+        "past the end: the end"
+    );
     let of = (cell, Key { number: 1, epoch: 4 }, replicas.incarnation());
     assert_eq!(replicas.read(of, log_of(1), 0, 100).unwrap(), b"abcdef");
-    assert_eq!(link.drop_through(0), Ok(()));
+    assert_eq!(runtime.block_on(link.drop_through(0)), Ok(()));
 
     replicas.fence(of, 5).unwrap();
-    let fenced = link.append(log_of(1), 6, b"late");
+    let fenced = runtime.block_on(link.append(log_of(1), 6, b"late".to_vec()));
     assert!(matches!(fenced, Err(LinkError::Fenced(_))), "{fenced:?}");
 
     let wrong = bucket_cell::layout::Member { address, incarnation: ours.incarnation ^ 1 };
-    let refused = members.link(cell, &configuration, &wrong).append(log_of(1), 0, b"x");
+    let refused = members.link(cell, &configuration, &wrong);
+    let refused = runtime.block_on(refused.append(log_of(1), 0, b"x".to_vec()));
     assert!(matches!(refused, Err(LinkError::Refused(_))), "{refused:?}");
 }

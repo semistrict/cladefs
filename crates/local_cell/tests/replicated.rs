@@ -47,20 +47,33 @@ struct Member {
 }
 
 impl MemberLink for Member {
-    fn append(&self, log: u64, offset: u64, bytes: &[u8]) -> Result<u64, LinkError> {
-        let mut logs = self.logs.lock().unwrap();
-        let held = logs.entry(log).or_default();
-        if offset > held.len() as u64 {
-            return Ok(held.len() as u64);
-        }
-        held.truncate(offset as usize);
-        held.extend_from_slice(bytes);
-        Ok(held.len() as u64)
+    fn append<'a>(
+        &'a self,
+        log: u64,
+        offset: u64,
+        bytes: Vec<u8>,
+    ) -> futures::future::BoxFuture<'a, Result<u64, LinkError>> {
+        Box::pin(async move {
+            let bytes = &bytes[..];
+            let mut logs = self.logs.lock().unwrap();
+            let held = logs.entry(log).or_default();
+            if offset > held.len() as u64 {
+                return Ok(held.len() as u64);
+            }
+            held.truncate(offset as usize);
+            held.extend_from_slice(bytes);
+            Ok(held.len() as u64)
+        })
     }
 
-    fn drop_through(&self, through: u64) -> Result<(), LinkError> {
-        self.logs.lock().unwrap().retain(|&log, _| log > through);
-        Ok(())
+    fn drop_through<'a>(
+        &'a self,
+        through: u64,
+    ) -> futures::future::BoxFuture<'a, Result<(), LinkError>> {
+        Box::pin(async move {
+            self.logs.lock().unwrap().retain(|&log, _| log > through);
+            Ok(())
+        })
     }
 }
 
@@ -68,12 +81,17 @@ impl MemberLink for Member {
 struct Down;
 
 impl MemberLink for Down {
-    fn append(&self, _: u64, _: u64, _: &[u8]) -> Result<u64, LinkError> {
-        Err(LinkError::Down("out of reach".into()))
+    fn append<'a>(
+        &'a self,
+        _: u64,
+        _: u64,
+        _: Vec<u8>,
+    ) -> futures::future::BoxFuture<'a, Result<u64, LinkError>> {
+        Box::pin(async move { Err(LinkError::Down("out of reach".into())) })
     }
 
-    fn drop_through(&self, _: u64) -> Result<(), LinkError> {
-        Err(LinkError::Down("out of reach".into()))
+    fn drop_through<'a>(&'a self, _: u64) -> futures::future::BoxFuture<'a, Result<(), LinkError>> {
+        Box::pin(async move { Err(LinkError::Down("out of reach".into())) })
     }
 }
 
@@ -274,14 +292,27 @@ fn link_error(err: local_cell::replica::Error) -> LinkError {
 }
 
 impl MemberLink for Link {
-    fn append(&self, log: u64, offset: u64, bytes: &[u8]) -> Result<u64, LinkError> {
-        self.reach()?;
-        self.replicas.append(self.of, log, offset, bytes).map_err(link_error)
+    fn append<'a>(
+        &'a self,
+        log: u64,
+        offset: u64,
+        bytes: Vec<u8>,
+    ) -> futures::future::BoxFuture<'a, Result<u64, LinkError>> {
+        Box::pin(async move {
+            let bytes = &bytes[..];
+            self.reach()?;
+            self.replicas.append(self.of, log, offset, bytes).map_err(link_error)
+        })
     }
 
-    fn drop_through(&self, through: u64) -> Result<(), LinkError> {
-        self.reach()?;
-        self.replicas.drop_logs(self.of, Some(through)).map_err(link_error)
+    fn drop_through<'a>(
+        &'a self,
+        through: u64,
+    ) -> futures::future::BoxFuture<'a, Result<(), LinkError>> {
+        Box::pin(async move {
+            self.reach()?;
+            self.replicas.drop_logs(self.of, Some(through)).map_err(link_error)
+        })
     }
 }
 
@@ -293,28 +324,30 @@ impl local_cell::upload::Members for Peers {
         })
     }
 
-    fn pick(
-        &self,
+    fn pick<'a>(
+        &'a self,
         _: bucket_cell::layout::CellId,
         _: u64,
         f: u8,
-        avoid: &[String],
-    ) -> Result<Vec<bucket_cell::layout::Member>, String> {
-        let lost = self.lost.lock().unwrap().clone();
-        let others = self.all.iter().filter(|(address, _)| {
-            **address != self.me && !lost.contains(*address) && !avoid.contains(address)
-        });
-        let picked: Vec<_> = others
-            .take(2 * usize::from(f))
-            .map(|(address, replicas)| bucket_cell::layout::Member {
-                address: address.clone(),
-                incarnation: replicas.incarnation(),
-            })
-            .collect();
-        match picked.len() == 2 * usize::from(f) {
-            true => Ok(picked),
-            false => Err(format!("{} peers", picked.len())),
-        }
+        avoid: &'a [String],
+    ) -> futures::future::BoxFuture<'a, Result<Vec<bucket_cell::layout::Member>, String>> {
+        Box::pin(async move {
+            let lost = self.lost.lock().unwrap().clone();
+            let others = self.all.iter().filter(|(address, _)| {
+                **address != self.me && !lost.contains(*address) && !avoid.contains(address)
+            });
+            let picked: Vec<_> = others
+                .take(2 * usize::from(f))
+                .map(|(address, replicas)| bucket_cell::layout::Member {
+                    address: address.clone(),
+                    incarnation: replicas.incarnation(),
+                })
+                .collect();
+            match picked.len() == 2 * usize::from(f) {
+                true => Ok(picked),
+                false => Err(format!("{} peers", picked.len())),
+            }
+        })
     }
 
     fn link(
@@ -328,39 +361,45 @@ impl local_cell::upload::Members for Peers {
         Arc::new(Link { replicas, of, address: member.address.clone(), lost: self.lost.clone() })
     }
 
-    fn fence(
-        &self,
+    fn fence<'a>(
+        &'a self,
         cell: bucket_cell::layout::CellId,
-        configuration: &bucket_cell::layout::Configuration,
-        member: &bucket_cell::layout::Member,
+        configuration: &'a bucket_cell::layout::Configuration,
+        member: &'a bucket_cell::layout::Member,
         epoch: u64,
-    ) -> Result<Vec<(u64, u64)>, String> {
-        let replicas = self.reach(&member.address)?;
-        let of = (cell, key(configuration), member.incarnation);
-        replicas.fence(of, epoch).map_err(|err| err.to_string())
+    ) -> futures::future::BoxFuture<'a, Result<Vec<(u64, u64)>, String>> {
+        Box::pin(async move {
+            let replicas = self.reach(&member.address)?;
+            let of = (cell, key(configuration), member.incarnation);
+            replicas.fence(of, epoch).map_err(|err| err.to_string())
+        })
     }
 
-    fn read(
-        &self,
+    fn read<'a>(
+        &'a self,
         cell: bucket_cell::layout::CellId,
-        configuration: &bucket_cell::layout::Configuration,
-        member: &bucket_cell::layout::Member,
+        configuration: &'a bucket_cell::layout::Configuration,
+        member: &'a bucket_cell::layout::Member,
         log: u64,
-    ) -> Result<Vec<u8>, String> {
-        let replicas = self.reach(&member.address)?;
-        let of = (cell, key(configuration), member.incarnation);
-        replicas.read(of, log, 0, u64::MAX).map_err(|err| err.to_string())
+    ) -> futures::future::BoxFuture<'a, Result<Vec<u8>, String>> {
+        Box::pin(async move {
+            let replicas = self.reach(&member.address)?;
+            let of = (cell, key(configuration), member.incarnation);
+            replicas.read(of, log, 0, u64::MAX).map_err(|err| err.to_string())
+        })
     }
 
-    fn drop_before(
-        &self,
+    fn drop_before<'a>(
+        &'a self,
         cell: bucket_cell::layout::CellId,
-        configuration: &bucket_cell::layout::Configuration,
-        member: &bucket_cell::layout::Member,
-    ) -> Result<(), String> {
-        let replicas = self.reach(&member.address)?;
-        let of = (cell, key(configuration), member.incarnation);
-        replicas.drop_logs(of, None).map_err(|err| err.to_string())
+        configuration: &'a bucket_cell::layout::Configuration,
+        member: &'a bucket_cell::layout::Member,
+    ) -> futures::future::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            let replicas = self.reach(&member.address)?;
+            let of = (cell, key(configuration), member.incarnation);
+            replicas.drop_logs(of, None).map_err(|err| err.to_string())
+        })
     }
 }
 
@@ -519,29 +558,42 @@ fn takes_without_enough_members_to_fence_are_refused() {
 #[derive(Default)]
 struct Gated {
     member: Member,
-    open: Mutex<bool>,
-    opened: std::sync::Condvar,
+    open: std::sync::atomic::AtomicBool,
+    opened: event_listener::Event,
 }
 
 impl Gated {
     fn open(&self) {
-        *self.open.lock().unwrap() = true;
-        self.opened.notify_all();
+        self.open.store(true, std::sync::atomic::Ordering::Release);
+        self.opened.notify(usize::MAX);
     }
 }
 
 impl MemberLink for Gated {
-    fn append(&self, log: u64, offset: u64, bytes: &[u8]) -> Result<u64, LinkError> {
-        let mut open = self.open.lock().unwrap();
-        while !*open {
-            open = self.opened.wait(open).unwrap();
-        }
-        drop(open);
-        self.member.append(log, offset, bytes)
+    fn append<'a>(
+        &'a self,
+        log: u64,
+        offset: u64,
+        bytes: Vec<u8>,
+    ) -> futures::future::BoxFuture<'a, Result<u64, LinkError>> {
+        Box::pin(async move {
+            // Holding no thread as it waits: a task of the bucket runtime's.
+            while !self.open.load(std::sync::atomic::Ordering::Acquire) {
+                let opened = self.opened.listen();
+                if self.open.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
+                opened.await;
+            }
+            self.member.append(log, offset, bytes).await
+        })
     }
 
-    fn drop_through(&self, through: u64) -> Result<(), LinkError> {
-        self.member.drop_through(through)
+    fn drop_through<'a>(
+        &'a self,
+        through: u64,
+    ) -> futures::future::BoxFuture<'a, Result<(), LinkError>> {
+        Box::pin(async move { self.member.drop_through(through).await })
     }
 }
 
@@ -1201,13 +1253,13 @@ impl local_cell::upload::Members for Garbling {
         self.peers.me()
     }
 
-    fn pick(
-        &self,
+    fn pick<'a>(
+        &'a self,
         cell: bucket_cell::layout::CellId,
         number: u64,
         f: u8,
-        avoid: &[String],
-    ) -> Result<Vec<bucket_cell::layout::Member>, String> {
+        avoid: &'a [String],
+    ) -> futures::future::BoxFuture<'a, Result<Vec<bucket_cell::layout::Member>, String>> {
         self.peers.pick(cell, number, f, avoid)
     }
 
@@ -1220,43 +1272,47 @@ impl local_cell::upload::Members for Garbling {
         self.peers.link(cell, configuration, member)
     }
 
-    fn fence(
-        &self,
+    fn fence<'a>(
+        &'a self,
         cell: bucket_cell::layout::CellId,
-        configuration: &bucket_cell::layout::Configuration,
-        member: &bucket_cell::layout::Member,
+        configuration: &'a bucket_cell::layout::Configuration,
+        member: &'a bucket_cell::layout::Member,
         epoch: u64,
-    ) -> Result<Vec<(u64, u64)>, String> {
-        let ends = self.peers.fence(cell, configuration, member, epoch)?;
-        Ok(match member.address == self.garbled {
-            true => ends
-                .into_iter()
-                .map(|(log, end)| (log, end + if log & 1 == 0 { PAD as u64 } else { 0 }))
-                .collect(),
-            false => ends,
+    ) -> futures::future::BoxFuture<'a, Result<Vec<(u64, u64)>, String>> {
+        Box::pin(async move {
+            let ends = self.peers.fence(cell, configuration, member, epoch).await?;
+            Ok(match member.address == self.garbled {
+                true => ends
+                    .into_iter()
+                    .map(|(log, end)| (log, end + if log & 1 == 0 { PAD as u64 } else { 0 }))
+                    .collect(),
+                false => ends,
+            })
         })
     }
 
-    fn read(
-        &self,
+    fn read<'a>(
+        &'a self,
         cell: bucket_cell::layout::CellId,
-        configuration: &bucket_cell::layout::Configuration,
-        member: &bucket_cell::layout::Member,
+        configuration: &'a bucket_cell::layout::Configuration,
+        member: &'a bucket_cell::layout::Member,
         log: u64,
-    ) -> Result<Vec<u8>, String> {
-        let mut bytes = self.peers.read(cell, configuration, member, log)?;
-        if member.address == self.garbled && log & 1 == 0 {
-            bytes.extend(std::iter::repeat_n(0xa5, PAD));
-        }
-        Ok(bytes)
+    ) -> futures::future::BoxFuture<'a, Result<Vec<u8>, String>> {
+        Box::pin(async move {
+            let mut bytes = self.peers.read(cell, configuration, member, log).await?;
+            if member.address == self.garbled && log & 1 == 0 {
+                bytes.extend(std::iter::repeat_n(0xa5, PAD));
+            }
+            Ok(bytes)
+        })
     }
 
-    fn drop_before(
-        &self,
+    fn drop_before<'a>(
+        &'a self,
         cell: bucket_cell::layout::CellId,
-        configuration: &bucket_cell::layout::Configuration,
-        member: &bucket_cell::layout::Member,
-    ) -> Result<(), String> {
+        configuration: &'a bucket_cell::layout::Configuration,
+        member: &'a bucket_cell::layout::Member,
+    ) -> futures::future::BoxFuture<'a, Result<(), String>> {
         self.peers.drop_before(cell, configuration, member)
     }
 }

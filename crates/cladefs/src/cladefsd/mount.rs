@@ -99,7 +99,9 @@ pub fn start(config: &Config, bucket: String) -> Result<(), Error> {
     Ok(())
 }
 
-/// The Mount service of the daemon's mount, if it has one ([`start`]).
+/// The Mount service of the daemon's mount, if it has one ([`start`]). cladefs: none under madsim,
+/// FUSE being outside the simulation (doc-24).
+#[cfg(not(madsim))]
 pub(super) fn service() -> Option<
     control::proto::mount_server::MountServer<impl control::proto::mount_server::Mount + use<>>,
 > {

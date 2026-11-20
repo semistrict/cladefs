@@ -18,7 +18,7 @@
 //! them ([`Replicator::base`]), so that what a guest is told replicated is a prefix of the cell's
 //! commits, each in the bucket or on f+1 copies.
 //!
-//! Each member is sent what it lacks, by a thread of its own, through a [`MemberLink`], in pieces
+//! Each member is sent what it lacks, by a task of its own, through a [`MemberLink`], in pieces
 //! of [`PIECE`] at most (or, in the simulation, one turn at a time as its scheduler says,
 //! [`Replicator::idle`] and [`Replicator::drive`]), and answers the end of the log it holds, synced; one answering less than
 //! it was sent (an append past its end, as a member that lost what it had) is sent again from its
@@ -34,9 +34,11 @@
 //! durable state, the store's own log being: it is synced never, and emptied as a replicator
 //! starts. Its failing breaks the replicator, whose commits then wait for the bucket.
 
+use event_listener::Event;
+use futures::FutureExt as _;
+use futures::future::BoxFuture;
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::{Arc, Condvar, Mutex};
-use std::thread::JoinHandle;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// The most of a log a member is sent at once.
@@ -291,12 +293,19 @@ impl Spool for MemSpool {
     }
 }
 
-/// How the writer reaches a member of its configuration.
+/// How the writer reaches a member of its configuration: each call a future, which holds no thread
+/// as it waits for the member (doc-24 step 10). The simulation's answer at once
+/// ([`Replicator::drive`]).
 pub trait MemberLink: Send + Sync + 'static {
     /// Appends `bytes` at `offset` of the member's log `log`: the log's end there, synced.
-    fn append(&self, log: u64, offset: u64, bytes: &[u8]) -> Result<u64, LinkError>;
+    fn append(
+        &self,
+        log: u64,
+        offset: u64,
+        bytes: Vec<u8>,
+    ) -> BoxFuture<'_, Result<u64, LinkError>>;
     /// Drops the member's logs to `through`, whose segments the head names.
-    fn drop_through(&self, through: u64) -> Result<(), LinkError>;
+    fn drop_through(&self, through: u64) -> BoxFuture<'_, Result<(), LinkError>>;
 }
 
 /// Why a member did not take what it was sent.
@@ -323,10 +332,10 @@ pub struct Replicator {
     shared: Arc<Shared>,
     /// Each member's link, by its place among [`State::members`].
     links: Mutex<Vec<Arc<dyn MemberLink>>>,
-    /// Whether each member is served by a thread of its own ([`Replicator::run_threads`]), or
+    /// Whether each member is served by a task of its own ([`Replicator::run_tasks`]), or
     /// driven, a turn at a time ([`Replicator::drive`]).
     threaded: std::sync::atomic::AtomicBool,
-    threads: Mutex<Vec<JoinHandle<()>>>,
+    tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 /// What a turn of a member's did ([`turn`]).
@@ -351,7 +360,8 @@ struct Shared {
     base: std::sync::atomic::AtomicU64,
     spool: Arc<dyn Spool>,
     state: Mutex<State>,
-    changed: Condvar,
+    /// Said as its state changes, to the members' tasks waiting for something to send.
+    changed: Event,
     /// Called once more is replicated, or the writer is fenced, holding no lock.
     notify: Box<dyn Fn() + Send + Sync>,
 }
@@ -499,12 +509,12 @@ impl Replicator {
         notify: impl Fn() + Send + Sync + 'static,
     ) -> Arc<Self> {
         let replicator = Self::idle(f, base, spool, links, notify);
-        replicator.run_threads();
+        replicator.run_tasks();
         replicator
     }
 
     /// A replicator as [`Replicator::start`] makes it, whose members nothing serves yet: by a
-    /// thread each once [`Replicator::run_threads`] starts them, or a turn at a time as
+    /// task each once [`Replicator::run_tasks`] starts them, or a turn at a time as
     /// [`Replicator::drive`] is called, as the simulation's scheduler does, so that a seed decides
     /// what each member is sent and when (TASK-680).
     pub fn idle(
@@ -524,19 +534,20 @@ impl Replicator {
             base: base.into(),
             spool,
             state: Mutex::new(state),
-            changed: Condvar::new(),
+            changed: Event::new(),
             notify: Box::new(notify),
         });
         Arc::new(Self {
             shared,
             links: Mutex::new(links),
             threaded: false.into(),
-            threads: Mutex::default(),
+            tasks: Mutex::default(),
         })
     }
 
-    /// Serves each member by a thread of its own, from now on, and those of replacements.
-    pub fn run_threads(&self) {
+    /// Serves each member by a task of its own, on the host's bucket runtime, from now on, and
+    /// those of replacements.
+    pub fn run_tasks(&self) {
         self.threaded.store(true, std::sync::atomic::Ordering::Release);
         let links = self.links.lock().unwrap().clone();
         self.serve(0, links);
@@ -548,33 +559,37 @@ impl Replicator {
         self.links.lock().unwrap().len()
     }
 
-    /// A turn of member `m`'s, of a replicator no threads serve ([`Replicator::idle`]): sends it
+    /// A turn of member `m`'s, of a replicator no tasks serve ([`Replicator::idle`]): sends it
     /// what it lacks next, if anything, and takes in its answer. Whether it was sent anything and
-    /// answered.
+    /// answered. The simulation's links answer at once: a turn is done in its first poll.
     pub fn drive(&self, m: usize) -> bool {
         debug_assert!(!self.threaded.load(std::sync::atomic::Ordering::Acquire), "driven");
         let Some(link) = self.links.lock().unwrap().get(m).cloned() else { return false };
-        turn(&self.shared, m, &*link) == Turn::Sent
+        let turned = turn(&self.shared, m, &*link).now_or_never();
+        turned.expect("a driven member answers at once") == Turn::Sent
     }
 
-    /// Starts a thread serving each of `links`, the members from `first` on.
+    /// Starts a task serving each of `links`, the members from `first` on, on the host's bucket
+    /// runtime, which their links' calls run on too (doc-24 step 10). A runtime that can't be had
+    /// breaks the replicator, whose commits then wait for the bucket.
     fn serve(&self, first: usize, links: Vec<Arc<dyn MemberLink>>) {
-        let mut threads = self.threads.lock().unwrap();
-        // Those of members retired that finished, joined (Codex's review of TASK-537.3.5).
-        let (finished, running) = std::mem::take(&mut *threads)
-            .into_iter()
-            .partition::<Vec<_>, _>(|thread| thread.is_finished());
-        *threads = running;
-        for thread in finished {
-            let _ = thread.join();
-        }
+        let runtime = match crate::upload::bucket_runtime() {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                let why = format!("the bucket runtime, to serve the members on: {err}");
+                log::error!("cladefs: replicating: {why}");
+                self.shared.state.lock().unwrap().broken = Some(why);
+                self.shared.changed.notify(usize::MAX);
+                (self.shared.notify)();
+                return;
+            }
+        };
+        let mut tasks = self.tasks.lock().unwrap();
+        // Those of members retired that finished, let go of (Codex's review of TASK-537.3.5).
+        tasks.retain(|task| !task.is_finished());
         for (m, link) in (first..).zip(links) {
             let shared = self.shared.clone();
-            let thread = std::thread::Builder::new()
-                .name("cladefs replicate".into())
-                .spawn(move || serve(&shared, m, &*link))
-                .expect("a replicating thread");
-            threads.push(thread);
+            tasks.push(runtime.spawn(async move { serve(&shared, m, &*link).await }));
         }
     }
 
@@ -589,7 +604,7 @@ impl Replicator {
             if let Err(err) = self.shared.spool.append(*log, have, bytes) {
                 state.broken = Some(format!("spooling log {log}: {err}"));
                 drop(state);
-                self.shared.changed.notify_all();
+                self.shared.changed.notify(usize::MAX);
                 (self.shared.notify)();
                 return Err(err);
             }
@@ -604,7 +619,7 @@ impl Replicator {
         }
         let moved = state.advance();
         drop(state);
-        self.shared.changed.notify_all();
+        self.shared.changed.notify(usize::MAX);
         if moved {
             (self.shared.notify)();
         }
@@ -629,7 +644,7 @@ impl Replicator {
         }
         let moved = state.advance();
         drop(state);
-        self.shared.changed.notify_all();
+        self.shared.changed.notify(usize::MAX);
         if moved {
             (self.shared.notify)();
         }
@@ -700,7 +715,7 @@ impl Replicator {
         retire(&mut state, gone);
         let moved = state.advance();
         drop(state);
-        self.shared.changed.notify_all();
+        self.shared.changed.notify(usize::MAX);
         if moved {
             (self.shared.notify)();
         }
@@ -719,7 +734,7 @@ impl Replicator {
         }
         let moved = state.advance();
         drop(state);
-        self.shared.changed.notify_all();
+        self.shared.changed.notify(usize::MAX);
         if moved {
             (self.shared.notify)();
         }
@@ -811,7 +826,7 @@ impl Replicator {
     pub fn break_with(&self, why: String) {
         log::error!("cladefs: replicating: {why}");
         self.shared.state.lock().unwrap().broken.get_or_insert(why);
-        self.shared.changed.notify_all();
+        self.shared.changed.notify(usize::MAX);
         (self.shared.notify)();
     }
 
@@ -835,11 +850,11 @@ impl Replicator {
             }
         }
         drop(state);
-        self.shared.changed.notify_all();
+        self.shared.changed.notify(usize::MAX);
     }
 }
 
-/// Retires the members of `group`, a configuration replaced or given up: their threads stop.
+/// Retires the members of `group`, a configuration replaced or given up: their tasks stop.
 fn retire(state: &mut State, group: Group) {
     for member in &mut state.members[group.members] {
         member.retired = true;
@@ -849,45 +864,48 @@ fn retire(state: &mut State, group: Group) {
 }
 
 impl Drop for Replicator {
+    /// Its members' tasks stop: each at its next turn, or as it waits for one, holding no thread
+    /// meanwhile. What a task sends as it is dropped is a member's to take or not: nothing waits
+    /// for its answer.
     fn drop(&mut self) {
         self.shared.state.lock().unwrap().stopping = true;
-        self.shared.changed.notify_all();
-        for thread in self.threads.lock().unwrap().drain(..) {
-            let _ = thread.join();
-        }
+        self.shared.changed.notify(usize::MAX);
     }
 }
 
 /// Sends member `m`, through `link`, what it lacks, until the replicator stops or retires it: a
 /// [`turn`] after another, waiting while it has nothing to send, and backing off, from 50 ms,
-/// doubling, to 5 s, while the member is out of reach.
-fn serve(shared: &Shared, m: usize, link: &dyn MemberLink) {
+/// doubling, to 5 s, while the member is out of reach. A task, which holds no thread as it waits.
+async fn serve(shared: &Shared, m: usize, link: &dyn MemberLink) {
     let mut wait = Duration::from_millis(50);
     loop {
-        match turn(shared, m, link) {
+        match turn(shared, m, link).await {
             Turn::Stop => return,
             Turn::Sent => wait = Duration::from_millis(50),
             Turn::Again => {}
             Turn::Retry => {
-                std::thread::sleep(wait);
+                tokio::time::sleep(wait).await;
                 wait = (wait * 2).min(Duration::from_secs(5));
             }
-            Turn::Idle => {
-                let mut state = shared.state.lock().unwrap();
-                while state.next(m).is_none() {
+            Turn::Idle => loop {
+                let changed = shared.changed.listen();
+                {
+                    let state = shared.state.lock().unwrap();
+                    if state.next(m).is_some() {
+                        break;
+                    }
                     if state.stopping || state.members[m].retired {
                         return;
                     }
-                    crate::blocks!("a replicator's member thread, idle");
-                    state = shared.changed.wait(state).unwrap();
                 }
-            }
+                changed.await;
+            },
         }
     }
 }
 
 /// Sends member `m`, through `link`, what it lacks next, if anything, and takes in its answer.
-fn turn(shared: &Shared, m: usize, link: &dyn MemberLink) -> Turn {
+async fn turn(shared: &Shared, m: usize, link: &dyn MemberLink) -> Turn {
     let sending = {
         let state = shared.state.lock().unwrap();
         if state.stopping || state.members[m].retired {
@@ -905,14 +923,21 @@ fn turn(shared: &Shared, m: usize, link: &dyn MemberLink) -> Turn {
         }
     };
     let done = match &sending {
-        Sending::Drop(through) => link.drop_through(*through).map(|()| None),
-        Sending::Append { log, offset, len } => match shared.spool.read(*log, *offset, *len) {
-            Ok(bytes) if bytes.len() as u64 == *len => link.append(*log, *offset, &bytes).map(Some),
+        Sending::Drop(through) => link.drop_through(*through).await.map(|()| None),
+        // cladefs: the spool's read off the runtime's threads (`upload::blocking`).
+        Sending::Append { log, offset, len } => match crate::upload::blocking(|| {
+            shared.spool.read(*log, *offset, *len)
+        }) {
+            Ok(bytes) if bytes.len() as u64 == *len => {
+                link.append(*log, *offset, bytes).await.map(Some)
+            }
             // Dropped since it was chosen, the head naming its segment (Codex's review of
             // TASK-537.3.3): nothing to send, nothing broken.
             _ if shared.state.lock().unwrap().dropped.is_some_and(|dropped| *log <= dropped) => {
                 return Turn::Again;
             }
+            // The replicator stopped meanwhile, its spool going with it: nothing broken.
+            _ if shared.state.lock().unwrap().stopping => return Turn::Stop,
             read => {
                 let why = match read {
                     Ok(bytes) => format!("log {log}: {} of {len} bytes spooled", bytes.len()),
@@ -920,7 +945,7 @@ fn turn(shared: &Shared, m: usize, link: &dyn MemberLink) -> Turn {
                 };
                 log::error!("cladefs: replicating: {why}");
                 shared.state.lock().unwrap().broken = Some(why);
-                shared.changed.notify_all();
+                shared.changed.notify(usize::MAX);
                 (shared.notify)();
                 return Turn::Stop;
             }
@@ -947,7 +972,7 @@ fn turn(shared: &Shared, m: usize, link: &dyn MemberLink) -> Turn {
             log::warn!("cladefs: replicating: fenced: {why}");
             state.fenced = Some(why);
             drop(state);
-            shared.changed.notify_all();
+            shared.changed.notify(usize::MAX);
             (shared.notify)();
             return Turn::Stop;
         }
