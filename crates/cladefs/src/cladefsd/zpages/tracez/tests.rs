@@ -175,36 +175,3 @@ fn exports_are_whole_traces() {
     let counts = processor.recorder.counts();
     assert_eq!(counts.iter().map(|counts| counts.ended[3]).sum::<u64>(), 400);
 }
-
-/// What a span costs recorded, as the daemon records every one: a bucket request's (started, three
-/// attributes set, ended, its trace kept), the fastest of 5 rounds of 100 000, printed
-/// (`docs/tracing.md` has the figures), held to no bound, as `spans_off_are_nothing_and_cost_a_load`
-/// prints what one costs off.
-#[test]
-fn a_recorded_span_costs() {
-    use bucket_cell::trace::{self, BYTES, OBJECT_KEY};
-    use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
-    let provider = SdkTracerProvider::builder()
-        .with_sampler(Sampler::AlwaysOn)
-        .with_span_processor(Processor::new(None))
-        .build();
-    opentelemetry::global::set_tracer_provider(provider);
-    trace::enable(true);
-    let request = || {
-        let span = trace::Span::start("bucket.get");
-        span.set_with(OBJECT_KEY, || "tenants/1/cells/1/segments/1.0".to_owned());
-        span.set_count(BYTES, 4096);
-        span.result(&Err::<(), _>("failed"));
-    };
-    const SPANS: u32 = 100_000;
-    let round = || {
-        let started = std::time::Instant::now();
-        for _ in 0..SPANS {
-            request();
-        }
-        started.elapsed() / SPANS
-    };
-    let fastest = (0..5).map(|_| round()).min().unwrap();
-    assert_eq!(recorder().counts()[0].failed, 5 * u64::from(SPANS));
-    println!("a recorded span costs {fastest:?}");
-}
