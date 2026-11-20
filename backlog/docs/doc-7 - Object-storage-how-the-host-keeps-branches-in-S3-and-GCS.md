@@ -3,7 +3,7 @@ id: doc-7
 title: 'Object storage: how the host keeps branches in S3 and GCS'
 type: specification
 created_date: '2026-10-17 01:31'
-updated_date: '2026-11-18 20:23'
+updated_date: '2026-11-20 17:40'
 ---
 # Object storage: how the host keeps branches in S3 and GCS
 
@@ -173,7 +173,7 @@ Per bucket prefix, `<C>` a cell's prefix `tenants/<tenant>/cells/<cell>/`:
 | `<C>extents/<branch>/<epoch>.<segment>.<sequence>` | an extent of 4 MiB or more, raw, uploaded by the writer of `epoch` before its segment `segment`, which names it: the key is the writer's declaration of what may yet name it, which the collector goes by (Garbage collection) | create-only, before the segment naming it |
 | `<C>checkpoints/<branch>/<epoch>.<segment>` | the branch's state as of segment `segment`, by the writer of `epoch`; at a fork point to another cell, by whoever records the fork, of the epoch of the segment there (Forks) | create-only |
 | `<C>branches/<branch>` | the format of the branch's objects, first; its owner; where it was forked from, whether it is a fork's, whether deleted, whether a point, whether its fork of a point is being made, or made, and whether another than its host resumed it, whether a failed fork's claim | create; updated with a condition |
-| `<C>heads/<branch>` | the branch's head: its writer's epoch, who took it, and the token it was taken with (its cell's epoch, Cells); the end of its segments, the runs of epochs they were written in, and its newest checkpoint (The head, TASK-407); its versions, each its ID, the segment it is at and its cell's cut (Versions, TASK-476) | created, then swapped with a condition; deleted only with its cell, dead (Dead cells removed whole); or, of a branch of no record listed, if no deletion's (Fences kept) |
+| `<C>head/<slot>` | the cell's head, in its bucket's count of slots (Head slots, TASK-691), each slot a whole head, or a mark failing a half-made head: its writer's epoch, who took it, and the token it was taken with (its cell's epoch, Cells); the end of its segments, the runs of epochs they were written in, and its newest checkpoint (The head, TASK-407); its versions, each its ID, the segment it is at and its cell's cut (Versions, TASK-476) | created, then swapped with a condition; deleted only with its cell, dead (Dead cells removed whole); or, of a branch of no record listed, if no deletion's (Fences kept) |
 | `<C>gc/lease` | the collector's epoch over the cell, which its passes take, and what the last pass over the cell to end recorded: its listing's digest, what it deferred, what the cell takes (Garbage collection, Passes that skip; TASK-395.2, TASK-395.6, TASK-395.8) | likewise |
 | `<C>gc/marks/<epoch>` | what the cell's mark-only pass of that epoch would have deleted, each object's key, size, version and time as listed (Garbage collection) | create-only, by the collector; removed by an operator |
 | `<C>moves/<rest>/<pass>` | the live extents of the object at `<C><rest>`, compacted by the cell's pass of epoch `pass`, and where in it each is; `<C>moves/moves/<rest>/<pass>/<pass>` those moves' (Garbage collection, TASK-407.1) | create-only, by the collector |
@@ -504,6 +504,21 @@ it (Bucket.tla, every model; `KeysWrittenOnce`, `HeadsCurrent`, `NoAckedLost`).
   docs/measurements/durable-commits-under-the-head-2026-11-15.md):* a guest's sync-loop round
   through the daemon, at 25 ms a request, about 60 ms under the head against about 33 ms before:
   one round trip more, a sync loop of about 17 a second where it was 30.
+- **Head slots** *(added 2026-11-20, TASK-691, format 23)*: GCS takes about one write a second
+  to an object, and a cell's head was swapped once an uploaded segment. So a head is kept in its
+  bucket's count of slots, `<C>head/<slot>` (`Settings::head_slots`, set at `format` and carried
+  by `add`, default 10, at most 64, the simulation 2): version k of the head is written to slot
+  k mod N, conditional on the version that slot held (the spec's `slotCondition`), each slot swapped no
+  faster than once a second (TASK-690). A read gets every slot at once and takes the newest
+  (`newestOfSlots`), and only if every slot is filled or one holds the deletion's head
+  (`whole_or_final`): the creator creates all N at birth (`slots_at_birth`, slot 0 first, the
+  rest at once), and a head with slots missing is being made, read as none. A half-made head is
+  never completed: a deletion, or the collector once it is an hour old (`UNMADE_FOR`), fails it by
+  creating **marks** (`Head.failed`) in its empty slots, and any read that finds a mark fails
+  (`marks_fail`, `Error::Unmade`), so its creator's remaining creates find their keys taken. The
+  collector deletes a failed head's slots, its marks only once a day old (`MARKS_KEPT`,
+  `marks_kept`), past any creator still at work. specs/head-slots (HeadSlots.tla: `FencedWrites`,
+  `SlotsNewest`, `OneHead`, `DeletedStays`, `FailedStays`) models it; specs/bucket keeps one head.
 - **Startup** probes that the store honours conditional creates and updates, and refuses to run if
   not.
 
