@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-20 16:21'
-updated_date: '2026-11-20 18:09'
+updated_date: '2026-11-20 18:33'
 labels: []
 dependencies:
   - TASK-698.1
@@ -54,4 +54,6 @@ Forking a version into an ephemeral cell writes only a reference in the parent b
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-20: batch 2 committed (c8a6bf9ce). bucket_cell ephemeral test passes on macOS; cladefs compiles on macOS; Linux clippy + tests running on ubu1 (fxjob eph-check). Follow-ups noticed: an ephemeral store's ring is not held among the host's keys (RingHold), so forgetting a shredded tenant's keys does not reach an open ephemeral cell yet; the parent version state is recovered at every opening (the at-version store's layer is not shared with ephemeral openings).
+
+2026-11-20: on main at f3bd11827 + 91364d7d4. Linux: cladefsd::tests::ephemeral_cells_fork_from_versions_and_retire_their_references and ephemeral_host tests pass; collector ephemeral test passes; Go bindings regenerated. Note: scripts/test.sh madsim on ubu1 ran 0 tests (nextest selected none of 121 binaries) after its build check passed; CI's madsim job on main reports success, so the selection difference is ubu1-side and not looked into further yet.
 <!-- SECTION:NOTES:END -->

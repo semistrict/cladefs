@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-20 16:21'
-updated_date: '2026-11-20 17:53'
+updated_date: '2026-11-20 18:33'
 labels: []
 dependencies: []
 documentation:
@@ -54,4 +54,6 @@ An ephemeral cell has no bucket. Its segments stay raw in its directory, no uplo
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-20 batch 1 landed locally: design changed from doc-25's first draft in two places, both found by the crash test: raw runs a flush held only in log records are written back into raw files at open (Recovered::restore_raw) and synced before a checkpoint drops their logs; segments move to kept/ by link, sync, unlink, as a crash keeps directories' entries apart. Base stores only what the cell holds over its parent's version, not the parent's map. local_cell: 382/382 tests pass on macOS; clippy (repo flags, shuttle too) clean. Not yet: Linux build of DiskFile::punch (fallocate), footprint test of kept holes on a host dir.
+
+2026-11-20: on main at 3c029e2b7. Linux (ubu1 fxjob): local_cell + bucket_cell 718/718 (sim:: aside), repo clippy and shuttle clippy clean, madsim build checks clean. Open against the ACs: the crash proof is MemDir's fault injection at every disk operation, not yet shuttle/madsim schedules of checkpoints racing writes (AC #4); TASK-698.5 covers that.
 <!-- SECTION:NOTES:END -->
