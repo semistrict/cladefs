@@ -2781,13 +2781,13 @@ mod tests {
         LocalCell::make(&dir, description, Some("memory:///gcs"), None).unwrap();
         runtime.block_on(lifecycle::create(&*bucket, CELL, 1)).unwrap();
         let recovering = LocalCell::recover_unmade(dir).unwrap();
-        let (store, uploader) = open(
+        let (store, uploader) = crate::upload::wait_on(open(
             recovering,
             crate::Options::default(),
             bucket.clone(),
             (1, Options::default()),
             &host,
-        )
+        ))
         .unwrap();
         store.made().unwrap();
         // Its updates from now on: the head's swaps, the bucket's probe and the taking done.
@@ -2808,14 +2808,14 @@ mod tests {
         while started.elapsed() < 3 * second {
             write(false);
             let waiting = std::time::Instant::now();
-            uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
+            crate::upload::wait_on(uploader.uploaded(store.last_commit().unwrap())).unwrap();
             waits.push(waiting.elapsed());
         }
         for _ in 0..3 * IN_FLIGHT {
             write(true);
         }
         let last = write(false);
-        uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
+        crate::upload::wait_on(uploader.uploaded(store.last_commit().unwrap())).unwrap();
         let elapsed = started.elapsed();
         let stats = bucket.stats();
         assert_eq!(stats.failures(Request::Update), 0, "writes of the head refused");
