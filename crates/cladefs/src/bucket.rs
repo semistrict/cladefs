@@ -602,6 +602,16 @@ impl HostFetcher {
         Ok(Arc::new(Self { runtime, parts: Arc::new(parts.reading_ahead(spawn)) }))
     }
 
+    /// cladefs: runs `future` in a task of its own on the runtime its reads run on: what reads
+    /// ahead for a store, or writes behind it (doc-24, step 5).
+    pub(crate) fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.runtime.spawn(future)
+    }
+
     /// `len` bytes at `offset` in `extent`, whose data is at `location` in the bucket: as many as
     /// it holds.
     pub fn read(
@@ -1003,11 +1013,11 @@ mod tests {
         naming(&restarted, &bucket);
         let opened = reopened(&restarted, idle()).unwrap();
         let mut data = vec![0; EXTENT];
-        let read = opened.read(
+        let read = local_cell::upload::wait_on(opened.read(
             ExtentId { cell: cell.id, sequence: 1 },
             0,
             &mut [crate::VolatileSliceMut::from(&mut data[..])],
-        );
+        ));
         assert_eq!(read.map(|()| data == noise(1, EXTENT)), Ok(true));
         drop(store);
     }
@@ -1107,7 +1117,11 @@ mod tests {
         assert!(!keys.iter().any(|key| key.starts_with(&twice)), "{keys:?}");
         let mut data = vec![0; EXTENT];
         let extent = ExtentId { cell: cell.id, sequence: 1 };
-        let read = child.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]);
+        let read = local_cell::upload::wait_on(child.read(
+            extent,
+            0,
+            &mut [crate::VolatileSliceMut::from(&mut data[..])],
+        ));
         assert_eq!(read.map(|()| data == noise(1, EXTENT)), Ok(true));
     }
 
@@ -1172,7 +1186,11 @@ mod tests {
         let extent = ExtentId { cell: cell.id, sequence: 1 };
         let reads = |store: &OpenCell| {
             let mut data = vec![0; EXTENT];
-            let read = store.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]);
+            let read = local_cell::upload::wait_on(store.read(
+                extent,
+                0,
+                &mut [crate::VolatileSliceMut::from(&mut data[..])],
+            ));
             read.map(|()| data == noise(1, EXTENT))
         };
         assert_eq!([reads(&store), reads(&follower)], [Ok(true), Ok(true)], "cached: {cached}");
@@ -1696,8 +1714,11 @@ mod tests {
             assert_eq!(decoded(), one, "forks {name}: the states they share, decoded");
             let read = |store: &OpenCell, extent: ExtentId| {
                 let mut data = vec![0; BLOCK];
-                let read =
-                    store.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]);
+                let read = local_cell::upload::wait_on(store.read(
+                    extent,
+                    0,
+                    &mut [crate::VolatileSliceMut::from(&mut data[..])],
+                ));
                 read.map(|()| data).map_err(|err| err.to_string())
             };
             for store in &forks {
@@ -1762,7 +1783,14 @@ mod tests {
         // Each read once: into the cache.
         for sequence in 1..=EXTENTS {
             assert_eq!(fork.stored_extent(inherited(sequence)), held);
-            assert_eq!(fork.read_from_cache(inherited(sequence), 0, &mut data), Ok(true));
+            assert_eq!(
+                local_cell::upload::wait_on(fork.read_from_cache(
+                    inherited(sequence),
+                    0,
+                    &mut data
+                )),
+                Ok(true)
+            );
             assert_eq!(data, pattern(sequence as u8, BLOCK), "{sequence}");
         }
         let (asked, ()) = allocations_while(|| {
@@ -1773,7 +1801,14 @@ mod tests {
         assert_eq!(asked, 0, "allocations of {EXTENTS} asks of the store");
         let (read, ()) = allocations_while(|| {
             for sequence in 1..=EXTENTS {
-                assert_eq!(fork.read_from_cache(inherited(sequence), 0, &mut data), Ok(true));
+                assert_eq!(
+                    local_cell::upload::wait_on(fork.read_from_cache(
+                        inherited(sequence),
+                        0,
+                        &mut data
+                    )),
+                    Ok(true)
+                );
             }
         });
         assert_eq!(read, 0, "allocations of {EXTENTS} reads from the cache");
@@ -1813,14 +1848,25 @@ mod tests {
         let fork = reopened(&path, idle()).unwrap();
         let mut read = vec![0; BLOCK];
         for sequence in 1..=extents {
-            assert_eq!(fork.read_from_cache(inherited(sequence), 0, &mut read), Ok(true));
+            assert_eq!(
+                local_cell::upload::wait_on(fork.read_from_cache(
+                    inherited(sequence),
+                    0,
+                    &mut read
+                )),
+                Ok(true)
+            );
         }
         assert_eq!(read, data);
         let started = std::time::Instant::now();
         let (allocations, ()) = crate::heap::allocations_while(|| {
             for _ in 0..rounds {
                 for sequence in 1..=extents {
-                    let hit = fork.read_from_cache(inherited(sequence), 0, &mut read);
+                    let hit = local_cell::upload::wait_on(fork.read_from_cache(
+                        inherited(sequence),
+                        0,
+                        &mut read,
+                    ));
                     assert_eq!(hit, Ok(true));
                 }
             }
@@ -1934,7 +1980,12 @@ mod tests {
         for (sequence, data) in written {
             let extent = ExtentId { cell: cell.id, sequence };
             let mut read = vec![0; data.len()];
-            store.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut read[..])]).unwrap();
+            local_cell::upload::wait_on(store.read(
+                extent,
+                0,
+                &mut [crate::VolatileSliceMut::from(&mut read[..])],
+            ))
+            .unwrap();
             assert!(read == data, "extent {sequence} reads other data");
         }
     }
@@ -2828,7 +2879,12 @@ mod tests {
         assert_eq!(taken.root(), Ok(b"durable".to_vec()));
         let mut data = vec![0; BLOCK];
         let durable = ExtentId { cell: cell.id, sequence: 1 };
-        taken.read(durable, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).unwrap();
+        local_cell::upload::wait_on(taken.read(
+            durable,
+            0,
+            &mut [crate::VolatileSliceMut::from(&mut data[..])],
+        ))
+        .unwrap();
         assert_eq!(data, pattern(1, BLOCK));
         let info = taken.info().unwrap();
         let sequence = info.next_sequence.max(info.sequence_floor);
@@ -2873,7 +2929,12 @@ mod tests {
         let taken =
             kept_in(dir.path().join("taken"), (1 << 30, Some(cell)), &bucket, idle()).unwrap();
         let mut data = vec![0; BLOCK];
-        taken.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).unwrap();
+        local_cell::upload::wait_on(taken.read(
+            extent,
+            0,
+            &mut [crate::VolatileSliceMut::from(&mut data[..])],
+        ))
+        .unwrap();
         assert!(data == pattern(2, BLOCK), "the extent read back is not its second write");
     }
 
@@ -3061,7 +3122,12 @@ mod tests {
         );
         let mut data = vec![0; 1 << 20];
         let extent = ExtentId { cell: cell.id, sequence: 4 };
-        taken.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).unwrap();
+        local_cell::upload::wait_on(taken.read(
+            extent,
+            0,
+            &mut [crate::VolatileSliceMut::from(&mut data[..])],
+        ))
+        .unwrap();
         assert_eq!(data, noise(4, 1 << 20));
     }
 
@@ -3175,7 +3241,12 @@ mod tests {
         assert_eq!(second.root(), Ok(b"root".to_vec()));
         let mut data = vec![0; 4 << 20];
         let extent = ExtentId { cell: cell.id, sequence: 2 };
-        second.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).unwrap();
+        local_cell::upload::wait_on(second.read(
+            extent,
+            0,
+            &mut [crate::VolatileSliceMut::from(&mut data[..])],
+        ))
+        .unwrap();
         assert_eq!(data, large);
         let info = second.info().unwrap();
         let sequence = info.next_sequence.max(info.sequence_floor);
@@ -3189,7 +3260,12 @@ mod tests {
         assert_eq!(first.root(), Ok(b"root".to_vec()));
         let mut data = vec![0; BLOCK];
         let extent = ExtentId { cell: cell.id, sequence };
-        first.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).unwrap();
+        local_cell::upload::wait_on(first.read(
+            extent,
+            0,
+            &mut [crate::VolatileSliceMut::from(&mut data[..])],
+        ))
+        .unwrap();
         assert_eq!(data, pattern(3, BLOCK));
         drop(first);
         let (extents, root) = uploaded(&bucket, cell);
@@ -3226,7 +3302,12 @@ mod tests {
         let mut data = vec![0; BLOCK];
         let extent = ExtentId { cell: cell.id, sequence: 1 };
         within_now(Some(request), || {
-            second.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).unwrap()
+            local_cell::upload::wait_on(second.read(
+                extent,
+                0,
+                &mut [crate::VolatileSliceMut::from(&mut data[..])],
+            ))
+            .unwrap()
         });
         assert_eq!(data, pattern(1, BLOCK));
         // Each request of the bucket the read made: its kind, and the request it names.
@@ -3294,7 +3375,12 @@ mod tests {
         assert_eq!(second.root(), Ok(b"meanwhile".to_vec()));
         let mut data = vec![0; BLOCK];
         let written = ExtentId { cell: cell.id, sequence: 2 };
-        second.read(written, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).unwrap();
+        local_cell::upload::wait_on(second.read(
+            written,
+            0,
+            &mut [crate::VolatileSliceMut::from(&mut data[..])],
+        ))
+        .unwrap();
         assert_eq!(data, pattern(2, BLOCK));
         assert_eq!(
             uploaded(&bucket, cell),
@@ -3474,7 +3560,12 @@ mod tests {
         let theirs = reopened(dir.path().join("theirs"), idle()).unwrap();
         assert_eq!(theirs.root().unwrap(), b"base");
         let mut data = vec![0; BLOCK];
-        theirs.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).unwrap();
+        local_cell::upload::wait_on(theirs.read(
+            extent,
+            0,
+            &mut [crate::VolatileSliceMut::from(&mut data[..])],
+        ))
+        .unwrap();
         assert!(data == pattern(1, BLOCK), "the fork reads other bytes");
     }
 
@@ -3544,7 +3635,12 @@ mod tests {
         let theirs = reopened(dir.path().join("theirs"), idle()).unwrap();
         assert_eq!(theirs.root().unwrap(), b"base");
         let mut data = vec![0; BLOCK];
-        theirs.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).unwrap();
+        local_cell::upload::wait_on(theirs.read(
+            extent,
+            0,
+            &mut [crate::VolatileSliceMut::from(&mut data[..])],
+        ))
+        .unwrap();
         assert!(data == pattern(1, BLOCK), "the fork reads other bytes");
         let refused = local_cell::upload::wait_on(source.fork_to(dir.path().join("after"), of(1)))
             .map_err(|err| err.errno());
@@ -3607,7 +3703,11 @@ mod tests {
         let read = |at: usize| {
             let (store, extent, data) = &stores[at];
             let mut read = vec![0; data.len()];
-            let done = store.read(*extent, 0, &mut [crate::VolatileSliceMut::from(&mut read[..])]);
+            let done = local_cell::upload::wait_on(store.read(
+                *extent,
+                0,
+                &mut [crate::VolatileSliceMut::from(&mut read[..])],
+            ));
             done.map(|()| read == *data)
         };
         let cached = || {
@@ -3727,7 +3827,11 @@ mod tests {
         let read = |at: usize| {
             let (store, extent, data) = &stores[at];
             let mut read = vec![0; data.len()];
-            let done = store.read(*extent, 0, &mut [crate::VolatileSliceMut::from(&mut read[..])]);
+            let done = local_cell::upload::wait_on(store.read(
+                *extent,
+                0,
+                &mut [crate::VolatileSliceMut::from(&mut read[..])],
+            ));
             done.map(|()| read == *data)
         };
 
@@ -3822,7 +3926,12 @@ mod tests {
             assert_eq!(fork.root().unwrap(), b"base");
             let mut data = vec![0; BLOCK];
             let extent = ExtentId { cell: base.cell().id, sequence: 1 };
-            fork.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).unwrap();
+            local_cell::upload::wait_on(fork.read(
+                extent,
+                0,
+                &mut [crate::VolatileSliceMut::from(&mut data[..])],
+            ))
+            .unwrap();
             assert!(data == pattern(0, BLOCK), "tenant {tenant}'s fork reads other bytes");
         }
     }
@@ -3876,7 +3985,12 @@ mod tests {
         assert_eq!(inherited(&state), [small.sequence, own.sequence]);
         assert_eq!(state.root, Some(b"root".to_vec()));
         let mut data = vec![0; 4 << 20];
-        forked.read(own, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).unwrap();
+        local_cell::upload::wait_on(forked.read(
+            own,
+            0,
+            &mut [crate::VolatileSliceMut::from(&mut data[..])],
+        ))
+        .unwrap();
         assert_eq!(data, large);
         let info = forked.info().unwrap();
         let sequence = info.next_sequence.max(info.sequence_floor);
@@ -4315,7 +4429,12 @@ mod tests {
                 .unwrap();
         let read = || {
             let mut read = vec![0; 2 << 20];
-            second.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut read[..])]).unwrap();
+            local_cell::upload::wait_on(second.read(
+                extent,
+                0,
+                &mut [crate::VolatileSliceMut::from(&mut read[..])],
+            ))
+            .unwrap();
             read
         };
         assert_eq!(read(), data);

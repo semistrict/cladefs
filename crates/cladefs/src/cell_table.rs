@@ -479,7 +479,9 @@ impl<C: Writer, S, P> CellTable<C, S, P> {
     /// Holds the store `key` names, for the daemon: once its holder, if it has one, lets it go,
     /// if that holder is going, or is the daemon, waiting at most `wait` (for ever, if none);
     /// unless a connection not going writes it, which fails with `EBUSY`. What is open of it stays.
-    /// It blocks.
+    /// It blocks: the table's tests', whose threads the models schedule; the daemon holds no thread
+    /// as it waits ([`CellTable::hold_async`], doc-24).
+    #[cfg(test)]
     pub fn hold(&self, key: &Path, wait: Option<Duration>) -> Result<Hold<'_, C, S, P>, Errno> {
         let deadline = wait.map(|wait| Instant::now() + wait);
         match self.claim_blocking(key, &Claim::Daemon, deadline)? {

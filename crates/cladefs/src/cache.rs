@@ -315,8 +315,9 @@ impl CachedIn {
 
 /// The sealed `extent`, of `len` bytes, in the cache, of `cached_in`'s arena, cached from `store` if it isn't:
 /// read from it, or from `fetcher`, with its page-ins recorded by `recorder`, if any; and from any
-/// other store that asked for it, which `store` is one of from now on (TASK-79.7).
-pub(crate) fn cached(
+/// other store that asked for it, which `store` is one of from now on (TASK-79.7). cladefs: a copy of
+/// it a tenant's arena held, moved here, has its pages brought in awaited (doc-24, step 5).
+pub(crate) async fn cached(
     store: &Arc<LocalCell<HostDir>>,
     cached_in: CachedIn,
     fetcher: Option<Arc<crate::bucket::HostFetcher>>,
@@ -324,6 +325,32 @@ pub(crate) fn cached(
     extent: ExtentId,
     len: u64,
 ) -> Result<Arc<CachedExtent>> {
+    let (found, moved) = cache_now(store, cached_in, fetcher, recorder, extent, len);
+    if let Some(from) = moved {
+        // What of it the tenant's arena holds, moved before the caller maps it, so that its MAP
+        // maps those pages: moved as asked for, each was a fault of the guest's, and the first
+        // sandbox's cold read of the Linux tree took 13.7 s, paging nothing in, 4,422 faults,
+        // against the next sandbox's 5.7 s and none (GCE r991).
+        for page in from.present_parts() {
+            if let Err(errno) = found.clone().bring_in(page).await {
+                log::warn!("cladefs: moving {:?}'s page {page}: {errno:?}", found.extent);
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// cladefs: the cache's part of [`cached`], under its lock, which holds no await: the extent cached,
+/// and a tenant's copy of it moved here, if one was, its windows rebound, whose pages its caller
+/// brings in.
+fn cache_now(
+    store: &Arc<LocalCell<HostDir>>,
+    cached_in: CachedIn,
+    fetcher: Option<Arc<crate::bucket::HostFetcher>>,
+    recorder: Option<Arc<Recorder>>,
+    extent: ExtentId,
+    len: u64,
+) -> (Arc<CachedExtent>, Option<Arc<CachedExtent>>) {
     let cache = extent_cache();
     let mut extents = cache.extents.with(Mutex::lock);
     let key = held_key(&extents, cached_in.arena(), extent);
@@ -364,7 +391,7 @@ pub(crate) fn cached(
     drop(extents);
     // Freed past the cache's lock.
     drop(gone);
-    if let Some(from) = moved {
+    if let Some(from) = &moved {
         // The tenant's windows map it from here from now on, and nothing of the copy: a fault on
         // it would read it in again. Past the cache's lock, which no window's is taken under.
         let (from_source, to_source): (Arc<dyn Source>, Arc<dyn Source>) =
@@ -372,17 +399,8 @@ pub(crate) fn cached(
         for window in from.windows() {
             window.rebind(&from_source, to_source.clone());
         }
-        // What of it the tenant's arena holds, moved before the caller maps it, so that its MAP
-        // maps those pages: moved as asked for, each was a fault of the guest's, and the first
-        // sandbox's cold read of the Linux tree took 13.7 s, paging nothing in, 4,422 faults,
-        // against the next sandbox's 5.7 s and none (GCE r991).
-        for page in from.present_parts() {
-            if let Err(errno) = futures::executor::block_on(found.clone().bring_in(page)) {
-                log::warn!("cladefs: moving {:?}'s page {page}: {errno:?}", found.extent);
-            }
-        }
     }
-    Ok(found)
+    (found, moved)
 }
 
 /// The key `extent` of `arena` is cached by: the default arena's, if it holds it, as every VM
@@ -747,10 +765,10 @@ impl CachedExtent {
     }
 
     /// Reads its bytes at `offset` into `data`, reading in its pages that aren't in memory, as a
-    /// read of the extent that maps nothing does: blocks the calling thread while they are read
-    /// in. Past its end, zeros. cladefs: a page in memory is copied as it is found, allocating
+    /// read of the extent that maps nothing does, awaiting them, holding no thread (doc-24, step
+    /// 5). Past its end, zeros. cladefs: a page in memory is copied as it is found, allocating
     /// nothing; one not, brought in first (`Source::bring_in`, a future boxed), TASK-453.
-    pub(crate) fn read(self: &Arc<Self>, offset: u64, data: &mut [u8]) -> Result<()> {
+    pub(crate) async fn read(self: &Arc<Self>, offset: u64, data: &mut [u8]) -> Result<()> {
         let ps = page_size();
         let held = self.len.saturating_sub(offset).min(data.len() as u64) as usize;
         let (bytes, zeros) = data.split_at_mut(held);
@@ -772,7 +790,7 @@ impl CachedExtent {
                 }
             }
             // Read in, then copied, unless evicted meanwhile: read in again.
-            futures::executor::block_on(self.clone().bring_in(page))?;
+            self.clone().bring_in(page).await?;
         }
         Ok(())
     }

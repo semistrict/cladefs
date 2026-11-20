@@ -110,7 +110,12 @@ fn write(store: &OpenCell, extent: ExtentId, data: &[u8]) {
 
 pub(super) fn read(store: &OpenCell, extent: ExtentId, len: usize) -> Vec<u8> {
     let mut data = vec![0; len];
-    store.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).unwrap();
+    local_cell::upload::wait_on(store.read(
+        extent,
+        0,
+        &mut [VolatileSliceMut::from(&mut data[..])],
+    ))
+    .unwrap();
     data
 }
 

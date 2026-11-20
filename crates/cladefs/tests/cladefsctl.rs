@@ -93,7 +93,12 @@ impl Drop for KillOnDrop {
 
 fn read(store: &OpenCell, extent: ExtentId) -> Vec<u8> {
     let mut data = vec![0; BLOCK];
-    store.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).unwrap();
+    local_cell::upload::wait_on(store.read(
+        extent,
+        0,
+        &mut [VolatileSliceMut::from(&mut data[..])],
+    ))
+    .unwrap();
     data
 }
 

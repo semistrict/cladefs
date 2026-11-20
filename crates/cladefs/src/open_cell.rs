@@ -45,7 +45,7 @@ use local_cell::{
 };
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use storage_device::{ExtentId, NoExtent, OtherCell, SealedExtent};
 
 /// What a store holds, as doc-4's `INFO` reports it.
@@ -209,7 +209,7 @@ pub struct OpenCell {
     uploader: Option<local_cell::upload::Uploader<HostDir>>,
     /// cladefs: what records the store's page-ins for its base's boot profile, if it is a fork of a
     /// base that has none yet, and what writes it at the window's end, which closing stops early.
-    profiling: Option<(Arc<Recorder>, std::sync::mpsc::Sender<()>)>,
+    profiling: Option<(Arc<Recorder>, tokio::sync::oneshot::Sender<()>)>,
     /// cladefs: held, shared, by writes, which open extents, and alone by a fork only once nothing
     /// is open, which none comes between ([`OpenCell::fork_quiescent`]).
     opening: StoreRwLock<()>,
@@ -474,12 +474,15 @@ fn upload_errno(failure: local_cell::upload::Failure) -> Errno {
     })
 }
 
-/// cladefs: awaits `future` on a path of the daemon's that the async rewrite hasn't reached yet
-/// (doc-24, TASK-685.3), blocking the calling thread: one seam, so that what is left is one search,
-/// each use gone with its path's step. Under madsim, which runs on one thread, it fails at once.
-pub(crate) fn not_yet_async<F: std::future::Future>(future: F) -> F::Output {
-    local_cell::blocks!("a path of the daemon's not async yet (open_cell::not_yet_async)");
-    futures::executor::block_on(future)
+/// cladefs: lets `store` go, and, if this was its last reference, closes it ([`OpenCell::close`]),
+/// holding no thread as it waits: as every holder of the daemon's stores lets one go (doc-24, step
+/// 9), so that whichever holds it last, a connection's teardown, a request, a fork or the store
+/// following it, closes it, awaited, and none closes it in its drop, which blocks.
+pub async fn release(store: Arc<OpenCell>) {
+    if let Some(store) = Arc::into_inner(store) {
+        // Boxed: a store's close releases its writer and bases, which release theirs.
+        Box::pin(store.close()).await;
+    }
 }
 
 /// cladefs: the span of a commit's wait for object storage to hold the commits up to `epoch`, or
@@ -545,6 +548,14 @@ impl Drop for OpenCell {
         if self.closed {
             return;
         }
+        // cladefs: the daemon closes every store it has, awaited ([`release`]): under madsim, a store
+        // dropped open is one it let go of where it couldn't wait (doc-24, step 9).
+        if cfg!(madsim) && !std::thread::panicking() {
+            panic!(
+                "a store dropped open, {}: the daemon closes its stores (open_cell::release)",
+                self.path.display()
+            );
+        }
         // cladefs: what the fork recorded, its base's profile, if the window is not over yet.
         if let Some((recorder, _)) = self.profiling.take()
             && let Err(err) = recorder.write()
@@ -597,6 +608,19 @@ impl OpenCell {
             log::error!("cladefs: closing an extent store: {err:#}");
         }
         self.closed = true;
+        // cladefs: then what it held open: a follower's writer, and the bases attached to it,
+        // each closed if this was its last (doc-24, step 9).
+        if let Some(following) = self.following.take() {
+            release(following.writer).await;
+        }
+        if let Some(bases) = Arc::into_inner(std::mem::take(&mut self.bases)) {
+            let by_cell = bases.by_cell.into_inner().unwrap_or_else(PoisonError::into_inner);
+            for base in by_cell.into_values().flatten().filter_map(Arc::into_inner) {
+                if let Some(store) = base.store.into_inner() {
+                    release(store).await;
+                }
+            }
+        }
     }
 
     /// The size of the blocks extents are read and written in.
@@ -1033,7 +1057,7 @@ impl OpenCell {
         arenas: &Arenas,
         forked_from: &[(u64, std::path::PathBuf)],
         fetcher: &Arc<crate::bucket::HostFetcher>,
-    ) -> Option<(Arc<Recorder>, std::sync::mpsc::Sender<()>)> {
+    ) -> Option<(Arc<Recorder>, tokio::sync::oneshot::Sender<()>)> {
         let (base, dir) = forked_from.first()?;
         // A base deleted since has no profile, and records none.
         if !dir.exists() {
@@ -1059,24 +1083,18 @@ impl OpenCell {
             return None;
         }
         let recorder = Arc::new(Recorder::new(path.clone(), store.description().cell.id));
-        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let writer = recorder.clone();
-        let recorded = path.clone();
-        let spawned = std::thread::Builder::new().name("cladefs profile".into()).spawn(move || {
+        // cladefs: a task, its write off the runtime's threads (doc-24, step 5).
+        drop(fetcher.spawn(async move {
             // At the window's end, or the store's closing, which writes it itself.
-            if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
-                stopped.recv_timeout(profile::WINDOW)
-                && let Err(err) = writer.write()
+            if tokio::time::timeout(profile::WINDOW, stopped).await.is_err()
+                && let Err(err) = local_cell::upload::blocking(|| writer.write())
             {
                 log::warn!("cladefs: writing a boot profile: {err}");
             }
-            RECORDING.lock().unwrap().remove(&recorded);
-        });
-        if let Err(err) = spawned {
-            log::warn!("cladefs: starting a boot profile's writer: {err}");
             RECORDING.lock().unwrap().remove(&path);
-            return None;
-        }
+        }));
         Some((recorder, stop))
     }
 
@@ -1331,13 +1349,13 @@ impl OpenCell {
 
     /// cladefs: a read's of `extent` from the extent cache ([`OpenCell::read_cached`]).
     #[cfg(test)]
-    pub(crate) fn read_from_cache(
+    pub(crate) async fn read_from_cache(
         &self,
         extent: ExtentId,
         offset: u64,
         data: &mut [u8],
     ) -> Result<bool> {
-        self.read_cached(extent, offset, data)
+        self.read_cached(extent, offset, data).await
     }
 
     /// The cell whose extents the guest mints, by its ID, in its cell.
@@ -1385,19 +1403,20 @@ impl OpenCell {
     }
 
     /// Reads the bytes at `offset` in `extent` into `buffers`, in order (`READ`). Blocks never
-    /// written read as zeros.
-    pub fn read(
+    /// written read as zeros. cladefs: what it reads in, from the bucket, a base opened, or the
+    /// cache's page-ins, awaited, holding no thread (doc-24, step 5).
+    pub async fn read(
         &self,
         extent: ExtentId,
         offset: u64,
-        buffers: &mut [VolatileSliceMut],
+        buffers: &mut [VolatileSliceMut<'_>],
     ) -> Result<()> {
         let len = buffers.iter().map(VolatileSliceMut::len).sum::<usize>();
         stats::add(Counter::Reads, 1);
         stats::add(Counter::ReadBytes, len as u64);
         // cladefs: nothing a panic went through is read (`crate::halt`).
         self.halt.check()?;
-        let base = self.base_holding(extent)?;
+        let base = self.base_holding(extent).await?;
         // cladefs: a piece at a time, as the extent daemon's memory holds no more of a request
         // (TASK-149.17); once at least, as a read of nothing finds whether the extent is there.
         let mut piece = vec![0; len.min(Self::PIECE)];
@@ -1405,16 +1424,14 @@ impl OpenCell {
         loop {
             let data = &mut piece[..(len - done).min(Self::PIECE)];
             let at = offset.checked_add(done as u64).ok_or(Errno::EINVAL)?;
-            match &base {
-                Some((base, _)) if !base.read_cached(extent, at, data)? => {
-                    base.read_stored(extent, at, data)?;
-                }
-                Some(_) => {}
-                None if !self.read_cached(extent, at, data)? => {
-                    self.read_stored(extent, at, data)?
-                }
-                None => {}
+            let (from, through_base) = match &base {
+                Some((base, _)) => (&**base, true),
+                None => (self, false),
+            };
+            if !from.read_cached(extent, at, data).await? {
+                from.read_stored(extent, at, data).await?;
             }
+            let _ = through_base;
             scatter(buffers, done, data);
             done += data.len();
             if done == len {
@@ -1427,7 +1444,7 @@ impl OpenCell {
     /// them in from the store, or object storage, unless they are in memory already, read by any
     /// store or fork before (TASK-32). Returns whether it read them: not a follower's, whose view
     /// decides what it holds, nor an open extent's, nor one the store doesn't hold.
-    fn read_cached(&self, extent: ExtentId, offset: u64, data: &mut [u8]) -> Result<bool> {
+    async fn read_cached(&self, extent: ExtentId, offset: u64, data: &mut [u8]) -> Result<bool> {
         if self.following.is_some() {
             return Ok(false);
         }
@@ -1445,8 +1462,8 @@ impl OpenCell {
         if bytes.is_empty() {
             return Ok(true);
         }
-        let cached = self.cached(extent, len)?;
-        match cached.read(offset, bytes) {
+        let cached = self.cached(extent, len).await?;
+        match cached.read(offset, bytes).await {
             Ok(()) => Ok(true),
             // Freed meanwhile, or its page-in failed: as the store says.
             Err(errno) => {
@@ -1458,7 +1475,7 @@ impl OpenCell {
 
     /// Reads a sealed extent's bytes from the store, or, cladefs, from object storage, if the store
     /// holds it without its data.
-    fn read_stored(&self, extent: ExtentId, offset: u64, data: &mut [u8]) -> Result<()> {
+    async fn read_stored(&self, extent: ExtentId, offset: u64, data: &mut [u8]) -> Result<()> {
         stats::add(Counter::ReadStoredBytes, data.len() as u64);
         let read = match &self.following {
             Some(following) => {
@@ -1472,8 +1489,8 @@ impl OpenCell {
                 if let Some(in_bucket) = error.downcast_ref::<local_cell::BucketData>() =>
             {
                 let (location, len) = (in_bucket.location.clone(), data.len() as u64);
-                let fetched = self.fetcher().read(extent, location, offset, len);
-                let fetched = futures::executor::block_on(fetched).map_err(|failure| {
+                let fetched = self.fetcher().read(extent, location, offset, len).await;
+                let fetched = fetched.map_err(|failure| {
                     match failure {
                         // cladefs: a follower's of an extent its writer freed since its view's
                         // commit, which the bucket's collector reclaimed: it is cut off, as one too
@@ -1868,9 +1885,15 @@ impl OpenCell {
     /// The mapping is of a sealed extent's cached pages: cladefs: of an open one, it fails with
     /// `EPERM`, a guest's bug, counted (backlog doc-13). What of the range is past the extent
     /// reads as zeros, as the padding of its last page does.
-    pub fn map(&self, extent: ExtentId, offset: u64, len: u64, window_offset: u64) -> Result<()> {
+    pub async fn map(
+        &self,
+        extent: ExtentId,
+        offset: u64,
+        len: u64,
+        window_offset: u64,
+    ) -> Result<()> {
         let start = std::time::Instant::now();
-        let mapped = self.map_counted(extent, offset, len, window_offset);
+        let mapped = self.map_counted(extent, offset, len, window_offset).await;
         stats::count_since(Counter::Maps, Counter::MapNs, start);
         let result = mapped.as_ref().map(|_| ()).map_err(|errno| *errno);
         let change = Change::Map { extent, offset, result };
@@ -1878,14 +1901,14 @@ impl OpenCell {
         mapped
     }
 
-    fn map_counted(
+    async fn map_counted(
         &self,
         extent: ExtentId,
         offset: u64,
         len: u64,
         window_offset: u64,
     ) -> Result<()> {
-        let (cached, within) = self.mapped_of(extent, offset, len, window_offset)?;
+        let (cached, within) = self.mapped_of(extent, offset, len, window_offset).await?;
         let mut dax = self.dax.lock(&self.halt)?;
         let dax = dax.as_mut().ok_or(Errno::ENOSYS)?;
         if within > 0 {
@@ -1900,7 +1923,7 @@ impl OpenCell {
     /// What a `MAP` of `len` bytes at `offset` in `extent` into the window at `window_offset`
     /// maps, checked: the extent's cached pages, and how many of the bytes they hold, those within
     /// the extent; zeros the rest.
-    fn mapped_of(
+    async fn mapped_of(
         &self,
         extent: ExtentId,
         offset: u64,
@@ -1909,7 +1932,7 @@ impl OpenCell {
     ) -> Result<(Arc<dyn Source>, u64)> {
         self.dax_range_checked(window_offset, len)?;
         // cladefs: a base's is of the cache's one copy of it.
-        let base = self.base_holding(extent)?;
+        let base = self.base_holding(extent).await?;
         let extent_len = match (&base, &self.following) {
             (Some((_, len)), _) => *len,
             // A follower's view holds sealed extents alone.
@@ -1930,8 +1953,8 @@ impl OpenCell {
             return Err(Errno::EINVAL);
         }
         let cached: Arc<dyn Source> = match &base {
-            Some((base, _)) => base.cached(extent, extent_len)?,
-            None => self.cached(extent, extent_len)?,
+            Some((base, _)) => base.cached(extent, extent_len).await?,
+            None => self.cached(extent, extent_len).await?,
         };
         let within = end.min(extent_len.next_multiple_of(page_size())).max(offset);
         Ok((cached, within - offset))
@@ -1942,7 +1965,7 @@ impl OpenCell {
     /// that fails fails the call, those before it mapped. A snapshot's window's mappings
     /// ([`OpenCell::window_mappings`]) are mapped again so as its VM is restored, where a `MAP`
     /// each took a change of their own (TASK-92.14).
-    pub fn map_many(&self, mappings: &[WindowMapping]) -> Result<()> {
+    pub async fn map_many(&self, mappings: &[WindowMapping]) -> Result<()> {
         let start = std::time::Instant::now();
         // What each maps, as far as the first that fails.
         let mut pieces = Vec::new();
@@ -1951,7 +1974,8 @@ impl OpenCell {
             let WindowMapping { window_offset, len, contents } = *mapping;
             let mapped = match contents {
                 MappingContents::Extent { extent, offset } => {
-                    self.mapped_of(extent, offset, len, window_offset).map(|(cached, within)| {
+                    let mapped = self.mapped_of(extent, offset, len, window_offset).await;
+                    mapped.map(|(cached, within)| {
                         if within > 0 {
                             let source = Some((cached, offset));
                             pieces.push(DaxMapping { offset: window_offset, len: within, source });
@@ -2300,14 +2324,14 @@ impl OpenCell {
 
     /// The sealed `extent`, of `len` bytes, in the cache: read from this store if no other store
     /// has it cached.
-    fn cached(&self, extent: ExtentId, len: u64) -> Result<Arc<CachedExtent>> {
+    async fn cached(&self, extent: ExtentId, len: u64) -> Result<Arc<CachedExtent>> {
         let fetcher = Some(self.fetcher());
         let recorder = self.profiling.as_ref().map(|(recorder, _)| recorder.clone());
         let cached_in = match self.public_reach(extent) {
             Some(reach) => CachedIn::Public(reach),
             None => CachedIn::Arena(self.arenas.of(extent)),
         };
-        cache::cached(&self.store, cached_in, fetcher, recorder, extent, len)
+        cache::cached(&self.store, cached_in, fetcher, recorder, extent, len).await
     }
 
     /// cladefs: that `extent` is reachable from a published generation, if it is: the store is
@@ -2379,14 +2403,14 @@ impl OpenCell {
     /// cladefs: how many of what is attached to it are open.
     #[cfg(test)]
     pub(crate) fn bases_opened(&self) -> usize {
-        self.bases.opened(&self.halt)
+        self.bases.opened()
     }
 
     /// cladefs: the base attached that holds `extent`, with its length, if one does.
-    fn base_holding(&self, extent: ExtentId) -> Result<Option<(Arc<OpenCell>, u64)>> {
+    async fn base_holding(&self, extent: ExtentId) -> Result<Option<(Arc<OpenCell>, u64)>> {
         let Some(bases) = self.bases.of(extent.cell) else { return Ok(None) };
         for base in bases {
-            let store = base.store(self)?;
+            let store = base.store(self).await?;
             if let Some((len, false)) = store.store.extent(extent).map_err(errno)? {
                 return Ok(Some((store, len)));
             }
@@ -2443,41 +2467,40 @@ impl Arenas {
     }
 }
 
-/// cladefs: what opens a store attached to another, the first time it is read through to.
-pub type OpenBase = Arc<dyn Fn(&Path) -> Result<Arc<OpenCell>> + Send + Sync>;
+/// cladefs: what opens a store attached to another, the first time it is read through to, awaited
+/// (doc-24, step 5).
+pub type OpenBase =
+    Arc<dyn Fn(&Path) -> futures::future::BoxFuture<'static, Result<Arc<OpenCell>>> + Send + Sync>;
 
 /// cladefs: a fork attached to a store (backlog doc-10).
 struct Base {
     path: std::path::PathBuf,
-    store: CellMutex<Option<Arc<OpenCell>>>,
+    /// Opened once, by the first read through to it; those reading meanwhile wait for it, holding
+    /// no thread.
+    store: tokio::sync::OnceCell<Arc<OpenCell>>,
 }
 
 impl Base {
     fn new(path: &Path) -> Self {
-        Self { path: path.to_owned(), store: CellMutex::new("base", None) }
+        Self { path: path.to_owned(), store: tokio::sync::OnceCell::new() }
     }
 
     /// The fork, opened for `attached_to`, which is attached to it, once.
-    fn store(&self, attached_to: &OpenCell) -> Result<Arc<OpenCell>> {
-        let mut store = self.store.lock(&attached_to.halt)?;
-        if let Some(store) = &*store {
-            return Ok(store.clone());
-        }
-        let opened = match attached_to.bases.open.get() {
-            Some(open) => open(&self.path)?,
+    async fn store(&self, attached_to: &OpenCell) -> Result<Arc<OpenCell>> {
+        // cladefs: nothing a panic went through opens what it reads through to (`crate::halt`).
+        attached_to.halt.check()?;
+        let open = async || match attached_to.bases.open.get() {
+            Some(open) => open(&self.path).await,
             None => {
                 let arena = attached_to.arenas.own.clone();
-                // cladefs: the read path's, async in its step (doc-24, step 5).
-                let opened =
-                    not_yet_async(OpenCell::open_base(&self.path, arena)).map_err(|err| {
-                        log::warn!("cladefs: opening {}, attached: {err:#}", self.path.display());
-                        err.errno().unwrap_or(Errno::EIO)
-                    })?;
-                Arc::new(opened)
+                let opened = OpenCell::open_base(&self.path, arena).await.map_err(|err| {
+                    log::warn!("cladefs: opening {}, attached: {err:#}", self.path.display());
+                    err.errno().unwrap_or(Errno::EIO)
+                })?;
+                Ok(Arc::new(opened))
             }
         };
-        *store = Some(opened.clone());
-        Ok(opened)
+        self.store.get_or_try_init(open).await.cloned()
     }
 }
 
@@ -2524,9 +2547,9 @@ impl Bases {
 
     /// How many of those attached are open.
     #[cfg(test)]
-    fn opened(&self, halt: &Halt) -> usize {
+    fn opened(&self) -> usize {
         let mut opened: Vec<_> = (self.by_cell.read().unwrap().values().flatten())
-            .filter(|base| base.store.lock(halt).unwrap().is_some())
+            .filter(|base| base.store.initialized())
             .map(Arc::as_ptr)
             .collect();
         opened.sort();
@@ -2535,13 +2558,14 @@ impl Bases {
     }
 }
 
-/// How many threads read a boot profile's units into the cache at once.
-const REPLAY_THREADS: usize = 4;
+/// How many tasks read a boot profile's units into the cache at once.
+const REPLAY_TASKS: usize = 4;
 
 /// cladefs: reads `units`, a base's boot profile, into the extent cache from `store`, a fork of the
 /// base, or from the bucket, through `fetcher`, for what it holds there, as a fork holds what it
-/// inherited (TASK-165.7), on threads of their own: those of the extents the store holds, sealed,
-/// by a read of each unit's first byte, which pages in the unit.
+/// inherited (TASK-165.7), in tasks of their own, on the fetcher's runtime (doc-24, step 5): those
+/// of the extents the store holds, sealed, by a read of each unit's first byte, which pages in the
+/// unit.
 fn replay(
     store: Arc<LocalCell<HostDir>>,
     arenas: Arenas,
@@ -2549,18 +2573,18 @@ fn replay(
     units: Vec<profile::Unit>,
 ) {
     let units = Arc::new(units);
-    for first in 0..REPLAY_THREADS {
+    for first in 0..REPLAY_TASKS {
         let (store, arenas, units) = (store.clone(), arenas.clone(), units.clone());
-        let fetcher = fetcher.clone();
-        let spawned = std::thread::Builder::new().name("cladefs replay".into()).spawn(move || {
-            for unit in units.iter().skip(first).step_by(REPLAY_THREADS) {
+        let fetching = fetcher.clone();
+        drop(fetcher.spawn(async move {
+            for unit in units.iter().skip(first).step_by(REPLAY_TASKS) {
                 let Ok(Some((len, false))) = store.extent(unit.extent) else { continue };
                 let arena = arenas.of(unit.extent);
-                let fetcher = Some(fetcher.clone());
+                let fetcher = Some(fetching.clone());
                 let cached_in = CachedIn::Arena(arena);
                 let extent = cache::cached(&store, cached_in, fetcher, None, unit.extent, len);
-                let Ok(extent) = extent else { continue };
-                match extent.read(unit.offset, &mut [0; 1]) {
+                let Ok(extent) = extent.await else { continue };
+                match extent.read(unit.offset, &mut [0; 1]).await {
                     Ok(()) => stats::add(Counter::Prefetches, 1),
                     Err(errno) => log::debug!(
                         "cladefs: reading {:?} at {} ahead: {errno:?}",
@@ -2569,10 +2593,7 @@ fn replay(
                     ),
                 }
             }
-        });
-        if let Err(err) = spawned {
-            log::warn!("cladefs: starting a boot profile's replay: {err}");
-        }
+        }));
     }
 }
 
@@ -2759,11 +2780,11 @@ mod tests {
     fn read(store: &OpenCell, extent: ExtentId, offset: u64, len: usize) -> Result<Vec<u8>> {
         let mut data = vec![0; len];
         let (first, second) = data.split_at_mut(BLOCK.min(len));
-        store.read(
+        local_cell::upload::wait_on(store.read(
             extent,
             offset,
             &mut [VolatileSliceMut::from(first), VolatileSliceMut::from(second)],
-        )?;
+        ))?;
         Ok(data)
     }
 
@@ -2887,6 +2908,29 @@ mod tests {
         assert_eq!(store.root(), Ok(b"root".to_vec()));
         assert_eq!(read(&store, b, BLOCK as u64, BLOCK), Ok(pattern(2, BLOCK)));
         assert_eq!(read(&store, id(&store, 3), 0, BLOCK), Err(Errno::ENOENT));
+    }
+
+    /// doc-24, step 9: a store its holders let go of ([`release`]) closes as its last reference
+    /// goes, and not before: let go of by one while another holds it, it writes and commits still;
+    /// let go of by the last, it closes, what it committed kept, and opens again holding it.
+    #[test]
+    fn stores_close_once_their_last_reference_is_released() {
+        use local_cell::upload::wait_on;
+        let (store, dir) = store(1 << 20);
+        let (a, b) = (id(&store, 1), id(&store, 2));
+        write(&store, a, 0, &pattern(1, BLOCK)).unwrap();
+        wait_on(store.commit(None)).unwrap();
+        let held = Arc::new(store);
+        wait_on(release(held.clone()));
+        write(&held, b, 0, &pattern(2, BLOCK)).unwrap();
+        wait_on(held.commit_ordered(None)).unwrap();
+        let cell = held.cell();
+        wait_on(release(held));
+        let store = wait_on(OpenCell::open(dir.path().join("store"))).unwrap();
+        assert_eq!(store.cell(), cell);
+        assert_eq!(read(&store, a, 0, BLOCK), Ok(pattern(1, BLOCK)));
+        assert_eq!(read(&store, b, 0, BLOCK), Ok(pattern(2, BLOCK)));
+        wait_on(store.close());
     }
 
     /// TASK-411.3: a store of a tenant whose KEK the host's KMS holds (`CLADEFS_KMS`, set here as
@@ -3185,8 +3229,8 @@ mod tests {
         write(&store, b, 0, &pattern(5, ps as usize)).unwrap();
         local_cell::upload::wait_on(store.commit(None)).unwrap();
         let window = follower.create_dax_window(4 * ps, None).unwrap();
-        follower.map(a, 0, ps, 0).unwrap();
-        assert_eq!(follower.map(b, 0, ps, ps), Err(Errno::ENOENT));
+        local_cell::upload::wait_on(follower.map(a, 0, ps, 0)).unwrap();
+        assert_eq!(local_cell::upload::wait_on(follower.map(b, 0, ps, ps)), Err(Errno::ENOENT));
         block_on(window.fault(0, Access::Read)).unwrap();
         // SAFETY: The test faulted the page in, and nothing else accesses it.
         let bytes = unsafe { std::slice::from_raw_parts(window.host_base(), ps as usize) };
@@ -3244,13 +3288,16 @@ mod tests {
         // Not a whole number of pages where pages are 16 KiB.
         let len = ps as usize + BLOCK;
         write(&store, extent, 0, &pattern(5, len)).unwrap();
-        assert_eq!(store.map(extent, 0, ps, 0), Err(Errno::ENOSYS));
+        assert_eq!(local_cell::upload::wait_on(store.map(extent, 0, ps, 0)), Err(Errno::ENOSYS));
         let window = store.create_dax_window(6 * ps, None).unwrap();
         local_cell::upload::wait_on(store.commit(None)).unwrap();
-        store.map(extent, 0, 2 * ps, ps).unwrap();
+        local_cell::upload::wait_on(store.map(extent, 0, 2 * ps, ps)).unwrap();
         // Past the extent, zeros.
-        store.map(extent, 0, 3 * ps, 3 * ps).unwrap();
-        assert_eq!(store.map(id(&store, 9), 0, ps, 0), Err(Errno::ENOENT));
+        local_cell::upload::wait_on(store.map(extent, 0, 3 * ps, 3 * ps)).unwrap();
+        assert_eq!(
+            local_cell::upload::wait_on(store.map(id(&store, 9), 0, ps, 0)),
+            Err(Errno::ENOENT)
+        );
 
         block_on(async {
             window.fault(ps, Access::Read).await.unwrap();
@@ -3332,7 +3379,7 @@ mod tests {
         assert_eq!(store.free(sealed), Err(Errno::EIO));
         assert_eq!(local_cell::upload::wait_on(store.commit(None)), Err(Errno::EIO));
         // The window's, which the panic didn't hold.
-        assert_eq!(store.map(sealed, 0, ps, ps), Err(Errno::EIO));
+        assert_eq!(local_cell::upload::wait_on(store.map(sealed, 0, ps, ps)), Err(Errno::EIO));
         assert_eq!(store.unmap(0, ps), Err(Errno::EIO));
         assert_eq!(store.window_mappings(), Err(Errno::EIO));
         // Not quiescent, as far as anyone knows: its connection's end retires it.
@@ -3391,8 +3438,8 @@ mod tests {
         write(&store, sealed, 0, &pattern(3, 2 * ps as usize)).unwrap();
         local_cell::upload::wait_on(store.commit(None)).unwrap();
         let _window = store.create_dax_window(8 * ps, None).unwrap();
-        store.map(sealed, ps, 3 * ps, 0).unwrap();
-        store.map(sealed, 2 * ps, ps, 5 * ps).unwrap();
+        local_cell::upload::wait_on(store.map(sealed, ps, 3 * ps, 0)).unwrap();
+        local_cell::upload::wait_on(store.map(sealed, 2 * ps, ps, 5 * ps)).unwrap();
         let contents = MappingContents::Extent { extent: sealed, offset: ps };
         assert_eq!(
             store.window_mappings().unwrap(),
@@ -3419,7 +3466,13 @@ mod tests {
             local_cell::upload::wait_on(OpenCell::open_in(path, Some(arena.clone()))).unwrap();
         let window = store.create_dax_window(extents * EXTENT, None).unwrap();
         for sequence in 1..=extents {
-            store.map(id(&store, sequence), 0, EXTENT, (sequence - 1) * EXTENT).unwrap();
+            local_cell::upload::wait_on(store.map(
+                id(&store, sequence),
+                0,
+                EXTENT,
+                (sequence - 1) * EXTENT,
+            ))
+            .unwrap();
         }
         (store, window)
     }
@@ -3568,18 +3621,22 @@ mod tests {
         write(&store, sealed, 0, &pattern(1, 2 * ps as usize)).unwrap();
         local_cell::upload::wait_on(store.commit(None)).unwrap();
         let window = store.create_dax_window(8 * ps, None).unwrap();
-        store.map(sealed, 0, 2 * ps, 0).unwrap();
-        store.map(sealed, ps, ps, 4 * ps).unwrap();
+        local_cell::upload::wait_on(store.map(sealed, 0, 2 * ps, 0)).unwrap();
+        local_cell::upload::wait_on(store.map(sealed, ps, ps, 4 * ps)).unwrap();
         store.map_zeros_at(2 * ps, ps).unwrap();
         // Zeros over the first page of the first mapping: what is left of it maps the extent's
         // second page.
         store.map_zeros_at(0, ps).unwrap();
         write(&store, open, 0, &pattern(2, ps as usize)).unwrap();
         assert_eq!(store.is_quiescent(), Ok(false));
-        assert_eq!(store.map(open, 0, ps, 6 * ps), Err(Errno::EPERM), "an open extent mapped");
+        assert_eq!(
+            local_cell::upload::wait_on(store.map(open, 0, ps, 6 * ps)),
+            Err(Errno::EPERM),
+            "an open extent mapped"
+        );
         local_cell::upload::wait_on(store.commit(None)).unwrap();
         assert_eq!(store.is_quiescent(), Ok(true));
-        store.map(open, 0, ps, 6 * ps).unwrap();
+        local_cell::upload::wait_on(store.map(open, 0, ps, 6 * ps)).unwrap();
         let extent = |extent, offset| MappingContents::Extent { extent, offset };
         let mappings = store.window_mappings().unwrap();
         assert_eq!(
@@ -3602,9 +3659,9 @@ mod tests {
         let fork_window = fork.create_dax_window(8 * ps, None).unwrap();
         for mapping in &mappings {
             match mapping.contents {
-                MappingContents::Extent { extent, offset } => {
-                    fork.map(extent, offset, mapping.len, mapping.window_offset)
-                }
+                MappingContents::Extent { extent, offset } => local_cell::upload::wait_on(
+                    fork.map(extent, offset, mapping.len, mapping.window_offset),
+                ),
                 MappingContents::Zeros => fork.map_zeros_at(mapping.window_offset, mapping.len),
             }
             .unwrap();
@@ -3638,7 +3695,7 @@ mod tests {
         write(&store, extent, 0, &pattern(5, len)).unwrap();
         let window = store.create_dax_window(len as u64, None).unwrap();
         committed_here(&store);
-        store.map(extent, 0, len as u64, 0).unwrap();
+        local_cell::upload::wait_on(store.map(extent, 0, len as u64, 0)).unwrap();
         let before = stats::stats();
         // From its end, so that nothing is read ahead.
         block_on(async {
@@ -3671,7 +3728,7 @@ mod tests {
         store.store.close_segment().unwrap();
         committed_here(&store);
         store.store.wait_framed().unwrap();
-        store.map(extent, 0, len as u64, 0).unwrap();
+        local_cell::upload::wait_on(store.map(extent, 0, len as u64, 0)).unwrap();
         let counted = stats::stats();
         // From its end, so that nothing is read ahead.
         block_on(async {
@@ -3731,7 +3788,7 @@ mod tests {
             local_cell::pages::shared().evict_to(0);
 
             let start = at as u64 * len as u64;
-            store.map(*extent, 0, len as u64, start).unwrap();
+            local_cell::upload::wait_on(store.map(*extent, 0, len as u64, start)).unwrap();
             let page = offset / ps * ps;
             assert_eq!(block_on(window.fault(start + page, Access::Read)), Err(Errno::EIO));
             assert_eq!(read(&store, *extent, page, BLOCK), Err(Errno::EIO));
@@ -3757,7 +3814,7 @@ mod tests {
         write(&store, extent, 0, &pattern(5, len)).unwrap();
         let window = store.create_dax_window(len as u64, None).unwrap();
         committed_here(&store);
-        store.map(extent, 0, len as u64, 0).unwrap();
+        local_cell::upload::wait_on(store.map(extent, 0, len as u64, 0)).unwrap();
         let before = stats::stats();
         block_on(window.fault(0, Access::Read)).unwrap();
         // The first part, and the two after it, read ahead, in time.
@@ -3797,7 +3854,7 @@ mod tests {
         // The first fork reads two of the extent's parts, from its end.
         let fork = local_cell::upload::wait_on(OpenCell::open(&first)).unwrap();
         let window = fork.create_dax_window(len as u64, None).unwrap();
-        fork.map(extent, 0, len as u64, 0).unwrap();
+        local_cell::upload::wait_on(fork.map(extent, 0, len as u64, 0)).unwrap();
         block_on(async {
             window.fault(3 * part + ps, Access::Read).await.unwrap();
             window.fault(part, Access::Read).await.unwrap();
@@ -3836,7 +3893,7 @@ mod tests {
         let window = store.create_dax_window(len as u64, Some(stage.clone())).unwrap();
         local_cell::upload::wait_on(store.commit(None)).unwrap();
         // Nothing of it is in memory: mapping it maps no page yet.
-        store.map(extent, 0, len as u64, 0).unwrap();
+        local_cell::upload::wait_on(store.map(extent, 0, len as u64, 0)).unwrap();
         assert_eq!(*stage.0.lock().unwrap(), []);
         // A fault on each part's first page maps the part.
         block_on(async {
@@ -3870,7 +3927,7 @@ mod tests {
             base.fork_to(&forked, crate::host_cell::fork_child(base.cell())),
         )
         .unwrap();
-        base.map(extent, 0, len, 0).unwrap();
+        local_cell::upload::wait_on(base.map(extent, 0, len, 0)).unwrap();
         // Each part paged in by a fault of its own, at once, as a guest's threads fault.
         std::thread::scope(|scope| {
             for start in (0..len).step_by(part as usize) {
@@ -3881,7 +3938,7 @@ mod tests {
         let fork = local_cell::upload::wait_on(OpenCell::open(&forked)).unwrap();
         let stage = Arc::new(RunRecordingSecondStage::default());
         let _window = fork.create_dax_window(len, Some(stage.clone())).unwrap();
-        fork.map(extent, 0, len, 0).unwrap();
+        local_cell::upload::wait_on(fork.map(extent, 0, len, 0)).unwrap();
         let runs = stage.0.lock().unwrap().clone();
         let in_one_run: Vec<bool> = (0..parts)
             .map(|at| {
@@ -3959,7 +4016,9 @@ mod tests {
                     let _ = match request {
                         Request::Write(e, at, len) => write(&store, extent(e), at, &vec![1; len]),
                         Request::Read(e, at, len) => read(&store, extent(e), at, len).map(drop),
-                        Request::Map(e, at, len, to) => store.map(extent(e), at, len, to),
+                        Request::Map(e, at, len, to) => {
+                            local_cell::upload::wait_on(store.map(extent(e), at, len, to))
+                        }
                         Request::Unmap(to, len) => store.unmap(to, len),
                         Request::Commit => local_cell::upload::wait_on(store.commit(None)),
                         Request::Free(e) => store.free(extent(e)),
@@ -4024,7 +4083,7 @@ mod tests {
         let store = store.unwrap();
         assert_eq!(read(&store, extent, 0, len), Ok(pattern(7, len)));
         let window = store.create_dax_window(4 * ps, None).unwrap();
-        store.map(extent, 0, 2 * ps, ps).unwrap();
+        local_cell::upload::wait_on(store.map(extent, 0, 2 * ps, ps)).unwrap();
         block_on(async {
             window.fault(ps, Access::Read).await.unwrap();
             window.fault(2 * ps, Access::Read).await.unwrap();
@@ -4070,12 +4129,12 @@ mod tests {
         let extent = id(&store, 1);
         write(&store, extent, 0, &pattern(3, 2 * ps as usize)).unwrap();
         local_cell::upload::wait_on(store.commit(None)).unwrap();
-        store.map(extent, 0, 2 * ps, 0).unwrap();
+        local_cell::upload::wait_on(store.map(extent, 0, 2 * ps, 0)).unwrap();
         assert_eq!(take(), [], "pages not in memory mapped");
         block_on(window.fault(ps, Access::Read)).unwrap();
         assert_eq!(take(), [("map", ps)]);
         // The extent's first page, paged in with the second, is mapped as the range is.
-        store.map(extent, 0, ps, 3 * ps).unwrap();
+        local_cell::upload::wait_on(store.map(extent, 0, ps, 3 * ps)).unwrap();
         assert_eq!(take(), [("map", 3 * ps)]);
         write(&store, id(&store, 2), 0, &pattern(4, BLOCK)).unwrap();
         local_cell::upload::wait_on(store.commit(None)).unwrap();
@@ -4114,8 +4173,8 @@ mod tests {
         write(&store, sealed, 0, &pattern(1, 2 * ps as usize)).unwrap();
         write(&store, kept, 0, &pattern(2, ps as usize)).unwrap();
         local_cell::upload::wait_on(store.commit(None)).unwrap();
-        store.map(sealed, 0, 2 * ps, 0).unwrap();
-        store.map(kept, 0, ps, 4 * ps).unwrap();
+        local_cell::upload::wait_on(store.map(sealed, 0, 2 * ps, 0)).unwrap();
+        local_cell::upload::wait_on(store.map(kept, 0, ps, 4 * ps)).unwrap();
         assert!(window.is_mapped(0) && window.is_mapped(ps));
 
         let sealed_pages = cached(sealed).unwrap();
@@ -4166,8 +4225,8 @@ mod tests {
         let copy = local_cell::upload::wait_on(OpenCell::open(&copy_path)).unwrap();
         let (window, copy_window) =
             (store.create_dax_window(ps, None).unwrap(), copy.create_dax_window(ps, None).unwrap());
-        store.map(extent, 0, ps, 0).unwrap();
-        copy.map(extent, 0, ps, 0).unwrap();
+        local_cell::upload::wait_on(store.map(extent, 0, ps, 0)).unwrap();
+        local_cell::upload::wait_on(copy.map(extent, 0, ps, 0)).unwrap();
 
         // Counted before anything pages in: a page-in holds the extent too, a while after the
         // fault it serves returns.
@@ -4176,7 +4235,7 @@ mod tests {
         assert_eq!(Arc::strong_count(&extent_cached), 4);
         copy.unmap(0, ps).unwrap();
         assert_eq!(Arc::strong_count(&extent_cached), 3, "unmapped, the mapping let go");
-        copy.map(extent, 0, ps, 0).unwrap();
+        local_cell::upload::wait_on(copy.map(extent, 0, ps, 0)).unwrap();
         block_on(async {
             window.fault(0, Access::Read).await.unwrap();
             copy_window.fault(0, Access::Read).await.unwrap();
@@ -4222,7 +4281,7 @@ mod tests {
         store.free(extent).unwrap();
         local_cell::upload::wait_on(store.commit(None)).unwrap();
         let window = store.create_dax_window(ps, None).unwrap();
-        assert_eq!(store.map(extent, 0, ps, 0), Err(Errno::ENOENT));
+        assert_eq!(local_cell::upload::wait_on(store.map(extent, 0, ps, 0)), Err(Errno::ENOENT));
         assert_eq!(write(&store, extent, 0, &pattern(7, BLOCK)), Err(Errno::EPERM));
         drop(window);
         assert_eq!(read(&fork, extent, 0, BLOCK), Ok(pattern(6, BLOCK)));
@@ -4252,7 +4311,7 @@ mod tests {
         let windows: Vec<DaxWindow> =
             forks.iter().map(|fork| fork.create_dax_window(ps, None).unwrap()).collect();
         for fork in &forks {
-            fork.map(extent, 0, ps, 0).unwrap();
+            local_cell::upload::wait_on(fork.map(extent, 0, ps, 0)).unwrap();
         }
         forks[0].free(extent).unwrap();
         local_cell::upload::wait_on(forks[0].commit(None)).unwrap();
@@ -4290,13 +4349,16 @@ mod tests {
         let written = id(&store, 1);
         write(&store, written, 0, &pattern(1, ps as usize)).unwrap();
         let refused = open_maps_refused();
-        assert_eq!(store.map(written, 0, ps, 0), Err(Errno::EPERM));
+        assert_eq!(local_cell::upload::wait_on(store.map(written, 0, ps, 0)), Err(Errno::EPERM));
         assert_eq!(open_maps_refused(), refused + 1);
         assert!(!window.is_mapped(0), "an open extent mapped");
-        assert_eq!(store.map(id(&store, 3), 0, ps, 0), Err(Errno::ENOENT));
+        assert_eq!(
+            local_cell::upload::wait_on(store.map(id(&store, 3), 0, ps, 0)),
+            Err(Errno::ENOENT)
+        );
 
         local_cell::upload::wait_on(store.commit(None)).unwrap();
-        store.map(written, 0, 2 * ps, 0).unwrap();
+        local_cell::upload::wait_on(store.map(written, 0, 2 * ps, 0)).unwrap();
         block_on(async {
             for page in 0..2 {
                 window.fault(page * ps, Access::Read).await.unwrap();
@@ -4321,11 +4383,12 @@ mod tests {
         }
         local_cell::upload::wait_on(store.commit(None)).unwrap();
         let window = store.create_dax_window(ps, None).unwrap();
-        store.map(id(&store, 1), 0, ps, 0).unwrap();
+        local_cell::upload::wait_on(store.map(id(&store, 1), 0, ps, 0)).unwrap();
         for sequence in 2..=20 {
             let extent = id(&store, sequence);
             let cached_in = CachedIn::Arena(ArenaId::DEFAULT);
-            drop(cache::cached(&store.store, cached_in, None, None, extent, ps).unwrap());
+            let cached = cache::cached(&store.store, cached_in, None, None, extent, ps);
+            drop(local_cell::upload::wait_on(cached).unwrap());
         }
         let mut kept: Vec<u64> = cache::keys().iter().map(|(_, extent)| extent.sequence).collect();
         kept.sort_unstable();
@@ -4349,13 +4412,20 @@ mod tests {
         local_cell::upload::wait_on(store.commit(None)).unwrap();
         let window = store.create_dax_window(mapped * ps, None).unwrap();
         for sequence in 1..=mapped {
-            store.map(id(&store, sequence), 0, ps, (sequence - 1) * ps).unwrap();
+            local_cell::upload::wait_on(store.map(
+                id(&store, sequence),
+                0,
+                ps,
+                (sequence - 1) * ps,
+            ))
+            .unwrap();
         }
         let before = stats::stats();
         for sequence in mapped + 1..=mapped + looked_up {
             let extent = id(&store, sequence);
             let cached_in = CachedIn::Arena(ArenaId::DEFAULT);
-            drop(cache::cached(&store.store, cached_in, None, None, extent, ps).unwrap());
+            let cached = cache::cached(&store.store, cached_in, None, None, extent, ps);
+            drop(local_cell::upload::wait_on(cached).unwrap());
         }
         let trims = stats::stats().since(&before).cache_trims;
         assert!(trims <= looked_up / (MOST as u64 / 8) + 1, "{trims} trims of the cache");
@@ -4437,7 +4507,8 @@ mod tests {
                 let extent = extent.clone();
                 std::thread::spawn(move || {
                     let mut data = vec![0; BLOCK];
-                    extent.read(chunk * READ_AHEAD, &mut data).unwrap();
+                    local_cell::upload::wait_on(extent.read(chunk * READ_AHEAD, &mut data))
+                        .unwrap();
                     data
                 })
             })
@@ -4501,7 +4572,7 @@ mod tests {
             READ_AHEAD,
         ));
         let mut data = vec![0; BLOCK];
-        assert_eq!(extent.read(0, &mut data), Err(Errno::EIO));
+        assert_eq!(local_cell::upload::wait_on(extent.read(0, &mut data)), Err(Errno::EIO));
         let logged = KEPT.0.lock().unwrap().clone();
         assert!(
             logged
@@ -4529,16 +4600,19 @@ mod tests {
 
     /// What opens what stores attach, one instance of each, as the extent daemon does.
     fn one_instance_each() -> OpenBase {
-        let open: Mutex<HashMap<std::path::PathBuf, Arc<OpenCell>>> = Mutex::default();
+        let open: Arc<tokio::sync::Mutex<HashMap<std::path::PathBuf, Arc<OpenCell>>>> =
+            Arc::default();
         Arc::new(move |path| {
-            let mut open = open.lock().unwrap();
-            if let Some(store) = open.get(path) {
-                return Ok(store.clone());
-            }
-            let store =
-                Arc::new(local_cell::upload::wait_on(OpenCell::open_base(path, None)).unwrap());
-            open.insert(path.to_owned(), store.clone());
-            Ok(store)
+            let (open, path) = (open.clone(), path.to_owned());
+            Box::pin(async move {
+                let mut open = open.lock().await;
+                if let Some(store) = open.get(&path) {
+                    return Ok(store.clone());
+                }
+                let store = Arc::new(OpenCell::open_base(&path, None).await.unwrap());
+                open.insert(path, store.clone());
+                Ok(store)
+            })
         })
     }
 
@@ -4555,22 +4629,25 @@ mod tests {
         let window = store.create_dax_window(4 * ps, None).unwrap();
 
         assert_eq!(read(&store, extent, 0, BLOCK), Err(Errno::ENOENT));
-        assert_eq!(store.map(extent, 0, ps, 0), Err(Errno::ENOENT));
+        assert_eq!(local_cell::upload::wait_on(store.map(extent, 0, ps, 0)), Err(Errno::ENOENT));
 
         store.attach_base(&base, &ancestry).unwrap();
         assert_eq!(read(&store, extent, 0, ps as usize), Ok(data.clone()));
-        store.map(extent, 0, ps, 0).unwrap();
+        local_cell::upload::wait_on(store.map(extent, 0, ps, 0)).unwrap();
         block_on(window.fault(0, Access::Read)).unwrap();
         // SAFETY: The test faulted the page in, and nothing writes it.
         let mapped = unsafe { std::slice::from_raw_parts(window.host_base(), ps as usize) };
         assert!(mapped == data, "the window maps other data");
 
         assert_eq!(read(&store, not_attached, 0, BLOCK), Err(Errno::ENOENT));
-        assert_eq!(store.map(not_attached, 0, ps, ps), Err(Errno::ENOENT));
+        assert_eq!(
+            local_cell::upload::wait_on(store.map(not_attached, 0, ps, ps)),
+            Err(Errno::ENOENT)
+        );
         let beyond = ExtentId { sequence: extent.sequence + 1, ..extent };
         assert_eq!(read(&store, beyond, 0, BLOCK), Err(Errno::ENOENT));
         // A base's extent maps read-only anywhere, as every MAP does; it is never written.
-        store.map(extent, 0, ps, ps).unwrap();
+        local_cell::upload::wait_on(store.map(extent, 0, ps, ps)).unwrap();
         assert_eq!(write(&store, extent, 0, &[0; BLOCK]), Err(Errno::EPERM));
         // Attaching it again changes nothing.
         store.attach_base(&base, &ancestry).unwrap();
@@ -4600,7 +4677,7 @@ mod tests {
         for store in &stores {
             store.open_bases(open.clone()).unwrap();
             store.attach_base(&base, &ancestry).unwrap();
-            store.map(extent, 0, ps, 0).unwrap();
+            local_cell::upload::wait_on(store.map(extent, 0, ps, 0)).unwrap();
         }
         // Counted before anything pages in: a page-in holds the extent too, a while after the
         // fault it serves returns (TASK-157), as `windows_share_extents_pages` counts.
@@ -4615,7 +4692,7 @@ mod tests {
         }
         assert!(Arc::ptr_eq(&cached(extent).unwrap(), &extent_cached), "cached anew");
         let mut held = vec![0; ps as usize];
-        extent_cached.read(0, &mut held).unwrap();
+        local_cell::upload::wait_on(extent_cached.read(0, &mut held)).unwrap();
         assert!(held == pattern(4, ps as usize), "the cache holds other data");
     }
 
@@ -4650,7 +4727,7 @@ mod tests {
                 .unwrap();
         // The publisher's VM maps its first page, from the tenant's copy.
         let window = publisher.create_dax_window(len as u64, None).unwrap();
-        publisher.map(extent, 0, len as u64, 0).unwrap();
+        local_cell::upload::wait_on(publisher.map(extent, 0, len as u64, 0)).unwrap();
         block_on(window.fault(0, Access::Read)).unwrap();
         assert_eq!(read(&publisher, extent, 0, len), Ok(data.clone()));
         let pages = len as u64 / ps;
@@ -4665,7 +4742,7 @@ mod tests {
         let page_ins = stats::stats().page_ins;
         // Moved as the sandbox maps it, so that its MAP maps every page, none faulted on: moved
         // as asked for, the first sandbox on the Linux tree took 4,422 faults (GCE r991).
-        sandbox.map(extent, 0, len as u64, 0).unwrap();
+        local_cell::upload::wait_on(sandbox.map(extent, 0, len as u64, 0)).unwrap();
         assert_eq!((held(ArenaId::DEFAULT), held(tenant.id())), (Some(pages), None));
         assert_eq!(read(&sandbox, extent, 0, len), Ok(data.clone()));
         assert_eq!(stats::stats().page_ins - page_ins, 0, "paged in again");
@@ -4730,7 +4807,8 @@ mod tests {
         write(&store, other, 0, &[1; BLOCK]).unwrap();
         local_cell::upload::wait_on(store.commit(None)).unwrap();
         let cached_in = CachedIn::Public(PublicReach(reached));
-        drop(cache::cached(&store.store, cached_in, None, None, other, BLOCK as u64));
+        let cached = cache::cached(&store.store, cached_in, None, None, other, BLOCK as u64);
+        drop(local_cell::upload::wait_on(cached));
     }
 
     /// doc-10: what a generation pins stays, whatever its store does next.
@@ -4895,13 +4973,13 @@ mod tests {
         write(&store, sealed, 0, &pattern(1, BLOCK)).unwrap();
         local_cell::upload::wait_on(store.commit(None)).unwrap();
         write(&store, open, 0, &pattern(2, BLOCK)).unwrap();
-        assert_eq!(store.map(open, 0, ps, 0), Err(Errno::EPERM));
+        assert_eq!(local_cell::upload::wait_on(store.map(open, 0, ps, 0)), Err(Errno::EPERM));
         assert_eq!(open_maps_refused(), 1, "an open extent's MAP uncounted");
-        assert_eq!(store.map(never, 0, ps, 0), Err(Errno::ENOENT));
+        assert_eq!(local_cell::upload::wait_on(store.map(never, 0, ps, 0)), Err(Errno::ENOENT));
         assert_eq!(store.store.extent(open).map_err(errno), Ok(Some((BLOCK as u64, true))));
         assert_eq!(read(&store, open, 0, BLOCK), Ok(pattern(2, BLOCK)));
 
-        store.map(sealed, 0, ps, 0).unwrap();
+        local_cell::upload::wait_on(store.map(sealed, 0, ps, 0)).unwrap();
         block_on(window.fault(0, Access::Write)).unwrap();
         // SAFETY: The page is mapped, private, and nothing else accesses it.
         unsafe { *window.host_base() = 0xee };
@@ -4932,7 +5010,7 @@ mod tests {
         let (sealed, rebound) = (id(&store, 1), id(&store, 2));
         write(&store, sealed, 0, &pattern(1, BLOCK)).unwrap();
         local_cell::upload::wait_on(store.commit(None)).unwrap();
-        store.map(sealed, 0, ps, 0).unwrap();
+        local_cell::upload::wait_on(store.map(sealed, 0, ps, 0)).unwrap();
         block_on(window.fault(0, Access::Write)).unwrap();
         // SAFETY: The page is mapped, private, and nothing else accesses it.
         unsafe { *window.host_base() = 0xee };
@@ -4952,7 +5030,7 @@ mod tests {
         bytes[0] = 0xee;
         write(&store, rebound, 0, &bytes).unwrap();
         local_cell::upload::wait_on(store.commit(None)).unwrap();
-        store.map(rebound, 0, ps, 0).unwrap();
+        local_cell::upload::wait_on(store.map(rebound, 0, ps, 0)).unwrap();
         assert_eq!(store.private_pages(), Ok(0));
         let contents = MappingContents::Extent { extent: rebound, offset: 0 };
         assert_eq!(

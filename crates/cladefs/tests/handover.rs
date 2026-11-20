@@ -97,7 +97,11 @@ fn ordered_commits_are_whole_in_another_process_once_their_vm_goes() {
         let opened = local_cell::upload::wait_on(OpenCell::open(&path)).unwrap();
         for (extent, data) in &last {
             let mut read = vec![0; data.len()];
-            let found = opened.read(*extent, 0, &mut [VolatileSliceMut::from(&mut read[..])]);
+            let found = local_cell::upload::wait_on(opened.read(
+                *extent,
+                0,
+                &mut [VolatileSliceMut::from(&mut read[..])],
+            ));
             assert_eq!(found.map(|()| read), Ok(data.clone()), "round {round}: {extent:?}");
         }
         sequence = opened.info().unwrap().next_sequence.max(sequence);

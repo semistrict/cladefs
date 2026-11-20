@@ -23,7 +23,7 @@
 use super::server::Connection;
 use crate::cell_requests::{self, Capacity, Close};
 use crate::cell_table::{self, CellTable, Writer as _};
-use crate::open_cell::Opening;
+use crate::open_cell::{Opening, release};
 use crate::pages::Arena;
 use crate::{CellId, CellOf, Errno, ExtentInfo, OpenCell};
 use bucket_cell::cache::Cache;
@@ -152,16 +152,6 @@ pub(super) fn store_key(path: &Path) -> PathBuf {
     }
 }
 
-/// Holds the store `key` names for the daemon, which no connection opens meanwhile: `EBUSY` while
-/// a connection writes it, once a connection whose VM process is gone lets it go, waiting at most
-/// [`CLOSING_WAIT`]. cladefs: the store kept open of it for forks, if any, closed: the daemon's work
-/// on it but forking it has it alone (TASK-92.5). It blocks.
-fn hold_blocking(key: &Path) -> Result<Hold, Errno> {
-    let hold = table().hold(key, Some(CLOSING_WAIT))?;
-    close_kept_blocking(hold.take_kept());
-    Ok(hold)
-}
-
 /// cladefs: holds the store at `path` for the daemon's FUSE mount of cells, which attaches it
 /// (TASK-475.3): until what it returns is dropped, as the mount detaches it, a VM process opening
 /// it, or the control API working on it, fails with `EBUSY` at once. `EBUSY` if a connection not
@@ -176,8 +166,10 @@ pub(crate) fn hold_mounted(path: &Path) -> Result<MountHold, Errno> {
 /// cladefs: a store the daemon's FUSE mount holds ([`hold_mounted`]), let go as it is dropped.
 pub(crate) struct MountHold(#[allow(dead_code, reason = "held for its drop")] Hold);
 
-/// Holds the store at `path` for the daemon, as [`hold_blocking`] does, holding no thread while
-/// it waits.
+/// Holds the store at `path` for the daemon, which no connection opens meanwhile: `EBUSY` while a
+/// connection writes it, once a connection whose VM process is gone lets it go, waiting at most
+/// [`CLOSING_WAIT`], holding no thread. cladefs: the store kept open of it for forks, if any,
+/// closed: the daemon's work on it but forking it has it alone (TASK-92.5).
 async fn hold(path: &Path) -> Result<Hold, Errno> {
     hold_within(path, CLOSING_WAIT).await
 }
@@ -240,8 +232,8 @@ impl Borrow<OpenCell> for HeldCell {
 }
 
 /// A store the daemon works on ([`HeldCell`]): one it opened, or one open for connections, which
-/// it lets go of on a blocking thread, as closing one it opened blocks, on its last commits'
-/// uploads; its blocking work takes it so too.
+/// it lets go of in a task of its own ([`release_held`]), so that a call cancelled as it lets it go
+/// leaves it to close all the same.
 struct Here(Option<Arc<HeldCell>>);
 
 impl Here {
@@ -271,12 +263,35 @@ impl HeldCell {
     fn new(store: Arc<OpenCell>, hold: Option<Hold>) -> Self {
         Self { store, _then: hold.map(|_hold| Then::LetGo { _hold }) }
     }
+
+    /// cladefs: lets it go: its store, closed if this was its last reference ([`release`]), and
+    /// then what it lets go of once that is closed, in the order its drop would (TASK-79.34), holding
+    /// no thread (doc-24, step 9).
+    async fn close(self) {
+        let HeldCell { store, _then } = self;
+        release(store).await;
+        drop(_then);
+    }
+}
+
+/// cladefs: lets `held` go, and closes it ([`HeldCell::close`]) if this was its last reference: as
+/// every holder of one lets it go, so that whichever is last closes it, awaited.
+async fn release_held(held: Arc<HeldCell>) {
+    if let Some(held) = Arc::into_inner(held) {
+        held.close().await;
+    }
+}
+
+/// cladefs: lets `held` go in a task of its own, on the runtime that lives as long as the daemon:
+/// what lets one go where it can't await its close, as a drop, or a call that may be cancelled.
+fn release_held_behind(held: Arc<HeldCell>) -> tokio::task::JoinHandle<()> {
+    super::server::IO.spawn(release_held(held))
 }
 
 impl Drop for Here {
     fn drop(&mut self) {
         if let Some(store) = self.0.take() {
-            drop(tokio::task::spawn_blocking(move || drop(store)));
+            drop(release_held_behind(store));
         }
     }
 }
@@ -284,7 +299,7 @@ impl Drop for Here {
 impl Close for Here {
     async fn close(mut self) {
         if let Some(store) = self.0.take() {
-            if let Err(err) = tokio::task::spawn_blocking(move || drop(store)).await {
+            if let Err(err) = release_held_behind(store).await {
                 log::error!("cladefsd: closing a store: {err}");
             }
         }
@@ -363,16 +378,15 @@ fn keep(hold: &Hold, store: OpenCell) -> Arc<HeldCell> {
 /// closed: once the forks forking it are done. It blocks.
 fn close_kept_blocking(kept: Option<Kept>) {
     let Some(Kept { store, closed, .. }) = kept else { return };
-    drop(store);
+    drop(release_held_behind(store));
     local_cell::blocks!("a kept store's close, waiting for the forks forking it");
     let _ = futures::executor::block_on(closed);
 }
 
-/// cladefs: closes `kept`, as [`close_kept_blocking`] does, holding no thread while it waits, its
-/// closing on a blocking thread.
+/// cladefs: closes `kept`, as [`close_kept_blocking`] does, holding no thread while it waits.
 async fn close_kept(kept: Option<Kept>) {
     let Some(Kept { store, closed, .. }) = kept else { return };
-    drop(tokio::task::spawn_blocking(move || drop(store)));
+    drop(release_held_behind(store));
     let _ = closed.await;
 }
 
@@ -423,7 +437,10 @@ async fn let_go_failed(key: &Path, kept: Weak<HeldCell>) {
 pub(super) struct Live(pub(super) Arc<OpenCell>);
 
 impl Close for Live {
-    async fn close(self) {}
+    /// Lets the store go, which its connection, gone meanwhile, may have left it last to close.
+    async fn close(self) {
+        release(self.0).await;
+    }
 }
 
 impl Capacity for Live {
@@ -519,8 +536,11 @@ pub(super) async fn open_store(
         }
     })
     .await?;
-    // cladefs: a fork attached to it opens when first read through to.
-    store.open_bases(Arc::new(move |base| self::base(base, arena.as_ref())))?;
+    // cladefs: a fork attached to it opens when first read through to, awaited (doc-24, step 5).
+    store.open_bases(Arc::new(move |base| {
+        let (base, arena) = (base.to_owned(), arena.clone());
+        Box::pin(async move { self::base(&base, arena.as_ref()).await })
+    }))?;
     Ok(store)
 }
 
@@ -528,7 +548,7 @@ pub(super) async fn open_store(
 /// `arena` to read through to: the one instance open of it, for all that attach it, in the default
 /// arena, if public, or `arena`: `EBUSY` in another's, whose pages the connection's VM process
 /// doesn't hold.
-fn base(path: &Path, arena: Option<&Arc<Arena>>) -> Result<Arc<OpenCell>, Errno> {
+async fn base(path: &Path, arena: Option<&Arc<Arena>>) -> Result<Arc<OpenCell>, Errno> {
     let open = |found: Option<(Arc<OpenCell>, bool)>| match found {
         Some((_, true)) => Err(Errno::EBUSY),
         Some((store, false)) if store.is_public() => Ok(Some(store)),
@@ -542,18 +562,17 @@ fn base(path: &Path, arena: Option<&Arc<Arena>>) -> Result<Arc<OpenCell>, Errno>
     if let Some(store) = open(table().instance(&key))? {
         return Ok(store);
     }
-    let hold = hold_blocking(&key)?;
+    let hold = hold(&key).await?;
     if let Some(store) = open(hold.instance())? {
         return Ok(store);
     }
     if !path.exists() {
         return Err(Errno::ENOENT);
     }
-    // cladefs: the read path's, async in its step (doc-24, step 5).
-    let opened = crate::open_cell::not_yet_async(attached(path, async |keeping| {
+    let opened = attached(path, async |keeping| {
         OpenCell::open_base_with(path, arena.cloned(), keeping).await
-    }));
-    let store = Arc::new(opened?);
+    });
+    let store = Arc::new(opened.await?);
     hold.open(&store)?;
     Ok(store)
 }
@@ -757,7 +776,7 @@ pub(super) async fn import(
     blocking(move || {
         let imported = (image.as_path(), reference.as_deref());
         let made = crate::import::store_keeping(&at, (capacity, tenant), imported, keeping);
-        crate::open_cell::not_yet_async(made)
+        outside_the_simulation(made)
             .map_err(|err| errno_of(format_args!("importing {}", image.display()), err))
     })
     .await?;
@@ -765,6 +784,17 @@ pub(super) async fn import(
     let cell = store.cell();
     store.close().await;
     Ok(cell)
+}
+
+/// cladefs: awaits `future`, blocking the calling thread, a blocking thread of the runtime's: what an
+/// image's import does, whose walk of a layer's tar entries, which are not `Send`, spans its awaits,
+/// and which stays outside the simulation (doc-24). Under madsim, which runs on one thread, it fails
+/// at once.
+fn outside_the_simulation<F: std::future::Future>(future: F) -> F::Output {
+    local_cell::blocks!(
+        "an image's import, outside the simulation (cells::outside_the_simulation)"
+    );
+    futures::executor::block_on(future)
 }
 
 /// The store at `path`, or, if it doesn't exist, one of `cell`, of `capacity` bytes, taken from
@@ -928,7 +958,9 @@ where
     }
     let from = opened_version(cell, version, capacity).await?;
     let (kept, _) = kept_or_open(&from, capacity).await?;
-    if (**store).borrow().holds_what(&kept.store)? {
+    let holds = (**store).borrow().holds_what(&kept.store);
+    release_held(kept).await;
+    if holds? {
         return Ok(());
     }
     log::warn!(
@@ -957,7 +989,7 @@ async fn fork_kept(
     let forked = kept.store.fork(path, tenant).await.map(drop).map_err(|err| {
         errno_of(format_args!("forking {} to {}", from.display(), path.display()), err)
     });
-    drop(kept);
+    release_held(kept).await;
     if forked.is_err_and(store_at_fault) {
         let_go_failed(&store_key(from), failed).await;
     }
@@ -1073,7 +1105,7 @@ async fn fork_held(from: &Path, to: &Path, tenant: u64, key: &Path) -> Result<Ce
         forked.map_err(|err| errno_of(format_args!("forking to {}", to.display()), err))
     }
     .await;
-    drop(store);
+    release_held(store).await;
     forking.close().await;
     if forked.as_ref().is_err_and(|errno| store_at_fault(*errno)) {
         let_go_failed(key, held).await;
@@ -1088,7 +1120,9 @@ async fn with_store<T>(
     work: impl AsyncFnOnce(&OpenCell) -> Result<T, Errno>,
 ) -> Result<T, Errno> {
     if let Some(store) = open_by_connection(path) {
-        return work(&store).await;
+        let done = work(&store).await;
+        release(store).await;
+        return done;
     }
     let here = Here::open(path, hold(path).await?).await?;
     let done = work(&here.store().store).await;

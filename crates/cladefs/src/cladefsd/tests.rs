@@ -552,7 +552,12 @@ fn serves_a_store() {
     served.join().unwrap();
     let mut data = vec![0; 2 * BLOCK];
     let local = local_cell::upload::wait_on(OpenCell::open(&path)).unwrap();
-    local.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).unwrap();
+    local_cell::upload::wait_on(local.read(
+        extent,
+        0,
+        &mut [VolatileSliceMut::from(&mut data[..])],
+    ))
+    .unwrap();
     assert_eq!(data, pattern(1, 2 * BLOCK));
 }
 
@@ -3305,7 +3310,12 @@ fn stores_followed_are_worked_on_as_they_are() {
     followed.join().unwrap();
     let forked = local_cell::upload::wait_on(OpenCell::open(&fork)).unwrap();
     let mut data = vec![0; BLOCK];
-    forked.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).unwrap();
+    local_cell::upload::wait_on(forked.read(
+        extent,
+        0,
+        &mut [VolatileSliceMut::from(&mut data[..])],
+    ))
+    .unwrap();
     assert_eq!(data, pattern(1, BLOCK));
     delete_cell(&path).unwrap();
 }

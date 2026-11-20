@@ -73,7 +73,7 @@ fn round(mib: u64, mask: u8) -> (f64, f64) {
     local_cell::upload::wait_on(store.commit(None)).unwrap();
     for sequence in 1..=extents {
         let extent = ExtentId { cell: store.cell().id, sequence };
-        store.map(extent, 0, len, (sequence - 1) * len).unwrap();
+        local_cell::upload::wait_on(store.map(extent, 0, len, (sequence - 1) * len)).unwrap();
     }
     let (start, cpu) = (Instant::now(), cpu_micros());
     block_on(async {

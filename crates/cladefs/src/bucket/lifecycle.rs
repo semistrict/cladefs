@@ -879,6 +879,11 @@ fn versions_forked_on_a_host_of_another_bucket_make_children_there() {
 
     let child = open(&child_path);
     let mut read = vec![0; BLOCK];
-    child.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut read[..])]).unwrap();
+    local_cell::upload::wait_on(child.read(
+        extent,
+        0,
+        &mut [crate::VolatileSliceMut::from(&mut read[..])],
+    ))
+    .unwrap();
     assert!(read == data, "the child reads another than its parent's data");
 }

@@ -487,7 +487,7 @@ async fn run_connection(stream: UnixStream, tenant: Arc<Tenant>) {
         report: stats::Report::new(&peer.sender),
         page_ins: tokio::sync::Semaphore::new(PAGE_INS),
         named: OnceLock::new(),
-        _alive: alive,
+        alive: Some(alive),
     });
     match AsyncReceiver::new(stream) {
         Ok(receiver) => {
@@ -552,10 +552,7 @@ async fn run_connection(stream: UnixStream, tenant: Arc<Tenant>) {
     {
         log::error!("cladefsd: uploading a store's last commits as the daemon drains: {errno}");
     }
-    let finished = tokio::task::spawn_blocking(move || finish_connection(connection));
-    if let Err(err) = finished.await {
-        log::error!("cladefsd: letting a connection's store go: {err}");
-    }
+    finish_connection(connection).await;
     // Its store goes, with its window and open extents, before another connection may open it:
     // once nothing holds the connection any more, as a request's job, its receiving task, or the
     // control API's work through it may still, whose last to let go closes its store and then
@@ -662,9 +659,10 @@ impl Connection {
 
 /// Lets the store of `connection`, whose VM process is gone and whose requests are done, go: once
 /// what it committed is durable, if it writes it.
-fn finish_connection(connection: Arc<Connection>) {
+async fn finish_connection(connection: Arc<Connection>) {
     if let (Some(hold), Some(store)) = (connection.hold(), connection.store()) {
-        if let Err(err) = store.flush() {
+        // cladefs: its disk work off the runtime's threads (doc-24, step 9).
+        if let Err(err) = local_cell::upload::blocking(|| store.flush()) {
             log::error!("cladefsd: making a store's last commits durable: {err:?}");
         }
         // cladefs: what it wrote since its last commit no next writer knows of, nor takes over.
@@ -1055,14 +1053,15 @@ pub(super) struct Connection {
     /// cladefs: what the daemon reports of its VM process (TASK-111.4): its store, its build, what
     /// it says of its window's second stage, and its answers to asks for its stats.
     report: Arc<stats::Report>,
-    /// cladefs: its faults and `PRIVATE`s resolving, [`PAGE_INS`] at most (TASK-149.34).
+    /// cladefs: its faults, `PRIVATE`s and `READ`s resolving, [`PAGE_INS`] at most (TASK-149.34).
     page_ins: tokio::sync::Semaphore,
     /// cladefs: its store's path, once open, which names the guest requests it serves calls for
     /// (`crate::request::RequestId::store`, TASK-260).
     named: OnceLock<Arc<str>>,
-    /// What says, as it drops, that the connection has: its last field, dropped after its store,
-    /// window and open extents, and its hold of its store's path (TASK-79.34).
-    _alive: tokio::sync::oneshot::Sender<std::convert::Infallible>,
+    /// What says, as it drops, that the connection has: dropped after its store, window and open
+    /// extents, and its hold of its store's path (TASK-79.34), by its teardown ([`Connection`]'s
+    /// drop).
+    alive: Option<tokio::sync::oneshot::Sender<std::convert::Infallible>>,
 }
 
 /// Where a connection is in its life ([`Connection::phase`]): one `OPEN` at a time, and one store
@@ -1113,15 +1112,27 @@ impl Drop for Opening<'_> {
 impl Drop for Connection {
     /// Its store goes, then its window, as they did before (TASK-79.34), and only then its hold of
     /// its store's path, which those waiting to open it may then (TASK-54): all it has open is
-    /// closed by then, but for what its followers have.
+    /// closed by then, but for what its followers have. Then what says it is gone. cladefs: in a
+    /// task of its own, its store let go awaited, closed if this was its last (`open_cell::release`):
+    /// whatever drops the connection last, a request, its receiving or the control API, closes no
+    /// store in its drop, which blocks (doc-24, step 9).
     ///
     /// A lock a panic poisoned is taken all the same: what it guards is whole, each changed at
     /// once, and what it holds must go, in this order, whatever panicked.
     fn drop(&mut self) {
-        drop(self.store.take());
-        drop(self.window.get_mut().get_mut().unwrap_or_else(PoisonError::into_inner).take());
+        let store = self.store.take();
+        let window = self.window.get_mut().get_mut().unwrap_or_else(PoisonError::into_inner).take();
         let phase = self.phase.get_mut().get_mut().unwrap_or_else(PoisonError::into_inner);
-        drop(std::mem::replace(phase, Phase::Unopened));
+        let phase = std::mem::replace(phase, Phase::Unopened);
+        let alive = self.alive.take();
+        drop(IO.spawn(async move {
+            if let Some(store) = store {
+                crate::open_cell::release(store).await;
+            }
+            drop(window);
+            drop(phase);
+            drop(alive);
+        }));
     }
 }
 
@@ -1455,12 +1466,16 @@ impl Connection {
             }
             Request::Read { extent, offset, len, into: ReadInto::Transfer { at } } => {
                 let area = self.transfer.get().ok_or(Errno::EINVAL)?;
-                store.read(*extent, *offset, &mut [area.slice_mut(*at, *len)?])
+                // cladefs: in its turn, as a fault's, as what it pages in holds memory: a read
+                // served as a future holds no thread to bound it by (TASK-149.34, doc-24 step 5).
+                let _turn = self.page_ins.acquire().await.map_err(|_| Errno::EIO)?;
+                store.read(*extent, *offset, &mut [area.slice_mut(*at, *len)?]).await
             }
             // As much as a reply holds, the codec has it (TASK-79.16).
             Request::Read { extent, offset, len, into: ReadInto::Reply } => {
                 payload.resize(*len as usize, 0);
-                store.read(*extent, *offset, &mut [VolatileSliceMut::from(&mut payload[..])])
+                let _turn = self.page_ins.acquire().await.map_err(|_| Errno::EIO)?;
+                store.read(*extent, *offset, &mut [VolatileSliceMut::from(&mut payload[..])]).await
             }
             Request::Write { extent, offset, data, barriers } => {
                 let data = match *data {
@@ -1481,11 +1496,11 @@ impl Connection {
             Request::Map(WindowMapping { window_offset, len, contents }) => match *contents {
                 MappingContents::Zeros => store.map_zeros_at(*window_offset, *len),
                 MappingContents::Extent { extent, offset } => {
-                    store.map(extent, offset, *len, *window_offset)
+                    store.map(extent, offset, *len, *window_offset).await
                 }
             },
             // cladefs: in one change of the window (TASK-92.14).
-            Request::MapMany(mappings) => store.map_many(mappings),
+            Request::MapMany(mappings) => store.map_many(mappings).await,
             Request::Mappings => {
                 *payload = codec::mappings_payload(&store.window_mappings()?);
                 Ok(())
