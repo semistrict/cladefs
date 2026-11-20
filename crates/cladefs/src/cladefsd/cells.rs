@@ -1081,26 +1081,9 @@ async fn fork_held(from: &Path, to: &Path, tenant: u64, key: &Path) -> Result<Ce
     forked
 }
 
-/// cladefs: runs `work` on a blocking thread with the store at `path`: the one a connection has
-/// open, if one has; or opened here, which no connection opens meanwhile, and closed after.
-async fn with_store<T: Send + 'static>(
-    path: &Path,
-    work: impl FnOnce(&OpenCell) -> Result<T, Errno> + Send + 'static,
-) -> Result<T, Errno> {
-    if let Some(store) = open_by_connection(path) {
-        return blocking(move || work(&store)).await;
-    }
-    let here = Here::open(path, hold(path).await?).await?;
-    let store = here.store().clone();
-    let done = blocking(move || work(&store.store)).await;
-    here.close().await;
-    done
-}
-
-/// cladefs: awaits `work` with the store at `path`, as [`with_store`] runs its work: the one a
-/// connection has open, if one has; or opened here, which no connection opens meanwhile, and
-/// closed after (TASK-685.3).
-async fn working_with<T>(
+/// cladefs: awaits `work` with the store at `path`: the one a connection has open, if one has; or
+/// opened here, which no connection opens meanwhile, and closed after (TASK-685.3).
+async fn with_store<T>(
     path: &Path,
     work: impl AsyncFnOnce(&OpenCell) -> Result<T, Errno>,
 ) -> Result<T, Errno> {
@@ -1116,7 +1099,7 @@ async fn working_with<T>(
 /// cladefs: makes a version of the cell of the store at `path` ([`OpenCell::make_version`]),
 /// keeping its newest `keep_last` if given; returns its ID.
 pub(super) async fn make_version(path: PathBuf, keep_last: Option<u32>) -> Result<u64, Errno> {
-    working_with(&path, async |store| {
+    with_store(&path, async |store| {
         let made = store.make_version(keep_last).await;
         made.map_err(|err| errno_of(format_args!("making a version of {}", path.display()), err))
     })
@@ -1125,13 +1108,13 @@ pub(super) async fn make_version(path: PathBuf, keep_last: Option<u32>) -> Resul
 
 /// cladefs: the versions of the cell of the store at `path` ([`OpenCell::versions`]).
 pub(super) async fn versions(path: PathBuf) -> Result<Vec<crate::VersionInfo>, Errno> {
-    working_with(&path, async |store| Ok(store.versions().await)).await
+    with_store(&path, async |store| Ok(store.versions().await)).await
 }
 
 /// cladefs: drops the versions `ids` of the cell of the store at `path`
 /// ([`OpenCell::drop_versions`]).
 pub(super) async fn drop_versions(path: PathBuf, ids: BTreeSet<u64>) -> Result<(), Errno> {
-    working_with(&path, async |store| {
+    with_store(&path, async |store| {
         let dropped = store.drop_versions(&ids).await;
         dropped
             .map_err(|err| errno_of(format_args!("dropping versions of {}", path.display()), err))
@@ -1142,7 +1125,7 @@ pub(super) async fn drop_versions(path: PathBuf, ids: BTreeSet<u64>) -> Result<(
 /// cladefs: shares the version `id` of the cell of the store at `path`, or no longer
 /// ([`OpenCell::share_version`]).
 pub(super) async fn share_version(path: PathBuf, id: u64, shared: bool) -> Result<(), Errno> {
-    working_with(&path, async |store| {
+    with_store(&path, async |store| {
         let shared = store.share_version(id, shared).await;
         shared.map_err(|err| {
             errno_of(format_args!("sharing version {id} of {}", path.display()), err)
