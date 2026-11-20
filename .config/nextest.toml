@@ -7,8 +7,9 @@ slow-timeout = { period = "60s", terminate-after = 2 }
 fail-fast = false
 
 # The unit tests: the workspace's tests but its simulations, its fault explorations (each step of a
-# fork or restore failing, corrupt images) and the others that take 5 s or more on a Mac: 2,690 of
-# its 2,770 tests, and 1/8 of its test time (`cargo nextest run --workspace --profile unit`, or
+# fork or restore failing, corrupt images) and the others that take 5 s or more on a Mac, or, of
+# those that run on Linux alone, 10 s or more on ubu1 (four at a time): 2,690 of the Mac's 2,770
+# tests, and 1/8 of their time (`cargo nextest run --workspace --profile unit`, or
 # `CLADEFS_TEST_PARTS=unit scripts/test.sh`, which sets UCD_ZIP). The workspace part runs them all,
 # these included. A unit test that takes over a minute is ended and fails: it belongs in the list.
 [profile.unit]
@@ -53,7 +54,28 @@ not (
         | test(=storage::kept::tests::images_dropped_as_their_pass_runs_leave_their_bucket_whole)
         | test(=storage::kept::tests::passes_run_among_an_image_and_its_forks_commits)))
     | (binary_id(cladefs::cells) & test(=forks_and_takes_cells))
-    | (binary_id(cladefs::cladefsctl) & test(=stores_open_elsewhere_are_left_alone_locally))
+    | (binary_id(cladefs::cladefsctl) & (
+        test(=stores_open_elsewhere_are_left_alone_locally)
+        | test(=stores_open_elsewhere_are_left_alone_through_the_daemon)))
+    | (package(cladefs) & (
+        test(=cladefsd::tests::whatever_a_vm_process_says_harms_no_other)
+        | test(=cladefsd::tests::serves_hundreds_of_forks_of_a_base)
+        | test(=cladefsd::tests::hostile::page_ins_in_flight_are_bounded)
+        | test(=cladefsd::tests::vm_processes_within_the_bounds_are_served_on)
+        | test(=cladefsd::tests::hostile::a_compromised_vm_process_harms_no_tenant_beside_it)
+        | test(=cladefsd::tests::window_mappings_are_answered_beside_the_stream_data_in_flight)
+        | test(=cladefsd::tests::hostile::mappings_asked_for_past_the_credit_let_their_vm_process_go)
+        | test(=cladefsd::tests::followers_that_stop_reading_are_told_of_the_latest_commit)
+        | test(=cladefsd::tests::forks_opening_reads_nothing_more_of_a_larger_base)
+        | test(=cladefsd::tests::counting_followers_walks_no_extents)
+        | test(=cladefsd::tests::restores_wait_for_a_version_however_long_its_opening_takes)))
+    | (binary_id(cladefs::fuse_mount) & test(=a_store_mounted_is_not_mounted_again))
+    | (binary_id(cladefs::control) & (
+        test(=shrinks_waiting_for_their_guests_hold_no_threads)
+        | test(=tenants_encrypted_under_the_bucket_kms_and_shredded_through_the_control_api)))
+    | (binary_id(cladefs::fuse_differential)
+        & test(=random_calls_on_a_mount_come_to_what_they_do_on_tmpfs))
+    | (binary_id(cladefs::handover) & test(=stores_open_whole_in_another_process_once_their_vm_goes))
     | (package(extent_frame) & test(=tests::objects_of_raw_files_sectors_read_under_their_key_alone))
     | (package(fxfs) & (
         test(=object_store::allocator::tests::test_compaction_of_middle_layer_keeps_its_removals)
