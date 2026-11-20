@@ -69,19 +69,19 @@ fn public_bases_are_shared_read_only() {
     let one = listen(dir.path(), "one", Some(tenant(dir.path(), "one", 1)));
     let two = listen(dir.path(), "two", Some(tenant(dir.path(), "two", 2)));
     let base_path = dir.path().join("base");
-    let base = OpenCell::create(&base_path, 1 << 24).unwrap();
+    let base = local_cell::upload::wait_on(OpenCell::create(&base_path, 1 << 24)).unwrap();
     let base_bytes = pattern(3);
     let extent = ExtentId { cell: base.cell().id, sequence: 1 };
     base.write(extent, 0, &[cladefs::VolatileSlice::from(&base_bytes[..])]).unwrap();
-    futures::executor::block_on(base.commit(None)).unwrap();
+    local_cell::upload::wait_on(base.commit(None)).unwrap();
     base.make_public().unwrap();
     drop(base);
     let forks = [dir.path().join("one/fork"), dir.path().join("two/fork")];
     // A fork is the bucket's (TASK-165.7), made by the uploader its opening took the cell with.
-    let base = OpenCell::open(&base_path).unwrap();
+    let base = local_cell::upload::wait_on(OpenCell::open(&base_path)).unwrap();
     for (fork, tenant) in forks.iter().zip(1..) {
         // Each a cell of its tenant's (TASK-364).
-        base.fork(fork, tenant).unwrap();
+        local_cell::upload::wait_on(base.fork(fork, tenant)).unwrap();
     }
     drop(base);
 
@@ -90,7 +90,10 @@ fn public_bases_are_shared_read_only() {
     assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::EACCES));
     let base_in_one = dir.path().join("one/base");
     // Of a cell of its own (TASK-364), refused as public.
-    OpenCell::create_in(&base_in_one, 1 << 24, 1).unwrap().make_public().unwrap();
+    local_cell::upload::wait_on(OpenCell::create_in(&base_in_one, 1 << 24, 1))
+        .unwrap()
+        .make_public()
+        .unwrap();
     let refused = CellClient::connect(&one, &base_in_one, 1 << 24);
     assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::EPERM));
 

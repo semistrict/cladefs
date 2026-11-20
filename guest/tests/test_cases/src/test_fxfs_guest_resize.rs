@@ -103,8 +103,10 @@ mod host {
             if output != "OK\n" {
                 return TestOutcome::Fail(format!("expected exactly \"OK\\n\", got {output:?}"));
             }
-            let store = cladefs::OpenCell::open(test_setup.tmp_dir.join("extents"))
-                .expect("open the extent store");
+            let store = local_cell::upload::wait_on(cladefs::OpenCell::open(
+                test_setup.tmp_dir.join("extents"),
+            ))
+            .expect("open the extent store");
             assert_eq!(store.info().unwrap().capacity, STEPS[1].1);
             TestOutcome::Pass
         }

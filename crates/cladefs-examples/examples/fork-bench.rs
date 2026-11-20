@@ -55,21 +55,22 @@ fn main() {
 fn bench(dir: &std::path::Path, tenant: u64, name: &str, forks: usize) {
     std::fs::create_dir(dir).unwrap();
     let capacity = 2 * EXTENTS * EXTENT as u64;
-    let store = OpenCell::create_in(dir.join("parent"), capacity, tenant);
+    let store =
+        local_cell::upload::wait_on(OpenCell::create_in(dir.join("parent"), capacity, tenant));
     let store = store.unwrap();
     let data = vec![0x5a; EXTENT];
     for sequence in 1..=EXTENTS {
         let extent = ExtentId { cell: store.cell().id, sequence };
         store.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
     }
-    futures::executor::block_on(store.commit(Some(b"root"))).unwrap();
+    local_cell::upload::wait_on(store.commit(Some(b"root"))).unwrap();
     // The pool of the tenant's new cell KEKs, filled as its store opened, off the forks' path.
     futures::executor::block_on(cladefs::bucket::kms().unwrap().filled(tenant));
     let mut took = Vec::with_capacity(forks);
     let before = store.bucket().stats();
     for n in 0..forks {
         let started = Instant::now();
-        store.fork(dir.join(format!("fork-{n}")), tenant).unwrap();
+        local_cell::upload::wait_on(store.fork(dir.join(format!("fork-{n}")), tenant)).unwrap();
         took.push(started.elapsed());
     }
     let after = store.bucket().stats();
@@ -77,7 +78,7 @@ fn bench(dir: &std::path::Path, tenant: u64, name: &str, forks: usize) {
     let mut opened = Vec::with_capacity(OPENED);
     for n in 0..OPENED.min(forks) {
         let started = Instant::now();
-        drop(OpenCell::open(dir.join(format!("fork-{n}"))).unwrap());
+        drop(local_cell::upload::wait_on(OpenCell::open(dir.join(format!("fork-{n}")))).unwrap());
         opened.push(started.elapsed());
     }
     took.sort();

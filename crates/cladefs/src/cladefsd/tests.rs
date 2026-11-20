@@ -230,8 +230,15 @@ fn keeps_cells_in_the_buckets_their_stores_name() {
     let url = format!("file://{}/", dir.path().canonicalize().unwrap().join("bucket").display());
     let cell = crate::host_cell::new_alone();
     let (of, keeping) = (crate::CellOf::Named(cell), crate::host_cell::keeping().unwrap());
-    let made = crate::host_cell::create_unmade(&path, 1 << 20, of, Kind::Fxfs, Some(&url), keeping)
-        .unwrap();
+    let made = local_cell::upload::wait_on(crate::host_cell::create_unmade(
+        &path,
+        1 << 20,
+        of,
+        Kind::Fxfs,
+        Some(&url),
+        keeping,
+    ))
+    .unwrap();
     made.made().unwrap();
     drop(made);
     let (store, served) = connect(&path, 1 << 20);
@@ -450,7 +457,7 @@ fn resizes_open_stores() {
 
     drop(store);
     served.join().unwrap();
-    let reopened = OpenCell::open(&path).unwrap();
+    let reopened = local_cell::upload::wait_on(OpenCell::open(&path)).unwrap();
     assert_eq!(reopened.info().unwrap().capacity, 2 << 20);
 }
 
@@ -506,7 +513,7 @@ fn resizes_closed_stores() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    drop(OpenCell::create(&path, 1 << 20).unwrap());
+    drop(local_cell::upload::wait_on(OpenCell::create(&path, 1 << 20)).unwrap());
     resize(&path, 3 << 20).unwrap();
     assert_eq!(resize(&path, 2 << 20), Err(Errno::EBUSY));
     assert_eq!(resize(&dir.path().join("none"), 2 << 20), Err(Errno::ENOENT));
@@ -544,7 +551,7 @@ fn serves_a_store() {
     drop(store);
     served.join().unwrap();
     let mut data = vec![0; 2 * BLOCK];
-    let local = OpenCell::open(&path).unwrap();
+    let local = local_cell::upload::wait_on(OpenCell::open(&path)).unwrap();
     local.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).unwrap();
     assert_eq!(data, pattern(1, 2 * BLOCK));
 }
@@ -1493,11 +1500,14 @@ fn two_processes_map_the_same_pages() {
     let dir = tempfile::tempdir().unwrap();
     let (parent, child) = (dir.path().join("parent"), dir.path().join("child"));
     let extent = {
-        let store = OpenCell::create(&parent, 1 << 24).unwrap();
+        let store = local_cell::upload::wait_on(OpenCell::create(&parent, 1 << 24)).unwrap();
         let extent = ExtentId { cell: store.cell().id, sequence: 1 };
         store.write(extent, 0, &[VolatileSlice::from(&pattern(9, ps)[..])]).unwrap();
-        futures::executor::block_on(store.commit(None)).unwrap();
-        store.fork_to(&child, crate::host_cell::fork_child(store.cell())).unwrap();
+        local_cell::upload::wait_on(store.commit(None)).unwrap();
+        local_cell::upload::wait_on(
+            store.fork_to(&child, crate::host_cell::fork_child(store.cell())),
+        )
+        .unwrap();
         extent
     };
     let socket = dir.path().join("cladefsd.sock");
@@ -1791,11 +1801,15 @@ fn two_vm_processes(env: &[&str]) -> TwoVmProcesses {
     let (parent, child) = (dir.path().join("parent"), dir.path().join("child"));
     let extent = {
         // A cell of the tenant's (TASK-364).
-        let store = OpenCell::create_in(&parent, 1 << 24, tenant.id()).unwrap();
+        let store = local_cell::upload::wait_on(OpenCell::create_in(&parent, 1 << 24, tenant.id()))
+            .unwrap();
         let extent = ExtentId { cell: store.cell().id, sequence: 1 };
         store.write(extent, 0, &[VolatileSlice::from(&pattern(9, ps)[..])]).unwrap();
-        futures::executor::block_on(store.commit(None)).unwrap();
-        store.fork_to(&child, crate::host_cell::fork_child(store.cell())).unwrap();
+        local_cell::upload::wait_on(store.commit(None)).unwrap();
+        local_cell::upload::wait_on(
+            store.fork_to(&child, crate::host_cell::fork_child(store.cell())),
+        )
+        .unwrap();
         extent
     };
     let socket = dir.path().join("cladefsd.sock");
@@ -2730,7 +2744,7 @@ fn earlier_placements_open_no_stores() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let (path, earlier) = (dir.path().join("store"), dir.path().join("earlier"));
-    let cell = OpenCell::create(&path, 1 << 24).unwrap().cell();
+    let cell = local_cell::upload::wait_on(OpenCell::create(&path, 1 << 24)).unwrap().cell();
     OpenCell::place(&path, 5).unwrap();
     let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
     write(&store, ExtentId { cell: cell.id, sequence: 1 }, 0, &pattern(1, BLOCK)).unwrap();
@@ -2761,13 +2775,14 @@ fn fenced_stores_answer_ordered_commits_erofs() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let path = |name: &str| dir.path().join(name);
-    let cell = OpenCell::create(path("first"), 1 << 24).unwrap().cell();
+    let cell =
+        local_cell::upload::wait_on(OpenCell::create(path("first"), 1 << 24)).unwrap().cell();
     OpenCell::place(path("first"), 5).unwrap();
     let first = CellClient::connect(&socket, path("first"), 1 << 24).unwrap();
     let extent = |sequence| ExtentId { cell: cell.id, sequence };
     write(&first, extent(1), 0, &pattern(1, BLOCK)).unwrap();
     first.commit(None).unwrap();
-    OpenCell::take(path("second"), 1 << 24, cell, Some(6)).unwrap();
+    local_cell::upload::wait_on(OpenCell::take(path("second"), 1 << 24, cell, Some(6))).unwrap();
     // The first's uploader finds itself fenced at its next upload, which a durable commit waits
     // for, or has found it already.
     assert_eq!(first.commit(None), Err(Errno::EROFS));
@@ -2914,7 +2929,7 @@ fn control_takes_cells_at_the_placements_given() {
     drop(first);
     assert_eq!(control(super::cells::sync(path("first"))), Ok(()));
     // A copy beside the daemon, as cladefsctl's without it, placed at 6.
-    OpenCell::take(path("second"), 1 << 24, cell, Some(6)).unwrap();
+    local_cell::upload::wait_on(OpenCell::take(path("second"), 1 << 24, cell, Some(6))).unwrap();
     // One through the daemon, placed at 7.
     let taken =
         super::cells::create(path("third"), 1 << 24, cell, (Some(7), Kind::Fxfs, None, false));
@@ -3288,7 +3303,7 @@ fn stores_followed_are_worked_on_as_they_are() {
     assert_eq!(control(super::cells::make_public(path.clone(), false)), Err(Errno::EBUSY));
     drop(follower);
     followed.join().unwrap();
-    let forked = OpenCell::open(&fork).unwrap();
+    let forked = local_cell::upload::wait_on(OpenCell::open(&fork)).unwrap();
     let mut data = vec![0; BLOCK];
     forked.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).unwrap();
     assert_eq!(data, pattern(1, BLOCK));
@@ -3419,20 +3434,27 @@ fn forks_opening_reads_nothing_more_of_a_larger_base() {
     // Forks of a base of `extents` extents, opened: how long their opening took, and what it
     // unpacked and read from the stores.
     let opened = |extents: u64| {
-        let base = OpenCell::create(dir.path().join(format!("base-{extents}")), 1 << 30).unwrap();
+        let base = local_cell::upload::wait_on(OpenCell::create(
+            dir.path().join(format!("base-{extents}")),
+            1 << 30,
+        ))
+        .unwrap();
         let cell = base.cell();
         for sequence in 1..=extents {
             let data = pattern(sequence as u8, BLOCK);
             base.write(ExtentId { cell: cell.id, sequence }, 0, &[VolatileSlice::from(&data[..])])
                 .unwrap();
             if sequence % 1024 == 0 {
-                futures::executor::block_on(base.commit(None)).unwrap();
+                local_cell::upload::wait_on(base.commit(None)).unwrap();
             }
         }
         let forks: Vec<_> = (1..=FORKS)
             .map(|n| {
                 let fork = dir.path().join(format!("fork-{extents}-{n}"));
-                base.fork_to(&fork, crate::host_cell::fork_child(cell)).unwrap();
+                local_cell::upload::wait_on(
+                    base.fork_to(&fork, crate::host_cell::fork_child(cell)),
+                )
+                .unwrap();
                 fork
             })
             .collect();
@@ -3470,20 +3492,22 @@ fn counting_followers_walks_no_extents() {
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
-    let base = OpenCell::create(dir.path().join("base"), 1 << 30).unwrap();
+    let base =
+        local_cell::upload::wait_on(OpenCell::create(dir.path().join("base"), 1 << 30)).unwrap();
     let cell = base.cell();
     for sequence in 1..=EXTENTS {
         let data = pattern(sequence as u8, BLOCK);
         base.write(ExtentId { cell: cell.id, sequence }, 0, &[VolatileSlice::from(&data[..])])
             .unwrap();
         if sequence % 1024 == 0 {
-            futures::executor::block_on(base.commit(None)).unwrap();
+            local_cell::upload::wait_on(base.commit(None)).unwrap();
         }
     }
     let forks: Vec<_> = (1..=FORKS)
         .map(|n| {
             let fork = dir.path().join(format!("fork-{n}"));
-            base.fork_to(&fork, crate::host_cell::fork_child(cell)).unwrap();
+            local_cell::upload::wait_on(base.fork_to(&fork, crate::host_cell::fork_child(cell)))
+                .unwrap();
             fork
         })
         .collect();
@@ -3826,8 +3850,8 @@ fn forks_to_stores_there_already_fail_with_eexist() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let (path, fork) = (dir.path().join("store"), dir.path().join("fork"));
-    let store = OpenCell::create(&path, 1 << 20).unwrap();
-    futures::executor::block_on(store.commit(None)).unwrap();
+    let store = local_cell::upload::wait_on(OpenCell::create(&path, 1 << 20)).unwrap();
+    local_cell::upload::wait_on(store.commit(None)).unwrap();
     drop(store);
     fork_cell(&path, &fork).unwrap();
     let again = fork_cell(&path, &fork);
@@ -3846,10 +3870,10 @@ fn requests_attach_nothing() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let base = dir.path().join("base");
-    let store = OpenCell::create(&base, 1 << 20).unwrap();
+    let store = local_cell::upload::wait_on(OpenCell::create(&base, 1 << 20)).unwrap();
     let extent = ExtentId { cell: store.cell().id, sequence: 1 };
     store.write(extent, 0, &[VolatileSlice::from(&[7; 4096][..])]).unwrap();
-    futures::executor::block_on(store.commit(None)).unwrap();
+    local_cell::upload::wait_on(store.commit(None)).unwrap();
     drop(store);
     let vm = CellClient::connect(&socket, dir.path().join("vm"), 1 << 20).unwrap();
     // But those nothing replies to.
@@ -3875,11 +3899,12 @@ fn stores_worked_on_here_read_no_boot_profile() {
     let ps = page_size() as usize;
     let dir = tempfile::tempdir().unwrap();
     let (base, fork) = (dir.path().join("base"), dir.path().join("fork"));
-    let store = OpenCell::create(&base, 1 << 24).unwrap();
+    let store = local_cell::upload::wait_on(OpenCell::create(&base, 1 << 24)).unwrap();
     let extent = ExtentId { cell: store.cell().id, sequence: 1 };
     store.write(extent, 0, &[VolatileSlice::from(&pattern(7, ps)[..])]).unwrap();
-    futures::executor::block_on(store.commit(None)).unwrap();
-    store.fork_to(&fork, crate::host_cell::fork_child(store.cell())).unwrap();
+    local_cell::upload::wait_on(store.commit(None)).unwrap();
+    local_cell::upload::wait_on(store.fork_to(&fork, crate::host_cell::fork_child(store.cell())))
+        .unwrap();
     drop(store);
     // The base's profile, as its first fork to boot recorded it.
     let profile = crate::profile::path(&base.canonicalize().unwrap(), extent.cell);
@@ -3905,8 +3930,8 @@ fn stores_synced_here_are_closed_before_they_are_let_go() {
     let dir = tempfile::tempdir().unwrap();
     for round in 0..20 {
         let path = dir.path().join(format!("store-{round}"));
-        let store = OpenCell::create(&path, 1 << 20).unwrap();
-        futures::executor::block_on(store.commit(None)).unwrap();
+        let store = local_cell::upload::wait_on(OpenCell::create(&path, 1 << 20)).unwrap();
+        local_cell::upload::wait_on(store.commit(None)).unwrap();
         drop(store);
         wait_uploaded(&path).unwrap();
         let deleted = delete_cell(&path).map_err(|error| error.errno());
@@ -4612,7 +4637,10 @@ fn control_forks_failing_fork_again() {
     let failing = fail::FailGuard::new("upload::forked", "1*return").unwrap();
     let cell = control(super::cells::fork(base.clone(), again.clone(), None)).unwrap();
     drop(failing);
-    assert_eq!(OpenCell::open(&again).map(|store| store.cell()).map_err(drop), Ok(cell));
+    assert_eq!(
+        local_cell::upload::wait_on(OpenCell::open(&again)).map(|store| store.cell()).map_err(drop),
+        Ok(cell)
+    );
     let (forked, served) = connect(&again, 1 << 24);
     assert_eq!(read(&forked, extent, 0, BLOCK), Ok(pattern(3, BLOCK)));
     drop(forked);
@@ -5141,7 +5169,7 @@ fn faults_waiting_for_object_storage_hold_up_no_request() {
     // cell in the bucket.
     let path = dir.path().join("store");
     let cell = {
-        let store = OpenCell::create(&path, 1 << 24).unwrap();
+        let store = local_cell::upload::wait_on(OpenCell::create(&path, 1 << 24)).unwrap();
         let cell = store.cell();
         for sequence in 1..=FAULTS as u64 {
             let data = pattern(sequence as u8, ps);
@@ -5149,7 +5177,7 @@ fn faults_waiting_for_object_storage_hold_up_no_request() {
                 .write(ExtentId { cell: cell.id, sequence }, 0, &[VolatileSlice::from(&data[..])])
                 .unwrap();
         }
-        futures::executor::block_on(store.commit(None)).unwrap();
+        local_cell::upload::wait_on(store.commit(None)).unwrap();
         cell
     };
     let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
@@ -5592,13 +5620,13 @@ fn vm_processes_of_any_tenant_write_no_public_base() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let (base, fork) = (dir.path().join("base"), dir.path().join("fork"));
-    let store = OpenCell::create(&base, 1 << 24).unwrap();
-    futures::executor::block_on(store.commit(None)).unwrap();
+    let store = local_cell::upload::wait_on(OpenCell::create(&base, 1 << 24)).unwrap();
+    local_cell::upload::wait_on(store.commit(None)).unwrap();
     store.make_public().unwrap();
     let forked = crate::host_cell::fork_child(store.cell());
     drop(store);
-    let opened = OpenCell::open(&base).unwrap();
-    opened.fork_to(&fork, forked).unwrap();
+    let opened = local_cell::upload::wait_on(OpenCell::open(&base)).unwrap();
+    local_cell::upload::wait_on(opened.fork_to(&fork, forked)).unwrap();
     drop(opened);
     let refused = CellClient::connect(&socket, &base, 1 << 24);
     assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::EPERM));
@@ -6542,7 +6570,7 @@ fn drains_close_every_connection_and_take_no_more() {
     assert!(super::control::CALLS.begin().is_none(), "a control call began, drained");
     drop((store, tenants));
     // Closed, durable, as of its last commit, though only ordered.
-    let closed = OpenCell::open(&path).unwrap();
+    let closed = local_cell::upload::wait_on(OpenCell::open(&path)).unwrap();
     assert_eq!(closed.root(), Ok(b"drained".to_vec()));
 }
 

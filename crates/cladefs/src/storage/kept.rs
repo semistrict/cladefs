@@ -49,8 +49,9 @@ impl KeptImage {
         keeping: upload::Options,
     ) -> anyhow::Result<Self> {
         let cache = keeping.cache.clone();
+        // FUSE storage, outside the daemon, blocks on the store's making (TASK-685.3).
         let opened = host_cell::create_unmade(dir, capacity, of, Kind::Fxfs, None, keeping);
-        let opened = opened.map_err(anyhow_of)?;
+        let opened = local_cell::upload::wait_on(opened).map_err(anyhow_of)?;
         if whole {
             opened.made()?;
         }
@@ -62,7 +63,8 @@ impl KeptImage {
     /// this process is no host's daemon ([`host_cell::keeping`]).
     pub fn open(dir: &Path) -> anyhow::Result<Self> {
         let keeping = host_cell::keeping().map_err(anyhow_of)?;
-        Self::opened(host_cell::open(dir, keeping).map_err(anyhow_of)?, None)
+        let opened = local_cell::upload::wait_on(host_cell::open(dir, keeping));
+        Self::opened(opened.map_err(anyhow_of)?, None)
     }
 
     /// `opened`, its cell taken in its bucket, its extents there read through `cache`, if given.
@@ -93,7 +95,7 @@ impl KeptImage {
         if let Some(failed) = self.uploader.failed() {
             return Err(anyhow::Error::new(failed).context("the image's cell is not uploaded"));
         }
-        futures::executor::block_on(self.uploader.lag(self.store.last_commit()?))?;
+        local_cell::upload::wait_on(self.uploader.lag(self.store.last_commit()?))?;
         if let Some(collecting) = &self.collecting {
             collecting.after_commit();
         }
@@ -103,7 +105,7 @@ impl KeptImage {
     /// Waits until the store's commits are uploaded: so a closed image's cell is whole in its
     /// bucket.
     pub fn wait_uploaded(&self) -> anyhow::Result<()> {
-        Ok(futures::executor::block_on(self.uploader.uploaded(self.store.last_commit()?))?)
+        Ok(local_cell::upload::wait_on(self.uploader.uploaded(self.store.last_commit()?))?)
     }
 
     /// Forks the store's cell, as of its last commit, to a new cell of its tenant's (TASK-364),
@@ -111,14 +113,17 @@ impl KeptImage {
     /// commit ([`host_cell::fork_through`]): `held` is let go of once the version's commit is made.
     pub fn fork<H>(&self, path: &Path, held: H) -> Result<(), Error> {
         let tenant = self.store.description().cell.tenant;
-        let cell = host_cell::new_cell(self.uploader.bucket(), tenant).map_err(Error::from)?;
+        let cell = local_cell::upload::wait_on(host_cell::new_cell(self.uploader.bucket(), tenant))
+            .map_err(Error::from)?;
         let child = Child { cell, owner: rand::random() };
         let id = rand::random::<u64>().max(1);
         let version = bucket_cell::layout::NewVersion { id, keep_last: None };
         let epoch = self.store.commit_version(version, false).map_err(Error::new)?;
         drop(held);
-        futures::executor::block_on(self.uploader.uploaded(epoch)).map_err(Error::from)?;
-        host_cell::fork_through(&self.store, &self.uploader, id, path, child, |_| Ok(()))
+        local_cell::upload::wait_on(self.uploader.uploaded(epoch)).map_err(Error::from)?;
+        let forking =
+            host_cell::fork_through(&self.store, &self.uploader, id, path, child, |_| Ok(()));
+        local_cell::upload::wait_on(forking)
     }
 
     /// The bucket's collector in this process, if it is the image's own.
@@ -133,7 +138,7 @@ impl KeptImage {
 /// a copy never placed deletes it where this process is no host's daemon ([`host_cell::token`]).
 pub(crate) fn delete(path: &Path) -> Result<(), Error> {
     let bucket = host_cell::bucket_at(path).map_err(Error::new)?;
-    host_cell::delete(path, bucket.as_deref(), host_cell::token)
+    local_cell::upload::wait_on(host_cell::delete(path, bucket.as_deref(), host_cell::token))
 }
 
 #[cfg(test)]
@@ -299,8 +304,9 @@ mod tests {
         let scenario = fail::FailScenario::setup();
         fail::cfg("upload::stopped", "sleep(500)").unwrap();
         drop(Storage::create(&path, SIZE).unwrap());
-        let reopened = host_cell::open(&path, host_cell::keeping().unwrap())
-            .map(|opened| opened.store.description().cell);
+        let reopened =
+            local_cell::upload::wait_on(host_cell::open(&path, host_cell::keeping().unwrap()))
+                .map(|opened| opened.store.description().cell);
         scenario.teardown();
         let cell = reopened.map_err(|err| format!("{err:#}"));
         assert_eq!(cell.map(|_| ()), Ok(()));
@@ -313,14 +319,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
         let keeping = host_cell::keeping().unwrap();
-        let made = host_cell::create_unmade(
+        let made = local_cell::upload::wait_on(host_cell::create_unmade(
             &path,
             SIZE,
             CellOf::Named(bucket_cell::layout::test_cell(7)),
             bucket_cell::cell::Kind::Fxfs,
             Some("memory:///host"),
             keeping,
-        );
+        ));
         made.unwrap().made().unwrap();
         let image = KeptImage::open(&path).unwrap();
         assert!(image.collecting().is_none());

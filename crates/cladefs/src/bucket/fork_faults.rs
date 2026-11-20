@@ -135,7 +135,7 @@ pub(super) fn commit(
     for (extent, data) in &extents {
         write(store, *extent, data);
     }
-    futures::executor::block_on(store.commit(Some(root))).unwrap();
+    local_cell::upload::wait_on(store.commit(Some(root))).unwrap();
     extents
 }
 
@@ -165,13 +165,13 @@ impl World {
         let parent = kept_in(&path, (1 << 30, None), &reached, options()).unwrap();
         let cell = parent.cell();
         let mut held = commit(&parent, 1, &[BLOCK], b"first");
-        futures::executor::block_on(parent.wait_uploaded()).unwrap();
+        local_cell::upload::wait_on(parent.wait_uploaded()).unwrap();
         let floor = parent.info().unwrap().sequence_floor;
         drop(parent);
         let parent = reopened(&path, options()).unwrap();
         assert!(parent.info().unwrap().sequence_floor > floor, "a writer's floor jumps");
         held.extend(commit(&parent, 2, &[2 * BLOCK, 4 << 20], b"root"));
-        futures::executor::block_on(parent.wait_uploaded()).unwrap();
+        local_cell::upload::wait_on(parent.wait_uploaded()).unwrap();
         Self {
             temp,
             host,
@@ -242,6 +242,7 @@ impl World {
     fn fork(&mut self, faults: &[Fault]) -> Result<(), crate::Error> {
         let guards: Vec<_> = faults.iter().filter_map(|fault| self.arm(*fault)).collect();
         let forked = self.parent.as_ref().unwrap().fork_to(self.path("child"), self.child);
+        let forked = local_cell::upload::wait_on(forked);
         self.parent = None;
         drop(guards);
         if self.dead.load(Ordering::SeqCst) {
@@ -273,13 +274,13 @@ impl World {
             assert!(read(store, *extent, data.len()) == *data, "{case}: {extent:?} of a fork");
         }
         let own = commit(store, 5, &[BLOCK], b"child");
-        assert_eq!(futures::executor::block_on(store.wait_uploaded()), Ok(()), "{case}");
+        assert_eq!(local_cell::upload::wait_on(store.wait_uploaded()), Ok(()), "{case}");
         assert!(read(store, own[0].0, BLOCK) == own[0].1, "{case}");
     }
 
     /// Deletes the fork at `path`, as the control API does.
     fn delete(&self, path: &Path, case: &str) {
-        let deleted = OpenCell::delete(path, Some(&self.bucket));
+        let deleted = local_cell::upload::wait_on(OpenCell::delete(path, Some(&self.bucket)));
         assert_eq!(deleted.map_err(|err| err.to_string()), Ok(()), "{case}: deleting it");
         assert!(!path.exists(), "{case}: it is there still");
     }
@@ -357,7 +358,7 @@ impl World {
             assert!(read(&parent, *extent, data.len()) == *data, "{case}: the parent's {extent:?}");
         }
         let later = commit(&parent, 7, &[BLOCK], b"later");
-        assert_eq!(futures::executor::block_on(parent.wait_uploaded()), Ok(()), "{case}");
+        assert_eq!(local_cell::upload::wait_on(parent.wait_uploaded()), Ok(()), "{case}");
         let (mut extents, root) = uploaded(&self.bucket, self.cell);
         extents.sort();
         let mut all: Vec<_> = (self.held.iter().chain(&later))
@@ -381,7 +382,8 @@ impl World {
         // A fork to the same child, and to the same place, makes it if nothing has its ID, or fails
         // cleanly; one to a new child forks.
         let spent = self.record(self.child).is_some() || !children.is_empty();
-        let again = parent.fork_to(&path, self.child).map_err(|err| err.errno());
+        let again = local_cell::upload::wait_on(parent.fork_to(&path, self.child))
+            .map_err(|err| err.errno());
         assert_eq!(again, if spent { Err(Some(Errno::EEXIST)) } else { Ok(()) }, "{case}: again");
         if !spent {
             children.push(path.clone());
@@ -389,7 +391,8 @@ impl World {
         }
         let retried = crate::host_cell::new_alone();
         assert_eq!(
-            parent.fork_to(self.path("retried"), retried).map_err(|err| err.to_string()),
+            local_cell::upload::wait_on(parent.fork_to(self.path("retried"), retried))
+                .map_err(|err| err.to_string()),
             Ok(()),
             "{case}: a fork to a new child"
         );
@@ -404,7 +407,11 @@ impl World {
         let mut live = self.live();
         live.sort();
         let mut named = vec![self.cell, self.other.cell()];
-        named.extend(children.iter().map(|child| OpenCell::open(child).unwrap().cell()));
+        named.extend(
+            children
+                .iter()
+                .map(|child| local_cell::upload::wait_on(OpenCell::open(child)).unwrap().cell()),
+        );
         if taken {
             named.push(self.child);
         }
@@ -415,7 +422,7 @@ impl World {
         }
         commit(&self.other, 8, &[BLOCK], b"other, later");
         assert_eq!(
-            futures::executor::block_on(self.other.wait_uploaded()),
+            local_cell::upload::wait_on(self.other.wait_uploaded()),
             Ok(()),
             "{case}: another's cell"
         );
@@ -668,8 +675,8 @@ fn forks_orphaned_by_a_lost_host_keep_what_they_inherited_until_deleted() {
     for (extent, _) in &world.held {
         parent.free(*extent).unwrap();
     }
-    futures::executor::block_on(parent.commit(None)).unwrap();
-    assert_eq!(futures::executor::block_on(parent.wait_uploaded()), Ok(()));
+    local_cell::upload::wait_on(parent.commit(None)).unwrap();
+    assert_eq!(local_cell::upload::wait_on(parent.wait_uploaded()), Ok(()));
     drop(parent);
     let stored = || {
         let listed = block_on(bucket_cell::Bucket::list(&*world.bucket, "")).unwrap();
@@ -687,8 +694,11 @@ fn forks_orphaned_by_a_lost_host_keep_what_they_inherited_until_deleted() {
     world.collect("deleted");
     assert!(stored(), "the origin went while the fork's version names it");
     let parent = world.open(&reopen).unwrap();
-    let versions = parent.versions().into_iter().map(|version| version.id).collect();
-    parent.drop_versions(&versions).unwrap();
+    let versions = local_cell::upload::wait_on(parent.versions())
+        .into_iter()
+        .map(|version| version.id)
+        .collect();
+    local_cell::upload::wait_on(parent.drop_versions(&versions)).unwrap();
     crate::test_checkpoints::checkpointed(&parent, &world.bucket);
     drop(parent);
     world.collect("dropped");

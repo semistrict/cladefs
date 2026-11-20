@@ -66,7 +66,7 @@ fn stores_open_whole_in_another_process_once_their_vm_goes() {
             store.commit(Some(&root)).unwrap();
         }
         drop(store);
-        let opened = OpenCell::open(&path).unwrap();
+        let opened = local_cell::upload::wait_on(OpenCell::open(&path)).unwrap();
         assert_eq!(opened.root().unwrap(), root, "round {round}");
         sequence = opened.info().unwrap().next_sequence.max(sequence);
     }
@@ -94,7 +94,7 @@ fn ordered_commits_are_whole_in_another_process_once_their_vm_goes() {
             last.push((extent, data));
         }
         drop(store);
-        let opened = OpenCell::open(&path).unwrap();
+        let opened = local_cell::upload::wait_on(OpenCell::open(&path)).unwrap();
         for (extent, data) in &last {
             let mut read = vec![0; data.len()];
             let found = opened.read(*extent, 0, &mut [VolatileSliceMut::from(&mut read[..])]);
