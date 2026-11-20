@@ -85,7 +85,7 @@ fn status(what: impl std::fmt::Display, err: impl std::fmt::Display) -> Status {
 /// A client of the peer at `address`.
 fn client(address: &str) -> Result<PeerClient<tonic::transport::Channel>, Errno> {
     let runtime = crate::bucket::bucket_runtime().map_err(|_| Errno::EIO)?;
-    super::peers::member(runtime.handle(), address).map_err(|err| {
+    super::peers::member(&runtime, address).map_err(|err| {
         log::warn!("cladefsd: migrating to {address}: {err}");
         Errno::EINVAL
     })
@@ -104,7 +104,7 @@ pub(super) async fn migrate(path: PathBuf, peer: String, to: String) -> Result<u
     })
     .await?;
     if OUTGOING.get().lock().unwrap().contains_key(&path) {
-        return Err(Errno::EALREADY);
+        return Err(Errno::EBUSY);
     }
     let entry = host.entry(cell).ok_or(Errno::ENOENT)?;
     let parent = base.parent();
@@ -122,7 +122,7 @@ pub(super) async fn migrate(path: PathBuf, peer: String, to: String) -> Result<u
     };
     let prepared = client.migrate_prepare(prepare).await.map_err(|refused| {
         log::warn!("cladefsd: preparing migration {migration:x} at {peer}: {refused}");
-        Errno::EREMOTEIO
+        Errno::ENOTCONN
     })?;
     let incarnation = prepared.into_inner().incarnation;
     let outgoing = Arc::new(Outgoing {
@@ -276,7 +276,7 @@ fn crc_of(path: &Path) -> std::io::Result<u32> {
 
 /// Hands the ephemeral cell of the store at `path` over to the target of its migration
 /// (`HandOverCell`), once nothing has it open here (`EBUSY` otherwise): see the module's docs.
-/// `EAGAIN` if the target refused, the store served here again; `EREMOTEIO` if it did not answer,
+/// `EAGAIN` if the target refused, the store served here again; `ENOTCONN` if it did not answer,
 /// the store given up still, to be asked again.
 pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
     let host = ephemeral_host::host()?;
@@ -302,7 +302,7 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
             })?;
             let files = finish(outgoing, &path).await.map_err(|err| {
                 log::warn!("cladefsd: migration {:x}'s last files: {err}", outgoing.migration);
-                Errno::EREMOTEIO
+                Errno::ENOTCONN
             })?;
             (marker, Some(files))
         }
@@ -322,7 +322,7 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
         Ok(answer) => answer.into_inner().accepted,
         Err(unanswered) => {
             log::warn!("cladefsd: migration {:x}'s hand-over: {unanswered}", marker.migration);
-            return Err(Errno::EREMOTEIO);
+            return Err(Errno::ENOTCONN);
         }
     };
     OUTGOING.get().lock().unwrap().remove(&path);
