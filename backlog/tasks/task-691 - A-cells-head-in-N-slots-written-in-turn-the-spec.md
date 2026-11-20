@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-20 09:39'
-updated_date: '2026-11-20 17:02'
+updated_date: '2026-11-20 18:24'
 labels:
   - bucket
   - gcs
@@ -45,6 +45,8 @@ TASK-690 caps a cell's head swaps at GCS's one write a second to an object, so a
 Mac, scripts/check-tla.sh: HeadSlots (2 slots, 2 writers, 1 reader, versions to 5) 666,565 states 2 s; HeadSlots3 (3 slots, versions to 6) 14,800,131 states 36 s; NoSlotCondition violates FencedWrites, NoNewestOfSlots violates ReadsLinearizable; all 48 specs/bucket models and mutations pass, as on main before. Not modelled: a read starting at a known version and reading forward until a slot holds an older one; the code's read should be checked against this spec, or the spec extended, when it is written.
 
 2026-11-20, code (user: no PRs, straight to main; 10 slots by default, a format-time setting; half-made heads fenced by marks, the collector deleting marks a day on). Spec extended: slotsAtBirth, wholeOrFinal, marksFail, marksKept, each with a mutation (TLC found two drafts' flaws: deleting a head being made, and finishers copying version 0 back after a removal). Code: head.rs (Slots, Found, birth, fail), identity Settings/Asked, Bucket::head_slots (ObjectBucket reads its identity once), collector fails heads unmade an hour (UNMADE_FOR) and deletes failed heads' slots, their marks a day on (MARKS_KEPT), retiring a failed fork's reference; lifecycle deletions fail unmade heads; fork steps meeting a failed head give up (Deleted). The simulation keeps heads in 2 slots: at 10, each head read 10 of its 400 steps' requests, and its rule searches found nothing in 30+ minutes. Its garbage check now keeps unmade moves of a kept parent (TASK-697, filed: a leak seed 3 of twin restores showed). Verified on the Mac: bucket_cell 377/377, local_cell 375/375, cladefs bucket tests 113/113 and cladefsctl 12/12; head-slots: HeadSlots 3.4M states 13 s, HeadSlots3 254K 1 s, six mutations.
+
+2026-11-20 Linux verified (ubu1, f4f4f4c78): cargo check -p cladefs --all-targets, VMM (firecracker-cargo check -p vmm --features cladefs --tests), guest/tests test_cases host+guest and runner all clean after two fixes (cladefsd peers test's head key slot; guest encrypted check counting a cell once over its slots, marks skipped). nextest -p cladefs -p bucket_cell -p local_cell: 1482/1482 passed (an earlier cut-off run hit known TASK-495 and TASK-650 once each). doc-7 describes the slots.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
