@@ -241,20 +241,29 @@ service Cladefsd {
   rpc HandOverCell(HandOverCellRequest) returns (HandOverCellResponse);
 }
 
+// A live migration of an ephemeral cell to begin.
 message MigrateCellRequest {
+  // The store of the ephemeral cell.
   string path = 1;
+  // The peer address of the daemon it goes to.
   string peer = 2;
+  // Where its store goes there.
   string to = 3;
 }
 
+// A migration begun.
 message MigrateCellResponse {
+  // Its ID.
   uint64 migration = 1;
 }
 
+// A migration's hand-over.
 message HandOverCellRequest {
+  // The store of the ephemeral cell being migrated.
   string path = 1;
 }
 
+// A migration handed over.
 message HandOverCellResponse {}
 
 // A host's incarnation to decommission.
