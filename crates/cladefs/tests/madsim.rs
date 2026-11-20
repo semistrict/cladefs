@@ -54,6 +54,7 @@ async fn boot(host: u8, root: &Path, bucket: Arc<ObjectBucket>, ephemeral: Optio
         let peers: Vec<String> = std::iter::once(peer(host).to_string()).chain(others).collect();
         vars.extend([
             ("CLADEFSD_EPHEMERAL", root.join("ephemeral").display().to_string()),
+            ("CLADEFSD_PART_CACHE", root.join("cache").display().to_string()),
             ("CLADEFSD_PEER_ADDRESS", peer(host).to_string()),
             ("CLADEFSD_PEERS", peers.join(",")),
         ]);
