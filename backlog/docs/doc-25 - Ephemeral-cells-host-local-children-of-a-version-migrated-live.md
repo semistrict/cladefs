@@ -3,7 +3,7 @@ id: doc-25
 title: 'Ephemeral cells: host-local children of a version, migrated live'
 type: specification
 created_date: '2026-11-20 16:20'
-updated_date: '2026-11-20 18:08'
+updated_date: '2026-11-20 19:38'
 ---
 # Ephemeral cells: host-local children of a version, migrated live
 
@@ -124,33 +124,42 @@ the incarnation's index entries and retires each reference.
 
 ## Live migration
 
-Host S migrates an ephemeral cell to host T. Both are peers (doc-21's `SetPeers`), and the
-VM manager drives both (`MigrateCell` on S, naming T).
+Host S migrates an ephemeral cell to host T, both daemons with `CLADEFSD_EPHEMERAL` and peer
+addresses (`CLADEFSD_PEER_ADDRESS`). Since everything an ephemeral store holds past its base is
+files, and its kept segments never change once kept but for holes, a migration copies its store's
+files rather than streaming its log (`cladefsd::migration`):
 
-1. **T's reference first.** S has T write a reference naming T's incarnation, before anything is
-   sent. While both stand, either host's death keeps the version for the other.
-2. **Bulk copy.** S sends its closed raw segments to T, sparse, keeping holes, through the peer
-   transport.
-3. **Rounds.** A replicator (`local_cell::replicate`) streams S's log to T as a one-member
-   configuration of f = 0 that never tells anything replicated. A round sends the segments closed
-   since the last one, the open segment's log, and the frees, which T applies as punched holes.
-   Sealed extents never change, so a round sends only what was written since the last one.
-4. **Hand over.** The VM manager freezes and pauses the guest. S makes one commit and sends the
-   rest of the log. S writes a local checkpoint as of that commit and sends it, then **gives the
-   cell up**: it closes the cell's store and refuses its guest's requests from then on. Only then does S tell T the commit it ended at. T checks
-   it holds the log through that commit, recovers the cell from the checkpoint, and opens it as its
-   writer. The guest resumes on T, its extent device connected to T's daemon.
-5. **After.** S deletes its directory, then its reference. A crash of S at any point leaves T's
-   reference, and S's own reference is retired when S starts again or is decommissioned.
+1. **Prepare** (`MigrateCell` on S, naming T's peer address and the store's path on T): T notes the
+   cell in its journal as being taken by the migration, writes its own reference before anything is
+   sent (`targetRefersFirst`), makes a staging directory beside the path, and answers its
+   incarnation.
+2. **Rounds**, every 500 ms while the guest runs: S sends the kept segments it has not sent yet,
+   whole and sparse (`SEEK_DATA`/`SEEK_HOLE`).
+3. **Hand-over** (`HandOverCell` on S): refused while anything has the store open (`EBUSY`), so the
+   VM manager stops the VM process first. S then writes a `migrating` marker in the store, durably,
+   and from then on refuses to open it (`sourceGivesUpFirst`). It sends the rest: every directory
+   (the empty ones too, which opening lists), the files the rounds did not send, whole, and the holes
+   the kept segments already sent have gained since. Then it asks T to take over, naming every file
+   with its length and the CRC32C of each one that is not a kept segment.
+4. **T's answer:** T accepts only if its staging directory holds every named file at that length and
+   CRC (`openAtNamed`). It then syncs the staging tree, renames it into place, records the migration
+   in `accepted/` for good (`remembersAccepted`), and notes the cell as its own. If the check fails,
+   T removes the staging directory and retires its reference, and any later ask gets no
+   (`refuseFinal`). A migration T never prepared, or one naming another incarnation of T's, also
+   gets no.
+5. **S's response:** accepted, S removes its store, then retires its own reference
+   (`sourceRetiresLast`). Refused, it removes the marker and serves the cell again (`EAGAIN`). Not
+   answered (`ENOTCONN`), the marker stays and the store stays unopened; `HandOverCell` asked
+   again, after a restart too, asks T again, which answers as it did. T restarted mid-migration
+   gives the migration up as it starts (its journal entry is a migration's), retiring its reference.
 
-**One writer:** S gives the cell up before T can open, and T opens only for the commit S named. A hand-over that
-fails before S gives the cell up leaves S the writer. T deletes what it received, and its reference, so that S
-can try again. A hand-over that fails after S gives it up leaves T the writer if T holds the log through
-the named commit. Otherwise the cell is lost, as it would be if S had lost its disk.
+**One writer:** S gives the cell up before T can open it, and T opens only the store S named in full.
 
-**Downtime** is the freeze, one commit, the last of the log, and one checkpoint, with no bucket
-request. The parent's pages on T come cold from T's part cache or the bucket. Pre-copy may warm T's
-extent cache with the pages S's window maps (later).
+**Downtime** is the guest's stop, plus copying the raw segments since the last checkpoint (at most
+eight of 32 MiB) and the logs, plus T's check and rename. No bucket request is made meanwhile, but
+T's preparation wrote its reference earlier. T reads the parent's pages cold. While a store is
+open, its ring is held among the host's keys (`RingHold`), which T's fetchers read inherited
+extents with.
 
 ## The spec
 

@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-20 16:21'
-updated_date: '2026-11-20 19:01'
+updated_date: '2026-11-20 19:38'
 labels: []
 dependencies:
   - TASK-698.1
@@ -41,3 +41,19 @@ Sandboxes on ephemeral cells must move between hosts while running. The user cho
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Peer RPCs MigratePrepare/File/HandOver/Abort; control RPCs MigrateCell/HandOverCell; Go bindings.
+2. Target: journal entry with the migration, reference first, staging beside the path, accepted/ for good, refusal drops staging and reference, restart gives a migration up.
+3. Source: rounds send kept segments; hand-over writes the marker, sends directories, the rest and new holes, names files with lengths and CRCs, then removes its store and retires its reference, or removes its marker.
+4. Opening refuses a marked store; ephemeral rings held among host keys while open.
+5. Tests: two daemons, live migration with writes during rounds; target unreachable then restarted and refusing.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-20 Linux (ubu1): ephemeral_cells_migrate_live_between_hosts (340 MiB, writes during rounds) and hand_overs_refused_leave_the_source_serving pass; cladefs --lib + cells/control/peers/handover: 542/543, the one failure TASK-700, a control shred test passing alone, filed. Design differs from doc-25's first draft: files copied, not the log streamed (doc-25 updated). Not covered yet: a hand-over refused for a missing file, a source restart while given up, three hosts (remembersAccepted in practice); downtime not measured.
+<!-- SECTION:NOTES:END -->
