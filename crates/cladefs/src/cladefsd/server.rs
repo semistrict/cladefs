@@ -1132,13 +1132,14 @@ impl Opening<'_> {
     /// The connection has `store`, at `path`, from now on, as `opened` says: [`Phase::Writing`] or
     /// [`Phase::Following`]. Checked without the phase's lock, which a panic would poison.
     fn opened(self, path: &Path, store: Arc<OpenCell>, opened: Phase) {
+        // cladefs: its guest's reads traced from now, if the daemon traces them (TASK-702.1).
+        if let Some(trace) = super::reads::Trace::opened(store.cell().id) {
+            drop(self.0.reads.set(trace));
+        }
         let follower = matches!(opened, Phase::Following);
         let key = store_key(path);
         drop(self.0.named.set(key.to_string_lossy().into()));
         self.0.report.opened(key, store.cell().id, follower);
-        if let Some(trace) = super::reads::Trace::opened(store.cell().id) {
-            drop(self.0.reads.set(trace));
-        }
         assert!(self.0.store.set(store).is_ok(), "a connection opened a second store");
         let was = std::mem::replace(&mut *self.0.phase.with(Mutex::lock), opened);
         assert!(matches!(was, Phase::Opening), "a connection opened a store not opening one");
