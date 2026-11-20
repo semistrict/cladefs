@@ -8,7 +8,10 @@
 //! sync, and a directory's entries as of its last sync. A crash ([`MemDir::crash`]) keeps that,
 //! and any of what happened since, at random: each block of each write since the file's last sync,
 //! and each file created or removed since the directory's last sync, in order. Directories
-//! themselves are durable once created. [`MemDir::fail_after`] makes the file system fail every
+//! themselves are durable once created. cladefs: a crash may also corrupt what it kept of the
+//! writes since ([`MemDir::crash_corrupting`], TASK-680, as FoundationDB's simulation's power losses
+//! do): each block written since its file's last sync there whole, not at all, garbage, or torn,
+//! its first half written and the rest as it was. [`MemDir::fail_after`] makes the file system fail every
 //! operation that would change it after a number of them, as a crash would interrupt them.
 //! cladefs: which of them fails, and so what a crash keeps, is a function of the store's calls, and
 //! of the crash's seed, only if the store does no I/O on threads of its own, in a directory made
@@ -288,6 +291,16 @@ impl MemDisk {
     /// The directory as a crash would leave it: what was durable, and any of what happened since,
     /// chosen at random by an RNG seeded with `seed`. See the module docs.
     pub fn crash(&self, seed: u64) -> MemDisk {
+        self.crash_with(seed, false)
+    }
+
+    /// cladefs: the directory as a crash would leave it, as [`MemDisk::crash`] says, each block
+    /// written since its file's last sync also garbage, or torn, at random (TASK-680).
+    pub fn crash_corrupting(&self, seed: u64) -> MemDisk {
+        self.crash_with(seed, true)
+    }
+
+    fn crash_with(&self, seed: u64, corrupting: bool) -> MemDisk {
         let mut rng = StdRng::seed_from_u64(seed);
         let fs = self.fs.lock().unwrap();
         let mut dirs = BTreeMap::new();
@@ -324,12 +337,26 @@ impl MemDisk {
             let mut data = file.durable.clone();
             for (offset, written) in &file.writes {
                 for (i, block) in written.chunks(BLOCK).enumerate() {
-                    if rng.random::<bool>() {
-                        let start = offset + i * BLOCK;
-                        if data.len() < start + block.len() {
-                            data.resize(start + block.len(), 0);
+                    // Kept, not, and, corrupting, garbage or torn.
+                    let fate = match corrupting {
+                        true => rng.random_range(0..4u8),
+                        false => u8::from(rng.random::<bool>()),
+                    };
+                    if fate == 0 {
+                        continue;
+                    }
+                    let start = offset + i * BLOCK;
+                    if data.len() < start + block.len() {
+                        data.resize(start + block.len(), 0);
+                    }
+                    let at = &mut data[start..start + block.len()];
+                    match fate {
+                        1 => at.copy_from_slice(block),
+                        2 => rng.fill(at),
+                        _ => {
+                            let half = block.len() / 2;
+                            at[..half].copy_from_slice(&block[..half]);
                         }
-                        data[start..start + block.len()].copy_from_slice(block);
                     }
                 }
             }
@@ -445,6 +472,13 @@ impl MemDir {
     /// dirty lost, as a process's memory is; its footprint counted anew, as listed.
     pub fn crash(&self, seed: u64) -> MemDir {
         Self::on(self.disk().crash(seed), page_cache())
+    }
+
+    /// cladefs: the directory as a crash would leave it, as [`MemDir::crash`] says, what it kept
+    /// of the writes since their files' last syncs corrupted at random
+    /// ([`MemDisk::crash_corrupting`], TASK-680).
+    pub fn crash_corrupting(&self, seed: u64) -> MemDir {
+        Self::on(self.disk().crash_corrupting(seed), page_cache())
     }
 }
 
@@ -689,6 +723,36 @@ mod tests {
         }
         assert_eq!(seen_unsynced, [true, true]);
         assert!(lens.len() > 2, "{lens:?}");
+    }
+
+    /// cladefs: a corrupting crash keeps what was synced, and leaves each block written since
+    /// whole, as it was, garbage, or torn: its first half written, the rest as it was (TASK-680).
+    #[test]
+    fn corrupting_crashes_keep_what_was_synced_and_mangle_the_rest() {
+        let dir = MemDisk::new();
+        let file = dir.create("f", true).unwrap();
+        file.write_at(&[1; 2 * BLOCK], 0).unwrap();
+        file.sync().unwrap();
+        dir.sync_dir("").unwrap();
+        file.write_at(&[3; 2 * BLOCK], 0).unwrap();
+        let (mut torn, mut garbage) = (false, false);
+        let mut whole = [false; 2];
+        for seed in 0..64 {
+            let data = read(&dir.crash_corrupting(seed).open("f", true).unwrap());
+            assert_eq!(data.len(), 2 * BLOCK);
+            for block in data.chunks(BLOCK) {
+                let half = BLOCK / 2;
+                match block {
+                    _ if block == [1; BLOCK] => whole[0] = true,
+                    _ if block == [3; BLOCK] => whole[1] = true,
+                    _ if block[..half] == [3; BLOCK / 2] && block[half..] == [1; BLOCK / 2] => {
+                        torn = true;
+                    }
+                    _ => garbage = true,
+                }
+            }
+        }
+        assert_eq!((whole, torn, garbage), ([true, true], true, true));
     }
 
     /// Creating a file where one is fails, as a host's `create_new` does, leaving the one there as

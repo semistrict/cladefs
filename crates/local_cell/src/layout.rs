@@ -56,7 +56,7 @@ pub struct Description {
 /// (`create_host`, TASK-165.6), and a store of memory's need not; the capacity its cell has
 /// until a commit sets one, as a cell made for it, or taken into it, says none; and the fencing
 /// token of its placement, if it was placed (TASK-39.7), which takes the cell,
-/// and so its head (TASK-165.9, TASK-364).
+/// and so its head (TASK-165.9, TASK-364); and whether that placement's takings are forced.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CellFile {
     pub block_size: u32,
@@ -64,6 +64,11 @@ pub(crate) struct CellFile {
     pub bucket: Option<String>,
     pub capacity: u64,
     pub token: Option<u64>,
+    /// cladefs: the token of the placement whose takings of a replicated cell are forced, if one
+    /// is (`PlaceCell`'s `force`, TASK-681): they go on with the members of the configuration its
+    /// head names that answer, too few for a take, the commits only the others held lost. A later
+    /// placement, of another token, is forced only if it is asked to be.
+    pub forced: Option<u64>,
     /// cladefs: its cell's kind, if it is kept in a bucket (TASK-364, doc-20).
     pub kind: Option<Kind>,
     /// cladefs: the version of its cell it is at, if it is one: its cell's state at the
@@ -96,6 +101,8 @@ impl CellFile {
         }
         let fields = fields(text, FORMAT)?;
         let token = fields.contains_key("token").then(|| number(&fields, "token")).transpose()?;
+        let forced =
+            fields.contains_key("forced").then(|| number(&fields, "forced")).transpose()?;
         let version = (fields.get("version"))
             .map(|id| base32_id::parse_padded(id).ok_or_else(|| anyhow!("bad version {id:?}")))
             .transpose()?;
@@ -110,13 +117,14 @@ impl CellFile {
             bucket: fields.get("bucket").cloned(),
             capacity: number(&fields, "capacity")?,
             token,
+            forced,
             kind,
             version,
         })
     }
 
     pub(crate) fn text(&self) -> String {
-        let Self { block_size, cell, bucket, capacity, token, kind, version } = self;
+        let Self { block_size, cell, bucket, capacity, token, forced, kind, version } = self;
         let mut text = format!("{FORMAT}\nblock_size {block_size}\ncell {cell}\n");
         text += &format!("capacity {capacity}\n");
         if let Some(url) = bucket {
@@ -124,6 +132,9 @@ impl CellFile {
         }
         if let Some(token) = token {
             text += &format!("token {token}\n");
+        }
+        if let Some(forced) = forced {
+            text += &format!("forced {forced}\n");
         }
         if let Some(kind) = kind {
             text += &format!("kind {}\n", kind.name());
@@ -541,6 +552,7 @@ mod tests {
             bucket: None,
             capacity: 1,
             token: None,
+            forced: None,
             kind: None,
             version: None,
         };
@@ -550,6 +562,9 @@ mod tests {
         let bucket = Some("file:///images/a/bucket".to_owned());
         let kept = CellFile { bucket, token: Some(7), ..file.clone() };
         assert_eq!(CellFile::parse(&kept.text()).unwrap(), kept);
+        // cladefs: and a forced placement its token again (TASK-681).
+        let forced = CellFile { forced: Some(7), ..kept.clone() };
+        assert_eq!(CellFile::parse(&forced.text()).unwrap(), forced);
         // cladefs: older formats are refused, by their format (TASK-165.6), the index's last
         // (TASK-165.9).
         for older in [

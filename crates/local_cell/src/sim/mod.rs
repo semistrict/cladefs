@@ -17,6 +17,10 @@
 //!
 //! Each case doc-7 lists is a profile that makes it likely, run over many seeds; each rule of the
 //! protocol has a test that turns it off and expects some seed to find the violation it prevents.
+//!
+//! cladefs: and replicated cells (doc-21, TASK-680), their members on the other hosts, over a
+//! network that breaks, delays, duplicates and drops calls, whose disks crash corrupting what
+//! they never synced: every commit told replicated must survive every take.
 
 mod world;
 
@@ -199,6 +203,7 @@ fn one() {
             "versions_kept" => rules.versions_kept = false,
             "versions_carried" => rules.versions_carried = false,
             "versions_acked" => rules.versions_acked = false,
+            "installs_own" => rules.installs_own = false,
             other => panic!("no rule {other}"),
         }
     }
@@ -226,6 +231,8 @@ fn one() {
         "late_checkpoints" => late_checkpoints(),
         "versions" => versions(),
         "regions" => regions(),
+        "replicated" => replicated(),
+        "retakes" => retakes(),
         other => panic!("no profile {other}"),
     };
     let count = std::env::var("SIM_SEEDS").map_or(1, |count| count.parse().unwrap());
@@ -251,6 +258,7 @@ fn seeds_replay() {
         recreated(),
         twin_restores(),
         regions(),
+        replicated(),
     ];
     for profile in profiles {
         replays(profile, 0..20);
@@ -740,3 +748,53 @@ test_needs!(versions_need_takeovers_to_carry_them, versions_carried, versions())
 test_needs!(versions_need_naming_with_their_segments, versions_acked, versions());
 
 test_needs!(restores_of_versions_need_their_heads_read, forks_check_versions, versions());
+
+/// cladefs: replicated cells (doc-21, TASK-680), of f 1 and 2 on five hosts, beside cells that
+/// are not: their writers' commits sent to their members a turn at a time, over a network that
+/// breaks between hosts, one way or both, and delays, duplicates and drops calls; hosts crashing,
+/// keeping their disks, corrupting what they never synced, or losing them, their replica
+/// directories with them, and taking their cells back at once; other hosts taking them over.
+/// Every commit told replicated survives every take.
+fn replicated() -> Profile {
+    let mut profile = weights(|weights| {
+        weights.deliver = 40;
+        weights.late = 4;
+        weights.partition = 3;
+        weights.crash = 3;
+        weights.open = 8;
+        weights.takeover = 3;
+        weights.close = 8;
+        weights.version = 0;
+        weights.restore_version = 0;
+        weights.delete = 0;
+        weights.collect = 1;
+    });
+    profile.hosts = 5;
+    profile.replicated = 0.8;
+    profile.net_faults = 0.1;
+    profile.corrupting = true;
+    profile.restarts = true;
+    profile
+}
+
+test_holds!(replicated_cells_survive_takes_crashes_and_the_network, replicated());
+
+/// cladefs: TASK-678's case, likelier: cells of f 1 on four hosts whose writers' hosts crash and
+/// take them back at once, on their own disks, while the network between hosts breaks, so that a
+/// take may hold, of its own log, commits told replicated that the members it fences lack.
+fn retakes() -> Profile {
+    let mut profile = replicated();
+    profile.hosts = 4;
+    profile.replicated = 1.0;
+    profile.net_faults = 0.0;
+    profile.corrupting = false;
+    profile.weights.crash = 6;
+    profile.weights.partition = 8;
+    profile.weights.takeover = 4;
+    profile.weights.late = 0;
+    profile
+}
+
+test_holds!(replicated_cells_retaken_on_their_writers_disks, retakes());
+
+test_needs!(retakes_need_to_install_their_own_logs, installs_own, retakes(), 0..2_000);

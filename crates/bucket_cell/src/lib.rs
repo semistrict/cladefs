@@ -388,6 +388,13 @@ pub struct Rules {
     /// name among them, at a segment the head does not hold.
     /// TLA+: `specs/bucket/mutations/NoVersionsAcked.cfg`.
     pub versions_acked: bool,
+    /// cladefs: a take of a replicated cell whose store opened holding more than the members of
+    /// the configuration it fenced gave, its own write-ahead log's commits, activates its own
+    /// configuration only by the acknowledgement that names them all (`local_cell::upload`'s
+    /// `Shared::replicate`, TASK-678): without it, the head names a configuration none of whose
+    /// members hold commits told replicated, and the next take, elsewhere, loses them.
+    /// TLA+: `specs/replication/mutations/InstallMembersOnly.cfg`.
+    pub installs_own: bool,
 }
 
 impl Rules {
@@ -419,11 +426,13 @@ impl Rules {
         versions_kept: true,
         versions_carried: true,
         versions_acked: true,
+        installs_own: true,
     };
 }
 
+/// The rules the protocol keeps: all of them (cladefs: public, as `local_cell` keeps one too).
 #[cfg(not(any(test, feature = "testing")))]
-pub(crate) fn rules() -> Rules {
+pub fn rules() -> Rules {
     Rules::ALL
 }
 

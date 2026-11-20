@@ -120,6 +120,23 @@ used by more than one process, or across a daemon's restarts, needs a file or
 cloud bucket. cladefsctl, without the daemon, changes existing stores'
 cells on the same terms, and makes new stores (`take`, `import`) anywhere.
 
+### Replicated cells' replica directories
+
+A host keeps the logs it holds of other hosts' replicated cells, and its promises
+to their takes, in its replica directory (`CLADEFSD_REPLICAS`, doc-21). **Never
+restore it from a snapshot or a backup, and never copy it to another host**
+(TASK-682). A restored directory keeps its incarnation but goes back to older
+promises, so a writer a take fenced can have commits told Replicated again that
+no later writer holds. A host whose disk was restored, or whose image was cloned,
+deletes its replica directory before its daemon starts: it comes back as a new
+member, whose configurations replace it as they replace a lost disk.
+
+A cell more of whose members are lost for good than its f can't be taken: place
+its store forced (`cladefsctl place --force DIR TOKEN`, `PlaceCell`'s `force`,
+TASK-681). That placement's takes go on with the members that answer and the
+bucket, and lose what only the others held; `StatCell`'s `forced_after` names the
+last commit recovered.
+
 ### Buckets and their numbers
 
 Every bucket has a **bucket number**, which the high bits of every cell ID it gives carry, so that

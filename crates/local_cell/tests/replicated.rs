@@ -810,12 +810,12 @@ fn takes_asking_for_f_zero_drop_once_the_bucket_holds_what_was_told() {
     drop(uploader);
 }
 
-/// doc-21, Take, steps 5 and 6 (the spec's installOwn, its mutation InstallMembersOnly): a writer
-/// whose daemon restarts takes its cell again on its own disk, its write-ahead log holding commits
-/// told replicated that the one member it fences lacks (the member holding them out of reach).
-/// The configuration it activates must hold them on f of its members before the head names it:
-/// else its host lost too, a take elsewhere reads that configuration, and the bucket, and loses
-/// them.
+/// doc-21, Take, steps 5 and 6 (the spec's installOwn, its mutation InstallMembersOnly; TASK-678):
+/// a writer whose daemon restarts takes its cell again on its own disk, its write-ahead log
+/// holding commits told replicated that the one member it fences lacks (the member holding them
+/// out of reach). The head names the configuration it makes, none of whose members holds them,
+/// only once the bucket does, in the swap that acknowledges them: else its host lost too, a take
+/// elsewhere reads that configuration, and the bucket, and loses them.
 #[test]
 fn retakes_on_the_writers_disk_install_what_its_own_log_holds() {
     let host = replicated_host();
@@ -852,9 +852,13 @@ fn retakes_on_the_writers_disk_install_what_its_own_log_holds() {
     let (retaken, uploader) = again.open_replicated(recovering, 2, None, peers("a")).unwrap();
     assert!(retaken.last_commit().unwrap() >= last);
     assert_eq!(again.contents(&retaken), expected);
+    // Its configuration named once the bucket holds what its log held, uploaded at once.
+    until("a's configuration named", || configuration_named(&host).number == 2);
     let configuration = configuration_named(&host);
-    assert_eq!((configuration.number, addresses(&configuration)), (2, vec!["a", "c", "d"]));
-    assert!(uploader.last_uploaded() < last, "the bucket holds them: nothing to lose");
+    assert_eq!(addresses(&configuration), ["a", "c", "d"]);
+    let bucket = host.runtime.block_on(bucket_cell::recover(&*host.bucket, cell(), None)).unwrap();
+    let uploaded = bucket.state.last_commit.map_or(0, extent_frame::segment::epoch_of);
+    assert!(uploaded >= last, "named, the bucket holding commit {uploaded}, of {last}");
 
     // a lost, its disk with it: e takes the cell from c, d and the bucket.
     let replicator = retaken.replicator().unwrap();
@@ -867,5 +871,63 @@ fn retakes_on_the_writers_disk_install_what_its_own_log_holds() {
     taken.made().unwrap();
     assert!(taken.last_commit().unwrap() >= last);
     assert_eq!(host.contents(&taken), expected);
+    drop(uploader);
+}
+
+/// The cell the tests' stores keep.
+fn cell() -> bucket_cell::layout::CellId {
+    DESCRIPTION.cell
+}
+
+/// TASK-681 (doc-21's row "Writer's host and a peer lost"): a replicated cell whose writer's host
+/// and both its members' are lost for good can't be taken: fewer than f+1 members of its
+/// configuration answer. A placement forced takes it from the bucket and what the members that
+/// answer hold, none here, and its status says past which commit commits told replicated are lost.
+#[test]
+fn takes_of_cells_whose_members_are_lost_go_on_by_force() {
+    let host = replicated_host();
+    let all = directories(&["a", "b", "c", "d", "e"]);
+    let lost = Lost::default();
+    let peers = |me: &str| Peers { me: me.into(), all: all.clone(), lost: lost.clone() };
+    let writer = Host { runtime: runtime_of_its_own(), bucket: host.bucket.clone() };
+    let dir = MemDir::new();
+    LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
+    let wish = bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated);
+    let recovering = LocalCell::recover_unmade(dir).unwrap();
+    let (store, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).unwrap();
+    store.made().unwrap();
+    store.close_segment().unwrap();
+    uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
+    assert_eq!(addresses(&configuration_named(&host)), ["a", "b", "c"]);
+    let last = commit(&store, 0, 4);
+    uploader.wait_replicated(last).unwrap();
+    assert!(uploader.last_uploaded() < last, "told replicated by b and c, not the bucket");
+    let replicator = store.replicator().unwrap();
+    lose(writer, (uploader, store, replicator));
+    let bucket = host.runtime.block_on(bucket_cell::recover(&*host.bucket, cell(), None)).unwrap();
+    let uploaded = bucket.state.last_commit.map_or(0, extent_frame::segment::epoch_of);
+
+    // a, b and c lost for good: d's take is refused, no member of a's configuration answering.
+    lost.lock().unwrap().extend(["a", "b", "c"].map(String::from));
+    let refused = MemDir::new();
+    LocalCell::make(&refused, DESCRIPTION, Some(URL), None).unwrap();
+    let recovering = LocalCell::recover_unmade(refused).unwrap();
+    let failure = host.open_replicated(recovering, 2, None, peers("d")).err().unwrap();
+    assert!(
+        failure.to_string().contains("0 of the 2 members of configuration 1 a take must fence"),
+        "{failure}"
+    );
+
+    // Placed forced, d takes it from the bucket.
+    let forced = MemDir::new();
+    LocalCell::make(&forced, DESCRIPTION, Some(URL), None).unwrap();
+    local_cell::place(&forced, 7, true).unwrap();
+    let recovering = LocalCell::recover_unmade(forced).unwrap();
+    let (taken, uploader) = host.open_replicated(recovering, 3, None, peers("d")).unwrap();
+    taken.made().unwrap();
+    let taking = uploader.status().unwrap().taking.unwrap();
+    assert_eq!(taking.replication.unwrap().forced_after, Some(uploaded));
+    let next = commit(&taken, 4, 2);
+    uploader.wait_replicated(next).unwrap();
     drop(uploader);
 }

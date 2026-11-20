@@ -314,6 +314,7 @@ fn stat_response(state: cells::CellState) -> StatCellResponse {
         degraded: upload.replication.is_some_and(|replication| replication.degraded),
         members_up: upload.replication.map_or(0, |replication| replication.members_up),
         active_replicas: upload.replication.map_or(0, |replication| u32::from(replication.f)),
+        forced_after: replicated.and_then(|replicated| replicated.forced_after).unwrap_or(0),
     }
 }
 
@@ -446,9 +447,9 @@ impl Cladefsd for Control {
         &self,
         request: Request<PlaceCellRequest>,
     ) -> Result<Response<PlaceCellResponse>, Status> {
-        let PlaceCellRequest { path: store, token } = request.into_inner();
+        let PlaceCellRequest { path: store, token, force } = request.into_inner();
         let store = path(store)?;
-        reply(cells::place(store, token).await.map(|()| PlaceCellResponse {}))
+        reply(cells::place(store, token, force).await.map(|()| PlaceCellResponse {}))
     }
 
     async fn make_public(
@@ -959,9 +960,10 @@ impl Client {
         self.call(what, |mut c| async move { c.resize_cell(request).await }).map(drop)
     }
 
-    /// Places the store at `path` at the placement whose fencing token is `token` (`PlaceCell`).
-    pub fn place_cell(&self, path: &Path, token: u64) -> Result<(), crate::Error> {
-        let request = PlaceCellRequest { path: name(path)?, token };
+    /// Places the store at `path` at the placement whose fencing token is `token` (`PlaceCell`),
+    /// its takings forced if `force`.
+    pub fn place_cell(&self, path: &Path, token: u64, force: bool) -> Result<(), crate::Error> {
+        let request = PlaceCellRequest { path: name(path)?, token, force };
         let what = format!("placing the store at {}", path.display());
         self.call(what, |mut c| async move { c.place_cell(request).await }).map(drop)
     }

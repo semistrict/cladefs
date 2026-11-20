@@ -1207,13 +1207,18 @@ pub(super) async fn resize(path: PathBuf, capacity: u64) -> Result<(), Errno> {
 }
 
 /// Places the store at `path`, or the fork whose handle it is, at the placement whose fencing
-/// token is `token` ([`OpenCell::place`]): `EBUSY` while a connection has it open, whose
-/// writer took its cell with the token it had.
-pub(super) async fn place(path: PathBuf, token: u64) -> Result<(), Errno> {
+/// token is `token` ([`OpenCell::place`]), its takings forced if `force`
+/// ([`OpenCell::place_forced`]): `EBUSY` while a connection has it open, whose writer took its
+/// cell with the token it had.
+pub(super) async fn place(path: PathBuf, token: u64, force: bool) -> Result<(), Errno> {
     let held = hold_alone(&path).await?;
     blocking(move || {
         let _held = held;
-        OpenCell::place(&path, token)
+        let placed = match force {
+            true => OpenCell::place_forced(&path, token),
+            false => OpenCell::place(&path, token),
+        };
+        placed
             .map_err(|err| errno_of(format_args!("placing {}", path.display()), err))
     })
     .await

@@ -117,7 +117,13 @@ impl Daemon {
     }
 
     pub fn place(&mut self, path: &Path, token: u64) -> Result<(), tonic::Status> {
-        let request = PlaceCellRequest { path: name(path), token };
+        let request = PlaceCellRequest { path: name(path), token, force: false };
+        self.runtime.block_on(self.client.place_cell(request)).map(drop)
+    }
+
+    /// Places the store at `path` at `token`'s placement, its takings forced (TASK-681).
+    pub fn place_forced(&mut self, path: &Path, token: u64) -> Result<(), tonic::Status> {
+        let request = PlaceCellRequest { path: name(path), token, force: true };
         self.runtime.block_on(self.client.place_cell(request)).map(drop)
     }
 

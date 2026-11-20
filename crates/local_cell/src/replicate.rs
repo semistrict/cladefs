@@ -19,7 +19,8 @@
 //! commits, each in the bucket or on f+1 copies.
 //!
 //! Each member is sent what it lacks, by a thread of its own, through a [`MemberLink`], in pieces
-//! of [`PIECE`] at most, and answers the end of the log it holds, synced; one answering less than
+//! of [`PIECE`] at most (or, in the simulation, one turn at a time as its scheduler says,
+//! [`Replicator::idle`] and [`Replicator::drive`]), and answers the end of the log it holds, synced; one answering less than
 //! it was sent (an append past its end, as a member that lost what it had) is sent again from its
 //! end. A member out of reach is tried again, from 50 ms apart, doubling, to 5 s; one that refuses
 //! the writer (another incarnation, no replica directory) is sent nothing more, until a
@@ -78,11 +79,17 @@ pub fn own_frames(mut bytes: &[u8]) -> Vec<(u64, Vec<u8>)> {
 /// goes on from `last`, the last commit the cell's head names (TASK-537.3.4): the segments after
 /// the last whose records name a commit through `last`, the head acknowledging whole segments, so
 /// that a member's copy of one it named, whole or cut short, its drop never come, is the bucket's
-/// already (TASK-537.3.5's review); and of those, from the first holding any record. Refused if
-/// the first commit they hold does not follow `last`: what is between, on no member, may be
-/// commits a guest was told are replicated; and if a segment at or before the last naming a
-/// commit through `last` names one past it, as no writer's logs do, but forged ones may. (Not the head's count of segments: a writer's local
-/// segments are numbered as its own, the bucket's as the cell's.)
+/// already (TASK-537.3.5's review); and of those, from the first holding any record. None if the
+/// first commit they hold does not follow `last` (TASK-680, found by the simulation): members are
+/// sent a segment's logs before the next's, and drop only what the head names, so what is between
+/// is the writer's base, the commits it opened with ([`Replicator::base`]), which its members
+/// were never given and the bucket held not yet; and it tells nothing replicated before the
+/// bucket holds its base, so nothing they hold was told replicated. (A take's own commits it gives
+/// its configuration's members as their logs' first, or the head names the configuration before
+/// until the bucket holds them, TASK-678.) Refused if a segment at or before the last naming a
+/// commit through `last` names one past it, as no writer's logs do, but forged ones may. (Not the
+/// head's count of segments: a writer's local segments are numbered as its own, the bucket's as
+/// the cell's.)
 pub fn trimmed(
     cell: extent_frame::segment::CellId,
     logs: &[(u64, Vec<u8>)],
@@ -131,11 +138,14 @@ pub fn trimmed(
         (None, Some(commit)) => epoch_of(commit) <= 1,
         (Some(last), Some(commit)) => epoch_of(commit) == epoch_of(last) + 1,
     };
-    anyhow::ensure!(
-        follows,
-        "the members' logs of {cell:?} from segment {first} begin at commit {first_commit:?}, not \
-         going on from the head's last, {last:?}"
-    );
+    if !follows {
+        log::info!(
+            "cladefs: the members' logs of {cell:?} from segment {first} begin at commit \
+             {first_commit:?}, past the head's last, {last:?}: their writer's base, which the \
+             bucket held not, was between, none of it told replicated: given up"
+        );
+        return Ok(Vec::new());
+    }
     Ok(kept)
 }
 
@@ -290,7 +300,28 @@ pub struct Flushed {
 /// A replicated cell's writer's replicator: what its members hold, and what is replicated.
 pub struct Replicator {
     shared: Arc<Shared>,
+    /// Each member's link, by its place among [`State::members`].
+    links: Mutex<Vec<Arc<dyn MemberLink>>>,
+    /// Whether each member is served by a thread of its own ([`Replicator::run_threads`]), or
+    /// driven, a turn at a time ([`Replicator::drive`]).
+    threaded: std::sync::atomic::AtomicBool,
     threads: Mutex<Vec<JoinHandle<()>>>,
+}
+
+/// What a turn of a member's did ([`turn`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Turn {
+    /// Nothing to send it, for now.
+    Idle,
+    /// It was sent something, and answered.
+    Sent,
+    /// What it was to be sent went meanwhile: to choose again.
+    Again,
+    /// It is out of reach: to try again, later.
+    Retry,
+    /// It is sent nothing more: retired, refusing, the writer fenced, or the replicator stopped
+    /// or broken.
+    Stop,
 }
 
 struct Shared {
@@ -446,6 +477,22 @@ impl Replicator {
         links: Vec<Arc<dyn MemberLink>>,
         notify: impl Fn() + Send + Sync + 'static,
     ) -> Arc<Self> {
+        let replicator = Self::idle(f, base, spool, links, notify);
+        replicator.run_threads();
+        replicator
+    }
+
+    /// A replicator as [`Replicator::start`] makes it, whose members nothing serves yet: by a
+    /// thread each once [`Replicator::run_threads`] starts them, or a turn at a time as
+    /// [`Replicator::drive`] is called, as the simulation's scheduler does, so that a seed decides
+    /// what each member is sent and when (TASK-680).
+    pub fn idle(
+        f: usize,
+        base: u64,
+        spool: Arc<dyn Spool>,
+        links: Vec<Arc<dyn MemberLink>>,
+        notify: impl Fn() + Send + Sync + 'static,
+    ) -> Arc<Self> {
         let state = State {
             members: vec![Member::default(); links.len()],
             active: Some(Group { f, members: 0..links.len() }),
@@ -459,9 +506,34 @@ impl Replicator {
             changed: Condvar::new(),
             notify: Box::new(notify),
         });
-        let replicator = Arc::new(Self { shared, threads: Mutex::default() });
-        replicator.serve(0, links);
-        replicator
+        Arc::new(Self {
+            shared,
+            links: Mutex::new(links),
+            threaded: false.into(),
+            threads: Mutex::default(),
+        })
+    }
+
+    /// Serves each member by a thread of its own, from now on, and those of replacements.
+    pub fn run_threads(&self) {
+        self.threaded.store(true, std::sync::atomic::Ordering::Release);
+        let links = self.links.lock().unwrap().clone();
+        self.serve(0, links);
+    }
+
+    /// How many members it has had, those of configurations gone among them: what
+    /// [`Replicator::drive`] takes.
+    pub fn members(&self) -> usize {
+        self.links.lock().unwrap().len()
+    }
+
+    /// A turn of member `m`'s, of a replicator no threads serve ([`Replicator::idle`]): sends it
+    /// what it lacks next, if anything, and takes in its answer. Whether it was sent anything and
+    /// answered.
+    pub fn drive(&self, m: usize) -> bool {
+        debug_assert!(!self.threaded.load(std::sync::atomic::Ordering::Acquire), "driven");
+        let Some(link) = self.links.lock().unwrap().get(m).cloned() else { return false };
+        turn(&self.shared, m, &*link) == Turn::Sent
     }
 
     /// Starts a thread serving each of `links`, the members from `first` on.
@@ -566,8 +638,11 @@ impl Replicator {
         state.members.extend(std::iter::repeat_n(member, links.len()));
         state.pending = Some(Group { f, members: first..first + links.len() });
         let moved = state.advance();
+        self.links.lock().unwrap().extend(links.iter().cloned());
         drop(state);
-        self.serve(first, links);
+        if self.threaded.load(std::sync::atomic::Ordering::Acquire) {
+            self.serve(first, links);
+        }
         if moved {
             (self.shared.notify)();
         }
@@ -762,109 +837,124 @@ impl Drop for Replicator {
     }
 }
 
-/// Sends member `m`, through `link`, what it lacks, until the replicator stops or retires it.
+/// Sends member `m`, through `link`, what it lacks, until the replicator stops or retires it: a
+/// [`turn`] after another, waiting while it has nothing to send, and backing off, from 50 ms,
+/// doubling, to 5 s, while the member is out of reach.
 fn serve(shared: &Shared, m: usize, link: &dyn MemberLink) {
     let mut wait = Duration::from_millis(50);
     loop {
-        let sending = {
-            let mut state = shared.state.lock().unwrap();
-            loop {
-                if state.stopping || state.members[m].retired {
-                    return;
-                }
-                if let Some(sending) = state.next(m) {
-                    break sending;
-                }
-                state = shared.changed.wait(state).unwrap();
-            }
-        };
-        let done = match &sending {
-            Sending::Drop(through) => link.drop_through(*through).map(|()| None),
-            Sending::Append { log, offset, len } => match shared.spool.read(*log, *offset, *len) {
-                Ok(bytes) if bytes.len() as u64 == *len => {
-                    link.append(*log, *offset, &bytes).map(Some)
-                }
-                // Dropped since it was chosen, the head naming its segment (Codex's review of
-                // TASK-537.3.3): nothing to send, nothing broken.
-                _ if shared
-                    .state
-                    .lock()
-                    .unwrap()
-                    .dropped
-                    .is_some_and(|dropped| *log <= dropped) =>
-                {
-                    continue;
-                }
-                read => {
-                    let why = match read {
-                        Ok(bytes) => format!("log {log}: {} of {len} bytes spooled", bytes.len()),
-                        Err(err) => format!("reading spooled log {log}: {err}"),
-                    };
-                    log::error!("cladefs: replicating: {why}");
-                    shared.state.lock().unwrap().broken = Some(why);
-                    shared.changed.notify_all();
-                    (shared.notify)();
-                    return;
-                }
-            },
-        };
-        let mut state = shared.state.lock().unwrap();
-        let moved = match (sending, done) {
-            (Sending::Drop(through), Ok(_)) => {
-                state.members[m].dropped = Some(through);
-                state.members[m].ends.retain(|&log, _| log > through);
-                // Up again, if it was down: its first answer may be a drop, nothing else left to
-                // send it (TASK-537.3.5's review).
-                state.members[m].down = None;
-                wait = Duration::from_millis(50);
-                false
-            }
-            (Sending::Append { log, .. }, Ok(Some(end))) => {
-                // Its end as it says: less than it was sent if it lacked what came before.
-                state.members[m].ends.insert(log, end);
-                state.members[m].down = None;
-                wait = Duration::from_millis(50);
-                state.advance()
-            }
-            (_, Ok(_)) => false,
-            (_, Err(LinkError::Fenced(why))) => {
-                log::warn!("cladefs: replicating: fenced: {why}");
-                state.fenced = Some(why);
-                drop(state);
-                shared.changed.notify_all();
-                (shared.notify)();
-                return;
-            }
-            (_, Err(LinkError::Refused(why))) => {
-                log::warn!("cladefs: replicating: member {m} refuses the writer: {why}");
-                state.members[m].refused = true;
-                state.members[m].down = Some((why, std::time::Instant::now()));
-                return;
-            }
-            (_, Err(LinkError::Down(why))) => {
-                let member = &mut state.members[m];
-                match &mut member.down {
-                    Some((was, _)) => *was = why,
-                    None => {
-                        log::warn!("cladefs: replicating: member {m} down: {why}");
-                        member.down = Some((why, std::time::Instant::now()));
-                    }
-                }
-                let stopping = state.stopping || state.members[m].retired;
-                drop(state);
-                if stopping {
-                    return;
-                }
+        match turn(shared, m, link) {
+            Turn::Stop => return,
+            Turn::Sent => wait = Duration::from_millis(50),
+            Turn::Again => {}
+            Turn::Retry => {
                 std::thread::sleep(wait);
                 wait = (wait * 2).min(Duration::from_secs(5));
-                continue;
             }
-        };
-        drop(state);
-        if moved {
-            (shared.notify)();
+            Turn::Idle => {
+                let mut state = shared.state.lock().unwrap();
+                while state.next(m).is_none() {
+                    if state.stopping || state.members[m].retired {
+                        return;
+                    }
+                    state = shared.changed.wait(state).unwrap();
+                }
+            }
         }
     }
+}
+
+/// Sends member `m`, through `link`, what it lacks next, if anything, and takes in its answer.
+fn turn(shared: &Shared, m: usize, link: &dyn MemberLink) -> Turn {
+    let sending = {
+        let state = shared.state.lock().unwrap();
+        if state.stopping || state.members[m].retired {
+            return Turn::Stop;
+        }
+        match state.next(m) {
+            Some(sending) => sending,
+            None if state.members[m].refused
+                || state.fenced.is_some()
+                || state.broken.is_some() =>
+            {
+                return Turn::Stop;
+            }
+            None => return Turn::Idle,
+        }
+    };
+    let done = match &sending {
+        Sending::Drop(through) => link.drop_through(*through).map(|()| None),
+        Sending::Append { log, offset, len } => match shared.spool.read(*log, *offset, *len) {
+            Ok(bytes) if bytes.len() as u64 == *len => link.append(*log, *offset, &bytes).map(Some),
+            // Dropped since it was chosen, the head naming its segment (Codex's review of
+            // TASK-537.3.3): nothing to send, nothing broken.
+            _ if shared.state.lock().unwrap().dropped.is_some_and(|dropped| *log <= dropped) => {
+                return Turn::Again;
+            }
+            read => {
+                let why = match read {
+                    Ok(bytes) => format!("log {log}: {} of {len} bytes spooled", bytes.len()),
+                    Err(err) => format!("reading spooled log {log}: {err}"),
+                };
+                log::error!("cladefs: replicating: {why}");
+                shared.state.lock().unwrap().broken = Some(why);
+                shared.changed.notify_all();
+                (shared.notify)();
+                return Turn::Stop;
+            }
+        },
+    };
+    let mut state = shared.state.lock().unwrap();
+    let moved = match (sending, done) {
+        (Sending::Drop(through), Ok(_)) => {
+            state.members[m].dropped = Some(through);
+            state.members[m].ends.retain(|&log, _| log > through);
+            // Up again, if it was down: its first answer may be a drop, nothing else left to
+            // send it (TASK-537.3.5's review).
+            state.members[m].down = None;
+            false
+        }
+        (Sending::Append { log, .. }, Ok(Some(end))) => {
+            // Its end as it says: less than it was sent if it lacked what came before.
+            state.members[m].ends.insert(log, end);
+            state.members[m].down = None;
+            state.advance()
+        }
+        (_, Ok(_)) => false,
+        (_, Err(LinkError::Fenced(why))) => {
+            log::warn!("cladefs: replicating: fenced: {why}");
+            state.fenced = Some(why);
+            drop(state);
+            shared.changed.notify_all();
+            (shared.notify)();
+            return Turn::Stop;
+        }
+        (_, Err(LinkError::Refused(why))) => {
+            log::warn!("cladefs: replicating: member {m} refuses the writer: {why}");
+            state.members[m].refused = true;
+            state.members[m].down = Some((why, std::time::Instant::now()));
+            return Turn::Stop;
+        }
+        (_, Err(LinkError::Down(why))) => {
+            let member = &mut state.members[m];
+            match &mut member.down {
+                Some((was, _)) => *was = why,
+                None => {
+                    log::warn!("cladefs: replicating: member {m} down: {why}");
+                    member.down = Some((why, std::time::Instant::now()));
+                }
+            }
+            return match state.stopping || state.members[m].retired {
+                true => Turn::Stop,
+                false => Turn::Retry,
+            };
+        }
+    };
+    drop(state);
+    if moved {
+        (shared.notify)();
+    }
+    Turn::Sent
 }
 
 #[cfg(test)]

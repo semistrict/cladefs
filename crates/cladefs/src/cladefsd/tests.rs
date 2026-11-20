@@ -3282,7 +3282,7 @@ fn stores_followed_are_worked_on_as_they_are() {
     let fork = dir.path().join("fork");
     fork_cell(&path, &fork).unwrap();
     assert_eq!(delete_cell(&path).err().and_then(|error| error.errno()), Some(Errno::EBUSY));
-    assert_eq!(control(super::cells::place(path.clone(), 2)), Err(Errno::EBUSY));
+    assert_eq!(control(super::cells::place(path.clone(), 2, false)), Err(Errno::EBUSY));
     assert_eq!(control(super::cells::make_public(path.clone(), false)), Err(Errno::EBUSY));
     drop(follower);
     followed.join().unwrap();

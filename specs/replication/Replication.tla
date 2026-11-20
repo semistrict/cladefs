@@ -80,7 +80,11 @@
 (*   its own serves alone (f = 0) while the head names the configuration   *)
 (*   before; the acknowledgement that first covers what it recovered names *)
 (*   its own configuration in the same CAS, and none before it acknowledges*)
-(*   past it (AloneNoSwitch, TASK-537.3.6).                                *)
+(*   past it (AloneNoSwitch, TASK-537.3.6). So does a take that recovered  *)
+(*   from its own copy more than its members can be given (TASK-678), its  *)
+(*   own configuration of F members taking its commits meanwhile.          *)
+(* - deferQuiet: a take serving so tells nothing Replicated until the head *)
+(*   names its configuration (DeferTellsReplicated, TASK-678).             *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
@@ -98,7 +102,7 @@ CONSTANTS
 
 AllRules == {"fence", "fenceOthers", "longest", "installFirst", "activate", "joint",
              "dropAcked", "promise", "incarnation", "zeroAfterUpload", "zeroNoQuorum",
-             "abandonUnissued", "aloneSwitch", "installOwn"}
+             "abandonUnissued", "aloneSwitch", "installOwn", "deferQuiet"}
 
 ASSUME Rules \subseteq AllRules
 ASSUME F \in Nat /\ Cardinality(Hosts) >= 2 * F + 1
@@ -111,8 +115,9 @@ ASSUME NoHost \notin Hosts
 \* in (bounded by their Max constants).
 \* And replacements given up, their members not taking the tail in time ("abandon", TASK-537.3.5);
 \* and takes serving alone, no members to be had for their own configuration ("alone",
-\* TASK-537.3.6).
-AllCan == {"upload", "drop", "sweep", "zero", "abandon", "alone"}
+\* TASK-537.3.6); and takes serving so with members, deferring their activation to the
+\* acknowledgement that covers what they recovered ("defer", TASK-678).
+AllCan == {"upload", "drop", "sweep", "zero", "abandon", "alone", "defer"}
 ASSUME Can \subseteq AllCan
 
 R(rule) == rule \in Rules
@@ -315,22 +320,29 @@ Recover(h) ==
 \* h's take, fenced enough, recovers as Recover does, but has no members for a configuration of
 \* its own (TASK-537.3.6): it serves alone, at f = 0, the head naming the configuration before,
 \* until an acknowledgement covers what it recovered (`need`), which names its own (aloneSwitch).
+\* Or (TASK-678, "defer") it has members, h and 2F others, but defers its configuration's
+\* activation so, as a take does whose own copy, the old writer's, held more than its members can
+\* be given: its members take its commits from now on, and it tells none Replicated meanwhile
+\* (deferQuiet). The model lets any take defer, whatever it recovered.
 RecoverAlone(h) ==
     LET s == ses[h]
         c == s.old
         k == <<s.ep, 0>>
     IN
-    /\ "alone" \in Can
     /\ s.st = "fencing"
     /\ c # NoCfg /\ c.f >= 1 /\ Cardinality(Counted(h)) >= c.f + 1
     /\ \E rec \in {Recovered(h, r) : r \in {r \in Counted(h) :
-                   \A q \in Counted(h) : Len(Recovered(h, q)) <= Len(Recovered(h, r))}} :
-          LET new == [key |-> k, f |-> 0, w |-> h, members |-> {[h |-> h, inc |-> inc[h]]}]
-          IN /\ cfgs' = [cfgs EXCEPT ![k] = new]
-             /\ sent' = [sent EXCEPT ![k] = rec]
-             /\ ses' = [ses EXCEPT ![h].st = "serving", ![h].cfg = new, ![h].old = NoCfg,
-                                   ![h].fenced = {}, ![h].replies = NoSes.replies,
-                                   ![h].alone = TRUE, ![h].need = Len(rec)]
+                   \A q \in Counted(h) : Len(Recovered(h, q)) <= Len(Recovered(h, r))}},
+          f \in (IF "alone" \in Can THEN {0} ELSE {}) \cup (IF "defer" \in Can THEN {F} ELSE {}),
+          others \in SUBSET (Hosts \ {h}) :
+          /\ Cardinality(others) = 2 * f
+          /\ LET new == [key |-> k, f |-> f, w |-> h,
+                         members |-> {[h |-> m, inc |-> inc[m]] : m \in others \cup {h}}]
+             IN /\ cfgs' = [cfgs EXCEPT ![k] = new]
+                /\ sent' = [sent EXCEPT ![k] = rec]
+                /\ ses' = [ses EXCEPT ![h].st = "serving", ![h].cfg = new, ![h].old = NoCfg,
+                                      ![h].fenced = {}, ![h].replies = NoSes.replies,
+                                      ![h].alone = TRUE, ![h].need = Len(rec)]
     /\ UNCHANGED <<head, mlog, drop, promise, inc, told, next, losses, crashes>>
 
 \* h activates its configuration by a CAS of the head, once f+1 of its members hold what it
@@ -370,6 +382,7 @@ AckReplicated(h) ==
     LET s == ses[h] IN
     /\ s.st = "serving"
     /\ s.cfg.f >= 1
+    /\ ~s.alone \/ ~R("deferQuiet")
     /\ \E k \in 1..Len(Log(h)) :
           /\ ~(Range(SubSeq(Log(h), 1, k)) \subseteq told)
           /\ Quorum(s.cfg, k)

@@ -8,7 +8,7 @@
 //! a version ([`LocalCell::commit_version`]).
 
 use crate::cell::{LocalCell, UNMADE};
-use crate::dir::{Dir as _, HostDir};
+use crate::dir::{Dir, File as _, HostDir};
 use crate::layout::{CellFile, DESCRIPTION, Description};
 use anyhow::{Context as _, Error};
 use bucket_cell::cell::Kind;
@@ -68,14 +68,26 @@ pub fn unmade_host(path: &Path) -> bool {
 /// that taking of the cell. A placement takes the cell only with a token as high as the last
 /// one's: a placement cut off takes no cell back from the one after it.
 /// A store never placed takes it with its host's (TASK-165.9: the token is the description's).
-pub fn place_host(path: &Path, token: u64) -> Result<(), Error> {
-    let mut file = store_file(path)?;
-    file.token = Some(token);
-    let written = HostDir::new(path).and_then(|dir| {
-        dir.replace(DESCRIPTION, file.text().as_bytes())?;
-        dir.sync_dir("")
-    });
-    written.with_context(|| format!("placing {}", path.display()))
+/// cladefs: `force`d, this placement's takings of a replicated cell go on with the members of the
+/// configuration its head names that answer, too few for a take (TASK-681): the commits told
+/// replicated that only the others held are lost. A placement after, unforced, is not.
+pub fn place_host(path: &Path, token: u64, force: bool) -> Result<(), Error> {
+    let placed = HostDir::new(path).map_err(Error::new).and_then(|dir| place(&dir, token, force));
+    placed.with_context(|| format!("placing {}", path.display()))
+}
+
+/// cladefs: places the store in `dir` at the placement whose fencing token is `token`, its takings
+/// forced if `force`, as [`place_host`] places a host's store: its description rewritten, durably.
+pub fn place<D: Dir>(dir: &D, token: u64, force: bool) -> Result<(), Error> {
+    let file = dir.open(DESCRIPTION, false).context("opening the description")?;
+    let mut text = vec![0; file.size()? as usize];
+    file.read_at(&mut text, 0).context("reading the description")?;
+    let mut described = CellFile::parse(std::str::from_utf8(&text)?)?;
+    described.token = Some(token);
+    described.forced = force.then_some(token);
+    dir.replace(DESCRIPTION, described.text().as_bytes())?;
+    dir.sync_dir("")?;
+    Ok(())
 }
 
 /// cladefs: the fencing token of the placement of the store at `path`, if it was placed

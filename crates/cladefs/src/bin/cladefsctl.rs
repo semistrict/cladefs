@@ -9,7 +9,7 @@
 //! ```sh
 //! cladefsctl take DIR CAPACITY CELL [TOKEN]
 //! cladefsctl create DIR CAPACITY
-//! cladefsctl place DIR TOKEN
+//! cladefsctl place [--force] DIR TOKEN
 //! cladefsctl sync DIR
 //! cladefsctl import DIR CAPACITY IMAGE [REF]
 //! cladefsctl fork SRC DST
@@ -61,7 +61,11 @@
 //! `place` places the store at DIR at the placement whose fencing token,
 //! its boot ID, is TOKEN (TASK-39.7): its writer takes its cell in object storage with that token
 //! from then on, which a later placement's exceeds, so that a placement cut off takes no cell
-//! back from the one after it (`ESTALE`), and its commits fail once a later one takes it. `sync`
+//! back from the one after it (`ESTALE`), and its commits fail once a later one takes it.
+//! `--force`d, that placement's takings of a replicated cell go on with the members of the
+//! configuration its head names that answer, fewer than a take needs, as when f+1 of them are
+//! gone for good (doc-21, TASK-681): commits told replicated that only the others held are lost,
+//! and the store's status says past which commit (`forced_after`). `sync`
 //! returns once every commit of the store at DIR is durable and in object storage, as before a
 //! clean stop: through the daemon, a store a VM has open as of then. `import` makes a store at DIR, of CAPACITY bytes,
 //! holding an Fxfs filesystem of the container image IMAGE (TASK-39.5), a base for VMs to boot
@@ -194,7 +198,7 @@ fn print_versions(versions: &[cladefs::VersionInfo]) {
 fn usage() -> anyhow::Error {
     anyhow::anyhow!(
         "usage: cladefsctl take DIR CAPACITY CELL [TOKEN] | cladefsctl create DIR CAPACITY | \
-         cladefsctl place DIR TOKEN | \
+         cladefsctl place [--force] DIR TOKEN | \
          cladefsctl sync DIR | cladefsctl import DIR CAPACITY IMAGE [REF] | cladefsctl fork SRC DST | \
          cladefsctl version DIR | cladefsctl versions DIR | \
          cladefsctl drop-versions DIR VERSION... | cladefsctl share DIR VERSION | \
@@ -240,6 +244,7 @@ enum Command {
     Place {
         dir: PathBuf,
         token: u64,
+        force: bool,
     },
     Sync {
         dir: PathBuf,
@@ -438,7 +443,12 @@ impl Command {
                 token: rest.first().map(|rest| token(rest)).transpose()?,
             },
             ["create", dir, size] => Self::Create { dir: dir.into(), capacity: capacity(size)? },
-            ["place", dir, given] => Self::Place { dir: dir.into(), token: token(given)? },
+            ["place", dir, given] => {
+                Self::Place { dir: dir.into(), token: token(given)?, force: false }
+            }
+            ["place", "--force", dir, given] => {
+                Self::Place { dir: dir.into(), token: token(given)?, force: true }
+            }
             ["sync", dir] => Self::Sync { dir: dir.into() },
             ["import", dir, size, image, ref rest @ ..] if rest.len() <= 1 => Self::Import {
                 dir: dir.into(),
@@ -526,7 +536,7 @@ impl Command {
             Self::Take { dir, capacity, cell, token } => {
                 daemon.create_cell(&dir, capacity, cell, token)?;
             }
-            Self::Place { dir, token } => daemon.place_cell(&dir, token)?,
+            Self::Place { dir, token, force } => daemon.place_cell(&dir, token, force)?,
             Self::Sync { dir } => daemon.sync_cell(&dir)?,
             Self::Import { dir, capacity, image, reference } => {
                 daemon.import_image(&dir, capacity, &image, reference.as_deref())?;
@@ -676,7 +686,8 @@ impl Command {
             Self::Take { dir, capacity, cell, token } => {
                 OpenCell::take(&dir, capacity, cell, token)?;
             }
-            Self::Place { dir, token } => OpenCell::place(&dir, token)?,
+            Self::Place { dir, token, force: false } => OpenCell::place(&dir, token)?,
+            Self::Place { dir, token, force: true } => OpenCell::place_forced(&dir, token)?,
             Self::Sync { dir } => {
                 let store = OpenCell::open(&dir)?;
                 store.wait_uploaded()?;

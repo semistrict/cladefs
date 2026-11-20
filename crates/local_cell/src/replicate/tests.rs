@@ -467,9 +467,10 @@ fn trims_keep_what_follows_the_head_and_refuse_forged_logs() {
     // Segment 1 named whole by the head, a member's copy of it cut short.
     let cut = [replica_log(1, &[&[1]]), replica_log(2, &[&[3], &[4]])];
     assert_eq!(kept(&cut, 2), Ok(vec![2]));
-    // A hole: commit 3 on no member.
+    // A hole: commit 3 on no member, the base of the writer that sent the rest, which told none of
+    // it replicated, the bucket holding not its base (TASK-680): given up.
     let hole = [replica_log(2, &[&[4]])];
-    assert!(kept(&hole, 2).is_err());
+    assert_eq!(kept(&hole, 2), Ok(vec![]));
     // Forged: an old commit after the honest records, or a log of its own past them.
     let appended = [replica_log(1, &[&[1], &[2]]), replica_log(2, &[&[3], &[4], &[1]])];
     assert!(kept(&appended, 2).unwrap_err().contains("not one writer's"));

@@ -175,6 +175,33 @@ fn logs_whose_first_append_failed_are_appended_to_after() {
     }
 }
 
+/// TASK-680: an append whose sync never came, its frame written, then a crash that corrupts what
+/// it kept of it, garbage or torn, leaves the log ending at the last frame its CRC holds: what was
+/// answered synced is there, nothing of the rest, and the log is appended to from its end.
+#[test]
+fn logs_end_at_their_last_whole_frame_after_corrupting_crashes() {
+    for seed in 0..32 {
+        for failing in 1..=3 {
+            let dir = MemDir::serial();
+            let replicas = Replicas::open(dir.clone(), MOST).unwrap();
+            let me = (CELL, key(1, 4), replicas.incarnation());
+            assert_eq!(replicas.append(me, 1, 0, &[5; 600]).unwrap(), 600);
+            dir.fail_after(Some(failing));
+            let torn = replicas.append(me, 1, 600, &[6; 1500]);
+            dir.fail_after(None);
+            let crashed = Replicas::open(dir.crash_corrupting(seed), MOST).unwrap();
+            let ends = crashed.fence(me, 4).unwrap();
+            let end = ends[0].1;
+            let at = format!("seed {seed}, failing after {failing}: {torn:?}");
+            assert!(end == 600 || end == 2100, "{at}: ends {ends:?}");
+            let mut expected = vec![5; 600];
+            expected.resize(end as usize, 6);
+            assert_eq!(crashed.read(me, 1, 0, 4000).unwrap(), expected, "{at}");
+            assert_eq!(crashed.append(me, 1, end, b"next").unwrap(), end + 4, "{at}");
+        }
+    }
+}
+
 /// Logs the bucket holds, or of configurations the head names no more, are dropped; a sweep of a
 /// cell gone drops its promise too; and a sweep of a replicated cell whose head names no
 /// configuration yet drops nothing (TASK-537.3.2's review), as its first may be being installed.

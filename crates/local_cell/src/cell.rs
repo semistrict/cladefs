@@ -900,6 +900,12 @@ impl<D: Dir> Recovering<D> {
         self.file.token
     }
 
+    /// cladefs: whether its placement's takings of its cell are forced (`PlaceCell`'s `force`,
+    /// TASK-681): its placement was placed forced, and is the store's placement still.
+    pub fn forced(&self) -> bool {
+        self.file.forced.is_some() && self.file.forced == self.file.token
+    }
+
     /// cladefs: its cell's kind, if its description names one (TASK-364, doc-20).
     pub fn kind(&self) -> Option<Kind> {
         self.file.kind
@@ -1297,7 +1303,7 @@ impl<D: Dir> LocalCell<D> {
             let file = dir.create(DESCRIPTION, false)?;
             let bucket = bucket.map(str::to_owned);
             let described =
-                CellFile { block_size, cell, bucket, capacity, token: None, kind, version };
+                CellFile { block_size, cell, bucket, capacity, token: None, forced: None, kind, version };
             let text = described.text();
             file.write_at(text.as_bytes(), 0)?;
             file.sync()?;

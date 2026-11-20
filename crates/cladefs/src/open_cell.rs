@@ -1177,7 +1177,15 @@ impl OpenCell {
     /// epoch; a later placement's token exceeds it, so a placement cut off takes no cell back
     /// from the one after it (`ESTALE`), and its commits fail once a later one takes it (`EROFS`).
     pub fn place(path: impl AsRef<Path>, token: u64) -> Result<(), Error> {
-        local_cell::place_host(path.as_ref(), token).map_err(Error::new)
+        local_cell::place_host(path.as_ref(), token, false).map_err(Error::new)
+    }
+
+    /// cladefs: places the store at `path` as [`OpenCell::place`] does, its placement's takings
+    /// of a replicated cell forced (doc-21, TASK-681): a taking goes on with the members of the
+    /// configuration the cell's head names that answer, fewer than a take needs, as when f+1 of
+    /// them are gone for good. Commits told replicated that only the others held are lost.
+    pub fn place_forced(path: impl AsRef<Path>, token: u64) -> Result<(), Error> {
+        local_cell::place_host(path.as_ref(), token, true).map_err(Error::new)
     }
 
     /// cladefs: deletes the store at `path`, which nothing has open: with `bucket`, its cell

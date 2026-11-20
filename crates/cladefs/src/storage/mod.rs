@@ -121,7 +121,7 @@ impl Storage {
             // Closed before it is placed, as `CreateCell` places a store, and opened again.
             drop(opened);
             if let Some(token) = token {
-                local_cell::place_host(path, token).map_err(Error::new)?;
+                local_cell::place_host(path, token, false).map_err(Error::new)?;
             }
         } else {
             let found = local_cell::host_cell(path).map_err(Error::new)?;

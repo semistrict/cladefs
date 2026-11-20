@@ -170,8 +170,8 @@ fn placements_name_their_token_in_the_description() {
     let path = dir.path().join("store");
     drop(create(&path));
     assert_eq!(host_token(&path).unwrap(), None);
-    place_host(&path, 7).unwrap();
-    place_host(&path, 9).unwrap();
+    place_host(&path, 7, true).unwrap();
+    place_host(&path, 9, false).unwrap();
     assert_eq!(host_token(&path).unwrap(), Some(9));
     let store = open_host(&path).unwrap();
     assert_eq!(store.bucket(), Some("memory:///host"));

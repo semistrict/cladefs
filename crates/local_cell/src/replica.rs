@@ -188,6 +188,18 @@ impl<D: Dir> Replicas<D> {
     /// refused: what its logs were promised can't be known. Each configuration's logs hold at most
     /// `most` bytes.
     pub fn open(dir: D, most: u64) -> Result<Self, Error> {
+        Self::open_as(dir, most, || loop {
+            let number: u64 = rand::random();
+            if number != 0 {
+                break number;
+            }
+        })
+    }
+
+    /// Opens the replica directory `dir` as [`Replicas::open`] does, a new incarnation, if one is
+    /// made, `new`'s: as the simulation draws it from its seed, so that a run replays (TASK-680).
+    /// It must not be 0.
+    pub fn open_as(dir: D, most: u64, new: impl FnOnce() -> u64) -> Result<Self, Error> {
         let names = dir.list("").context("listing the replica directory")?;
         let incarnation = if names.iter().any(|name| name == INCARNATION) {
             let text = read_text(&dir, INCARNATION)?;
@@ -210,12 +222,8 @@ impl<D: Dir> Replicas<D> {
                 )
                 .into());
             }
-            let incarnation = loop {
-                let number: u64 = rand::random();
-                if number != 0 {
-                    break number;
-                }
-            };
+            let incarnation = new();
+            assert_ne!(incarnation, 0, "a replica directory's incarnation is never 0");
             write_text(&dir, INCARNATION, &format!("{MAGIC}\nincarnation {incarnation}\n"))?;
             incarnation
         };

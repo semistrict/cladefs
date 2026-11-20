@@ -386,6 +386,12 @@ message PlaceCellRequest {
   string path = 1;
   // The placement's fencing token, its boot ID: greater than every earlier placement's.
   uint64 token = 2;
+  // Whether this placement's takings of a replicated cell are forced (doc-21, TASK-681): a taking
+  // goes on with the members of the configuration the cell's head names that answer, fewer than
+  // a take needs, as when f+1 of them are gone for good, and recovers what they hold. Commits told
+  // replicated that only the others held are lost; StatCell's forced_after says past which
+  // commit. A later placement is not forced unless it asks.
+  bool force = 3;
 }
 
 // The store placed.
@@ -556,6 +562,10 @@ message StatCellResponse {
   uint32 members_up = 26;
   // The f of its active configuration: less than replicas once it dropped to f = 0, degraded.
   uint32 active_replicas = 27;
+  // If its writer's taking was forced (PlaceCell's force) and fenced fewer members than a take
+  // needs: the commit number of the last commit it recovered, past which commits told replicated
+  // may be lost (TASK-681). 0 if not.
+  uint64 forced_after = 28;
 }
 
 // Asks for the stores the daemon serves.

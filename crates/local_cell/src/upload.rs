@@ -290,6 +290,16 @@ const SEEDING: Duration = Duration::from_secs(60);
 /// cladefs: how often a replicated cell's configuration is looked at ([`Shared::keep`]).
 const KEEPING: Duration = Duration::from_millis(250);
 
+/// cladefs: how many of [`KEEPING`]'s ticks a keeper waits, after a replacement it had no members
+/// for, before it tries again: from 1 s, doubling, to 30 s. Counted in ticks, not by the host's
+/// clock, so that the simulation's scheduler, which says when each tick is, decides it (TASK-680).
+const BACKOFF_FIRST: u32 = 4;
+const BACKOFF_MOST: u32 = 120;
+
+/// cladefs: how many of a replacement's waits for its members, of 10 ms, between its urgings of
+/// the uploader, a replacement to f = 0 waiting for the bucket: one [`KEEPING`]'s worth.
+const URGE_EVERY: u32 = 25;
+
 /// How an uploader uploads.
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -380,6 +390,13 @@ pub trait Members: Send + Sync + 'static {
         configuration: &bucket_cell::layout::Configuration,
         member: &bucket_cell::layout::Member,
     ) -> Result<(), String>;
+    /// Whether these members drive `replicator`, a replicator just made of a cell of this host's
+    /// that no thread serves yet ([`crate::replicate::Replicator::idle`]): a turn at a time, as the
+    /// simulation's scheduler does (TASK-680), keeping it to. Else each of its members is served by
+    /// a thread of its own, as the daemon's are.
+    fn drives(&self, _: &Arc<crate::replicate::Replicator>) -> bool {
+        false
+    }
 }
 
 /// cladefs: a host's [`Members`], as [`Options`] holds it.
@@ -423,7 +440,10 @@ pub fn open<D: Dir>(
     runtime: &Runtime,
 ) -> Result<(Arc<LocalCell<D>>, Uploader<D>), Failure> {
     let sleep: Clock = Arc::new(|interval| tokio::time::sleep(interval).boxed());
-    let shared = Shared::new(options, runtime.uploads.clone(), sleep, runtime.keys.clone());
+    let handle = runtime.handle.clone();
+    let spawn: Spawn = Arc::new(move |task| drop(handle.spawn(task)));
+    let uploads = runtime.uploads.clone();
+    let shared = Shared::new(options, uploads, (sleep, spawn), runtime.keys.clone());
     let (started, start) = std::sync::mpsc::channel();
     let (stop, stopped) = std::sync::mpsc::channel();
     let (uploader, uploads) = (shared.clone(), bucket.clone());
@@ -497,6 +517,8 @@ pub(crate) struct Shared<D: Dir, B: bucket_cell::Bucket = ObjectBucket> {
     uploads: Arc<Budget>,
     /// When its interval is up ([`Clock`]).
     clock: Clock,
+    /// cladefs: what it runs its keeper on ([`Spawn`]).
+    spawn: Spawn,
     /// The holders of its takings after the first, and the owners of what it makes: from the
     /// first taking's holder on ([`Shared::holder`]).
     holders: Mutex<Holders>,
@@ -507,6 +529,11 @@ pub(crate) struct Shared<D: Dir, B: bucket_cell::Bucket = ObjectBucket> {
     /// cladefs: of a replicated cell, what its head asks for and the configuration its taking
     /// activated, which [`Shared::keep`] keeps from then on (TASK-537.3.5).
     keeping: Mutex<Option<(bucket_cell::layout::Wish, bucket_cell::layout::Configuration, bool)>>,
+    /// cladefs: the configuration whose members' logs its taking recovered the store from, if it
+    /// did, its own write-ahead log holding less (TASK-537.3.4): what the simulation follows the
+    /// history of the commits of (TASK-680).
+    #[cfg(test)]
+    recovered_from: Mutex<Option<bucket_cell::layout::Configuration>>,
 }
 
 /// The holders an uploader's takings of its cell's head after the first take, and the owners of
@@ -531,12 +558,25 @@ impl Holders {
 /// simulation, of its scheduler's, which says when each runs out (TASK-88).
 pub(crate) type Clock = Arc<dyn Fn(Duration) -> BoxFuture<'static, ()> + Send + Sync>;
 
+/// cladefs: what an uploader runs a task of its own beside it on, its keeper of a replicated cell's
+/// configuration ([`Shared::keep`]): the host's runtime, or, in the simulation, its scheduler,
+/// which polls it as a seed says (TASK-680).
+pub(crate) type Spawn = Arc<dyn Fn(BoxFuture<'static, ()>) + Send + Sync>;
+
 /// Runs `work`, which blocks on the store's disk, on the uploaders' runtime: on its thread, which
 /// hands its other tasks to another meanwhile; or as it is, on a thread no runtime runs, as the
 /// simulation's (`tokio::task::block_in_place` runs it so there).
 #[allow(clippy::disallowed_methods, reason = "the work waits on the disk alone")]
 fn blocking<T>(work: impl FnOnce() -> T) -> T {
     tokio::task::block_in_place(work)
+}
+
+/// cladefs: the members of the configuration a take found that it fenced, each with the ends of the
+/// logs it holds ([`Shared::fence`]); and, of a forced take (TASK-681), why they are fewer than a
+/// take needs, if they are.
+struct Fenced {
+    members: Vec<(bucket_cell::layout::Member, Vec<(u64, u64)>)>,
+    short: Option<String>,
 }
 
 /// cladefs: a version of its cell a store is at, and the segment its cell's head names
@@ -629,6 +669,9 @@ pub struct Replicated {
     pub f: u8,
     pub fsync: bucket_cell::layout::Fsync,
     pub configuration: Option<u64>,
+    /// cladefs: if the taking was forced and fenced fewer members than a take needs (TASK-681):
+    /// the epoch of the last commit it recovered, past which commits told replicated may be lost.
+    pub forced_after: Option<u64>,
 }
 
 impl Replicated {
@@ -638,6 +681,7 @@ impl Replicated {
             f: wish.f,
             fsync: wish.fsync,
             configuration: configuration.as_ref().map(|configuration| configuration.number),
+            forced_after: None,
         }
     }
 }
@@ -750,8 +794,10 @@ impl<D: Dir> Uploader<D> {
             return self.wait_uploaded(epoch);
         };
         // cladefs: and while a replacement is under way, whose members may take long to catch up
-        // (TASK-537.3.5).
-        if replicator.degraded() || replicator.replacing_now() {
+        // (TASK-537.3.5); and while the bucket holds not yet what the store opened with, which no
+        // member need hold, nothing told replicated before (`Replicator::told`, TASK-678).
+        let gated = shared.last_uploaded() < replicator.base();
+        if replicator.degraded() || replicator.replacing_now() || gated {
             if shared.ask(epoch, Awaited::Uploaded)? {
                 return Ok(());
             }
@@ -979,11 +1025,11 @@ impl<D: Dir, B: bucket_cell::Bucket> bucket_cell::host_disk::Urge for Shared<D, 
 impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// An uploader that uploads as `options` say, within `uploads`, its interval running out on
     /// `clock`: started by [`Shared::run`]. cladefs: encrypting and reading under `keys`, the host's
-    /// (TASK-411.3).
+    /// (TASK-411.3); its keeper run on `spawn`.
     pub(crate) fn new(
         options: Options,
         uploads: Arc<Budget>,
-        clock: Clock,
+        (clock, spawn): (Clock, Spawn),
         keys: keys::Host,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -997,10 +1043,13 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             options,
             uploads,
             clock,
+            spawn,
             holders: Mutex::default(),
             keys,
             held: Mutex::default(),
             keeping: Mutex::default(),
+            #[cfg(test)]
+            recovered_from: Mutex::default(),
         })
     }
 
@@ -1169,7 +1218,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // cladefs: a replicated cell's configuration kept whole beside (TASK-537.3.5).
         let keeping = self.keeping.lock().unwrap().take();
         if let Some((wish, configuration, stale)) = keeping {
-            tokio::spawn(self.clone().keep(writer.clone(), wish, (configuration, stale)));
+            (self.spawn)(self.clone().keep(writer.clone(), wish, (configuration, stale)).boxed());
         }
         let mut segments = 0;
         let mut in_flight = InFlight::default();
@@ -1351,8 +1400,11 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let old = (held.head.replication.as_ref())
             .and_then(|replication| replication.configuration.clone())
             .filter(|configuration| configuration.f >= 1);
+        // cladefs: or, its placement's takings forced, those of them that answer, however few
+        // (TASK-681).
+        let (own, forced) = (recovering.has_wal(), recovering.forced());
         let fenced = match &old {
-            Some(old) => Some(self.fence(cell, old, held.head.epoch, recovering.has_wal()).await?),
+            Some(old) => Some(self.fence(cell, old, held.head.epoch, own, forced).await?),
             None => None,
         };
         // cladefs: the host serves a cell of the tenant's: its pool of new cell KEKs, which forks of
@@ -1365,11 +1417,20 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // cladefs: what the fenced members hold, the longest copy of each log, after the head's
         // last commit: the store's write-ahead log, if it holds none, and what the new
         // configuration's members are given before it is active (TASK-537.3.4).
-        let (seed, recovering) = match (&old, fenced) {
-            (Some(old), Some(fenced)) => {
+        let (seed, recovering, short) = match (&old, fenced) {
+            (Some(old), Some(Fenced { members: fenced, short })) => {
                 let logs = self.read_longest(cell, old, &fenced).await?;
                 let last = writer.taken().last_commit;
-                let seed = crate::replicate::trimmed(cell, &logs, last)?;
+                let seed = match crate::replicate::trimmed(cell, &logs, last) {
+                    Ok(seed) => seed,
+                    // Forced, what the members that answered hold, going not on from the head, is
+                    // given up as what the others held is (TASK-681).
+                    Err(err) if short.is_some() => {
+                        log::warn!("cladefs: {cell:?} taken by force: its members' logs: {err:#}");
+                        Vec::new()
+                    }
+                    Err(err) => return Err(err.into()),
+                };
                 // Its own write-ahead log, if it holds one, recovered unless the members' go past
                 // it: a later writer's, or this writer's beyond its own sync (TASK-537.3.4's review).
                 let own = recovering.last_commit_held();
@@ -1377,6 +1438,10 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 let recovering = match crate::replicate::members_ahead(own, members) {
                     false => recovering,
                     true => blocking(|| -> Result<_, Failure> {
+                        #[cfg(test)]
+                        {
+                            *self.recovered_from.lock().unwrap() = Some(old.clone());
+                        }
                         let mut recovering = recovering;
                         if recovering.has_wal() {
                             log::warn!(
@@ -1388,9 +1453,9 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                         Ok(recovering.restored(&seed, last)?)
                     })?,
                 };
-                (seed, recovering)
+                (seed, recovering, short)
             }
-            _ => (Vec::new(), recovering),
+            _ => (Vec::new(), recovering, None),
         };
         let (state, layer, taken) = (writer.state(), writer.layer(), Some(writer.taken().clone()));
         let opening = Opening { state, layer, taken, cache, keys: keys.clone(), held: parts };
@@ -1399,6 +1464,17 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         self.hold_ring(&keys);
         let _ = self.token.set(placement);
         self.took(&writer, placement);
+        // cladefs: taken by force from too few members: what may be lost said, and kept in its
+        // status (TASK-681).
+        if let Some(short) = short {
+            let kept = self.store().last_commit()?;
+            log::warn!(
+                "cladefs: {cell:?} taken by force: {short}: recovered through commit {kept}, \
+                 what the members that answered held; commits told replicated past it that \
+                 only the others held are lost"
+            );
+            self.forced_after(kept);
+        }
         // cladefs: a replicated cell's commits replicated from now on (doc-21, TASK-537.3.3).
         // cladefs: and, of a cell whose head names a configuration, replicated at its f at least,
         // whatever this taking asked: its head goes on naming a live configuration, whose
@@ -1424,6 +1500,14 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// that what `old` held replicated stays so; then the store's replicator started, of the
     /// commits after those it opened with, on no member of the new configuration but the seed's.
     /// The configuration before's members drop what they held of it, if they answer.
+    ///
+    /// A store that opened holding more than `old`'s members gave, its own write-ahead log's
+    /// commits on its own host (a retake on the writer's disk, the member holding the rest out of
+    /// reach), may hold commits told replicated that no member of the new configuration is given:
+    /// it is activated only by the acknowledgement that names them all, in the same swap
+    /// (`Writer::configure_past`), the head naming `old`, fenced, until then (TASK-678; the spec's
+    /// installOwn, its mutation InstallMembersOnly). Returns the configuration, and whether the
+    /// head names one before it still ([`Shared::keep`]'s `stale`).
     async fn replicate(
         &self,
         writer: &Arc<Writer<B>>,
@@ -1443,6 +1527,10 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             let me = picking.me().map_err(Failure::msg)?;
             Ok((me, picking.pick(cell, number, wish.f, &[])))
         })?;
+        let base = store.last_commit()?;
+        let epoch = writer.epoch();
+        // The last commit the head names, which every configuration's members go on from.
+        let named = writer.taken().last_commit.map(epoch_of);
         let (me, others) = match picked {
             (me, Ok(others)) => (me, others),
             // cladefs: no members to be had: the cell serves degraded, at f = 0, its commits
@@ -1459,16 +1547,9 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                      commits waiting for the bucket: {err}",
                     wish.f
                 );
-                let base = store.last_commit()?;
                 let spool = blocking(|| store.spool())?;
-                let changed = self.changed.clone();
-                let waker = move || {
-                    changed.notify(usize::MAX);
-                };
-                let replicator =
-                    crate::replicate::Replicator::start(0, base, spool, Vec::new(), waker);
+                let replicator = self.replicator(&members, 0, base, spool, Vec::new());
                 store.replicate_to(replicator);
-                let epoch = writer.epoch();
                 return Ok(match before {
                     Some(before) if before.f == 0 => (before, false),
                     // The writer's own, of f = 0, which the head names once it names all the
@@ -1476,7 +1557,6 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                     Some(before) => {
                         let number = before.number + 1;
                         let alone = Configuration { number, epoch, f: 0, members: vec![me] };
-                        let named = writer.taken().last_commit.map(epoch_of);
                         match named.is_some_and(|named| named >= base) {
                             true => writer.configure(alone.clone()).await?,
                             false => writer.configure_past(base, alone.clone()),
@@ -1491,22 +1571,27 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         };
         let mut all = vec![me];
         all.extend(others.iter().cloned());
-        let configuration = bucket_cell::layout::Configuration {
-            number,
-            epoch: writer.epoch(),
-            f: wish.f,
-            members: all,
-        };
+        let configuration = Configuration { number, epoch, f: wish.f, members: all };
         let links =
             others.iter().map(|member| members.link(cell, &configuration, member)).collect();
-        let base = store.last_commit()?;
-        let changed = self.changed.clone();
-        let waker = move || {
-            changed.notify(usize::MAX);
-        };
         let spool = blocking(|| store.spool())?;
-        let replicator =
-            crate::replicate::Replicator::start(usize::from(wish.f), base, spool, links, waker);
+        let replicator = self.replicator(&members, usize::from(wish.f), base, spool, links);
+        // What `old`'s members held, which they give the new configuration's: through the seed's
+        // last commit, or the head's. The store holding more, its own log's, of `old`'s writer's
+        // (TASK-678): the head names the new configuration once it names those too.
+        let given = crate::replicate::last_commit(cell, &seed).map(epoch_of).max(named);
+        if bucket_cell::rules().installs_own && old.is_some() && given.unwrap_or(0) < base {
+            log::info!(
+                "cladefs: {cell:?} replicated in configuration {number} with {:?} once the bucket \
+                 holds its commits through {base}, which its own log held past what the members \
+                 of configuration {} gave ({given:?}): until then the head names that one",
+                configuration.members.iter().map(|member| &member.address).collect::<Vec<_>>(),
+                old.as_ref().map_or(0, |old| old.number),
+            );
+            writer.configure_past(base, configuration.clone());
+            store.replicate_to(replicator);
+            return Ok((configuration, true));
+        }
         if !seed.is_empty() {
             let appends = seed.into_iter().map(|(log, bytes)| (log, 0, bytes)).collect();
             let flushed = crate::replicate::Flushed { epoch: base, appends };
@@ -1520,16 +1605,12 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                         replicator.down()
                     )));
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                (self.clock)(Duration::from_millis(10)).await;
             }
         }
         writer.configure(configuration.clone()).await?;
         store.replicate_to(replicator);
-        let mut progress = self.progress.lock().unwrap();
-        if let Some(Taking { replication: Some(replicated), .. }) = progress.taking.as_mut() {
-            replicated.configuration = Some(number);
-        }
-        drop(progress);
+        self.configured(number);
         log::info!(
             "cladefs: {cell:?} replicated in configuration {number} with {:?}",
             configuration.members.iter().map(|member| &member.address).collect::<Vec<_>>()
@@ -1538,6 +1619,28 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             self.drop_before(cell, &old, &configuration);
         }
         Ok((configuration, false))
+    }
+
+    /// cladefs: a replicator of a configuration of `f`, its members reached by `links`, started
+    /// after the commit of epoch `base`, spooling in `spool` ([`crate::replicate::Replicator`]):
+    /// its members served by threads of their own, unless `members` drive it.
+    fn replicator(
+        &self,
+        members: &Arc<dyn Members>,
+        f: usize,
+        base: u64,
+        spool: Arc<dyn crate::replicate::Spool>,
+        links: Vec<Arc<dyn crate::replicate::MemberLink>>,
+    ) -> Arc<crate::replicate::Replicator> {
+        let changed = self.changed.clone();
+        let waker = move || {
+            changed.notify(usize::MAX);
+        };
+        let replicator = crate::replicate::Replicator::idle(f, base, spool, links, waker);
+        if !members.drives(&replicator) {
+            replicator.run_threads();
+        }
+        replicator
     }
 
     /// cladefs: has the members of `old`, but this host, drop what they hold of `cell`'s
@@ -1582,7 +1685,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     ) {
         let cell = writer.cell();
         let mut degraded = None::<std::time::Instant>;
-        let (mut backoff, mut next) = (Duration::ZERO, std::time::Instant::now());
+        // Ticks to wait before trying a replacement again, and those left to wait.
+        let (mut backoff, mut skip) = (0u32, 0u32);
         // Each attempt's configuration a number of its own, one given up never reused (the
         // review's: a member of both would hold what it never dropped of the first under the
         // second's key); and the members that refused one, not picked again at once.
@@ -1597,6 +1701,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             if replicator.fenced().is_some() {
                 return;
             }
+            skip = skip.saturating_sub(1);
             if replicator.degraded() {
                 if degraded.is_none() {
                     log::warn!(
@@ -1617,7 +1722,11 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             // replacement before (the spec's aloneSwitch).
             if stale {
                 match writer.switching() {
-                    true => continue,
+                    // What it waits for uploaded at once (TASK-678).
+                    true => {
+                        self.eager();
+                        continue;
+                    }
                     false => stale = false,
                 }
                 // What StatCell says of it, the head naming it now (Codex's review).
@@ -1630,7 +1739,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             }
             let replace_after = self.options.replace_after;
             let replace = configuration.f != wish.f || replicator.lost(replace_after);
-            if !replace || std::time::Instant::now() < next {
+            if !replace || skip > 0 {
                 continue;
             }
             let refusing = replicator.refusing().into_iter();
@@ -1649,7 +1758,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             match new {
                 Ok(Some(new)) => {
                     configuration = new;
-                    backoff = Duration::ZERO;
+                    backoff = 0;
                     avoid.clear();
                     if configuration.f == 0 && wish.f == 0 {
                         self.store().unreplicate();
@@ -1658,8 +1767,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                     }
                 }
                 Ok(None) => {
-                    backoff = (backoff * 2).clamp(Duration::from_secs(1), Duration::from_secs(30));
-                    next = std::time::Instant::now() + backoff;
+                    backoff = (backoff * 2).clamp(BACKOFF_FIRST, BACKOFF_MOST);
+                    skip = backoff;
                 }
                 // Its writer stopped, the uploader with it.
                 Err(err) => {
@@ -1677,6 +1786,23 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         {
             replicated.configuration = Some(number);
         }
+    }
+
+    /// cladefs: the writer's taking was forced, fewer members fenced than a take needs, and
+    /// recovered through the commit of epoch `kept`, as its status says from now (TASK-681).
+    fn forced_after(&self, kept: u64) {
+        if let Some(Taking { replication: Some(replicated), .. }) =
+            self.progress.lock().unwrap().taking.as_mut()
+        {
+            replicated.forced_after = Some(kept);
+        }
+    }
+
+    /// cladefs: the configuration whose members' logs its taking recovered the store from, if it
+    /// did ([`Shared::recovered_from`]'s field).
+    #[cfg(test)]
+    pub(crate) fn recovered_from(&self) -> Option<bucket_cell::layout::Configuration> {
+        self.recovered_from.lock().unwrap().clone()
     }
 
     /// cladefs: whether the uploader stops, or stopped.
@@ -1738,7 +1864,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         replicator.replacing(usize::from(f), links.collect());
         *next = number + 1;
         let started = std::time::Instant::now();
-        let mut urged = started;
+        let mut waits = 0u32;
         while !replicator.installed(self.last_uploaded()) {
             if self.stopping() || replicator.fenced().is_some() || started.elapsed() > SEEDING {
                 let refusing = replicator.abandon().into_iter();
@@ -1751,10 +1877,10 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 return Ok(None);
             }
             // Of f = 0, what was told replicated uploaded at once.
-            if f == 0 && urged.elapsed() >= KEEPING {
+            if f == 0 && waits.is_multiple_of(URGE_EVERY) {
                 self.eager();
-                urged = std::time::Instant::now();
             }
+            waits += 1;
             (self.clock)(Duration::from_millis(10)).await;
         }
         writer.configure(configuration.clone()).await?;
@@ -1785,14 +1911,16 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// as it was taken (doc-21, TASK-537.3.4): f+1 members other than its writer must answer, so
     /// that no ack quorum of `old` is left unfenced, the writer's own copy, which nothing fences,
     /// counting only if this host is the writer and holds it (`own`, its write-ahead log). Each
-    /// that answered, with the ends of the logs it holds.
+    /// that answered, with the ends of the logs it holds. `forced` (TASK-681), fewer may: why they
+    /// are too few, then.
     async fn fence(
         &self,
         cell: CellId,
         old: &bucket_cell::layout::Configuration,
         epoch: u64,
         own: bool,
-    ) -> Result<Vec<(bucket_cell::layout::Member, Vec<(u64, u64)>)>, Failure> {
+        forced: bool,
+    ) -> Result<Fenced, Failure> {
         let members = self.members()?;
         let old = old.clone();
         blocking(move || {
@@ -1808,14 +1936,18 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 }
             }
             if fenced.len() < needed {
-                return Err(Failure::msg(format!(
+                let short = format!(
                     "{} of the {needed} members of configuration {} a take must fence answered: {}",
                     fenced.len(),
                     old.number,
                     refused.join("; ")
-                )));
+                );
+                return match forced {
+                    true => Ok(Fenced { members: fenced, short: Some(short) }),
+                    false => Err(Failure::msg(short)),
+                };
             }
-            Ok(fenced)
+            Ok(Fenced { members: fenced, short: None })
         })
     }
 
@@ -2608,11 +2740,12 @@ mod shuttle_tests {
             let recovering = LocalCell::recover_unmade(dir).unwrap();
             // Its interval never runs out: the writer asks for what it commits.
             let never: Clock = Arc::new(|_| futures::future::pending().boxed());
+            let spawn: Spawn = Arc::new(|task| drop(shuttle::future::spawn(task)));
             let options = Options { token: holder, ..Options::default() };
             let uploader = Shared::new(
                 options,
                 Budget::new(Limits::UNBOUNDED),
-                never,
+                (never, spawn),
                 bucket_cell::keys::testing::host(),
             );
             let (started, start) = std::sync::mpsc::channel();

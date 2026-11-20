@@ -31,6 +31,17 @@ shows it with an "in progress" mark on screen rather than leave it out. Each fil
 fact check against the code. Undoing: pick another storyline from a film's STORYLINES.md and rebuild
 that film, or cut the marked scenes.
 
+## Replicated cells: closing the gaps found against the spec and FoundationDB (TASK-678, 680, 681, 682, 2026-11-19)
+
+Decided with you:
+- **A replica directory restored or copied is not detected** (TASK-682, your choice over a per-address generation object in the bucket bumped at each start): doc-21 and `docs/operating-a-host.md` say never to restore or copy one. *Undo:* build the detection then.
+
+Decided without you:
+- **A take whose own log held commits past what the members it fenced gave defers its configuration's activation** to the acknowledgement that names them (`Writer::configure_past`), as a take serving alone does, rather than streaming its own log's segments to the new members first (TASK-678). Its commits wait for the bucket after a take either way (`Replicator::base`), so sending them buys nothing, and members would need a log kind of their own for framed segments. Spec: rules `installOwn` and `deferQuiet`, model `ReplicationDefer`. *Instead:* give the new configuration's members the take's own segments. *Undo:* `bucket_cell::Rules::installs_own` off, which loses commits told Replicated (the simulation's `retakes_need_to_install_their_own_logs`).
+- **A take finding members' logs that begin past the head's last commit gives them up** rather than refusing (TASK-680, found by the simulation): the gap is their writer's base, none of it told Replicated. *Undo:* `replicate::trimmed`'s `ensure!` back, which leaves such a cell untakeable.
+- **A forced placement is one placement**: the store's description names the forced token (`forced`), and a later placement is forced only if asked (TASK-681). Its status says past which commit it may have lost commits (`forced_after`), the last it recovered. *Instead:* a one-shot flag the take clears. *Undo:* drop `PlaceCell`'s `force`.
+- **The simulation drives members a turn at a time** (`Replicator::idle`, `drive`) and runs the keeper on its scheduler (`upload::Spawn`); the keeper's backoff counts its ticks, not the host's clock, so that a seed replays (TASK-680).
+
 ## Replicated cells: a take with no members to be had serves alone (TASK-537.3.6, 2026-11-19)
 
 Decided without you:
