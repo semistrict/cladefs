@@ -59,7 +59,8 @@ pub fn made_host(path: &Path) -> Result<(), Error> {
 /// way: no store, which deleting finishes (TASK-79.84, TASK-196). Its description, made last of
 /// its directory, is not there; or it says it was never made whole ([`LocalCell::made`]).
 pub fn unmade_host(path: &Path) -> bool {
-    path.is_dir() && (!path.join(DESCRIPTION).exists() || path.join(UNMADE).exists())
+    host_fs::is_dir(path)
+        && (!host_fs::exists(path.join(DESCRIPTION)) || host_fs::exists(path.join(UNMADE)))
 }
 
 /// cladefs: places the store at `path` (TASK-39.7): records, durably, in its description, the
@@ -112,7 +113,7 @@ pub async fn delete_host(
 ) -> Result<(), Error> {
     // cladefs: its disk work off the runtime's threads, `before` awaited between (TASK-685.3).
     use crate::upload::blocking;
-    if !path.join(DESCRIPTION).exists() {
+    if !host_fs::exists(path.join(DESCRIPTION)) {
         return blocking(|| remove_store_dir(path));
     }
     let (cell, dir) = blocking(|| -> Result<_, Error> {
@@ -165,7 +166,7 @@ fn remove_store(store: &Path) -> Result<(), Error> {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => return Err(err),
         }
-        let entries = match std::fs::read_dir(store) {
+        let entries = match host_fs::read_dir(store) {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
             entries => Some(entries?),
         };
@@ -216,31 +217,31 @@ mod removals {
     /// Renames the file at `from` to `to`.
     pub(super) fn rename(from: &Path, to: &Path) -> io::Result<()> {
         step(Change::Renamed, to)?;
-        std::fs::rename(from, to)
+        host_fs::rename(from, to)
     }
 
     /// Removes the file at `path`.
     pub(super) fn remove_file(path: &Path) -> io::Result<()> {
         step(Change::Removed, path)?;
-        std::fs::remove_file(path)
+        host_fs::remove_file(path)
     }
 
     /// Removes the empty directory at `path`.
     pub(super) fn remove_dir(path: &Path) -> io::Result<()> {
         step(Change::Removed, path)?;
-        std::fs::remove_dir(path)
+        host_fs::remove_dir(path)
     }
 
     /// Removes the directory at `path`, and all it holds.
     pub(super) fn remove_dir_all(path: &Path) -> io::Result<()> {
         step(Change::Removed, path)?;
-        std::fs::remove_dir_all(path)
+        host_fs::remove_dir_all(path)
     }
 
     /// Makes the entries of the directory at `path` durable.
     pub(super) fn sync_dir(path: &Path) -> io::Result<()> {
         step(Change::Synced, path)?;
-        std::fs::File::open(path)?.sync_all()
+        host_fs::File::open(path)?.sync_all()
     }
 
     /// Goes on to the step that makes `change` at `path`: at once, but in a test.
@@ -313,7 +314,7 @@ pub fn create_host_ephemeral(
 
 /// The description of the store whose directory is `store`.
 fn store_file(store: &Path) -> Result<CellFile, Error> {
-    let text = std::fs::read_to_string(store.join(DESCRIPTION))
+    let text = host_fs::read_to_string(store.join(DESCRIPTION))
         .with_context(|| format!("reading {}'s description", store.display()))?;
     CellFile::parse(&text)
 }
@@ -377,7 +378,7 @@ mod tests {
     /// A store at `store` in `temp`, holding an extent: its path.
     fn stored(temp: &Path) -> PathBuf {
         let path = temp.join("store");
-        std::fs::create_dir(&path).unwrap();
+        host_fs::create_dir(&path).unwrap();
         let description = Description {
             block_size: BLOCK as u32,
             capacity: 1 << 20,
@@ -401,16 +402,16 @@ mod tests {
     fn stopped_deletions_finish() {
         let temp = tempfile::tempdir().unwrap();
         let path = stored(temp.path());
-        std::fs::rename(path.join(DESCRIPTION), path.join("store.deleted")).unwrap();
-        std::fs::remove_dir_all(path.join(crate::layout::LOGS)).unwrap();
+        host_fs::rename(path.join(DESCRIPTION), path.join("store.deleted")).unwrap();
+        host_fs::remove_dir_all(path.join(crate::layout::LOGS)).unwrap();
         crate::upload::wait_on(delete_host(&path, async |_| Err(anyhow!("called")))).unwrap();
-        assert!(!path.exists());
+        assert!(!host_fs::exists(&path));
 
         let unmade = temp.path().join("unmade");
-        std::fs::create_dir_all(unmade.join("segments")).unwrap();
-        std::fs::write(unmade.join("stray"), "").unwrap();
+        host_fs::create_dir_all(unmade.join("segments")).unwrap();
+        host_fs::write(unmade.join("stray"), "").unwrap();
         crate::upload::wait_on(delete_host(&unmade, async |_| Err(anyhow!("called")))).unwrap();
-        assert!(!unmade.exists());
+        assert!(!host_fs::exists(&unmade));
     }
 
     /// A deletion calls `before` with the store's cell, while the store is open nowhere, before
@@ -422,7 +423,7 @@ mod tests {
         let path = stored(temp.path());
         let opened = open(&path).unwrap();
         let refused = crate::upload::wait_on(delete_host(&path, async |_| Err(anyhow!("called"))));
-        assert!(refused.is_err() && path.join(DESCRIPTION).exists(), "{refused:?}");
+        assert!(refused.is_err() && host_fs::exists(&path.join(DESCRIPTION)), "{refused:?}");
         drop(opened);
         let stopped = crate::upload::wait_on(delete_host(&path, async |cell| {
             Err(anyhow!("stopped at {cell}"))
@@ -432,7 +433,10 @@ mod tests {
         let called = std::cell::Cell::new(None);
         crate::upload::wait_on(delete_host(&path, async |cell| Ok(called.set(Some(cell)))))
             .unwrap();
-        assert_eq!((called.get(), path.exists()), (Some(bucket_cell::layout::test_cell(3)), false));
+        assert_eq!(
+            (called.get(), host_fs::exists(&path)),
+            (Some(bucket_cell::layout::test_cell(3)), false)
+        );
     }
 
     /// TASK-79.77: a deletion stopped at any step is finished by deleting again, which leaves
@@ -448,7 +452,7 @@ mod tests {
         let finished = |temp: &Path, path: &Path, at: &str| {
             crate::upload::wait_on(delete_host(path, async |_| Ok(())))
                 .unwrap_or_else(|err| panic!("stopped {at}: {err:#}"));
-            let left: Vec<_> = std::fs::read_dir(temp).unwrap().collect();
+            let left: Vec<_> = host_fs::read_dir(temp).unwrap().collect();
             assert_eq!(left.len(), 0, "stopped {at}: {left:?} left");
         };
         let at = "before the cell went";

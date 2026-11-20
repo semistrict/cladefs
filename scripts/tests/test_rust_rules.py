@@ -73,6 +73,54 @@ class OutsideTheSeam(unittest.TestCase):
             """), [])
 
 
+class OffHostFs(unittest.TestCase):
+    """cladefs: the daemon's disk goes through host_fs, each simulated host's disk under madsim
+    (TASK-685.4)."""
+
+    def matches(self, source, path="crates/local_cell/src/x.rs"):
+        return [(match.line, match.rule)
+                for match in rules.off_host_fs(Path(path), textwrap.dedent(source))]
+
+    def test_std_fs_its_traits_and_paths_asking_the_disk_are_flagged(self):
+        self.assertEqual(self.matches("""\
+            use std::os::unix::fs::FileExt as _;
+            fn f(path: &Path) -> bool {
+                let _ = std::fs::read(path);
+                path.exists() && path.canonicalize().is_ok()
+            }
+            """), [(1, "off-host-fs"), (3, "off-host-fs"), (4, "off-host-fs")])
+
+    def test_host_fs_and_one_saying_why_it_is_outside_the_simulation_pass(self):
+        self.assertEqual(self.matches("""\
+            fn f(path: &Path) -> bool {
+                let _ = host_fs::read(path);
+                // cladefs: outside the simulation: procfs.
+                let _ = std::fs::read("/proc/self/status");
+                host_fs::exists(path)
+            }
+            """), [])
+
+    def test_files_outside_the_simulation_tests_and_other_crates_pass(self):
+        source = "fn f() { let _ = std::fs::read(\"x\"); }\n"
+        self.assertEqual(self.matches(source, "crates/cladefs/src/fuse/x.rs"), [])
+        self.assertEqual(self.matches(source, "crates/cladefs/src/cladefsd/tests.rs"), [])
+        self.assertEqual(self.matches(source, "crates/physmem/src/x.rs"), [])
+        self.assertEqual(self.matches("""\
+            fn f() {}
+            #[cfg(test)]
+            mod tests {
+                fn t() { let _ = std::fs::read("x"); }
+            }
+            """), [])
+        self.assertEqual(self.matches("""\
+            fn f() {}
+            #[cfg(test)]
+            pub(crate) mod tests {
+                fn t() { let _ = std::fs::read("x"); }
+            }
+            """), [])
+
+
 class MixedOrderings(unittest.TestCase):
     def test_a_counter_all_relaxed_passes(self):
         self.assertEqual(matches(rules.mixed_orderings, """\

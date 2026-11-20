@@ -17,12 +17,13 @@
 //! the part cache, rather than run in the host's page cache, a second memory no budget counts
 //! (TASK-433.6). Its setup is to be fixed: a file system that bypasses it.
 
+use host_fs::File;
+use host_fs::FileExt as _;
 use std::alloc::{Layout, alloc_zeroed, dealloc};
-use std::fs::File;
 use std::io;
 use std::ops::Range;
+#[cfg(not(madsim))]
 use std::os::fd::AsRawFd as _;
-use std::os::unix::fs::FileExt as _;
 use std::path::Path;
 
 /// The block that direct I/O moves, and aligns memory to: the largest a host's disks have.
@@ -42,6 +43,15 @@ pub fn bypass(file: &File, path: &Path) -> io::Result<()> {
     fail::fail_point!("direct::bypass", |_| Err(refused(io::Error::from_raw_os_error(
         libc::EINVAL
     ))));
+    match bypassed(file) {
+        true => Ok(()),
+        false => Err(refused(io::Error::last_os_error())),
+    }
+}
+
+/// Whether I/O on `file` bypasses the host's page cache from now on, as it asked.
+#[cfg(not(madsim))]
+fn bypassed(file: &File) -> bool {
     let fd = file.as_raw_fd();
     #[cfg(target_os = "linux")]
     // SAFETY: Reads and sets the status flags of an open file descriptor.
@@ -52,10 +62,13 @@ pub fn bypass(file: &File, path: &Path) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     // SAFETY: Sets an option of an open file descriptor.
     let set = unsafe { libc::fcntl(fd, libc::F_NOCACHE, 1) == 0 };
-    match set {
-        true => Ok(()),
-        false => Err(refused(io::Error::last_os_error())),
-    }
+    set
+}
+
+/// cladefs: a simulated host's disk in memory has no page cache to bypass (doc-24).
+#[cfg(madsim)]
+fn bypassed(_: &File) -> bool {
+    true
 }
 
 /// Memory aligned to [`DIRECT_BLOCK`], zeroed as it is allocated, a whole number of blocks long.
@@ -294,7 +307,7 @@ mod tests {
     /// A file in `dir`, bypassing the page cache.
     fn opened(dir: &Path) -> File {
         let path = dir.join("file");
-        let options = std::fs::OpenOptions::new().read(true).write(true).create_new(true).clone();
+        let options = host_fs::OpenOptions::new().read(true).write(true).create_new(true).clone();
         let file = options.open(&path).unwrap();
         bypass(&file, &path).unwrap();
         file

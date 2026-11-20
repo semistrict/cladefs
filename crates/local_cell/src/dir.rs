@@ -5,11 +5,11 @@
 //! The file system a store lives in: a directory of the host's ([`HostDir`]), or of memory
 //! ([`MemDir`](crate::MemDir)), which can simulate crashes.
 
+use host_fs::OpenOptions;
+use host_fs::OpenOptionsExt as _;
 use std::collections::BTreeMap;
-use std::fs::OpenOptions;
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -303,7 +303,7 @@ pub struct DiskDir {
     path: PathBuf,
     /// The directory, open, for `barrier`, and for the `flock` taking it, which outlives this
     /// while other takings of it in the process do ([`Dir::take`]).
-    handle: Arc<std::fs::File>,
+    handle: Arc<host_fs::File>,
     /// cladefs: the disk of its filesystem (doc-22).
     disk: Arc<bucket_cell::host_disk::HostDisk>,
 }
@@ -311,14 +311,14 @@ pub struct DiskDir {
 impl DiskDir {
     /// The directory at `path`, which exists.
     pub fn new(path: &Path) -> io::Result<Self> {
-        let handle = Arc::new(std::fs::File::open(path)?);
+        let handle = Arc::new(host_fs::File::open(path)?);
         let disk = bucket_cell::host_disk::HostDisk::of(path)?;
         Ok(Self { path: path.to_owned(), handle, disk })
     }
 
     /// `file`, opened at `path`, bypassing the host's page cache, or refused, naming it, if its
     /// file system refuses that (`InvalidInput`, [`bucket_cell::direct::bypass`]).
-    fn file(&self, path: &str, file: std::fs::File) -> io::Result<DiskFile> {
+    fn file(&self, path: &str, file: host_fs::File) -> io::Result<DiskFile> {
         bucket_cell::direct::bypass(&file, &self.path.join(path))?;
         Ok(DiskFile { file, tail: Mutex::default() })
     }
@@ -347,23 +347,23 @@ impl Dir for DiskDir {
     }
 
     fn remove(&self, path: &str) -> io::Result<()> {
-        std::fs::remove_file(self.path.join(path))
+        host_fs::remove_file(self.path.join(path))
     }
 
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
-        std::fs::rename(self.path.join(from), self.path.join(to))
+        host_fs::rename(self.path.join(from), self.path.join(to))
     }
 
     fn link(&self, from: &str, to: &str) -> io::Result<()> {
-        std::fs::hard_link(self.path.join(from), self.path.join(to))
+        host_fs::hard_link(self.path.join(from), self.path.join(to))
     }
 
     fn entries(&self) -> io::Result<Vec<DirFile>> {
-        use std::os::unix::fs::MetadataExt as _;
+        use host_fs::MetadataExt as _;
         let mut found = Vec::new();
         let mut dirs = vec![String::new()];
         while let Some(dir) = dirs.pop() {
-            for entry in std::fs::read_dir(self.path.join(&dir))? {
+            for entry in host_fs::read_dir(self.path.join(&dir))? {
                 let entry = entry?;
                 let name = entry.file_name().into_string().map_err(|name| {
                     io::Error::new(io::ErrorKind::InvalidData, format!("{name:?} isn't UTF-8"))
@@ -386,23 +386,23 @@ impl Dir for DiskDir {
     fn replace(&self, path: &str, bytes: &[u8]) -> io::Result<()> {
         let new = format!("{path}.new");
         // One a write that stopped left.
-        match std::fs::remove_file(self.path.join(&new)) {
+        match host_fs::remove_file(self.path.join(&new)) {
             Err(err) if !not_found(&err) => return Err(err),
             _ => {}
         }
         let file = self.create(&new, false)?;
         file.write_at(bytes, 0)?;
         file.sync()?;
-        std::fs::rename(self.path.join(&new), self.path.join(path))
+        host_fs::rename(self.path.join(&new), self.path.join(path))
     }
 
     fn create_dir(&self, path: &str) -> io::Result<()> {
-        std::fs::create_dir(self.path.join(path))
+        host_fs::create_dir(self.path.join(path))
     }
 
     fn list(&self, path: &str) -> io::Result<Vec<String>> {
         let mut names = Vec::new();
-        for entry in std::fs::read_dir(self.path.join(path))? {
+        for entry in host_fs::read_dir(self.path.join(path))? {
             let name = entry?.file_name();
             names.push(name.into_string().map_err(|name| {
                 io::Error::new(io::ErrorKind::InvalidData, format!("{name:?} isn't UTF-8"))
@@ -416,10 +416,10 @@ impl Dir for DiskDir {
     }
 
     fn sync_dir(&self, path: &str) -> io::Result<()> {
-        let dir = std::fs::File::open(self.path.join(path))?;
+        let dir = host_fs::File::open(self.path.join(path))?;
         #[cfg(target_os = "macos")]
         {
-            sync_with(&dir, &[libc::F_BARRIERFSYNC, libc::F_FULLFSYNC])
+            host_fs::sync_with(&dir, &[libc::F_BARRIERFSYNC, libc::F_FULLFSYNC])
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -440,9 +440,8 @@ impl Dir for DiskDir {
             *count += 1;
             return Ok(());
         }
-        // Its descriptor, which holds the `flock` while any taking in the process does.
-        take_from_others(&self.handle)?;
-        taken.insert(id, (1, self.handle.clone()));
+        // Its lock, held while any taking in the process holds it.
+        taken.insert(id, (1, take_from_others(&self.handle)?));
         Ok(())
     }
 
@@ -459,12 +458,8 @@ impl Dir for DiskDir {
         if *count > 0 {
             return;
         }
-        let (_, lock) = taken.remove(&id).unwrap();
-        // SAFETY: Plain system call on the directory's descriptor.
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) } != 0 {
-            let err = io::Error::last_os_error();
-            log::warn!("extent store: unlocking {}: {err}", self.path.display());
-        }
+        // Unlocked as it goes.
+        drop(taken.remove(&id));
     }
 
     fn claim(&self) -> io::Result<()> {
@@ -493,6 +488,7 @@ impl Dir for DiskDir {
             Ok(id) => {
                 CLAIMED.get().lock().unwrap().remove(&id);
                 UNCLAIMED.get().notify_all();
+                UNCLAIMED_EVENT.get().notify(usize::MAX);
             }
             Err(err) => log::warn!("extent store: unclaiming {}: {err}", self.path.display()),
         }
@@ -501,7 +497,7 @@ impl Dir for DiskDir {
     fn barrier(&self) -> io::Result<()> {
         #[cfg(target_os = "macos")]
         {
-            sync_with(&self.handle, &[libc::F_FULLFSYNC])
+            host_fs::sync_with(&self.handle, &[libc::F_FULLFSYNC])
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -517,8 +513,9 @@ impl Dir for DiskDir {
 
 node_local::node_local! {
     /// cladefs: the directories this process has taken ([`Dir::take`]), by their devices and inodes:
-    /// how many takings of each, and the descriptor holding the `flock`.
-    static TAKEN: Mutex<BTreeMap<DirId, (usize, Arc<std::fs::File>)>> = Mutex::new(BTreeMap::new());
+    /// how many takings of each, and the lock they hold, a process's, which its death lets go, a
+    /// simulated host's too (`host_fs::Flock`).
+    static TAKEN: Mutex<BTreeMap<DirId, (usize, host_fs::Flock)>> = Mutex::new(BTreeMap::new());
 }
 
 node_local::node_local! {
@@ -530,6 +527,12 @@ node_local::node_local! {
 node_local::node_local! {
     /// cladefs: woken as a claim goes ([`Dir::unclaim`]), for openings waiting for a store closing.
     static UNCLAIMED: std::sync::Condvar = std::sync::Condvar::new();
+}
+
+node_local::node_local! {
+    /// cladefs: said as a claim goes ([`Dir::unclaim`]), for what waits for a store closing holding
+    /// no thread ([`closed`]).
+    static UNCLAIMED_EVENT: event_listener::Event = event_listener::Event::new();
 }
 
 /// cladefs: `claimed`, [`CLAIMED`] locked, once no store of the directory `id` is closing in this
@@ -548,8 +551,9 @@ fn closed_in(
             ));
         }
         fail::fail_point!("dir::claim_waits");
-        // cladefs: never under madsim, where a store's close runs inline, awaiting nothing, so that
-        // no opening finds one closing (doc-24, TASK-685.3).
+        // cladefs: never under madsim, where an opening of a store waits for its close first,
+        // holding no thread ([`closed`]), then claims it, awaiting nothing between (doc-24,
+        // TASK-685.3).
         crate::blocks!("an opening, waiting for a store of its directory closing in the process");
         claimed = UNCLAIMED.get().wait_timeout(claimed, left).unwrap().0;
     }
@@ -557,17 +561,32 @@ fn closed_in(
 }
 
 /// cladefs: returns once no store of the directory at `path` is closing in this process, waiting
-/// for one that is a while, as an opening of it does ([`Dir::claim`]): `WouldBlock` if it still
-/// is. What reads in the bucket what a store's close uploads, a fork of a version its closing
-/// store made, say, waits for the close so (TASK-644). Nothing at `path`, nothing closes there.
-pub fn closed(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::MetadataExt as _;
-    let metadata = match std::fs::metadata(path) {
+/// for one that is a while, as an opening of it does ([`Dir::claim`]), holding no thread:
+/// `WouldBlock` if it still is. What reads in the bucket what a store's close uploads, a fork of a
+/// version its closing store made, say, waits for the close so (TASK-644); and an opening of the
+/// store, first, so that its claim finds none closing (doc-24). Nothing at `path`, nothing closes
+/// there.
+pub async fn closed(path: &Path) -> io::Result<()> {
+    use host_fs::MetadataExt as _;
+    let metadata = match host_fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(err) => return Err(err),
     };
-    closed_in(CLAIMED.get().lock().unwrap(), (metadata.dev(), metadata.ino())).map(drop)
+    let id = (metadata.dev(), metadata.ino());
+    let closing = async {
+        loop {
+            let unclaimed = UNCLAIMED_EVENT.get().listen();
+            if CLAIMED.get().lock().unwrap().get(&id) != Some(&true) {
+                return;
+            }
+            fail::fail_point!("dir::claim_waits");
+            unclaimed.await;
+        }
+    };
+    tokio::time::timeout(CLOSING_WAIT, closing).await.map_err(|_| {
+        io::Error::new(io::ErrorKind::WouldBlock, "this process is still closing the store")
+    })
 }
 
 /// cladefs: how long an opening waits for a store of its directory closing in this process
@@ -580,24 +599,23 @@ type DirId = (u64, u64);
 impl DiskDir {
     /// The directory's device and inode.
     fn id(&self) -> io::Result<DirId> {
-        use std::os::unix::fs::MetadataExt as _;
+        use host_fs::MetadataExt as _;
         let metadata = self.handle.metadata()?;
         Ok((metadata.dev(), metadata.ino()))
     }
 }
 
-/// Takes the directory through `lock`, a descriptor of it, against other processes' takings of it,
-/// waiting a while for them to let it go ([`Dir::take`]).
-fn take_from_others(lock: &std::fs::File) -> io::Result<()> {
+/// Takes the directory through `handle`, a descriptor of it, against other processes' takings of
+/// it, waiting a while for them to let it go ([`Dir::take`]): its lock, through a `dup` of the
+/// descriptor, of its open file description.
+fn take_from_others(handle: &host_fs::File) -> io::Result<host_fs::Flock> {
     let deadline = std::time::Instant::now() + TAKE_WAIT;
     loop {
-        // SAFETY: Plain system call on the directory's descriptor.
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-            return Ok(());
-        }
-        let err = io::Error::last_os_error();
-        if err.kind() != io::ErrorKind::WouldBlock {
-            return Err(err);
+        match host_fs::Flock::try_lock(handle.try_clone()?) {
+            Ok(locked) => return Ok(locked),
+            Err(err) if err.kind() != io::ErrorKind::WouldBlock => return Err(err),
+            // Another's: waited for a while.
+            Err(_) => {}
         }
         if std::time::Instant::now() >= deadline {
             return Err(io::Error::new(
@@ -613,13 +631,20 @@ fn take_from_others(lock: &std::fs::File) -> io::Result<()> {
 /// the blocks around what is asked, from memory aligned to them, the block ending the last write
 /// held, so that an append, a log's, reads nothing back (`bucket_cell::direct`, TASK-433).
 pub struct DiskFile {
-    file: std::fs::File,
+    file: host_fs::File,
     tail: Mutex<bucket_cell::direct::Tail>,
 }
 
 impl AsRawFd for DiskFile {
     fn as_raw_fd(&self) -> RawFd {
-        self.file.as_raw_fd()
+        #[cfg(not(madsim))]
+        return self.file.as_raw_fd();
+        // cladefs: a simulated host's disk in memory has no descriptors; what wants one, FUSE's
+        // storage, is outside the simulation (doc-24, TASK-685.4).
+        #[cfg(madsim)]
+        panic!(
+            "a descriptor of a simulated host's file, which has none: FUSE is outside the simulation"
+        )
     }
 }
 
@@ -643,7 +668,7 @@ impl File for DiskFile {
     fn sync(&self) -> io::Result<()> {
         #[cfg(target_os = "macos")]
         {
-            sync_with(&self.file, &[libc::F_BARRIERFSYNC, libc::F_FULLFSYNC])
+            host_fs::sync_with(&self.file, &[libc::F_BARRIERFSYNC, libc::F_FULLFSYNC])
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -659,89 +684,12 @@ impl File for DiskFile {
     /// whole.
     fn punch(&self, offset: u64, len: u64) -> io::Result<()> {
         let _writes = self.tail.lock().unwrap();
-        punch_hole(&self.file, offset, len)
+        host_fs::punch_hole(&self.file, offset, len)
     }
 
     fn allocated(&self) -> io::Result<u64> {
-        use std::os::unix::fs::MetadataExt as _;
+        use host_fs::MetadataExt as _;
         let _writes = self.tail.lock().unwrap();
         Ok(self.file.metadata()?.blocks() * 512)
-    }
-}
-
-/// cladefs: gives the `len` bytes at `offset` of `file` back to its disk, keeping its size
-/// ([`File::punch`]): `fallocate`'s `FALLOC_FL_PUNCH_HOLE` on Linux, `F_PUNCHHOLE` on macOS.
-fn punch_hole(file: &std::fs::File, offset: u64, len: u64) -> io::Result<()> {
-    if len == 0 {
-        return Ok(());
-    }
-    let fd = file.as_raw_fd();
-    let (offset, len) = (
-        libc::off_t::try_from(offset).map_err(|_| io::ErrorKind::InvalidInput)?,
-        libc::off_t::try_from(len).map_err(|_| io::ErrorKind::InvalidInput)?,
-    );
-    #[cfg(target_os = "linux")]
-    {
-        let mode = libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE;
-        loop {
-            // SAFETY: Changes the blocks of an open file descriptor's file alone, no memory.
-            if unsafe { libc::fallocate(fd, mode, offset, len) } == 0 {
-                return Ok(());
-            }
-            let err = io::Error::last_os_error();
-            if err.kind() != io::ErrorKind::Interrupted {
-                return Err(err);
-            }
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let hole =
-            libc::fpunchhole_t { fp_flags: 0, reserved: 0, fp_offset: offset, fp_length: len };
-        // SAFETY: Reads `hole`, which lives across the call, and changes the blocks of an open file
-        // descriptor's file alone.
-        again_if_interrupted(|| unsafe { libc::fcntl(fd, libc::F_PUNCHHOLE, &hole) })
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let _ = (fd, offset, len);
-        Err(io::ErrorKind::Unsupported.into())
-    }
-}
-
-/// cladefs: syncs `file` on macOS by the first of `syncs`, `fcntl`s of macOS's, that its file system
-/// supports; or, if none, by an `fsync`, which is all there is then (TASK-92.48). Not std's
-/// `sync_all`, which is an `F_FULLFSYNC` there.
-#[cfg(target_os = "macos")]
-fn sync_with(file: &std::fs::File, syncs: &[libc::c_int]) -> io::Result<()> {
-    let fd = file.as_raw_fd();
-    for &sync in syncs {
-        // SAFETY: Flushes an open file descriptor's file, as `sync` says.
-        let synced = again_if_interrupted(|| unsafe { libc::fcntl(fd, sync) });
-        // A file system without it says so.
-        let unsupported = matches!(
-            synced.as_ref().map_err(io::Error::raw_os_error),
-            Err(Some(libc::ENOTSUP | libc::ENOTTY | libc::EINVAL))
-        );
-        if !unsupported {
-            return synced;
-        }
-    }
-    // SAFETY: Syncs an open file descriptor's file.
-    again_if_interrupted(|| unsafe { libc::fsync(fd) })
-}
-
-/// cladefs: what `call`, a system call that returns -1 if it fails, gave, called again while a
-/// signal interrupts it, as std's own calls are.
-#[cfg(target_os = "macos")]
-fn again_if_interrupted(call: impl Fn() -> libc::c_int) -> io::Result<()> {
-    loop {
-        if call() != -1 {
-            return Ok(());
-        }
-        let err = io::Error::last_os_error();
-        if err.kind() != io::ErrorKind::Interrupted {
-            return Err(err);
-        }
     }
 }

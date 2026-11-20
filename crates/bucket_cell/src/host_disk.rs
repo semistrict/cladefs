@@ -200,7 +200,7 @@ pub trait Urge: Send + Sync {
 /// How a disk is sampled: a host's filesystem through a descriptor of a directory of it, or a
 /// disk in memory, by what its owner says of it.
 enum Sampler {
-    Fs { dev: u64, dir: std::fs::File },
+    Fs { dev: u64, dir: host_fs::File },
     Memory(Box<dyn Fn() -> Sample + Send + Sync>),
 }
 
@@ -237,15 +237,15 @@ node_local::node_local! {
 impl HostDisk {
     /// The disk of the filesystem `path` is on: the one alive already, if any is.
     pub fn of(path: &Path) -> io::Result<Arc<Self>> {
-        use std::os::unix::fs::MetadataExt as _;
-        let dev = std::fs::metadata(path)?.dev();
+        use host_fs::MetadataExt as _;
+        let dev = host_fs::metadata(path)?.dev();
         let mut disks = DISKS.get().lock().unwrap();
         disks.retain(|disk| disk.strong_count() > 0);
         let found = disks.iter().filter_map(Weak::upgrade).find(|disk| disk.dev() == Some(dev));
         if let Some(disk) = found {
             return Ok(disk);
         }
-        let dir = std::fs::File::open(path)?;
+        let dir = host_fs::File::open(path)?;
         let disk = Arc::new(Self::with(Sampler::Fs { dev, dir }));
         disks.push(Arc::downgrade(&disk));
         Ok(disk)
@@ -357,8 +357,16 @@ impl std::fmt::Debug for HostDisk {
     }
 }
 
+/// cladefs: the space of a simulated host's disk in memory, a terabyte, holding nothing as the
+/// governor counts it (doc-24): what its stores hold is counted as they write it.
+#[cfg(madsim)]
+fn fs_sample(_: &host_fs::File) -> io::Result<Sample> {
+    Ok(Sample { size: 1 << 40, free: 1 << 40, used: 0 })
+}
+
 /// The space of the filesystem `dir`, a descriptor of a directory of it, is on.
-fn fs_sample(dir: &std::fs::File) -> io::Result<Sample> {
+#[cfg(not(madsim))]
+fn fs_sample(dir: &host_fs::File) -> io::Result<Sample> {
     use std::os::fd::AsRawFd as _;
     // SAFETY: statvfs is plain data, valid all zeros.
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
@@ -400,7 +408,7 @@ mod tests {
     #[test]
     fn a_filesystem_has_one_disk() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("a")).unwrap();
+        host_fs::create_dir(dir.path().join("a")).unwrap();
         let (disk, a) = (HostDisk::of(dir.path()).unwrap(), HostDisk::of(&dir.path().join("a")));
         assert!(Arc::ptr_eq(&disk, &a.unwrap()));
         assert!(HostDisk::all().iter().any(|alive| Arc::ptr_eq(alive, &disk)));

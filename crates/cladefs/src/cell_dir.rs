@@ -55,7 +55,7 @@ fn mark(dir: &Path, names: impl IntoIterator<Item = String>) -> io::Result<()> {
 /// The record `name` in `dir`: none if it isn't there; `EIO`, logged, saying what it is (`what`),
 /// if it can't be read.
 fn read(dir: &Path, name: &str, what: &str) -> Result<Option<String>> {
-    match std::fs::read_to_string(dir.join(name)) {
+    match host_fs::read_to_string(dir.join(name)) {
         Ok(text) => Ok(Some(text)),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(err) => {
@@ -136,7 +136,7 @@ pub(crate) fn public_cells(dir: &Path) -> Result<BTreeSet<u64>> {
             Err(io::Error::from_raw_os_error(libc::EMFILE))
         });
         let mut public = BTreeSet::new();
-        for entry in std::fs::read_dir(dir)? {
+        for entry in host_fs::read_dir(dir)? {
             let name = entry?.file_name();
             let marked = name.to_str().and_then(|name| name.strip_prefix(PUBLIC));
             if let Some(cell) = marked.and_then(base32_id::parse_padded) {
@@ -166,7 +166,8 @@ pub(crate) fn inherit(
     to: &Path,
 ) -> Result<()> {
     inherit_attached(from, to)?;
-    let from = from.canonicalize().map_err(|err| failed(from, "finding the store", err))?;
+    let from =
+        host_fs::canonicalize(&from).map_err(|err| failed(from, "finding the store", err))?;
     let mut text = format!("{} {}\n", Short(cell), from.display());
     for &(cell, ref dir) in forked_from {
         text += &format!("{} {}\n", Short(cell), dir.display());
@@ -208,16 +209,16 @@ mod tests {
         assert_eq!(attached(dir), Ok(expected));
         mark_public(dir, &[7, 9]).unwrap();
         assert_eq!(public_cells(dir), Ok(BTreeSet::from([7, 9])));
-        let names: BTreeSet<String> = std::fs::read_dir(dir)
+        let names: BTreeSet<String> = host_fs::read_dir(dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .collect();
         let expected = ["attached-bases", "public-0000000000007", "public-0000000000009"];
         assert_eq!(names, expected.map(str::to_owned).into());
 
-        std::fs::write(dir.join(ANCESTRY), "1F /stores/base\n").unwrap();
+        host_fs::write(dir.join(ANCESTRY), "1F /stores/base\n").unwrap();
         assert_eq!(ancestry(dir), Err(Errno::EIO));
-        std::fs::create_dir(dir.join("unreadable")).unwrap();
+        host_fs::create_dir(dir.join("unreadable")).unwrap();
         assert_eq!(read(dir, "unreadable", "a directory"), Err(Errno::EIO));
     }
 
@@ -232,7 +233,7 @@ mod tests {
         inherit(from.path(), 4, &older, to.path()).unwrap();
         assert_eq!(attached(to.path()), attached(from.path()));
         assert_eq!(public_cells(to.path()), Ok(BTreeSet::from([5])));
-        let parent = from.path().canonicalize().unwrap();
+        let parent = host_fs::canonicalize(&from.path()).unwrap();
         assert_eq!(ancestry(to.path()), Ok(vec![(4, parent), (3, "/stores/grandparent".into())]));
     }
 }

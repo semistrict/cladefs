@@ -317,7 +317,7 @@ impl Tenant {
     /// A new tenant, granted, of the ID `id` in the bucket (TASK-364), whose stores are in `dir`,
     /// with an arena of its own.
     pub fn new(id: u64, dir: impl AsRef<Path>) -> std::io::Result<Arc<Self>> {
-        let dir = dir.as_ref().canonicalize()?;
+        let dir = host_fs::canonicalize(&dir.as_ref())?;
         let disk = Some(super::disk::Disk::new(id, &dir)?);
         let policy = Policy::granted(dir);
         let tenant = Arc::new(Self { id, policy, memory: Memory::new()?, disk });
@@ -683,6 +683,8 @@ async fn finish_connection(connection: Arc<Connection>) {
     // cladefs: the trace of its guest's reads, if it keeps one, its requests done (TASK-702.1).
     if let Some(trace) = connection.reads.get() {
         let (file, text) = (trace.file().to_owned(), trace.text());
+        // cladefs: outside the simulation: a diagnostic, as the stats file is, not the host's disk
+        // its cells are kept on.
         let failed = match super::run::off_the_runtime(move || std::fs::write(&file, text)).await {
             Ok(Ok(())) => None,
             Ok(Err(err)) => Some(err.to_string()),
@@ -1019,7 +1021,7 @@ fn roots() -> Option<&'static [PathBuf]> {
                 node_local::env::var_os("CLADEFSD_ROOTS").filter(|roots| !roots.is_empty())?;
             Some(
                 std::env::split_paths(&roots)
-                    .filter_map(|root| match root.canonicalize() {
+                    .filter_map(|root| match host_fs::canonicalize(&root) {
                         Ok(root) => Some(root),
                         Err(err) => {
                             log::error!("cladefsd: CLADEFSD_ROOTS: {}: {err}", root.display());
@@ -1893,7 +1895,7 @@ impl Connection {
         // restore forked, holds the version's state, or is refused, as it is (TASK-194).
         let mut there = None;
         if let codec::Opening::ForkOf { tenant, cell, version, capacity } = *how
-            && path.exists()
+            && host_fs::exists(&path)
             && !crate::host_cell::unmade(path)
         {
             let store = match hold.instance() {
@@ -3086,11 +3088,11 @@ mod in_dir_tests {
     fn paths_name_stores_in_a_directory_however_they_name_them() {
         let dir = tempfile::tempdir().unwrap();
         let (ours, theirs) = (dir.path().join("ours"), dir.path().join("theirs"));
-        std::fs::create_dir(&ours).unwrap();
-        std::fs::create_dir(&theirs).unwrap();
-        std::fs::create_dir(ours.join("store")).unwrap();
+        host_fs::create_dir(&ours).unwrap();
+        host_fs::create_dir(&theirs).unwrap();
+        host_fs::create_dir(ours.join("store")).unwrap();
         std::os::unix::fs::symlink(&theirs, ours.join("link")).unwrap();
-        let ours = ours.canonicalize().unwrap();
+        let ours = host_fs::canonicalize(&ours).unwrap();
         for path in [ours.join("store"), ours.join("new"), ours.join("./new")] {
             assert!(in_dir(&path, &ours), "{}", path.display());
         }

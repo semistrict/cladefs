@@ -21,6 +21,8 @@ loom = ["dep:loom"]
 
 [dependencies]
 libc.workspace = true
+# cladefs: its memory per simulated host under madsim, per process otherwise (doc-24, TASK-685.14).
+node_local.workspace = true
 loom = { workspace = true, optional = true }
 # parking_lot itself without the `shuttle` feature; with it, Shuttle's locks behind parking_lot's
 # API (Apache-2.0).

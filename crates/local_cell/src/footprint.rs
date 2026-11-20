@@ -495,7 +495,7 @@ node_local::node_local! {
 /// counting the stores in it as they were counted, and those not counted yet, closed, as one
 /// listing of each finds them.
 pub fn allotment(dir: &Path) -> io::Result<Arc<Allotment>> {
-    let dir = std::fs::canonicalize(dir)?;
+    let dir = host_fs::canonicalize(dir)?;
     let made = {
         let mut allotments = ALLOTMENTS.get().lock().unwrap();
         if let Some(made) = allotments.iter().find(|allotment| allotment.dir == dir) {
@@ -528,14 +528,14 @@ pub fn allotment(dir: &Path) -> io::Result<Arc<Allotment>> {
 /// Counts the footprint of each store in `dir` not counted yet, at any depth: one listing of each.
 /// A store's directory is one holding its description, or what its deletion or making leaves of it.
 fn count_stores_in(dir: &Path) -> io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
+    for entry in host_fs::read_dir(dir)? {
         let path = entry?.path();
-        if !path.is_dir() {
+        if !host_fs::is_dir(&path) {
             continue;
         }
         let store = [crate::layout::DESCRIPTION, crate::host::DELETED, crate::cell::UNMADE]
             .iter()
-            .any(|name| path.join(name).exists());
+            .any(|name| host_fs::exists(path.join(name)));
         if !store {
             count_stores_in(&path)?;
             continue;
@@ -837,8 +837,8 @@ node_local::node_local! {
 
 /// The directory at `path`'s device and inode.
 fn dir_id(path: &Path) -> io::Result<DirId> {
-    use std::os::unix::fs::MetadataExt as _;
-    let metadata = std::fs::metadata(path)?;
+    use host_fs::MetadataExt as _;
+    let metadata = host_fs::metadata(path)?;
     Ok((metadata.dev(), metadata.ino()))
 }
 
@@ -851,7 +851,7 @@ pub(crate) fn of_host(path: &Path, disk: &Arc<HostDisk>) -> io::Result<Arc<Footp
     if let Some(footprint) = footprints.get(&id) {
         return Ok(footprint.clone());
     }
-    let footprint = Footprint::new(Some(std::fs::canonicalize(path)?), Some(disk.clone()));
+    let footprint = Footprint::new(Some(host_fs::canonicalize(path)?), Some(disk.clone()));
     footprints.insert(id, footprint.clone());
     drop(ledger);
     allot_nearest(&footprint);
@@ -953,7 +953,7 @@ mod tests {
                 let taken = rng.random();
                 let given = dir.give(&from, &mut |path| {
                     if taken {
-                        std::fs::remove_file(path)?;
+                        host_fs::remove_file(path)?;
                     }
                     Ok(taken)
                 });
@@ -1057,7 +1057,7 @@ mod tests {
     fn host_stores_are_counted_once_while_open_and_closed() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("store");
-        std::fs::create_dir(&path).unwrap();
+        host_fs::create_dir(&path).unwrap();
         let dir = HostDir::new(&path).unwrap();
         let disk = dir.footprint().disk().unwrap().clone();
         let before = disk.stores.bytes();
@@ -1071,8 +1071,8 @@ mod tests {
         drop((dir, other));
         assert_eq!(footprint.bytes(), 3 * GRANULE, "closed, still counted");
         // Changed around it while closed.
-        std::fs::write(path.join("f"), vec![3; 2 * GRANULE as usize]).unwrap();
-        std::fs::remove_file(path.join("segments/1")).unwrap();
+        host_fs::write(path.join("f"), vec![3; 2 * GRANULE as usize]).unwrap();
+        host_fs::remove_file(path.join("segments/1")).unwrap();
         let dir = HostDir::new(&path).unwrap();
         assert_eq!(dir.footprint().bytes(), 3 * GRANULE);
         assert_eq!(disk.stores.bytes() - before, 3 * GRANULE);

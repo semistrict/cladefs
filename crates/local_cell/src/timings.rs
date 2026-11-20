@@ -87,6 +87,7 @@ pub fn runnable_ns() -> u64 {
     {
         use std::io::Read;
         let mut stat = [0u8; 96];
+        // cladefs: outside the simulation: procfs, the host's, not its disk (doc-24).
         let read = std::fs::File::open("/proc/thread-self/schedstat")
             .and_then(|mut file| file.read(&mut stat));
         let Ok(read) = read else { return 0 };

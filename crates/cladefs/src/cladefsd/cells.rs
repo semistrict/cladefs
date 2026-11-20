@@ -113,7 +113,7 @@ pub(super) async fn followed(path: &Path, arena: &Arc<Arena>) -> Result<OpenCell
         Some((store, false)) => return follow(&store),
         None => {}
     }
-    if !path.exists() {
+    if !host_fs::exists(&path) {
         return Err(Errno::ENOENT);
     }
     let store = Arc::new(open_store(path, None, Some(arena)).await?);
@@ -142,11 +142,11 @@ const VERSION_WAIT: std::time::Duration = std::time::Duration::MAX;
 /// The path that names the store at `path` in the daemon's [`table`]: whichever way a request
 /// names it.
 pub(super) fn store_key(path: &Path) -> PathBuf {
-    if let Ok(path) = path.canonicalize() {
+    if let Ok(path) = host_fs::canonicalize(&path) {
         return path;
     }
     // A store not yet made: where it will be.
-    match (path.parent().map(std::fs::canonicalize), path.file_name()) {
+    match (path.parent().map(host_fs::canonicalize), path.file_name()) {
         (Some(Ok(parent)), Some(name)) => parent.join(name),
         _ => path.to_owned(),
     }
@@ -535,7 +535,7 @@ pub(super) async fn open_store(
     let store = attached(path, async |keeping| {
         let opening = Opening { arena: own, profiled: true, keeping };
         match new {
-            Some(New { capacity, kind, tenant }) if !path.exists() => {
+            Some(New { capacity, kind, tenant }) if !host_fs::exists(&path) => {
                 let of = CellOf::New(tenant);
                 OpenCell::create_kind_with(path, capacity, (of, kind), opening).await
             }
@@ -573,7 +573,7 @@ async fn base(path: &Path, arena: Option<&Arc<Arena>>) -> Result<Arc<OpenCell>, 
     if let Some(store) = open(hold.instance())? {
         return Ok(store);
     }
-    if !path.exists() {
+    if !host_fs::exists(&path) {
         return Err(Errno::ENOENT);
     }
     let opened = attached(path, async |keeping| {
@@ -591,7 +591,7 @@ pub(super) async fn attach(
     base: PathBuf,
     allowed: impl FnOnce(&Path, &Path) -> bool + Send + 'static,
 ) -> Result<(), Errno> {
-    let base = base.canonicalize().map_err(|err| match err.kind() {
+    let base = host_fs::canonicalize(&base).map_err(|err| match err.kind() {
         std::io::ErrorKind::NotFound => Errno::ENOENT,
         _ => Errno::EIO,
     })?;
@@ -613,7 +613,7 @@ pub(super) async fn attach(
     let held = hold(&path).await?;
     blocking(move || {
         let _held = held;
-        if !path.exists() {
+        if !host_fs::exists(&path) {
             return Err(Errno::ENOENT);
         }
         crate::cell_dir::attach(&path, &base, &ancestry)
@@ -704,6 +704,7 @@ async fn open_here(path: &Path) -> Result<OpenCell, Errno> {
 pub(super) fn errno_of(what: std::fmt::Arguments<'_>, err: crate::Error) -> Errno {
     // Another process's lock of the store, waited for: `EBUSY`, as for a connection's.
     if err.is_busy() {
+        log::debug!("cladefsd: {what}: {err:#}");
         return Errno::EBUSY;
     }
     err.errno().unwrap_or_else(|| {
@@ -731,7 +732,7 @@ pub(super) async fn create(
     let checked = path.clone();
     blocking(move || {
         removed_if_unmade(&checked)?;
-        if checked.exists() {
+        if host_fs::exists(&checked) {
             return Err(Errno::EEXIST);
         }
         Ok(())
@@ -769,7 +770,7 @@ pub(super) async fn import(
     let checked = path.clone();
     blocking(move || {
         removed_if_unmade(&checked)?;
-        if checked.exists() {
+        if host_fs::exists(&checked) {
             return Err(Errno::EEXIST);
         }
         Ok(())
@@ -811,7 +812,7 @@ fn outside_the_simulation<F: std::future::Future>(future: F) -> F::Output {
 async fn take_store(path: &Path, cell: Option<CellId>, capacity: u64) -> Result<OpenCell, Errno> {
     let cell = match cell {
         Some(cell) => cell,
-        None if !path.exists() => return Err(Errno::ENOENT),
+        None if !host_fs::exists(&path) => return Err(Errno::ENOENT),
         None => local_cell::host_cell(path).map_err(|_| Errno::ENOENT)?,
     };
     attached(path, async |keeping| {
@@ -850,7 +851,7 @@ async fn opened_version(cell: CellId, version: u64, capacity: u64) -> Result<Pat
     let capacity = capacity.max(OpenCell::BLOCK_SIZE as u64);
     let dir = version_dir(cell, version);
     let held = hold_within(&dir, VERSION_WAIT).await?;
-    if dir.exists() && !crate::host_cell::unmade(&dir) {
+    if host_fs::exists(&dir) && !crate::host_cell::unmade(&dir) {
         return Ok(dir);
     }
     // Their paths alone: a reference to a store kept across its sync would keep it from closing
@@ -866,13 +867,10 @@ async fn opened_version(cell: CellId, version: u64, capacity: u64) -> Result<Pat
     // uploading its last commits, the version's among them: its close waited for, if the version
     // was made here, before the bucket is read for it (TASK-644).
     if let Some(of) = crate::host_cell::version_made_of(cell, version) {
-        blocking(move || {
-            local_cell::closed(&of).map_err(|err| {
-                log::warn!("cladefsd: waiting for {} to close: {err}", of.display());
-                Errno::EBUSY
-            })
-        })
-        .await?;
+        local_cell::closed(&of).await.map_err(|err| {
+            log::warn!("cladefsd: waiting for {} to close: {err}", of.display());
+            Errno::EBUSY
+        })?;
     }
     let bucket = daemon_bucket()?;
     let found = bucket_cell::head::get(&*bucket, cell).await;
@@ -883,7 +881,7 @@ async fn opened_version(cell: CellId, version: u64, capacity: u64) -> Result<Pat
         let _held = held;
         removed_if_unmade(&made)?;
         if let Some(root) = made.parent() {
-            std::fs::create_dir_all(root).map_err(|_| Errno::EIO)?;
+            host_fs::create_dir_all(root).map_err(|_| Errno::EIO)?;
         }
         let url = crate::host_cell::bucket_for(&made).map_err(|_| Errno::EIO)?;
         let description =
@@ -1280,7 +1278,7 @@ pub(super) async fn resize(path: PathBuf, capacity: u64) -> Result<(), Errno> {
                 Some((store, _)) => store,
                 None => {
                     close_kept(hold.as_ref().and_then(Hold::take_kept)).await;
-                    if !key.exists() {
+                    if !host_fs::exists(&key) {
                         return Err(Errno::ENOENT);
                     }
                     Arc::new(open_here(&key).await?)
@@ -1371,7 +1369,7 @@ pub(super) async fn stat(path: PathBuf) -> Result<CellState, Errno> {
         return state_of(&store, true);
     }
     let _held = hold(&path).await?;
-    if !path.exists() {
+    if !host_fs::exists(&path) {
         return Err(Errno::ENOENT);
     }
     let store = open_here(&path).await?;
@@ -1707,7 +1705,7 @@ fn daemon_line() -> String {
 /// written to its disk, each as it dirtied the page, and of those, the bytes that went unwritten,
 /// their file truncated or removed first; 0 where there is no /proc (TASK-310).
 fn process_io() -> [(&'static str, u64); 2] {
-    let io = std::fs::read_to_string("/proc/self/io").unwrap_or_default();
+    let io = host_fs::read_to_string("/proc/self/io").unwrap_or_default();
     let field = |name: &str| {
         (io.lines())
             .find_map(|line| line.strip_prefix(name)?.strip_prefix(": "))
@@ -1747,10 +1745,10 @@ fn timed_fields<const N: usize>(
 fn write_stats(file: &std::path::Path, lines: &[String]) -> std::io::Result<()> {
     let new = file.with_extension("new");
     let text = lines.join("\n") + "\n";
-    std::fs::write(&new, &text)?;
+    host_fs::write(&new, &text)?;
     let pages = (text.len() as u64).div_ceil(crate::pages::page_size()) * crate::pages::page_size();
     STATS_WRITTEN.fetch_add(pages, Ordering::Relaxed);
-    std::fs::rename(&new, file)
+    host_fs::rename(&new, file)
 }
 
 /// cladefs: the bytes of the pages the daemon's stats file took, written again and again

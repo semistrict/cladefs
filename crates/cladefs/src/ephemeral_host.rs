@@ -66,10 +66,11 @@ node_local::node_local! {
 pub(crate) fn open(dir: &Path) -> Result<Arc<Host>, Error> {
     for made in [CELLS, ACCEPTED] {
         let made = dir.join(made);
-        std::fs::create_dir_all(&made).with_context(|| format!("making {}", made.display()))?;
+        host_fs::create_dir_all_durably(&made)
+            .with_context(|| format!("making {}", made.display()))?;
     }
     let path = dir.join(INCARNATION);
-    let incarnation = match std::fs::read_to_string(&path) {
+    let incarnation = match host_fs::read_to_string(&path) {
         Ok(text) => text.trim().parse().with_context(|| format!("{}", path.display()))?,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             let incarnation = rand::random::<u64>() | 1;
@@ -109,12 +110,15 @@ impl Host {
         write_durably(&self.entry_path(entry.child), &serde_json::to_vec(entry)?)
     }
 
-    /// Forgets `child`, its reference gone.
+    /// Forgets `child`, its reference gone: durably, so that no crash brings its entry back
+    /// (TASK-714).
     pub fn forget(&self, child: CellId) {
         let path = self.entry_path(child);
-        if let Err(err) = std::fs::remove_file(&path)
-            && err.kind() != std::io::ErrorKind::NotFound
-        {
+        let forgotten = match host_fs::remove_file(&path) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            removed => removed.and_then(|()| host_fs::sync_dir(self.dir.join(CELLS))),
+        };
+        if let Err(err) = forgotten {
             log::warn!("cladefsd: forgetting {}: {err}", path.display());
         }
     }
@@ -126,7 +130,7 @@ impl Host {
 
     /// Whether it accepted migration `migration`.
     pub fn accepted(&self, migration: u64) -> bool {
-        self.dir.join(ACCEPTED).join(format!("{migration:x}")).exists()
+        host_fs::exists(self.dir.join(ACCEPTED).join(format!("{migration:x}")))
     }
 
     /// The entry of the cell migration `migration` is taking here, if one is.
@@ -136,7 +140,7 @@ impl Host {
 
     /// The ephemeral cell `child`'s entry, if it has one.
     pub fn entry(&self, child: CellId) -> Option<Entry> {
-        let bytes = std::fs::read(self.entry_path(child)).ok()?;
+        let bytes = host_fs::read(self.entry_path(child)).ok()?;
         serde_json::from_slice(&bytes).ok()
     }
 
@@ -144,19 +148,19 @@ impl Host {
     /// was written, goes.
     pub fn entries(&self) -> Result<Vec<Entry>, Error> {
         let mut entries = Vec::new();
-        for found in std::fs::read_dir(self.dir.join(CELLS))? {
+        for found in host_fs::read_dir(self.dir.join(CELLS))? {
             let path = found?.path();
             if path.extension().is_some_and(|extension| extension == "new") {
-                std::fs::remove_file(&path)?;
+                host_fs::remove_file(&path)?;
                 continue;
             }
-            let read = std::fs::read(&path).map_err(Error::new);
+            let read = host_fs::read(&path).map_err(Error::new);
             match read.and_then(|bytes| serde_json::from_slice::<Entry>(&bytes).map_err(Error::new))
             {
                 Ok(entry) => entries.push(entry),
                 Err(err) => {
                     log::warn!("cladefsd: {} is no whole note, removed: {err:#}", path.display());
-                    std::fs::remove_file(&path)?;
+                    host_fs::remove_file(&path)?;
                 }
             }
         }
@@ -168,11 +172,23 @@ impl Host {
     pub async fn retire_stale(&self) -> Result<usize, Error> {
         let mut retired = 0;
         for entry in self.entries()? {
+            // A migration it accepted, crashed before it noted the cell taken: taken, as the
+            // hand-over did (TASK-713); the cell its, as its source let it go.
+            if entry.migration.is_some_and(|migration| self.accepted(migration)) {
+                let taken = Entry { migration: None, ..entry };
+                self.note(&taken)?;
+                if local_cell::upload::blocking(|| held(&taken)) {
+                    continue;
+                }
+                self.retire(&taken).await?;
+                retired += 1;
+                continue;
+            }
             // A migration being taken, which the daemon's going stopped: given up (TASK-698.4).
             if let Some(migration) = entry.migration {
                 let staged = staging(&entry.path, migration);
-                if staged.exists() {
-                    std::fs::remove_dir_all(&staged)?;
+                if host_fs::exists(&staged) {
+                    host_fs::remove_dir_all(&staged)?;
                 }
             } else if local_cell::upload::blocking(|| held(&entry)) {
                 continue;
@@ -195,7 +211,7 @@ impl Host {
 
 /// Whether the store at `entry`'s path is its ephemeral cell's, whole.
 fn held(entry: &Entry) -> bool {
-    if !entry.path.exists() || local_cell::unmade_host(&entry.path) {
+    if !host_fs::exists(&entry.path) || local_cell::unmade_host(&entry.path) {
         return false;
     }
     let ephemeral =
@@ -206,12 +222,12 @@ fn held(entry: &Entry) -> bool {
 /// Writes `bytes` to a file at `path`, whole, durably, over any there.
 fn write_durably(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     let staged = path.with_extension("new");
-    let mut file = std::fs::File::create(&staged)?;
+    let mut file = host_fs::File::create(&staged)?;
     file.write_all(bytes)?;
     file.sync_all()?;
-    std::fs::rename(&staged, path)?;
+    host_fs::rename(&staged, path)?;
     let Some(parent) = path.parent() else { bail!("{} has no directory", path.display()) };
-    std::fs::File::open(parent)?.sync_all()?;
+    host_fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 
@@ -237,10 +253,10 @@ mod tests {
             migration: None,
         };
         host.note(&entry).unwrap();
-        std::fs::write(dir.path().join(CELLS).join("torn"), b"{\"child\"").unwrap();
-        std::fs::write(dir.path().join(CELLS).join("staged.new"), b"{}").unwrap();
+        host_fs::write(dir.path().join(CELLS).join("torn"), b"{\"child\"").unwrap();
+        host_fs::write(dir.path().join(CELLS).join("staged.new"), b"{}").unwrap();
         assert_eq!(host.entries().unwrap(), vec![entry.clone()]);
-        assert_eq!(std::fs::read_dir(dir.path().join(CELLS)).unwrap().count(), 1);
+        assert_eq!(host_fs::read_dir(dir.path().join(CELLS)).unwrap().count(), 1);
         assert_eq!(host.entry(child), Some(entry));
         host.forget(child);
         assert_eq!(host.entries().unwrap(), vec![]);

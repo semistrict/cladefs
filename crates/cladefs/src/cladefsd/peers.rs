@@ -197,7 +197,8 @@ async fn serve(listening: Listening, server: Server) -> std::io::Result<()> {
 /// cladefs: the daemon's replica directory at `dir` (`CLADEFSD_REPLICAS`, doc-21), made if it is
 /// not there: each cell's logs held to the lag bound in bytes, which bounds a writer's.
 fn replicas(dir: &std::path::Path) -> Result<Arc<Replicas<HostDir>>, String> {
-    let made = std::fs::create_dir_all(dir).and_then(|()| HostDir::new(dir));
+    // cladefs: made durable, its promises with it (TASK-708).
+    let made = host_fs::create_dir_all_durably(dir).and_then(|()| HostDir::new(dir));
     let dir = made.map_err(|err| format!("the replica directory {}: {err}", dir.display()))?;
     let most = local_cell::upload::Options::default().max_lag_bytes;
     let replicas =

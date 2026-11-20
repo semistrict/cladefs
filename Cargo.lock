@@ -970,6 +970,7 @@ dependencies = [
  "extent_keys",
  "fail",
  "futures",
+ "host_fs",
  "http-body-util",
  "humantime",
  "hyper",
@@ -1117,6 +1118,7 @@ dependencies = [
  "futures",
  "fxfs",
  "fxfs-posix",
+ "host_fs",
  "humantime",
  "hyper-util",
  "io-uring",
@@ -2486,6 +2488,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "host_fs"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "madsim",
+ "node_local",
+ "tempfile",
+]
+
+[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3014,6 +3026,7 @@ dependencies = [
  "extent_keys",
  "fail",
  "futures",
+ "host_fs",
  "libc",
  "local_cell",
  "log",
@@ -3651,6 +3664,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "loom",
+ "node_local",
  "shuttle",
  "shuttle-parking_lot",
 ]

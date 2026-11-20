@@ -88,14 +88,14 @@ fi
 # part.
 if part madsim; then
     madsim=(env RUSTFLAGS="--cfg madsim" CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}/madsim")
-    "${madsim[@]}" cargo check --manifest-path "$root/Cargo.toml" -p node_local -p bucket_cell \
-        -p local_cell -p cladefs
+    "${madsim[@]}" cargo check --manifest-path "$root/Cargo.toml" -p node_local -p host_fs \
+        -p physmem -p bucket_cell -p local_cell -p cladefs
     # Each test over CLADEFS_MADSIM_SEEDS seeds, 20 unless said, from MADSIM_TEST_SEED's, 1 unless
     # said: each seed a process of its own, as what a simulation's hosts held, leaked as their
     # node-local values are, stays in its process for the next to find (TASK-685.15).
     # A rule search, `*_needs_*`, runs its own seeds, once. The regression seeds first, those that
     # once failed (crates/cladefs/tests/madsim-seeds, TASK-685.8).
-    simulated=(-p node_local -p bucket_cell -p local_cell -p cladefs --test madsim)
+    simulated=(-p node_local -p host_fs -p bucket_cell -p local_cell -p cladefs --test madsim)
     first=${MADSIM_TEST_SEED:-1}
     regressions=$(sed -e 's/#.*//' "$root/crates/cladefs/tests/madsim-seeds" | awk 'NF {print $1}')
     for seed in $regressions $(seq "$first" $((first + ${CLADEFS_MADSIM_SEEDS:-20} - 1))); do

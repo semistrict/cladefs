@@ -41,12 +41,8 @@ impl Config {
 /// used, and with `EINVAL` if the memory is not whole chunks of `physmem::CHUNK_SIZE`, or more than
 /// the host maps (`vm.max_map_count` on Linux, TASK-79.37).
 pub fn configure(config: Config) -> Result<(), Error> {
-    // cladefs: under madsim, the simulated hosts share the process's physical memory, which
-    // physmem keeps per process: configured by the first, the others' configure nothing (doc-24,
+    // cladefs: under madsim, each simulated host's own memory, as physmem keeps it (doc-24,
     // TASK-685.14).
-    if cfg!(madsim) && physmem::configured() {
-        return Ok(());
-    }
     physmem::configure(config.memory_bytes).map_err(|error| {
         let errno = match error {
             physmem::ConfigError::InUse => Errno::EBUSY,

@@ -775,7 +775,7 @@ impl OpenCell {
             // cladefs: an ephemeral cell's, with no uploader (doc-25, TASK-698.3).
             let store = match local_cell::upload::blocking(|| host_cell::is_ephemeral(path)) {
                 // cladefs: given up to a live migration, it opens here no more (TASK-698.4).
-                true if path.join("migrating").exists() => return Err(Errno::EBUSY.into()),
+                true if host_fs::exists(&path.join("migrating")) => return Err(Errno::EBUSY.into()),
                 true => {
                     let (store, bucket, keys) =
                         host_cell::open_ephemeral(path, &opening.keeping).await?;
@@ -1101,7 +1101,7 @@ impl OpenCell {
     ) -> Option<(Arc<Recorder>, tokio::sync::oneshot::Sender<()>)> {
         let (base, dir) = forked_from.first()?;
         // A base deleted since has no profile, and records none.
-        if !dir.exists() {
+        if !host_fs::exists(&dir) {
             return None;
         }
         let path = profile::path(dir, *base);
@@ -1282,7 +1282,7 @@ impl OpenCell {
         let path = path.as_ref();
         // cladefs: a store made here is opened once, as made, not made, closed and opened again
         // (TASK-449).
-        let opened = if !path.exists() {
+        let opened = if !host_fs::exists(&path) {
             let kept = opening.keeping.clone();
             let of = CellOf::Taken(cell);
             Self::made_placed(path, (capacity, of, token), Kind::Fxfs, kept).await?
@@ -2307,7 +2307,7 @@ impl OpenCell {
         description: local_cell::Description,
         id: u64,
     ) -> Result<(), Error> {
-        std::fs::create_dir(path).map_err(|err| match err.kind() {
+        host_fs::create_dir(path).map_err(|err| match err.kind() {
             std::io::ErrorKind::AlreadyExists => Error::new(Errno::EEXIST),
             _ => Error::new(anyhow::Error::new(err).context(format!("making {}", path.display()))),
         })?;
@@ -3036,10 +3036,10 @@ mod tests {
         let mut files = vec![bucket.clone()];
         let mut objects = 0;
         while let Some(at) = files.pop() {
-            match at.is_dir() {
-                true => files.extend(std::fs::read_dir(&at).unwrap().map(|e| e.unwrap().path())),
+            match host_fs::is_dir(&at) {
+                true => files.extend(host_fs::read_dir(&at).unwrap().map(|e| e.unwrap().path())),
                 false => {
-                    let bytes = std::fs::read(&at).unwrap();
+                    let bytes = host_fs::read(&at).unwrap();
                     let held = bytes.windows(64).any(|window| window == &data[..64]);
                     assert!(!held, "{} holds the store's data", at.display());
                     objects += 1;
@@ -3086,7 +3086,7 @@ mod tests {
             local_cell::upload::wait_on(common.fork_to(dir.path().join("into-none"), into))
                 .unwrap_err();
         assert_eq!(refused.errno(), Some(Errno::EACCES), "{refused:#}");
-        assert!(!dir.path().join("into-none").exists());
+        assert!(!host_fs::exists(&dir.path().join("into-none")));
         let found = local_cell::upload::block_on(bucket_cell::head::get(&**common.bucket(), into));
         assert_eq!(found.unwrap().unwrap(), None);
     }
@@ -3235,7 +3235,7 @@ mod tests {
         local_cell::upload::wait_on(store.commit(None)).unwrap();
         let segments =
             dir.path().join("store/segments").join(base32_id::Padded(store.cell().id).to_string());
-        assert_eq!(std::fs::read_dir(&segments).unwrap().count(), 0, "segments left in the store");
+        assert_eq!(host_fs::read_dir(&segments).unwrap().count(), 0, "segments left in the store");
         assert_eq!(read(&follower, a, 0, BLOCK), Ok(pattern(1, BLOCK)));
         // Commits, each of a segment, until the uploader checkpoints the cell, which then holds
         // the history the collector goes by: an extent written, and freed by the next; the
@@ -3658,7 +3658,7 @@ mod tests {
         let small = dir.path().join("small");
         let error = local_cell::upload::wait_on(OpenCell::create(&small, block - 1)).err().unwrap();
         assert_eq!(error.to_string(), "the store is smaller than a block");
-        assert!(!small.exists());
+        assert!(!host_fs::exists(&small));
         let store =
             local_cell::upload::wait_on(OpenCell::create(dir.path().join("one"), block)).unwrap();
         assert_eq!(store.info().unwrap().capacity, block);
@@ -3677,7 +3677,7 @@ mod tests {
         .expect_err("the fork was made");
         drop(made);
         assert_eq!(failed.errno(), None, "{failed:#}");
-        assert!(!fork.exists(), "the failed fork's store stays");
+        assert!(!host_fs::exists(&fork), "the failed fork's store stays");
     }
 
     /// TASK-39.1: the window's mappings, as a snapshot of the VM records them once nothing is
@@ -3841,7 +3841,7 @@ mod tests {
                 base32_id::Padded(extent.cell),
                 base32_id::Padded(extent.sequence)
             ));
-            let mut bytes = std::fs::read(&path).unwrap();
+            let mut bytes = host_fs::read(&path).unwrap();
             let parts = extent_frame::Parts::of(&bytes, &extent_frame::NoKeys).unwrap();
             let opened = parts.part(2).unwrap();
             let (place, stored) = (opened.place, opened.stored);
@@ -3852,7 +3852,7 @@ mod tests {
                 extent_frame::Encoding::Zstd => stored.offset + stored.len / 2,
             };
             bytes[byte as usize] ^= 0x10;
-            std::fs::write(&path, bytes).unwrap();
+            host_fs::write(&path, bytes).unwrap();
             // Damaged behind the store's back: what the store's page cache holds of it, clean, goes,
             // so that its reads read the disk (TASK-433).
             local_cell::pages::shared().evict_to(0);
@@ -3929,7 +3929,7 @@ mod tests {
             window.fault(3 * part + ps, Access::Read).await.unwrap();
             window.fault(part, Access::Read).await.unwrap();
         });
-        assert!(!profile.exists());
+        assert!(!host_fs::exists(&profile));
         drop(window);
         drop(fork);
         let units = profile::read(&profile).unwrap();

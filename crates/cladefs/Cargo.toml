@@ -40,6 +40,7 @@ tests-kms = ["testing"]
 
 [dependencies]
 node_local.workspace = true
+host_fs.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 bitflags.workspace = true

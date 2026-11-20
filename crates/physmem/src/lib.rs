@@ -76,8 +76,11 @@ impl std::fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
-/// Physical memory's size, once configured, read or used.
-static MEMORY_BYTES: OnceLock<u64> = OnceLock::new();
+node_local::node_local! {
+    /// Physical memory's size, once configured, read or used. cladefs: the process's, or, under
+    /// madsim, the simulated host's, each its own memory (doc-24, TASK-685.14).
+    static MEMORY_BYTES: OnceLock<u64> = OnceLock::new();
+}
 
 /// Sets physical memory's size, `memory_bytes`, before its first use: whole chunks, one at least,
 /// and no more than the host maps ([`max_size`]: raise `vm.max_map_count` on Linux, TASK-79.37).
@@ -97,33 +100,63 @@ pub fn configure(memory_bytes: u64) -> Result<(), ConfigError> {
             format!("{memory_bytes} bytes, more than the host maps, {max}: raise vm.max_map_count");
         return Err(ConfigError::Invalid(why));
     }
-    MEMORY_BYTES.set(memory_bytes).map_err(|_| ConfigError::InUse)
-}
-
-/// cladefs: whether physical memory's size is fixed: configured, read or used, as [`configure`]
-/// refuses it then.
-pub fn configured() -> bool {
-    MEMORY_BYTES.get().is_some()
+    MEMORY_BYTES.get().set(memory_bytes).map_err(|_| ConfigError::InUse)
 }
 
 /// Physical memory's size, in bytes: as [`configure`] gave it, or [`DEFAULT_MEMORY_BYTES`]. Read,
 /// it is fixed: [`configure`] fails from then on.
 pub fn memory_bytes() -> u64 {
-    *MEMORY_BYTES.get_or_init(|| DEFAULT_MEMORY_BYTES)
+    *MEMORY_BYTES.get().get_or_init(|| DEFAULT_MEMORY_BYTES)
 }
 
 /// An allocated page of physical memory, its holder's. Dropping it frees it: to its arena, or, if
 /// a second stage of another process mapped it ([`Page::mark_staged`]) and a quarantine is given
 /// ([`quarantine_with`]), into quarantine. Its contents are not zeroed as it is allocated.
-#[derive(Debug)]
 pub struct Page {
     frame: u32,
+    /// cladefs: under madsim, the memory it is of, the simulated host's that allocated it, which it
+    /// is freed to and read through wherever it goes: its host's tasks, killed, drop it after
+    /// (doc-24, TASK-685.14).
+    #[cfg(madsim)]
+    node: &'static pmm::PmmNode,
+}
+
+impl std::fmt::Debug for Page {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Page").field("frame", &self.frame).finish_non_exhaustive()
+    }
 }
 
 impl Page {
+    /// The page at `frame` of this process's memory, or, under madsim, the current host's.
+    fn allocated(frame: u32) -> Self {
+        Self {
+            frame,
+            #[cfg(madsim)]
+            node: pmm::node(),
+        }
+    }
+
+    /// The page at `frame` of the memory it is of.
+    fn beside(&self, frame: u32) -> Self {
+        Self {
+            frame,
+            #[cfg(madsim)]
+            node: self.node,
+        }
+    }
+
+    /// The memory it is of.
+    fn pmm(&self) -> &'static pmm::PmmNode {
+        #[cfg(madsim)]
+        return self.node;
+        #[cfg(not(madsim))]
+        return pmm::node();
+    }
+
     /// Where it is: its arena, and its offset in the arena's shared memory object.
     pub fn location(&self) -> PhysLocation {
-        pmm::node().phys_memory().location(pmm::PmmPages::paddr(self.frame))
+        self.pmm().phys_memory().location(pmm::PmmPages::paddr(self.frame))
     }
 
     /// Its arena.
@@ -140,19 +173,19 @@ impl Page {
     /// Its address in this process, in the physmap: [`page_size`] bytes, its holder's to read and
     /// write while it holds the page.
     pub fn as_ptr(&self) -> *mut u8 {
-        pmm::node().phys_memory().paddr_to_physmap(pmm::PmmPages::paddr(self.frame))
+        self.pmm().phys_memory().paddr_to_physmap(pmm::PmmPages::paddr(self.frame))
     }
 
     /// A second stage of another process mapped it, as it may still as it is freed: freed, it is
     /// quarantined ([`quarantine_with`]).
     pub fn mark_staged(&self) {
-        pmm::node().frames().stage(self.frame);
+        self.pmm().frames().stage(self.frame);
     }
 }
 
 impl Drop for Page {
     fn drop(&mut self) {
-        pmm::node().free(self.frame);
+        self.pmm().free(self.frame);
     }
 }
 
@@ -180,7 +213,7 @@ impl std::error::Error for NoMemory {}
 /// it room, and fails once relief makes none; one that may not, or one with no relief, fails. One
 /// of an arena removed fails at once, as does one the host maps no chunk for.
 pub fn alloc(arena: ArenaId, wait: Wait) -> Result<Page, NoMemory> {
-    pmm::node().alloc(arena, wait).map(|frame| Page { frame })
+    pmm::node().alloc(arena, wait).map(Page::allocated)
 }
 
 /// Allocates `count` pages of `arena`, as [`alloc`] allocates one: in runs of pages consecutive in
@@ -188,14 +221,14 @@ pub fn alloc(arena: ArenaId, wait: Wait) -> Result<Page, NoMemory> {
 /// meanwhile (TASK-108.1). One that fails frees what it took.
 pub fn alloc_run(arena: ArenaId, count: usize, wait: Wait) -> Result<Vec<Page>, NoMemory> {
     let frames = pmm::node().alloc_run(arena, count, wait)?;
-    Ok(frames.into_iter().map(|frame| Page { frame }).collect())
+    Ok(frames.into_iter().map(Page::allocated).collect())
 }
 
 /// The page physically after `page`, if it is free, of the same chunk and arena: so that the pages
 /// allocated together are consecutive where they can be (TASK-108.1). It neither takes a chunk nor
 /// waits.
 pub fn alloc_after(page: &Page) -> Option<Page> {
-    pmm::node().alloc_after(page.frame).map(|frame| Page { frame })
+    page.pmm().alloc_after(page.frame).map(|frame| page.beside(frame))
 }
 
 /// Whether the page at `location` is free: neither held nor quarantined. `None` if no chunk of an

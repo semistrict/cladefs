@@ -1,0 +1,21 @@
+# cladefs's own: the host's file system as cladefsd serves from it, std::fs's built normally, and a
+# disk in memory of each simulated host's under madsim, crashed as the host is (doc-24, TASK-685.4).
+[package]
+name = "host_fs"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+libc.workspace = true
+node_local.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[target.'cfg(madsim)'.dependencies]
+madsim = "=0.2.34"
+
+[lints]
+workspace = true

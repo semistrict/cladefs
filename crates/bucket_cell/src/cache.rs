@@ -24,12 +24,11 @@
 use crate::host_disk::HostDisk;
 use crate::object;
 use extent_frame::{Frame, Parts, TRAILER};
+use host_fs::File;
+use host_fs::FileExt as _;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::File;
 use std::io;
 use std::ops::Range;
-use std::os::fd::AsRawFd as _;
-use std::os::unix::fs::FileExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -53,7 +52,7 @@ pub struct Cache {
     governed: AtomicU64,
     kept: Mutex<Index>,
     /// The directory, locked, so that no other cache opens it while this one has it.
-    _lock: File,
+    _lock: host_fs::Flock,
 }
 
 /// The cache's index: the objects it keeps parts of, and those parts by when they were last read.
@@ -302,7 +301,7 @@ impl Cache {
     /// recently first, as far as `budget` needs. Fails while another cache has the directory.
     pub fn open(dir: &Path, budget: u64) -> io::Result<Self> {
         let dir = dir.join(FILES);
-        std::fs::create_dir_all(&dir)?;
+        host_fs::create_dir_all(&dir)?;
         let lock = lock(&dir)?;
         let files = Files::new(dir)?;
         let mut found = Vec::new();
@@ -643,19 +642,16 @@ impl Drop for Cache {
     }
 }
 
-/// Locks the directory `dir`, as a cache that has it does: fails if another has.
-fn lock(dir: &Path) -> io::Result<File> {
-    let file = File::open(dir)?;
-    // SAFETY: an flock of an open file.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        let err = io::Error::last_os_error();
-        if err.kind() == io::ErrorKind::WouldBlock {
+/// Locks the directory `dir`, as a cache that has it does: fails if another has. cladefs: a
+/// process's lock, which its death lets go, a simulated host's too (`host_fs::Flock`).
+fn lock(dir: &Path) -> io::Result<host_fs::Flock> {
+    match host_fs::Flock::try_lock(File::open(dir)?) {
+        Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
             let held = format!("{}: another cache has it", dir.display());
-            return Err(io::Error::new(io::ErrorKind::WouldBlock, held));
+            Err(io::Error::new(io::ErrorKind::WouldBlock, held))
         }
-        return Err(err);
+        locked => locked,
     }
-    Ok(file)
 }
 
 /// An object a file of the cache holds: where its parts are stored, as its tail, checked against
@@ -742,33 +738,7 @@ fn read_exact(file: &File, bytes: &mut [u8], at: u64) -> io::Result<()> {
 /// The ranges of `file`, of `size` bytes, that hold data, not holes, as `SEEK_DATA` and
 /// `SEEK_HOLE` find them: all of it, on a filesystem that finds no holes.
 fn data(file: &File, size: u64) -> io::Result<Vec<Range<u64>>> {
-    let seek = |at: u64, whence| {
-        // SAFETY: an lseek of an open file.
-        match unsafe { libc::lseek(file.as_raw_fd(), at as libc::off_t, whence) } {
-            -1 => Err(io::Error::last_os_error()),
-            at => Ok(at as u64),
-        }
-    };
-    let (mut ranges, mut at) = (Vec::new(), 0);
-    while at < size {
-        let start = match seek(at, libc::SEEK_DATA) {
-            Ok(start) => start,
-            // None after it.
-            Err(err) if err.raw_os_error() == Some(libc::ENXIO) => break,
-            Err(err) if err.raw_os_error() == Some(libc::EINVAL) => {
-                let whole = 0..size;
-                return Ok(vec![whole]);
-            }
-            Err(err) => return Err(err),
-        };
-        let end = seek(start, libc::SEEK_HOLE)?.min(size);
-        if end <= start {
-            break;
-        }
-        ranges.push(start..end);
-        at = end;
-    }
-    Ok(ranges)
+    host_fs::data_ranges(file, size)
 }
 
 /// cladefs: the filesystem `dir` is on, checked once, as the cache opens: that its files bypass
@@ -778,7 +748,7 @@ fn data(file: &File, size: u64) -> io::Result<Vec<Range<u64>>> {
 /// as data once a hole is punched.
 fn probed(dir: &Path) -> io::Result<bool> {
     let path = dir.join(".holes");
-    let mut options = std::fs::OpenOptions::new();
+    let mut options = host_fs::OpenOptions::new();
     let file = options.create(true).truncate(true).read(true).write(true).open(&path)?;
     let found = (|| {
         file.set_len(4 * BLOCK)?;
@@ -787,7 +757,7 @@ fn probed(dir: &Path) -> io::Result<bool> {
         Ok(data(&file, 4 * BLOCK)?.is_empty())
     })();
     let bypassed = crate::direct::bypass(&file, dir);
-    std::fs::remove_file(&path)?;
+    host_fs::remove_file(&path)?;
     bypassed?;
     found
 }
@@ -845,14 +815,14 @@ impl Files {
     /// empty. Returns whether there is any.
     fn walk(&self, rel: &Path, found: &mut Vec<(String, Found)>) -> io::Result<bool> {
         let mut any = false;
-        for entry in std::fs::read_dir(self.dir.join(rel))? {
+        for entry in host_fs::read_dir(self.dir.join(rel))? {
             let entry = entry?;
             let (rel, kind) = (rel.join(entry.file_name()), entry.file_type()?);
             let path = self.dir.join(&rel);
             if kind.is_dir() {
                 if self.walk(&rel, found)? {
                     any = true;
-                } else if let Err(err) = std::fs::remove_dir(&path) {
+                } else if let Err(err) = host_fs::remove_dir(&path) {
                     log::warn!("cladefs: removing {} from the cache: {err}", path.display());
                 }
                 continue;
@@ -874,7 +844,7 @@ impl Files {
                 }
                 None => {
                     log::warn!("cladefs: removing {} from the cache: no object", path.display());
-                    std::fs::remove_file(&path)?;
+                    host_fs::remove_file(&path)?;
                 }
             }
         }
@@ -888,10 +858,10 @@ impl Files {
         }
         let path = self.path(key);
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            host_fs::create_dir_all(parent)?;
         }
         let file =
-            std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(path)?;
+            host_fs::OpenOptions::new().create(true).write(true).truncate(false).open(path)?;
         // Its file is the object's size from the first, so that what is not written to it is a
         // hole: some filesystems (APFS) fill what a write past the end skips.
         if file.metadata()?.len() < size && self.done(Change::Resize) {
@@ -925,7 +895,7 @@ impl Files {
 
     fn remove(&self, key: &str) -> io::Result<()> {
         match self.done(Change::Remove) {
-            true => std::fs::remove_file(self.path(key)),
+            true => host_fs::remove_file(self.path(key)),
             false => Ok(()),
         }
     }
@@ -934,10 +904,10 @@ impl Files {
     fn rename(&self, from: &Path, key: &str) -> io::Result<()> {
         let path = self.path(key);
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            host_fs::create_dir_all(parent)?;
         }
         match self.done(Change::Rename) {
-            true => std::fs::rename(from, path),
+            true => host_fs::rename(from, path),
             false => Ok(()),
         }
     }
@@ -978,36 +948,11 @@ impl Files {
 }
 
 /// Frees the blocks wholly within `len` bytes at `offset` of `file`, which reads zeros there after.
-#[cfg(target_os = "linux")]
-fn punch(file: &File, offset: u64, len: u64) -> io::Result<()> {
-    let mode = libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE;
-    // SAFETY: an fallocate of an open file.
-    let punched = unsafe { libc::fallocate(file.as_raw_fd(), mode, offset as i64, len as i64) };
-    if punched != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-/// Frees the blocks wholly within `len` bytes at `offset` of `file`, which reads zeros there after.
 /// macOS punches whole blocks only, so a part's last partial block stays.
-#[cfg(target_os = "macos")]
 fn punch(file: &File, offset: u64, len: u64) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
     let len = len / BLOCK * BLOCK;
-    if len == 0 {
-        return Ok(());
-    }
-    let hole = libc::fpunchhole_t {
-        fp_flags: 0,
-        reserved: 0,
-        fp_offset: offset as libc::off_t,
-        fp_length: len as libc::off_t,
-    };
-    // SAFETY: an F_PUNCHHOLE of an open file, with its argument.
-    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_PUNCHHOLE, &hole) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    host_fs::punch_hole(file, offset, len)
 }
 
 #[cfg(test)]
@@ -1130,7 +1075,7 @@ mod tests {
         /// Writes it whole to a file in `dir`, as a store's WAL would: its path.
         fn write_to(&self, dir: &Path) -> PathBuf {
             let path = dir.join(self.key.replace('/', "-"));
-            std::fs::write(&path, &self.bytes).unwrap();
+            host_fs::write(&path, &self.bytes).unwrap();
             path
         }
     }
@@ -1187,7 +1132,7 @@ mod tests {
     /// The keys of the files under `dir`, a cache's.
     fn files(dir: &Path) -> Vec<String> {
         fn walk(dir: &Path, rel: &Path, keys: &mut Vec<String>) {
-            for entry in std::fs::read_dir(dir.join(rel)).unwrap() {
+            for entry in host_fs::read_dir(dir.join(rel)).unwrap() {
                 let rel = rel.join(entry.unwrap().file_name());
                 match dir.join(&rel).is_dir() {
                     true => walk(dir, &rel, keys),
@@ -1241,10 +1186,10 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn evicted_parts_free_their_blocks() {
-        use std::os::unix::fs::MetadataExt as _;
+        use host_fs::MetadataExt as _;
         // The bytes the object's file takes on its filesystem.
         let allocated =
-            |cache: &Cache, key: &str| std::fs::metadata(cache.path(key)).unwrap().blocks() * 512;
+            |cache: &Cache, key: &str| host_fs::metadata(cache.path(key)).unwrap().blocks() * 512;
         let dir = tempfile::tempdir().unwrap();
         let object = Object::noise(KEY, 64 * PART, 1);
         // Its tail takes a block, of the parts' last.
@@ -1372,11 +1317,11 @@ mod tests {
         File::options().write(true).open(cache.path(KEY)).unwrap().set_len(PART).unwrap();
         assert_eq!((object.read(&cache, 1), cache.bytes()), (None, 0));
         object.keep(&cache);
-        std::fs::remove_file(cache.path(KEY)).unwrap();
+        host_fs::remove_file(cache.path(KEY)).unwrap();
         assert_eq!((object.read(&cache, 1), cache.bytes()), (None, 0));
         object.keep(&cache);
-        std::fs::remove_file(cache.path(KEY)).unwrap();
-        std::fs::create_dir(cache.path(KEY)).unwrap();
+        host_fs::remove_file(cache.path(KEY)).unwrap();
+        host_fs::create_dir(cache.path(KEY)).unwrap();
         let err = cache.part(KEY, 1).unwrap_err();
         assert_eq!(err.raw_os_error(), Some(libc::EISDIR), "{err}");
     }
@@ -1445,7 +1390,7 @@ mod tests {
         let cache = Cache::open(dir.path(), 3 * PART).unwrap();
         let object = Object::noise(KEY, 5 * PART, 1);
         object.keep_tail(&cache);
-        assert_eq!(std::fs::metadata(cache.path(KEY)).unwrap().len(), object.bytes.len() as u64);
+        assert_eq!(host_fs::metadata(cache.path(KEY)).unwrap().len(), object.bytes.len() as u64);
     }
 
     /// A tail whose write fails is neither kept nor counted; the cache keeps others after it.
@@ -1454,7 +1399,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = Cache::open(dir.path(), 3 * PART).unwrap();
         let (object, other) = (Object::noise(KEY, PART, 1), Object::noise(OTHER, PART, 2));
-        std::fs::create_dir_all(cache.path(OTHER)).unwrap();
+        host_fs::create_dir_all(cache.path(OTHER)).unwrap();
         let failed = cache.keep_tail(OTHER, &other.tail).unwrap_err();
         assert_eq!(failed.raw_os_error(), Some(libc::EISDIR), "{failed}");
         assert_eq!((cache.tail(OTHER).unwrap(), cache.bytes()), (None, 0));
@@ -1472,7 +1417,7 @@ mod tests {
         let cache = Cache::open(dir.path(), 3 * PART).unwrap();
         let object = Object::noise(KEY, PART + 100, 1);
         object.keep(&cache);
-        std::fs::remove_file(cache.path(KEY)).unwrap();
+        host_fs::remove_file(cache.path(KEY)).unwrap();
         cache.forget_part(KEY, 0).unwrap();
         assert_eq!(cache.bytes(), 100 + object.tail_len());
         cache.forget_part(KEY, TAIL).unwrap();
@@ -1649,9 +1594,9 @@ mod tests {
         let longer = objects[2].bytes.len() as u64 + 8;
         File::options().write(true).open(path(2)).unwrap().set_len(longer).unwrap();
         let stray = cache.path("segments/stray");
-        std::fs::write(&stray, b"stray").unwrap();
+        host_fs::write(&stray, b"stray").unwrap();
         std::os::unix::fs::symlink(path(3), cache.path("segments/link")).unwrap();
-        std::fs::create_dir_all(cache.path("checkpoints/0000000000001")).unwrap();
+        host_fs::create_dir_all(cache.path("checkpoints/0000000000001")).unwrap();
         drop(cache);
 
         let cache = Cache::open(dir.path(), 8 * PART).unwrap();
@@ -1716,7 +1661,7 @@ mod tests {
     fn filesystems_find_holes_but_apfs() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(probed(dir.path()).unwrap(), cfg!(target_os = "linux"));
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        assert_eq!(host_fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     /// TASK-433.6: a cache on a file system that can't bypass the host's page cache, as the
@@ -1801,12 +1746,12 @@ mod tests {
         let cache = Cache::open(dir.path(), 8 * PART).unwrap();
         cache.set_limit(0).unwrap();
         assert!(!cache.adopt(KEY, &from).unwrap());
-        assert_eq!((std::fs::read(&from).unwrap(), cache.bytes()), (object.bytes.clone(), 0));
+        assert_eq!((host_fs::read(&from).unwrap(), cache.bytes()), (object.bytes.clone(), 0));
         assert_eq!(cache.keys(), Vec::<String>::new());
 
         drop(cache);
         let cache = Cache::open(dir.path(), 8 * PART).unwrap();
-        std::fs::write(&from, b"no object").unwrap();
+        host_fs::write(&from, b"no object").unwrap();
         let err = cache.adopt(KEY, &from).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
         assert!(from.exists());

@@ -46,7 +46,7 @@ pub(crate) fn path(dir: &Path, cell: u64) -> PathBuf {
 
 /// The units of the profile at `path`, in the order they were first read.
 pub(crate) fn read(path: &Path) -> io::Result<Vec<Unit>> {
-    let text = std::fs::read_to_string(path)?;
+    let text = host_fs::read_to_string(path)?;
     let mut lines = text.lines();
     let invalid = |what: &str| io::Error::new(io::ErrorKind::InvalidData, what.to_owned());
     if lines.next() != Some(HEADER) {
@@ -121,7 +121,7 @@ impl Recorder {
 
     /// Writes the profile, once, unless one is there already, as what a fork recorded first.
     pub(crate) fn write(&self) -> io::Result<()> {
-        if self.written.swap(true, Ordering::Relaxed) || self.path.exists() {
+        if self.written.swap(true, Ordering::Relaxed) || host_fs::exists(&self.path) {
             return Ok(());
         }
         let recorded = self.units.lock().unwrap();
@@ -137,7 +137,7 @@ impl Recorder {
         // cladefs: in the base's directory, which it makes nothing of if it went: a fork's directory
         // is its own, and outlives its base's (TASK-165.7).
         let dir = self.path.parent().expect("a profile is in a directory");
-        match std::fs::create_dir(dir) {
+        match host_fs::create_dir(dir) {
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
             created => created?,
         }
@@ -164,14 +164,14 @@ mod tests {
         recorder.record(inherited, 0x3000, 0x1000);
         recorder.record(ExtentId { cell: 9, sequence: 1 }, 0, 0x1000);
         recorder.write().unwrap();
-        let text = std::fs::read_to_string(&profile).unwrap();
+        let text = host_fs::read_to_string(&profile).unwrap();
         assert_eq!(text, "cladefs boot profile 2\n1a fzzzzzzzzzzzz 3000 1000\n");
         let expected = vec![Unit { extent: inherited, offset: 0x3000, len: 0x1000 }];
         assert_eq!(read(&profile).unwrap(), expected);
         for wrong in
             ["cladefs boot profile 1\n2a 1 3000 1000\n", "cladefs boot profile 2\n2A 1 0 1\n"]
         {
-            std::fs::write(&profile, wrong).unwrap();
+            host_fs::write(&profile, wrong).unwrap();
             assert_eq!(read(&profile).unwrap_err().kind(), io::ErrorKind::InvalidData, "{wrong}");
         }
     }

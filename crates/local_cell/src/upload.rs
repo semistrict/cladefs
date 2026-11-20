@@ -639,6 +639,9 @@ pub(crate) struct Shared<D: Dir, B: bucket_cell::Bucket = ObjectBucket> {
     /// cladefs: of a replicated cell, what its head asks for and the configuration its taking
     /// activated, which [`Shared::keep`] keeps from then on (TASK-537.3.5).
     keeping: Mutex<Option<(bucket_cell::layout::Wish, bucket_cell::layout::Configuration, bool)>>,
+    /// cladefs: said, as its sender goes, once its keeper is done, which holds it, and so its
+    /// store, meanwhile: what [`Shared::run`] waits for before it returns (TASK-701).
+    kept: Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
     /// cladefs: the configuration whose members' logs its taking recovered the store from, if it
     /// did, its own write-ahead log holding less (TASK-537.3.4): what the simulation follows the
     /// history of the commits of (TASK-680).
@@ -1248,6 +1251,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             keys,
             held: Mutex::default(),
             keeping: Mutex::default(),
+            kept: Mutex::default(),
             #[cfg(test)]
             recovered_from: Mutex::default(),
         })
@@ -1399,8 +1403,26 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     }
 
     /// Runs the uploader of the store `recovering` recovered, opening it first, with what the host
-    /// learned of its cell for this opening, if anything ([`learned`]).
+    /// learned of its cell for this opening, if anything ([`learned`]): returns once it stopped,
+    /// its keeper too, if it has one, so that nothing of it holds the store open (TASK-701).
     pub(crate) async fn run(
+        self: &Arc<Self>,
+        recovering: (Recovering<D>, Option<Learned>),
+        options: crate::Options,
+        bucket: Arc<B>,
+        holder: u64,
+        started: futures::channel::oneshot::Sender<Result<Arc<LocalCell<D>>, Failure>>,
+    ) {
+        self.upload(recovering, options, bucket, holder, started).await;
+        let kept = self.kept.lock().unwrap().take();
+        if let Some(kept) = kept {
+            // Said as the keeper's task ends, or goes, its sender with it.
+            let _ = kept.await;
+        }
+    }
+
+    /// Runs the uploader, as [`Shared::run`] does, but for waiting for its keeper.
+    async fn upload(
         self: &Arc<Self>,
         recovering: (Recovering<D>, Option<Learned>),
         options: crate::Options,
@@ -1437,7 +1459,17 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // cladefs: a replicated cell's configuration kept whole beside (TASK-537.3.5).
         let keeping = self.keeping.lock().unwrap().take();
         if let Some((wish, configuration, stale)) = keeping {
-            (self.spawn)(self.clone().keep(writer.clone(), wish, (configuration, stale)).boxed());
+            let (done, kept) = futures::channel::oneshot::channel::<()>();
+            *self.kept.lock().unwrap() = Some(kept);
+            let keeper = self.clone().keep(writer.clone(), wish, (configuration, stale));
+            (self.spawn)(
+                async move {
+                    keeper.await;
+                    // Said once the keeper, and what it held, went.
+                    drop(done);
+                }
+                .boxed(),
+            );
         }
         // The segments uploaded, and as many as were when the last checkpoint was begun.
         let (mut segments, mut checkpointed) = (0, 0);
@@ -2003,7 +2035,9 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let mut number = configuration.number + 1;
         let mut avoid = Vec::<String>::new();
         loop {
-            (self.clock)(KEEPING).await;
+            // Its tick, or the uploader stopping, which it holds up no longer (TASK-701).
+            let stopping = std::pin::pin!(self.until_stopping());
+            futures::future::select((self.clock)(KEEPING), stopping).await;
             if self.stopping() {
                 return;
             }
@@ -2119,6 +2153,17 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     fn stopping(&self) -> bool {
         let progress = self.progress.lock().unwrap();
         progress.stop || progress.failed.is_some()
+    }
+
+    /// cladefs: returns once the uploader is stopping ([`Shared::stopping`]), holding no thread.
+    async fn until_stopping(&self) {
+        loop {
+            let changed = self.changed.listen();
+            if self.stopping() {
+                return;
+            }
+            changed.await;
+        }
     }
 
     /// cladefs: has the uploader close and upload what the store holds at once, if it holds

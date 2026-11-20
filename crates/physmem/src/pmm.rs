@@ -418,8 +418,11 @@ impl PmmNode {
 /// Returns the PMM node, of physical memory's size ([`crate::memory_bytes`]), creating it on first
 /// use.
 pub(crate) fn node() -> &'static PmmNode {
-    static NODE: OnceLock<PmmNode> = OnceLock::new();
-    NODE.get_or_init(|| PmmNode::new(crate::memory_bytes() as usize))
+    node_local::node_local! {
+        /// cladefs: the process's, or, under madsim, the simulated host's (TASK-685.14).
+        static NODE: OnceLock<PmmNode> = OnceLock::new();
+    }
+    NODE.get().get_or_init(|| PmmNode::new(crate::memory_bytes() as usize))
 }
 
 /// cladefs: `bytes` of memory, in whole chunks.

@@ -218,7 +218,7 @@ fn bucket_named(host: Option<String>, path: &Path) -> anyhow::Result<String> {
     if let Some(url) = host {
         return Ok(url);
     }
-    let path = path.canonicalize()?;
+    let path = host_fs::canonicalize(&path)?;
     let name = path.file_name().ok_or_else(|| anyhow::anyhow!("{} has no name", path.display()))?;
     let own = path.with_file_name(format!("{}{OWN_BUCKET}", name.to_string_lossy()));
     let url = url::Url::from_directory_path(&own)
@@ -323,7 +323,7 @@ pub(crate) async fn create_unmade(
     bucket: Option<&str>,
     keeping: upload::Options,
 ) -> Result<Opened, Failure> {
-    upload::blocking(|| std::fs::create_dir(path))
+    upload::blocking(|| host_fs::create_dir(path))
         .map_err(|err| Failure::local(err, format!("creating {}", path.display())))?;
     let made = async {
         let url = bucket.map_or_else(|| bucket_for(path), |bucket| Ok(bucket.to_owned()))?;
@@ -349,7 +349,7 @@ pub(crate) async fn create_unmade(
             let description = Description { block_size: BLOCK_SIZE, capacity, cell };
             local_cell::create_host(path, description, &url, kind)?;
             let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
-            let synced = std::fs::File::open(parent.unwrap_or(Path::new(".")))
+            let synced = host_fs::File::open(parent.unwrap_or(Path::new(".")))
                 .and_then(|parent| parent.sync_all());
             synced.map_err(|err| Failure::local(err, "syncing a store's parent"))?;
             Ok(LocalCell::recover_unmade(host_dir(path)?)?)
@@ -392,9 +392,19 @@ async fn learn_taken(bucket: &ObjectBucket, cell: CellId) -> Result<bool, Failur
 /// TASK-165.9). Fails as that does: a log another writer's commits moved past (`ESTALE`), a cell
 /// deleted (`ENOENT`) or a later placement's (`ESTALE`); and a store never made whole (`Unmade`).
 pub(crate) async fn open(path: &Path, keeping: upload::Options) -> Result<Opened, Failure> {
+    // cladefs: a close of it in this process waited for first, holding no thread (doc-24).
+    closed(path).await?;
     let recovering =
         upload::blocking(|| -> Result<_, Failure> { Ok(LocalCell::recover(host_dir(path)?)?) })?;
     opened(recovering, keeping).await
+}
+
+/// cladefs: returns once no store of the directory at `path` is closing in this process
+/// (`local_cell::closed`), whose opening then finds none: a waiting that gave up, as the opening
+/// would have (`WouldBlock`, which the daemon says `EBUSY`).
+async fn closed(path: &Path) -> Result<(), Failure> {
+    let waited = local_cell::closed(path).await;
+    waited.map_err(|err| Failure::local(err, format!("{}", path.display())))
 }
 
 /// The directory of the store at `path`.
@@ -457,7 +467,7 @@ pub(crate) fn unmade(path: &Path) -> bool {
 /// (`local_cell::remove_store_dir`): logged if it can't, as the failure the caller returns is
 /// the making's.
 pub(crate) fn discard(path: &Path) {
-    if path.exists()
+    if host_fs::exists(&path)
         && let Err(err) = local_cell::remove_store_dir(path)
     {
         log::warn!("cladefs: removing {}, which a making left: {err:#}", path.display());
@@ -495,7 +505,7 @@ pub(crate) async fn fork(
 ) -> Result<(), Error> {
     may_fork_into(store.description().cell, uploader, child.cell.tenant)?;
     let inheriting = uploader.inheriting(child).await?;
-    upload::blocking(|| std::fs::create_dir(path)).map_err(|err| match err.kind() {
+    upload::blocking(|| host_fs::create_dir(path)).map_err(|err| match err.kind() {
         std::io::ErrorKind::AlreadyExists => {
             Error::new(anyhow::Error::new(err).context(Errno::EEXIST))
         }
@@ -583,8 +593,8 @@ pub(crate) async fn fork_through(
     let at = version_dir(store.description().cell, version);
     let (kind, url) = (store.kind().ok_or(Errno::EINVAL)?, store.bucket().ok_or(Errno::EINVAL)?);
     let made = upload::blocking(|| -> Result<(), Error> {
-        let made = at.parent().map_or(Ok(()), std::fs::create_dir_all);
-        made.and_then(|()| std::fs::create_dir(&at)).map_err(|err| {
+        let made = at.parent().map_or(Ok(()), host_fs::create_dir_all);
+        made.and_then(|()| host_fs::create_dir(&at)).map_err(|err| {
             Error::new(anyhow::Error::new(err).context(format!("making {}", at.display())))
         })?;
         local_cell::create_host_at_version(&at, store.description(), url, kind, version)
@@ -684,7 +694,7 @@ pub(crate) async fn fork_ephemeral(
                 .with_context(|| format!("forking to ephemeral cell {cell}: its store"))?;
                 local_cell::made_host(path)?;
                 let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
-                std::fs::File::open(parent.unwrap_or(Path::new(".")))?.sync_all()?;
+                host_fs::File::open(parent.unwrap_or(Path::new(".")))?.sync_all()?;
                 Ok(())
             }),
         },
@@ -700,7 +710,7 @@ pub(crate) async fn fork_ephemeral(
 
 /// cladefs: makes the directory at `path` for a fork's store: `EEXIST` if anything is there.
 fn make_dir(path: &Path) -> Result<(), Error> {
-    upload::blocking(|| std::fs::create_dir(path)).map_err(|err| match err.kind() {
+    upload::blocking(|| host_fs::create_dir(path)).map_err(|err| match err.kind() {
         std::io::ErrorKind::AlreadyExists => {
             Error::new(anyhow::Error::new(err).context(Errno::EEXIST))
         }
@@ -715,6 +725,7 @@ pub(crate) async fn open_ephemeral(
     path: &Path,
     keeping: &upload::Options,
 ) -> Result<(Arc<LocalCell<HostDir>>, Arc<ObjectBucket>, bucket_cell::keys::RingHold), Failure> {
+    closed(path).await?;
     let recovering =
         upload::blocking(|| -> Result<_, Failure> { Ok(LocalCell::recover(host_dir(path)?)?) })?;
     let url = recovering.bucket().map(str::to_owned);
@@ -760,7 +771,7 @@ fn make_child(
     local_cell::create_host(path, description, &url, kind)?;
     local_cell::made_host(path)?;
     let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
-    std::fs::File::open(parent.unwrap_or(Path::new(".")))?.sync_all()?;
+    host_fs::File::open(parent.unwrap_or(Path::new(".")))?.sync_all()?;
     Ok(())
 }
 
@@ -827,7 +838,7 @@ pub(crate) async fn delete_with(
     path: &Path,
     elsewhere: impl AsyncFnOnce(&Path, CellId) -> Result<(), Failure>,
 ) -> Result<(), Error> {
-    if !path.exists() {
+    if !host_fs::exists(&path) {
         return Err(Errno::ENOENT.into());
     }
     let deleting = async |cell| -> anyhow::Result<()> {
@@ -896,7 +907,7 @@ mod tests {
         use bucket_cell::identity::{self, Details, Entry};
         let dir = tempfile::tempdir().unwrap();
         let url = |name: &str| {
-            std::fs::create_dir(dir.path().join(name)).unwrap();
+            host_fs::create_dir(dir.path().join(name)).unwrap();
             format!("file://{}", dir.path().join(name).display())
         };
         let (root, home, other, late) = (url("root"), url("home"), url("other"), url("late"));
@@ -995,7 +1006,7 @@ mod tests {
         ));
         let Err(Failure::Bucket(refused)) = refused.map(drop) else { panic!("made") };
         assert_eq!(refused, bucket_cell::Error::NoCell);
-        assert!(!path.exists(), "a store of no cell was left");
+        assert!(!host_fs::exists(&path), "a store of no cell was left");
     }
 
     /// TASK-165.6: a store made on a host of cladefs's system names the host's bucket; one made
@@ -1006,10 +1017,10 @@ mod tests {
     fn stores_name_their_hosts_bucket_or_one_of_their_own() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
-        std::fs::create_dir(&path).unwrap();
+        host_fs::create_dir(&path).unwrap();
         let host = Some("gs://bucket/prefix".to_owned());
         assert_eq!(bucket_named(host, &path).unwrap(), "gs://bucket/prefix");
-        let own = dir.path().canonicalize().unwrap().join("store.bucket");
+        let own = host_fs::canonicalize(&dir.path()).unwrap().join("store.bucket");
         let url = format!("file://{}/", own.display());
         assert_eq!(bucket_named(None, &path).unwrap(), url);
 
@@ -1041,7 +1052,7 @@ mod tests {
             |_| Ok(()),
         ))
         .unwrap();
-        let own = dir.path().canonicalize().unwrap().join("made.bucket");
+        let own = host_fs::canonicalize(&dir.path()).unwrap().join("made.bucket");
         let url = format!("file://{}/", own.display());
         for named in [&made, &fork] {
             assert_eq!(local_cell::host_bucket(named).unwrap(), Some(url.clone()));
@@ -1051,12 +1062,12 @@ mod tests {
         assert!(Arc::ptr_eq(&bucket, &self::bucket(&url).unwrap()));
         // cladefs: under its cell's prefix (TASK-364).
         let cell = own.join(store.description().cell.prefix());
-        assert!(cell.join("head").exists(), "{:?}", std::fs::read_dir(&cell).unwrap());
+        assert!(host_fs::exists(&cell.join("head")), "{:?}", host_fs::read_dir(&cell).unwrap());
         // The store deleted, its fork's cell lives on in it.
         drop(uploader);
         drop(store);
         local_cell::upload::wait_on(delete(&made, Some(&bucket), || Ok(1))).unwrap();
-        assert!(!made.exists() && own.exists());
+        assert!(!host_fs::exists(&made) && host_fs::exists(&own));
         let record = futures::executor::block_on(bucket_cell::head::get(&*bucket, forked));
         assert_eq!(record.unwrap().map(|record| record.deleted()), Some(false));
     }
@@ -1078,12 +1089,12 @@ mod tests {
             .unwrap(),
         );
         let description = path.join("store");
-        let text = std::fs::read_to_string(&description).unwrap();
+        let text = host_fs::read_to_string(&description).unwrap();
         let older: String = std::iter::once("cladefs extent store 5")
             .chain(text.lines().skip(1).filter(|line| !line.starts_with("bucket ")))
             .map(|line| format!("{line}\n"))
             .collect();
-        std::fs::write(&description, older).unwrap();
+        host_fs::write(&description, older).unwrap();
 
         let format = local_cell::Format { found: "cladefs extent store 5".to_owned() };
         let refused = local_cell::upload::wait_on(open(&path, keeping().unwrap())).err().unwrap();
@@ -1093,7 +1104,7 @@ mod tests {
         assert_eq!(refused.errno(), Some(Errno::ENOTSUP), "{refused:#}");
         let refused = crate::Storage::delete(&path).err().unwrap();
         assert_eq!(refused.errno(), Some(Errno::ENOTSUP), "{refused:#}");
-        assert!(path.join("store").exists());
+        assert!(host_fs::exists(&path.join("store")));
     }
 
     /// A store's directory whose deletion stopped once its description was gone, or whose making
@@ -1102,10 +1113,10 @@ mod tests {
     fn deleting_an_emptied_store_finishes_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fork");
-        std::fs::create_dir(&path).unwrap();
+        host_fs::create_dir(&path).unwrap();
         assert!(unmade(&path));
         local_cell::upload::wait_on(delete(&path, None, token)).unwrap();
-        assert!(!path.exists());
+        assert!(!host_fs::exists(&path));
     }
 
     /// TASK-79.20: a store whose description was never put in place, its host crashing as its
@@ -1115,10 +1126,10 @@ mod tests {
     fn deleting_a_store_never_described_removes_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fork");
-        std::fs::create_dir_all(path.join("segments")).unwrap();
-        std::fs::write(path.join("ancestry"), "3 /elsewhere\n").unwrap();
+        host_fs::create_dir_all(path.join("segments")).unwrap();
+        host_fs::write(path.join("ancestry"), "3 /elsewhere\n").unwrap();
         assert!(unmade(&path));
         local_cell::upload::wait_on(delete(&path, None, token)).unwrap();
-        assert!(!path.exists());
+        assert!(!host_fs::exists(&path));
     }
 }

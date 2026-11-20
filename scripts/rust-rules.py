@@ -115,6 +115,17 @@ UNSEAMED = re.compile(r"\bthread::spawn\b|\bthread::Builder::new\(\)|\bruntime::
 UNSEAMED_REASON_LINES = 3
 
 
+# A module declared, with any visibility: `mod`, `pub mod`, `pub(crate) mod`.
+MODULE = re.compile(r"(pub(\([\w:]+\))? )?mod ")
+
+
+def starts_tests(lines, number):
+    """Whether line `number` of `lines`, from 1, begins a file's test module: `#[cfg(test)]` on a
+    module's declaration, which, and what follows it, the rules leave to tests."""
+    return lines[number - 1].startswith("#[cfg(test)]") and number < len(lines) and \
+        MODULE.match(lines[number]) is not None
+
+
 def outside_the_seam(path, text):
     """A thread started, a runtime built or a thread blocked on a future in cladefsd's code, other
     than through its seam (cladefsd::run), which stops the simulation's one thread under madsim
@@ -127,8 +138,7 @@ def outside_the_seam(path, text):
         return
     lines = text.splitlines()
     for number, line in enumerate(lines, 1):
-        if line.startswith("#[cfg(test)]") and number < len(lines) and \
-                lines[number].startswith("mod "):
+        if starts_tests(lines, number):
             return
         if not UNSEAMED.search(line.split("//", 1)[0]):
             continue
@@ -141,9 +151,54 @@ def outside_the_seam(path, text):
                     "or say why it is outside the simulation (doc-24, TASK-685.3)")
 
 
+# The host's file system, other than through host_fs: std::fs, its extension traits, and what
+# `Path` asks the file system itself.
+OFF_HOST_FS = re.compile(r"\bstd::fs\b|\bstd::os::unix::fs::(FileExt|MetadataExt|OpenOptionsExt)\b|"
+                         r"\.(exists|canonicalize|try_exists)\(\)")
+OFF_HOST_FS_CRATES = ("crates/cladefs/src/", "crates/local_cell/src/", "crates/bucket_cell/src/")
+# The files whose reading or writing of the host's file system is outside the simulation as a
+# whole (doc-24): FUSE, the VM sockets and a VM process's client, procfs, the image an import reads,
+# a file bucket, the tools; and those that are tests' alone.
+OFF_HOST_FS_FILES = (
+    "/fuse/", "/cladefsd/grants.rs", "/cladefsd/mod.rs", "/cladefsd/mount.rs",
+    "/cladefsd/client.rs", "/cladefsd/governor.rs", "/cladefsd/process.rs", "/dax/uffd.rs",
+    "/import.rs", "/import/", "/storage/", "/bucket_cell/src/local.rs", "/bucket_cell/src/faults.rs",
+    "/src/bin/", "/testing.rs", "_faults.rs", "/bucket/lifecycle.rs", "/bucket/write_budgets.rs",
+    "/upload/encrypted.rs", "/memory_cell.rs",
+)
+
+
+def off_host_fs(path, text):
+    """The host's disk read or written by cladefsd's code other than through host_fs, which under
+    madsim is each simulated host's disk in memory, crashed as the host is (doc-24, TASK-685.4):
+    std::fs, its extension traits, or `Path::exists` and `Path::canonicalize`, which go to the real
+    file system there; unless a comment on it or the few lines above says why it is outside the
+    simulation, or its file is (OFF_HOST_FS_FILES). Its tests aside, a file's test module and what
+    follows it among them."""
+    posix = path.as_posix()
+    if not any(crate in posix for crate in OFF_HOST_FS_CRATES) \
+            or any(file in posix for file in OFF_HOST_FS_FILES) \
+            or posix.endswith("/tests.rs") or "/tests/" in posix:
+        return
+    lines = text.splitlines()
+    for number, line in enumerate(lines, 1):
+        if starts_tests(lines, number):
+            return
+        if not OFF_HOST_FS.search(line.split("//", 1)[0]):
+            continue
+        above = lines[max(0, number - 1 - UNSEAMED_REASON_LINES):number]
+        if any("outside the simulation" in near for near in above):
+            continue
+        yield Match(path, number, "off-host-fs",
+                    "the host's disk outside host_fs, which under madsim is each simulated host's "
+                    "disk in memory: go through host_fs, or say why it is outside the simulation "
+                    "(doc-24, TASK-685.4)")
+
+
 # Each rule, and the mutants of the bugs it is from.
 RULES = [
     (outside_the_seam, []),
+    (off_host_fs, []),
     (mixed_orderings, [
         "latest-listens-relaxed", "latest-rises-relaxed", "occurrence-happens-relaxed",
         "occurrence-listens-relaxed", "answers-release-no-capacity", "capacities-read-relaxed",
