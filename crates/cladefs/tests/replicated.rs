@@ -448,12 +448,12 @@ fn takes_of_cells_whose_members_are_lost_go_on_by_force() {
     write(&client, 1..=2);
     daemons[0].control.sync_cell(&store).unwrap();
     let uploaded = daemons[0].control.stat_cell(&store).unwrap().uploaded;
+    let (_, _, members) = configuration(&bucket, cell);
     reachable(&bucket, false);
     write(&client, 3..=4);
     drop(client);
 
     // The writer's host and its members' lost, their disks with them.
-    let (_, _, members) = configuration(&bucket, cell);
     let lost: Vec<usize> =
         members.iter().map(|member| addresses.iter().position(|a| a == member).unwrap()).collect();
     for &host in &lost {

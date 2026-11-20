@@ -692,7 +692,7 @@ fn commands_with_more_arguments_print_the_usage() {
             arg => Path::new(arg),
         }));
         let error = cladefsctl.run(&all).expect_err("ran with more arguments");
-        assert!(error.contains("usage: cladefsctl take DIR CAPACITY CELL [TOKEN]"), "{error}");
+        assert!(error.contains("usage: cladefsctl take [--force] DIR CAPACITY CELL [TOKEN]"), "{error}");
         assert!(!path.exists());
     }
 }
