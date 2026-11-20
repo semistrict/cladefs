@@ -976,6 +976,7 @@ fn roots() -> Option<&'static [PathBuf]> {
         static ROOTS: OnceLock<Option<Vec<PathBuf>>> = OnceLock::new();
     }
     ROOTS
+        .get()
         .get_or_init(|| {
             let roots = std::env::var_os("CLADEFSD_ROOTS").filter(|roots| !roots.is_empty())?;
             Some(

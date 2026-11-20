@@ -1365,6 +1365,7 @@ pub(crate) fn daemon_bucket() -> Result<Arc<bucket_cell::object_bucket::ObjectBu
         Errno::EIO
     })?;
     Ok(BUCKET
+        .get()
         .get_or_init(|| {
             watch_stats(Arc::downgrade(&bucket));
             bucket
