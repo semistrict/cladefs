@@ -906,6 +906,23 @@ impl<D: Dir> Recovering<D> {
         self.file.forced.is_some() && self.file.forced == self.file.token
     }
 
+    /// cladefs: of its forced placement, the epoch of the last commit the bucket held as a
+    /// taking of it fenced fewer members than a take needs, if one did
+    /// ([`Recovering::note_forced_after`] noted it).
+    pub fn forced_after(&self) -> Option<u64> {
+        self.file.forced_after.filter(|_| self.forced())
+    }
+
+    /// cladefs: notes, durably, in its description, that its placement's taking fenced fewer members
+    /// than a take needs, the bucket holding its commits through epoch `kept` (TASK-681): what its
+    /// status says from now on, until another placement holds it.
+    pub fn note_forced_after(&mut self, kept: u64) -> Result<(), Error> {
+        self.file.forced_after = Some(kept);
+        self.dir.replace(DESCRIPTION, self.file.text().as_bytes())?;
+        self.dir.sync_dir("")?;
+        Ok(())
+    }
+
     /// cladefs: its cell's kind, if its description names one (TASK-364, doc-20).
     pub fn kind(&self) -> Option<Kind> {
         self.file.kind
@@ -1325,6 +1342,7 @@ impl<D: Dir> LocalCell<D> {
                 capacity,
                 token: None,
                 forced: None,
+                forced_after: None,
                 kind,
                 version,
             };

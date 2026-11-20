@@ -1477,6 +1477,18 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             }
             _ => (Vec::new(), recovering, None),
         };
+        // cladefs: taken by force from too few members: what may be lost noted in the store's
+        // description, which its status says from now on, while this placement holds it; or, of an
+        // earlier taking of this forced placement, what that one noted (TASK-681).
+        let mut recovering = recovering;
+        let forced_after = match &short {
+            Some(_) => {
+                let kept = writer.taken().last_commit.map_or(0, epoch_of);
+                blocking(|| recovering.note_forced_after(kept))?;
+                Some(kept)
+            }
+            None => recovering.forced_after(),
+        };
         let (state, layer, taken) = (writer.state(), writer.layer(), Some(writer.taken().clone()));
         let opening = Opening { state, layer, taken, cache, keys: keys.clone(), held: parts };
         let store = blocking(|| recovering.open(options, opening))?;
@@ -1489,13 +1501,14 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // Kept for sure: what the bucket holds. Past it, what the members that answered held, and
         // its own write-ahead log, which may be an earlier writer's, past what a later one told
         // replicated on the members that answered not (TASK-680's simulation, seed 129).
-        if let Some(short) = short {
-            let kept = writer.taken().last_commit.map_or(0, epoch_of);
+        if let (Some(short), Some(kept)) = (&short, forced_after) {
             log::warn!(
                 "cladefs: {cell:?} taken by force: {short}: the bucket holds its commits through \
                  {kept}; commits told replicated past it that only the members that answered not \
                  held may be lost"
             );
+        }
+        if let Some(kept) = forced_after {
             self.forced_after(kept);
         }
         // cladefs: a replicated cell's commits replicated from now on (doc-21, TASK-537.3.3).

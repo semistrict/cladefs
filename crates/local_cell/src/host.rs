@@ -85,6 +85,7 @@ pub fn place<D: Dir>(dir: &D, token: u64, force: bool) -> Result<(), Error> {
     let mut described = CellFile::parse(std::str::from_utf8(&text)?)?;
     described.token = Some(token);
     described.forced = force.then_some(token);
+    described.forced_after = None;
     dir.replace(DESCRIPTION, described.text().as_bytes())?;
     dir.sync_dir("")?;
     Ok(())

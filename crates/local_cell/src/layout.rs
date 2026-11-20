@@ -69,6 +69,10 @@ pub(crate) struct CellFile {
     /// head names that answer, too few for a take, the commits only the others held lost. A later
     /// placement, of another token, is forced only if it is asked to be.
     pub forced: Option<u64>,
+    /// cladefs: of a forced placement whose taking fenced fewer members than a take needs, the
+    /// epoch of the last commit the bucket held then, past which commits told replicated may be
+    /// lost (TASK-681): what the store's status says while that placement holds it.
+    pub forced_after: Option<u64>,
     /// cladefs: its cell's kind, if it is kept in a bucket (TASK-364, doc-20).
     pub kind: Option<Kind>,
     /// cladefs: the version of its cell it is at, if it is one: its cell's state at the
@@ -103,6 +107,9 @@ impl CellFile {
         let token = fields.contains_key("token").then(|| number(&fields, "token")).transpose()?;
         let forced =
             fields.contains_key("forced").then(|| number(&fields, "forced")).transpose()?;
+        let forced_after = (fields.contains_key("forced_after"))
+            .then(|| number(&fields, "forced_after"))
+            .transpose()?;
         let version = (fields.get("version"))
             .map(|id| base32_id::parse_padded(id).ok_or_else(|| anyhow!("bad version {id:?}")))
             .transpose()?;
@@ -118,13 +125,15 @@ impl CellFile {
             capacity: number(&fields, "capacity")?,
             token,
             forced,
+            forced_after,
             kind,
             version,
         })
     }
 
     pub(crate) fn text(&self) -> String {
-        let Self { block_size, cell, bucket, capacity, token, forced, kind, version } = self;
+        let Self { block_size, cell, bucket, capacity, token, forced, forced_after, kind, version } =
+            self;
         let mut text = format!("{FORMAT}\nblock_size {block_size}\ncell {cell}\n");
         text += &format!("capacity {capacity}\n");
         if let Some(url) = bucket {
@@ -135,6 +144,9 @@ impl CellFile {
         }
         if let Some(forced) = forced {
             text += &format!("forced {forced}\n");
+        }
+        if let Some(after) = forced_after {
+            text += &format!("forced_after {after}\n");
         }
         if let Some(kind) = kind {
             text += &format!("kind {}\n", kind.name());
@@ -553,6 +565,7 @@ mod tests {
             capacity: 1,
             token: None,
             forced: None,
+            forced_after: None,
             kind: None,
             version: None,
         };
@@ -563,7 +576,7 @@ mod tests {
         let kept = CellFile { bucket, token: Some(7), ..file.clone() };
         assert_eq!(CellFile::parse(&kept.text()).unwrap(), kept);
         // cladefs: and a forced placement its token again (TASK-681).
-        let forced = CellFile { forced: Some(7), ..kept.clone() };
+        let forced = CellFile { forced: Some(7), forced_after: Some(12), ..kept.clone() };
         assert_eq!(CellFile::parse(&forced.text()).unwrap(), forced);
         // cladefs: older formats are refused, by their format (TASK-165.6), the index's last
         // (TASK-165.9).
