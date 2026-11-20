@@ -13,7 +13,8 @@
 //! the pages it touched on a cold one; a page-in would say neither what a warm host's VM read nor
 //! which reads were read-ahead's.
 //!
-//! A trace is written once, as its connection goes, to `<cell>-<opened>.reads` in the directory,
+//! A trace is written once, as its connection goes (`server::finish_connection`, off the runtime
+//! through the daemon's seam), to `<cell>-<opened>.reads` in the directory,
 //! the cell in base 32 (`base32_id`) and the opening in milliseconds since the Unix epoch: the first
 //! line [`HEADER`], the second `cell CELL opened MS`, then a line a read,
 //! `AT_US KIND EXTENT_CELL EXTENT_SEQUENCE EXTENT_LEN OFFSET LEN WAITED_US`: times in decimal
@@ -127,6 +128,11 @@ impl Trace {
         self.opened
     }
 
+    /// The file it is written to.
+    pub(super) fn file(&self) -> &Path {
+        &self.file
+    }
+
     /// Records a read the guest began at `began`, of `len` bytes at `offset` in `extent`, of
     /// `extent_len` bytes, done now: within [`WINDOW`] of the opening and [`MOST`] reads.
     pub(super) fn record(
@@ -150,7 +156,7 @@ impl Trace {
     }
 
     /// The trace's text.
-    fn text(&self) -> String {
+    pub(super) fn text(&self) -> String {
         let reads = self.reads.lock().unwrap();
         let mut text = format!("{HEADER}\ncell {} opened {}\n", Short(self.cell), self.opened_ms);
         for read in reads.iter() {
@@ -166,26 +172,6 @@ impl Trace {
             );
         }
         text
-    }
-
-    /// Writes it, on a thread of its own, as a connection's teardown blocks on no file: logged if
-    /// it fails.
-    fn write_behind(&self) {
-        let (file, text) = (self.file.clone(), self.text());
-        let spawned = std::thread::Builder::new().name("cladefs trace".into()).spawn(move || {
-            if let Err(err) = std::fs::write(&file, text) {
-                log::warn!("cladefsd: writing the read trace {}: {err}", file.display());
-            }
-        });
-        if let Err(err) = spawned {
-            log::warn!("cladefsd: starting a read trace's writer: {err}");
-        }
-    }
-}
-
-impl Drop for Trace {
-    fn drop(&mut self) {
-        self.write_behind();
     }
 }
 
@@ -223,28 +209,5 @@ mod tests {
         assert_eq!(lines.len(), 4, "{text}");
         assert_eq!(&fault[..7], ["5000", "fault", "7", "11", "300000", "1000", "1000"]);
         assert_eq!(&read[..7], ["9000", "read", "7", "11", "300000", "0", "200"]);
-    }
-
-    /// A trace dropped is written whole to its file.
-    #[test]
-    fn traces_are_written_as_they_go() {
-        let dir = tempfile::tempdir().unwrap();
-        let trace = Trace::in_dir(dir.path(), 9);
-        let file = trace.file.clone();
-        trace.record(
-            Kind::Read,
-            trace.opened_at(),
-            ExtentId { cell: 9, sequence: 1 },
-            4096,
-            0,
-            4096,
-        );
-        let text = trace.text();
-        drop(trace);
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while std::fs::read_to_string(&file).ok().as_deref() != Some(text.as_str()) {
-            assert!(Instant::now() < deadline, "the trace was never written");
-            std::thread::yield_now();
-        }
     }
 }

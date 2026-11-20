@@ -483,6 +483,7 @@ async fn run_connection(stream: super::wire::Stream, tenant: Arc<Tenant>) {
         tenant,
         peer: peer.clone(),
         store: OnceLock::new(),
+        reads: OnceLock::new(),
         phase: SharedLock::new("connection phase", Mutex::new(Phase::Unopened)),
         window: SharedLock::new("connection window", Mutex::new(None)),
         behind: SharedLock::new("connection behind", Mutex::new(None)),
@@ -498,7 +499,6 @@ async fn run_connection(stream: super::wire::Stream, tenant: Arc<Tenant>) {
         report: stats::Report::new(&peer.sender),
         page_ins: tokio::sync::Semaphore::new(PAGE_INS),
         named: OnceLock::new(),
-        reads: OnceLock::new(),
         alive: Some(alive),
     });
     match AsyncReceiver::new(stream) {
@@ -678,6 +678,18 @@ async fn finish_connection(connection: Arc<Connection>) {
         // cladefs: what it wrote since its last commit no next writer knows of, nor takes over.
         if store.is_quiescent() != Ok(true) {
             cells::retire(&hold, store);
+        }
+    }
+    // cladefs: the trace of its guest's reads, if it keeps one, its requests done (TASK-702.1).
+    if let Some(trace) = connection.reads.get() {
+        let (file, text) = (trace.file().to_owned(), trace.text());
+        let failed = match super::run::off_the_runtime(move || std::fs::write(&file, text)).await {
+            Ok(Ok(())) => None,
+            Ok(Err(err)) => Some(err.to_string()),
+            Err(panicked) => Some(panicked),
+        };
+        if let Some(err) = failed {
+            log::warn!("cladefsd: writing the read trace {}: {err}", trace.file().display());
         }
     }
     connection.peer.sender.shutdown();
@@ -1086,7 +1098,7 @@ pub(super) struct Connection {
     /// (`crate::request::RequestId::store`, TASK-260).
     named: OnceLock<Arc<str>>,
     /// cladefs: the trace of its guest's reads, from its store's opening, if the daemon writes
-    /// traces (`CLADEFSD_READ_TRACES`, TASK-702.1): written as it goes.
+    /// traces (`CLADEFSD_READ_TRACES`, TASK-702.1): written as it goes ([`finish_connection`]).
     reads: OnceLock<super::reads::Trace>,
     /// What says, as it drops, that the connection has: dropped after its store, window and open
     /// extents, and its hold of its store's path (TASK-79.34), by its teardown ([`Connection`]'s
