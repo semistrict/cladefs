@@ -118,5 +118,5 @@ tower = "0.5.3"
 seccompiler = { path = "../../vendor/firecracker/src/seccompiler" }
 
 [build-dependencies]
+madsim-tonic-build = { version = "=0.6.0", default-features = false, features = ["prost", "transport"] }
 protox = "0.10.0"
-tonic-prost-build = "0.14.6"

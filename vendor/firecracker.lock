@@ -1137,6 +1137,7 @@ dependencies = [
  "log",
  "madsim-tokio",
  "madsim-tonic",
+ "madsim-tonic-build",
  "node_local",
  "opentelemetry",
  "opentelemetry-otlp",
@@ -1157,7 +1158,6 @@ dependencies = [
  "tokio-stream",
  "tonic-health",
  "tonic-prost",
- "tonic-prost-build",
  "tower",
  "url",
  "zerocopy",
@@ -3170,6 +3170,21 @@ dependencies = [
  "tonic",
  "tower",
  "tracing",
+]
+
+[[package]]
+name = "madsim-tonic-build"
+version = "0.6.0+0.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2df12aca583def22dfeb88ec9d9c8f82045db3575c4973153f89bf2688f9367"
+dependencies = [
+ "prettyplease",
+ "proc-macro2",
+ "prost-build 0.14.4",
+ "quote",
+ "syn 2.0.119",
+ "tonic-build",
+ "tonic-prost-build",
 ]
 
 [[package]]

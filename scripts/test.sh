@@ -86,10 +86,14 @@ fi
 # beneath them builds otherwise; and their tests under madsim, each crate's tests/madsim.rs. Their
 # other tests are tokio's and std's, which madsim has no stand-ins for: they run in the workspace
 # part.
+# cladefs's on Linux holds the daemon (cladefsd), whose gRPC services, tonic's, madsim's tonic
+# serves otherwise: built under madsim once they are ported (doc-24 step 12, TASK-685.13); until
+# then, cladefs's madsim build is checked where the daemon isn't built, macOS.
 if part madsim; then
     madsim=(env RUSTFLAGS="--cfg madsim" CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}/madsim")
-    "${madsim[@]}" cargo check --manifest-path "$root/Cargo.toml" -p node_local -p bucket_cell \
-        -p local_cell -p cladefs
+    simulated=(-p node_local -p bucket_cell -p local_cell)
+    [[ $(uname) == Linux ]] || simulated+=(-p cladefs)
+    "${madsim[@]}" cargo check --manifest-path "$root/Cargo.toml" "${simulated[@]}"
     "${madsim[@]}" cargo nextest run --manifest-path "$root/Cargo.toml" -p node_local \
         -p bucket_cell -p local_cell --test madsim "$@"
 fi

@@ -166,7 +166,8 @@ pub(crate) async fn take(wait: Duration) -> HostStats {
         .collect();
     let mut vms = Vec::with_capacity(asked.len());
     for (report, answer) in asked {
-        let vm = match tokio::time::timeout_at(deadline, answer).await {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let vm = match tokio::time::timeout(left, answer).await {
             Ok(Ok(vm)) => Some(vm),
             // Not answered in time, or its connection went without answering: as the daemon has
             // it, the ask forgotten.

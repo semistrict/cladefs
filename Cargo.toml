@@ -114,7 +114,7 @@ syn = { version = "2.0.119", features = ["full", "visit", "visit-mut", "extra-tr
 # madsim's tokio (doc-24, TASK-685.1): tokio itself, built normally, which madsim-tokio re-exports;
 # madsim's simulated one under `--cfg madsim`. Crates outside the simulation (Fxfs's executor and
 # FUSE, the KMS backends over HTTP) name tokio itself, at the version Cargo.lock holds: 1.53.1.
-tokio = { package = "madsim-tokio", version = "=0.2.30", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "sync"] }
+tokio = { package = "madsim-tokio", version = "=0.2.30", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros"] }
 zerocopy = { version = "0.8.48", features = ["derive", "simd"] }
 zeroize = "1.9.1"
 

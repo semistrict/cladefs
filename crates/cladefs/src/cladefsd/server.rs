@@ -572,7 +572,7 @@ enum Ended {
 
 /// Receives `connection`'s messages from `receiver` until its VM process is gone, and says how
 /// (`gone`). A request it may serve at once ([`Connection::admit`]) it serves on the thread that
-/// received it, out of the runtime's ([`tokio::task::block_in_place`]), while a task of its own
+/// received it, out of the runtime's ([`local_cell::upload::blocking`]), while a task of its own
 /// receives on: no thread is woken between a request's arrival and its serving, but the next
 /// receiver, meanwhile (TASK-41).
 fn receive(
@@ -613,11 +613,9 @@ fn receive(
                 Ok(Some(admitted)) => {
                     let Some((message, charge)) = connection.admit(admitted) else { continue };
                     IO.spawn(receive(connection.clone(), receiver, gone));
-                    #[allow(
-                        clippy::disallowed_methods,
-                        reason = "the task does nothing more: its receiving goes on in another"
-                    )]
-                    tokio::task::block_in_place(move || connection.serve_in_turn(message, charge));
+                    // The task does nothing more: its receiving goes on in another. Inline under
+                    // madsim, which has one thread (`upload::blocking`, doc-24 step 11).
+                    local_cell::upload::blocking(move || connection.serve_in_turn(message, charge));
                     return;
                 }
                 Ok(None) => break,
