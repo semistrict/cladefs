@@ -3,7 +3,7 @@ id: doc-21
 title: 'Replicated commits: a majority of hosts'' disks before the bucket'
 type: specification
 created_date: '2026-11-18T12:27:00Z'
-updated_date: '2026-11-19T16:04:00Z'
+updated_date: '2026-11-20 01:58'
 ---
 # Replicated commits: a majority of hosts' disks before the bucket
 
@@ -102,6 +102,14 @@ replicas/<tenant>/<cell>/promise                the greatest epoch it promised (
 
 **Incarnations** (found by TLC, TASK-537.2): a member's promises live on its disk, so a host that lost its disk lost them. A zombie writer could then fill the empty host's log again and gather its quorum, and a host that lost its disk could retake the cell and count its own copy, now empty, as the old writer's. So each daemon's `replicas/` directory has an incarnation, a random 64-bit number made when the directory is created, and kept in it. A configuration names its members as (address, incarnation). A member refuses an `Open`, `Append` or `Fence` that names another incarnation, and a taker counts a member's read only in the incarnation the head names, its own included. This is BookKeeper's cookies. The spec's `NoIncarnation` mutation loses an acknowledged commit without it.
 
+**A replica directory is never restored or copied** (TASK-682; the user's decision,
+2026-11-19: a rule, not detected). Restored from a snapshot or a backup, or cloned onto a host
+that takes the same address, it keeps its incarnation but goes back to older promises, so a
+zombie writer's appends of an epoch a take fenced are taken again, and a commit it tells
+Replicated is in no later writer's history. Incarnations cover a disk lost, not one gone back in
+time; FoundationDB assumes the same of its disks. A host whose disk was restored deletes its
+replica directory before its daemon starts, which makes it a new member (`docs/operating-a-host.md`).
+
 A member therefore holds what the bucket holds and no more: data in ciphertext, and commit metadata
 (`Contents`: extent IDs, offsets, the root) in the clear but MACed, as framed footers are in the bucket
 (doc-16). It can verify nothing and needs no key. Recovery checks the MACs with the cell's key, so a
@@ -183,6 +191,12 @@ The new writer `W'`, at the VM manager's take, on any host:
    What members send is read here holding no key, so a segment at or before the last named one
    naming a commit past `last` is refused (no writer's logs do; a forged record may, which would
    otherwise make honest logs after it look named, and drop them before any MAC is checked).
+   *As built (TASK-680, found by the simulation):* logs whose first commit does not follow
+   `last_commit` are given up, not refused. Members are sent a segment's logs before the next's
+   and drop only what the head names, so what is between is their writer's base, the commits it
+   opened with, which it gave no member and told none of Replicated before the bucket held them.
+   Refused, a writer that took a cell of f = 0 and died before the bucket held its base left the
+   cell untakeable for good.
    *As built (TASK-537.3.6),* **no members for `c+1`** (one host of three lost, say): the take
    serves alone, at f = 0, its commits waiting for Uploaded. The head goes on naming `c`, fenced,
    whose members hold what it recovered, until the acknowledgement that first names the last commit
@@ -202,6 +216,18 @@ The new writer `W'`, at the VM manager's take, on any host:
    is told Replicated before the bucket holds every commit through that one; until then its commits
    wait for Uploaded. A take while the bucket is out of reach serves, but its commits wait for the
    bucket (cladefs's `replicated_commits_survive_their_daemon_killed_and_reopened`).
+   *Corrected (TASK-678, found checking the spec against the code):* that note missed the commits
+   the take recovered from its own write-ahead log past what the members it fenced gave, as on a
+   reopen on the old writer's disk with the member holding them out of reach. They may have been
+   told Replicated, and no member of `c+1` holds them: activated at once, the head named a
+   configuration that loses them to the next take elsewhere. Such a take now activates `c+1` only
+   by the acknowledgement that first names them all, in the same swap (`Writer::configure_past`),
+   the head naming `c`, fenced, until then, as a take serving alone does. Its members take its
+   commits meanwhile, none told Replicated before the swap (`Replicator::told`), and the keeper
+   uploads at once. The spec's rules `installOwn` and `deferQuiet` (mutations
+   `InstallMembersOnly` and `DeferTellsReplicated`, model `ReplicationDefer`), and
+   `bucket_cell::Rules::installs_own`, which the simulation's
+   `retakes_need_to_install_their_own_logs` turns off to find the loss.
 
 A crash anywhere in 1–6 leaves the head naming `c`, whose fenced logs nothing changed. The next take
 fences `c` again, at a greater epoch, and finds the same commits or more. Configuration `c+1`'s logs
@@ -325,6 +351,7 @@ minutes at 11M states and more.
 | `ReplicationSweeps` | sweeps of superseded configurations, 3 takes | 238,260 | 11 s |
 | `ReplicationDeep` (deep) | 2 commits, 3 takes | 5,544,379 | 200 s |
 | `ReplicationFailuresDeep` (deep) | failures over 3 takes | 8,108,108 | 256 s |
+| `ReplicationDefer` | takes deferring their activation to the acknowledgement that covers what they recovered (TASK-678): the old writer's host retaking after its daemon's crash, uploads, 3 takes | 11,656,113 | 382 s on the Mac |
 
 All on four hosts with f = 1, symmetric in hosts, under fxjob (`check-tla.sh`, 13.5 minutes for all
 twenty models and mutations, the deep ones included).
@@ -360,6 +387,8 @@ configuration other than the old writer are up (TASK-537.3 tests them on daemons
 | `NoZeroQuorum`: an f = 0 configuration counts as a quorum of one | an ack lost during a drop to f = 0 |
 | `AbandonIssued`: give a replacement up after its CAS is sent | an ack lost when the CAS lands after |
 | `AloneNoSwitch`: a take serving alone acknowledges its own commits with the head naming `c` | an Uploaded commit lost as the old writer's host retakes, counting its longer log |
+| `InstallMembersOnly`: a take activates `c+1` once its members hold what the members it read held, not its own log's commits past them (the code before TASK-678) | an ack lost: the old writer's host retakes, fencing a member that lacks it, and a take elsewhere reads `c+1` |
+| `DeferTellsReplicated`: a take deferring its activation tells commits Replicated on `c+1`'s members | an ack lost: the next take reads `c` |
 
 ## What each failure keeps (rows for doc-12)
 
@@ -370,7 +399,7 @@ For a cell whose fsync waits for Replicated, with f = 1 (3 members):
 | Guest crash, VMM killed | kept | kept |
 | cladefsd killed, or the host rebooted, disk kept | kept: the reopen recovers from the members and its own WAL | kept |
 | Writer's host lost | kept: the take recovers from the 2 peers | kept |
-| Writer's host and a peer lost | Replicated commits not yet uploaded may go: more than f failures. The take waits for the lost peer, and can't complete without it (the VM manager may then take from the bucket alone, by an explicit force, which loses that tail) | as fsync |
+| Writer's host and a peer lost | Replicated commits not yet uploaded may go: more than f failures. The take waits for the lost peer, and can't complete without it. The VM manager may then take it forced (TASK-681): on a host holding its store, `PlaceCell`'s `force` (`cladefsctl place --force`); on a new one, `CreateCell`'s `force` (`cladefsctl take --force`). The take goes on with the members that answer and the bucket, losing that tail, and `StatCell`'s `forced_after` names the last commit it recovered | as fsync |
 | A peer lost, writer up | kept; the cell replaces the peer and stays Replicated | kept |
 | Both peers lost, writer up | kept: degraded, waits for Uploaded until replaced | kept |
 | The bucket failing | kept, Replicated as before; waits at the lag bound | kept |
@@ -440,8 +469,10 @@ For a cell whose fsync waits for Replicated, with f = 1 (3 members):
 4. Take: fence, read, rebase of a tail after `last_commit`, install, activate, in `upload::start`
    (`upload.rs:1012`) before `Recovering::open`.
 5. Replacement and degraded mode, with metrics.
-6. Tests: unit tests of each side with fake links; `bucket_cell`'s simulation with members (a
-   member lost, a zombie, crashes in the middle of takes); three daemons on ubu1, killing the
+6. Tests: unit tests of each side with fake links; `local_cell`'s simulation with members
+   (TASK-680: profiles `replicated` and `retakes`, the network between hosts breaking, delaying,
+   duplicating and dropping calls, disks crashing corrupting what they never synced, members
+   driven a turn at a time; it found TASK-680's refusal of a base gap and TASK-683); three daemons on ubu1, killing the
    writer's daemon and its disk mid-pgbench and checking every Replicated commit after the take;
    doc-12's rows.
 

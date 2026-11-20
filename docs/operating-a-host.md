@@ -131,11 +131,13 @@ no later writer holds. A host whose disk was restored, or whose image was cloned
 deletes its replica directory before its daemon starts: it comes back as a new
 member, whose configurations replace it as they replace a lost disk.
 
-A cell more of whose members are lost for good than its f can't be taken: place
-its store forced (`cladefsctl place --force DIR TOKEN`, `PlaceCell`'s `force`,
-TASK-681). That placement's takes go on with the members that answer and the
-bucket, and lose what only the others held; `StatCell`'s `forced_after` names the
-last commit recovered.
+A cell more of whose members are lost for good than its f can't be taken: take it
+forced (TASK-681), on a host holding its store by placing that forced
+(`cladefsctl place --force DIR TOKEN`, `PlaceCell`'s `force`), on a new host by
+taking it forced (`cladefsctl take --force DIR CAPACITY CELL TOKEN`,
+`CreateCell`'s `force`). That placement's takes go on with the members that answer
+and the bucket, and lose what only the others held; `StatCell`'s `forced_after`
+names the last commit recovered.
 
 ### Buckets and their numbers
 

@@ -318,7 +318,11 @@ struct Late {
 
 #[derive(Clone)]
 enum Call {
-    Append { log: u64, offset: u64, bytes: Vec<u8> },
+    Append {
+        log: u64,
+        offset: u64,
+        bytes: Vec<u8>,
+    },
     /// Drops through a log, or, with none, every configuration's before the call's.
     Drop(Option<u64>),
     Fence(u64),
@@ -1157,7 +1161,8 @@ impl World {
             let cells: Vec<u64> = self.hosts[host].sessions.keys().copied().collect();
             for cell in cells {
                 // cladefs: what its uploader runs beside it, spawned (TASK-680).
-                let kept = std::mem::take(&mut *self.hosts[host].sessions[&cell].kept.lock().unwrap());
+                let kept =
+                    std::mem::take(&mut *self.hosts[host].sessions[&cell].kept.lock().unwrap());
                 for task in kept {
                     let keeper = self.spawn_uploader(task);
                     self.hosts[host].sessions.get_mut(&cell).unwrap().keepers.push(keeper);
@@ -1216,10 +1221,11 @@ impl World {
                 // cladefs: and of what was replicated, by its replicator's word (TASK-680).
                 let replicator = session.store.as_ref().and_then(|store| store.replicator());
                 let told: Vec<u64> = match replicator {
-                    Some(replicator) => (self.lineages[&lineage].range(..=replicator.told(uploaded)))
-                        .map(|(_, &tag)| tag)
-                        .filter(|tag| commits[tag].cell == cell)
-                        .collect(),
+                    Some(replicator) => (self.lineages[&lineage]
+                        .range(..=replicator.told(uploaded)))
+                    .map(|(_, &tag)| tag)
+                    .filter(|tag| commits[tag].cell == cell)
+                    .collect(),
                     None => Vec::new(),
                 };
                 if let Some(found) = self.cells.get_mut(&cell) {
@@ -2042,10 +2048,14 @@ impl World {
                 false => net.blocked.remove(&(to, from)),
             };
         }
-        trace!("host {from} to {to}{}: {}", if both { " and back" } else { "" }, match broken {
-            true => "broken",
-            false => "mended",
-        });
+        trace!(
+            "host {from} to {to}{}: {}",
+            if both { " and back" } else { "" },
+            match broken {
+                true => "broken",
+                false => "mended",
+            }
+        );
     }
 
     /// `child`, a fork of a version that failed, or a crash left, goes as its host's cleanup deletes
@@ -2909,15 +2919,14 @@ impl World {
             // cladefs: every commit told replicated is in the history of the cell's writer that
             // serves, the head's (TASK-680): the spec's ReplicatedSurvives.
             if !cell.told.is_empty() {
-                let serving = self.hosts.iter().filter_map(|host| host.sessions.get(&id)).find(
-                    |session| {
+                let serving =
+                    self.hosts.iter().filter_map(|host| host.sessions.get(&id)).find(|session| {
                         session.store.is_some()
                             && session.uploader.failed().is_none()
                             && session.uploader.writer().is_some_and(|writer| {
                                 writer.stopped().is_none() && writer.epoch() == record.epoch
                             })
-                    },
-                );
+                    });
                 if let Some(serving) = serving {
                     for &told in &cell.told {
                         if !self.precedes(told, serving.guest.head) {

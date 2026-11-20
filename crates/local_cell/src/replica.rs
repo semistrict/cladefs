@@ -188,10 +188,12 @@ impl<D: Dir> Replicas<D> {
     /// refused: what its logs were promised can't be known. Each configuration's logs hold at most
     /// `most` bytes.
     pub fn open(dir: D, most: u64) -> Result<Self, Error> {
-        Self::open_as(dir, most, || loop {
-            let number: u64 = rand::random();
-            if number != 0 {
-                break number;
+        Self::open_as(dir, most, || {
+            loop {
+                let number: u64 = rand::random();
+                if number != 0 {
+                    break number;
+                }
             }
         })
     }

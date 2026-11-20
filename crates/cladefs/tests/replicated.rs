@@ -466,7 +466,10 @@ fn takes_of_cells_whose_members_are_lost_go_on_by_force() {
     let refused = daemons[spare].dir.join("refused");
     let failure = daemons[spare].control.create_cell(&refused, CAPACITY, cell, (Some(2), false));
     let failure = failure.err().unwrap().to_string();
-    assert!(failure.contains("0 of the 2 members of configuration 1 a take must fence"), "{failure}");
+    assert!(
+        failure.contains("0 of the 2 members of configuration 1 a take must fence"),
+        "{failure}"
+    );
 
     let taken = daemons[spare].dir.join("taken");
     daemons[spare].control.create_cell(&taken, CAPACITY, cell, (Some(3), true)).unwrap();

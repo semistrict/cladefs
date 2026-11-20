@@ -1218,8 +1218,7 @@ pub(super) async fn place(path: PathBuf, token: u64, force: bool) -> Result<(), 
             true => OpenCell::place_forced(&path, token),
             false => OpenCell::place(&path, token),
         };
-        placed
-            .map_err(|err| errno_of(format_args!("placing {}", path.display()), err))
+        placed.map_err(|err| errno_of(format_args!("placing {}", path.display()), err))
     })
     .await
 }

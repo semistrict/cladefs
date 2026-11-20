@@ -1302,8 +1302,16 @@ impl<D: Dir> LocalCell<D> {
             dir.create(UNMADE, false)?.sync()?;
             let file = dir.create(DESCRIPTION, false)?;
             let bucket = bucket.map(str::to_owned);
-            let described =
-                CellFile { block_size, cell, bucket, capacity, token: None, forced: None, kind, version };
+            let described = CellFile {
+                block_size,
+                cell,
+                bucket,
+                capacity,
+                token: None,
+                forced: None,
+                kind,
+                version,
+            };
             let text = described.text();
             file.write_at(text.as_bytes(), 0)?;
             file.sync()?;
