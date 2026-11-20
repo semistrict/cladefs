@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-18 21:17'
-updated_date: '2026-11-20 08:21'
+updated_date: '2026-11-20 17:50'
 labels:
   - cladefsd
   - flaky
@@ -43,4 +43,6 @@ Seen again on ubu1 2026-11-19 (branch t3/mirrors at 439a7068c, TASK-633.8): clad
 Seen 2026-11-20 on ubu1 (t3/sim-spike, scripts/test.sh workspace under fxjob, --test-threads 4): cladefsd::tests::snapshots_after_private_pages_are_rebound_restore_their_bytes passed, then SIGABRT at exit; passed alone right after.
 
 2026-11-20 on ubu1: cladefs's snapshots_after_private_pages_are_rebound_restore_their_bytes and tenants::tenants_hold_their_own_pages pass, then SIGABRT at exit; stressed together 60 times: main e052b73f 5 failed, t3/async-1 2 failed. Both seen in full workspace runs.
+
+2026-11-20 (TASK-691 Linux run, ubu1, f4f4f4c78): cladefs::disk tenants_past_their_disk_limits_are_refused_while_others_write passed, then SIGABRT at exit.
 <!-- SECTION:NOTES:END -->
