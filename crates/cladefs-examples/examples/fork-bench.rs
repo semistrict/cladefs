@@ -62,7 +62,7 @@ fn bench(dir: &std::path::Path, tenant: u64, name: &str, forks: usize) {
         let extent = ExtentId { cell: store.cell().id, sequence };
         store.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
     }
-    store.commit(Some(b"root")).unwrap();
+    futures::executor::block_on(store.commit(Some(b"root"))).unwrap();
     // The pool of the tenant's new cell KEKs, filled as its store opened, off the forks' path.
     futures::executor::block_on(cladefs::bucket::kms().unwrap().filled(tenant));
     let mut took = Vec::with_capacity(forks);
