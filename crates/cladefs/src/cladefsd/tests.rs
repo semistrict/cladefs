@@ -4108,14 +4108,16 @@ fn shut(error: &std::io::Error) -> bool {
 }
 
 /// Asserts the daemon let go of the VM process whose connection `sender` sends on and `stream` is,
-/// within 10 s: it hangs up, and shuts the connection, so that what the VM process sends then
-/// fails, as a send of [`send_until_let_go`]'s may (TASK-240).
-fn assert_let_go(sender: &super::wire::Sender, stream: &UnixStream) {
+/// `within` what the caller's case allows for what it has the daemon do first: it hangs up, and
+/// shuts the connection, so that what the VM process sends then fails, as a send of
+/// [`send_until_let_go`]'s may (TASK-240).
+fn assert_let_go(sender: &super::wire::Sender, stream: &UnixStream, within: std::time::Duration) {
     use super::wire::{Header, INFO};
     use std::os::fd::AsRawFd;
     let mut hung_up = libc::pollfd { fd: stream.as_raw_fd(), events: libc::POLLRDHUP, revents: 0 };
-    // SAFETY: Polls the stream, which the caller keeps open, for 10 s at most.
-    let ready = unsafe { libc::poll(&mut hung_up, 1, 10_000) };
+    let within = libc::c_int::try_from(within.as_millis()).unwrap();
+    // SAFETY: Polls the stream, which the caller keeps open, for `within` at most.
+    let ready = unsafe { libc::poll(&mut hung_up, 1, within) };
     assert_eq!(ready, 1, "the daemon holds what the VM process leaves unread");
     assert_ne!(hung_up.revents & libc::POLLRDHUP, 0, "{:#x}", hung_up.revents);
     let sent = sender.send(Header::new(INFO, u64::MAX), &[], &[]);
@@ -4190,7 +4192,7 @@ fn vm_processes_that_leave_replies_unread_are_let_go() {
     assert_eq!(receiver.receive(|| 0).unwrap().unwrap().header.status, 0);
     let reads = (3..67).map(|id| Header::new(READ, id).with_args(&[cell, 1, 0, len as u64]));
     send_until_let_go(&sender, reads);
-    assert_let_go(&sender, &stream);
+    assert_let_go(&sender, &stream, WAIT);
     drop((sender, receiver, stream));
 }
 
@@ -4214,7 +4216,7 @@ fn vm_processes_naming_vast_windows_are_let_go_all_the_same() {
     assert_eq!(call(&sender, &mut receiver, written, &pattern(1, len)).header.status, 0);
     let reads = (4..68).map(|id| Header::new(READ, id).with_args(&[cell, 1, 0, len as u64]));
     send_until_let_go(&sender, reads);
-    assert_let_go(&sender, &stream);
+    assert_let_go(&sender, &stream, WAIT);
     assert_eq!(answered, -Errno::EINVAL.raw());
     drop((sender, receiver, stream));
 }
