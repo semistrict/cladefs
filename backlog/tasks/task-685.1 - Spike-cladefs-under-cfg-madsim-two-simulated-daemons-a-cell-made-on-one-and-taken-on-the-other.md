@@ -3,9 +3,11 @@ id: TASK-685.1
 title: >-
   Spike: cladefs under --cfg madsim, two simulated daemons, a cell made on one
   and taken on the other
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-20 03:32'
+updated_date: '2026-11-20 03:34'
 labels:
   - testing
   - simulation
