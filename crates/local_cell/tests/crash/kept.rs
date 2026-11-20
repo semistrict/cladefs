@@ -97,7 +97,13 @@ impl Host {
         // which they compact.
         let options =
             upload::Options { interval, checkpoint_every: 4, ..upload::Options::default() };
-        upload::open(recovering, OPTIONS, self.bucket(), (holder, options), &runtime)
+        local_cell::upload::wait_on(upload::open(
+            recovering,
+            OPTIONS,
+            self.bucket(),
+            (holder, options),
+            &runtime,
+        ))
     }
 
     /// What `store` holds, its extents whose data is in the bucket read there.
