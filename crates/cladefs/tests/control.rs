@@ -73,7 +73,7 @@ fn stores_through_the_control_api() {
             members_up: 0,
             active_replicas: 0,
             // Taken unforced (TASK-681).
-            forced_after: 0,
+            forced_after: None,
         }
     );
 

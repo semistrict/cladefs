@@ -252,10 +252,20 @@ impl LogRecord {
         segment: SegmentId,
         encryption: Option<&RawEncryption>,
     ) -> Result<Vec<Self>, Error> {
-        let Some(header) = LogHeader::of(bytes, segment) else { return Ok(Vec::new()) };
+        Self::decode_to(bytes, segment, encryption).map(|(records, _)| records)
+    }
+
+    /// cladefs: the records of `bytes` as [`LogRecord::decode`] reads them, and where in it the
+    /// last ends: what of it is whole (TASK-684).
+    fn decode_to(
+        bytes: &[u8],
+        segment: SegmentId,
+        encryption: Option<&RawEncryption>,
+    ) -> Result<(Vec<Self>, usize), Error> {
+        let Some(header) = LogHeader::of(bytes, segment) else { return Ok((Vec::new(), 0)) };
         let bytes = bytes.get(LOG_RECORDS as usize..).unwrap_or_default();
         let unauthentic = std::cell::Cell::new(None);
-        let (records, _) = crate::layout::decode_with(bytes, header.salt, |at, payload| {
+        let (records, end) = crate::layout::decode_with(bytes, header.salt, |at, payload| {
             let (payload, mac) = payload.split_at_checked(payload.len().checked_sub(MAC_LEN)?)?;
             let at = LOG_RECORDS + at as u64;
             let mac = mac.try_into().expect("a MAC's bytes");
@@ -272,7 +282,7 @@ impl LogRecord {
             Some(at) => {
                 Err(anyhow::anyhow!("{segment:?}'s log: its record at {at} is not authentic"))
             }
-            None => Ok(records),
+            None => Ok((records, LOG_RECORDS as usize + end)),
         }
     }
 }
@@ -466,6 +476,32 @@ fn framed(record: &LogRecord, at: u64, salt: u64, encryption: &RawEncryption) ->
 /// name, in order: read holding no key, as a taker restores it before it opens (TASK-537.3.3).
 pub(crate) fn replica_commits(log: &[u8], segment: SegmentId) -> Vec<u64> {
     replica_records(log, segment).into_iter().flatten().collect()
+}
+
+/// cladefs: whether `log`, segment `segment`'s replica log as a member holds it, is authentic under
+/// `keys`, the cell's: its header's MAC, and each of its records' (TASK-680's review). What a
+/// member sends is unauthenticated: a take gives nothing up on its word alone.
+pub(crate) fn replica_authentic(
+    log: &[u8],
+    segment: SegmentId,
+    keys: &bucket_cell::keys::Ring,
+) -> Result<(), Error> {
+    replica_whole(log, segment, keys).map(drop)
+}
+
+/// cladefs: how much of `log`, segment `segment`'s replica log as a member holds it, is whole and
+/// authentic under `keys`, the cell's: its header, MAC checked, then its records as far as each is
+/// framed whole, as a torn tail ends a log. Refused if its header, or a record framed whole, is not
+/// authentic (TASK-684): a member's copy a take may take.
+pub(crate) fn replica_whole(
+    log: &[u8],
+    segment: SegmentId,
+    keys: &bucket_cell::keys::Ring,
+) -> Result<usize, Error> {
+    let header = LogHeader::of(log, segment)
+        .ok_or_else(|| anyhow::anyhow!("{segment:?}'s log has no header of its own"))?;
+    let encryption = header.encryption(segment, keys)?;
+    LogRecord::decode_to(log, segment, Some(&encryption)).map(|(_, end)| end)
 }
 
 /// cladefs: the commits each of the records of `log`, as [`replica_commits`] reads it, names:

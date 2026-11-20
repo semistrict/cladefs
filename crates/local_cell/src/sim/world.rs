@@ -599,6 +599,9 @@ struct CellId {
     /// cladefs: the commits its guests were told are replicated: in the history of its writer once
     /// one serves, or in the bucket.
     told: BTreeSet<u64>,
+    /// cladefs: whether a take of it is forced ([`World::force`]), which may lose what was told
+    /// replicated past what it recovered, and no more.
+    forcing: bool,
 }
 
 impl CellId {
@@ -612,6 +615,7 @@ impl CellId {
             taken: 0,
             replicated: None,
             told: BTreeSet::new(),
+            forcing: false,
         }
     }
 }
@@ -1265,6 +1269,38 @@ impl World {
         );
     }
 
+    /// cladefs: a forced take of `cell` opened, the bucket holding its commits through epoch
+    /// `epoch`, its store's last commit `head` (TASK-681): what was told replicated past that epoch,
+    /// which the members that did not answer alone may have held, is let go of; what was told
+    /// through it must be its history, as the bucket holds it.
+    fn forced(&mut self, cell: u64, epoch: u64, head: Option<u64>) {
+        let told = self.cells[&cell].told.clone();
+        let place = |tag: u64| {
+            let mut places = self.lineages.values().flat_map(|history| history.iter());
+            places.find(|&(_, &made)| made == tag).map(|(&at, _)| at)
+        };
+        let (mut lost, mut violations) = (Vec::new(), Vec::new());
+        for tag in told {
+            if self.precedes(tag, head) {
+                continue;
+            }
+            match place(tag) {
+                Some(at) if at > epoch => lost.push(tag),
+                at => violations.push(format!(
+                    "cell {cell}'s forced take lost commit {tag}, told replicated, at epoch {at:?}, \
+                     which it recovered through {epoch}",
+                    cell = Short(cell)
+                )),
+            }
+        }
+        for violation in violations {
+            self.violation(violation);
+        }
+        trace!("{cell}'s forced take lets go of {lost:?}, told replicated", cell = Short(cell));
+        let found = self.cells.get_mut(&cell).unwrap();
+        found.told.retain(|tag| !lost.contains(tag));
+    }
+
     /// The directory of `cell`'s store on `host`, made if its disk has none.
     fn disk(&mut self, host: usize, cell: u64) -> &mut Disk {
         if !self.hosts[host].disks.contains_key(&cell) {
@@ -1426,6 +1462,9 @@ impl World {
         }
         let found = self.cells.get_mut(&cell).unwrap();
         found.taken = found.taken.max(token);
+        if std::mem::take(&mut found.forcing) {
+            self.forced(cell, last.map_or(0, epoch_of), head);
+        }
         let (held, _) = self.expected(head);
         let session = self.hosts[host].sessions.get_mut(&cell).unwrap();
         let next_sequence = uploader.next_sequence();
@@ -1535,7 +1574,8 @@ impl World {
     }
 
     /// cladefs: takes `cell` on `host` by force (TASK-681): its store placed forced, at a new
-    /// placement; what its guests were told replicated may be lost, and is let go of.
+    /// placement; what its guests were told replicated past what it recovered may be lost, and is
+    /// let go of once it opened ([`World::forced`]).
     fn force(&mut self, host: usize, cell: u64) {
         let token = self.id();
         trace!("host {host} takes {cell} by force, at {token}", cell = Short(cell));
@@ -1543,7 +1583,7 @@ impl World {
         if let Err(err) = crate::place(&dir, token, true) {
             return self.violation(format!("placing cell {cell}: {err:#}", cell = Short(cell)));
         }
-        self.cells.get_mut(&cell).unwrap().told.clear();
+        self.cells.get_mut(&cell).unwrap().forcing = true;
         self.start_session(host, cell, Some(token));
     }
 

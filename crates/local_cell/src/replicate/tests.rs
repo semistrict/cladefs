@@ -428,10 +428,37 @@ fn members_back_with_a_drop_are_up() {
 /// A replica log of segment `number` of the cell `trimmed` reads, its records each naming the
 /// commits of `commits`' entries, as a member holds it.
 fn replica_log(number: u64, commits: &[&[u64]]) -> (u64, Vec<u8>) {
+    replica_log_under(number, commits, [5; 32])
+}
+
+/// The cell `trimmed` reads' keys, its DEK the one [`replica_log`]'s are MACed under.
+fn trimmed_keys() -> Arc<bucket_cell::keys::Ring> {
+    let cell = bucket_cell::layout::CellId { tenant: TRIMMED.tenant, id: TRIMMED.id };
+    bucket_cell::keys::Ring::writing_under(cell, extent_frame::Secret::from_bytes(&[5; 32]))
+}
+
+/// TASK-680's review: members' logs beginning past the head's last commit are their writer's
+/// base, given up, only once the cell's keys find them authentic: a log MACed under another key is
+/// refused, as a forged one past the head's last would otherwise make a take give up commits told
+/// replicated.
+#[test]
+fn gaps_are_given_up_only_when_authentic() {
+    let keys = trimmed_keys();
+    let given = |logs: &[(u64, Vec<u8>)]| {
+        trimmed(TRIMMED, logs, Some(2), Some(&keys)).map_err(|err| format!("{err:#}"))
+    };
+    let hole = [replica_log(2, &[&[4]])];
+    assert_eq!(given(&hole), Ok(vec![]));
+    let forged = [replica_log_under(2, &[&[4]], [6; 32])];
+    assert!(given(&forged).unwrap_err().contains("not authentic"), "{:?}", given(&forged));
+}
+
+/// A replica log as [`replica_log`] makes it, MACed under a DEK of `secret`'s bytes.
+fn replica_log_under(number: u64, commits: &[&[u64]], secret: [u8; 32]) -> (u64, Vec<u8>) {
     use crate::wal::{LogRecord, ReplicaLog, Runs};
     let segment = crate::layout::SegmentId { cell: TRIMMED.id, number };
     let key = extent_frame::KeyId { cell: TRIMMED.id, generation: 1 };
-    let secret = extent_frame::Secret::from_bytes(&[5; 32]);
+    let secret = extent_frame::Secret::from_bytes(&secret);
     let encryption = Arc::new(crate::raw::RawEncryption::new(&secret, key));
     let header = crate::wal::log_header(number + 1, segment, &encryption);
     let (mut bytes, mut log) = ReplicaLog::new(&header, segment, encryption).unwrap();
@@ -457,7 +484,7 @@ const TRIMMED: extent_frame::segment::CellId = bucket_cell::layout::test_cell(3)
 #[test]
 fn trims_keep_what_follows_the_head_and_refuse_forged_logs() {
     let kept = |logs: &[(u64, Vec<u8>)], last: u64| -> Result<Vec<u64>, String> {
-        let trimmed = trimmed(TRIMMED, logs, Some(last)).map_err(|err| format!("{err:#}"))?;
+        let trimmed = trimmed(TRIMMED, logs, Some(last), None).map_err(|err| format!("{err:#}"))?;
         Ok(trimmed.into_iter().map(|(log, _)| log >> 1).collect())
     };
     let honest = [replica_log(1, &[&[1], &[2]]), replica_log(2, &[&[3], &[4]])];
@@ -468,9 +495,11 @@ fn trims_keep_what_follows_the_head_and_refuse_forged_logs() {
     let cut = [replica_log(1, &[&[1]]), replica_log(2, &[&[3], &[4]])];
     assert_eq!(kept(&cut, 2), Ok(vec![2]));
     // A hole: commit 3 on no member, the base of the writer that sent the rest, which told none of
-    // it replicated, the bucket holding not its base (TASK-680): given up.
+    // it replicated, the bucket holding not its base (TASK-680), given up only once the cell's
+    // keys find the logs authentic: refused with none, as a forged record past the head's last
+    // would otherwise make a take give up what was told (TASK-680's review).
     let hole = [replica_log(2, &[&[4]])];
-    assert_eq!(kept(&hole, 2), Ok(vec![]));
+    assert!(kept(&hole, 2).unwrap_err().contains("no key authenticates them"));
     // Forged: an old commit after the honest records, or a log of its own past them.
     let appended = [replica_log(1, &[&[1], &[2]]), replica_log(2, &[&[3], &[4], &[1]])];
     assert!(kept(&appended, 2).unwrap_err().contains("not one writer's"));

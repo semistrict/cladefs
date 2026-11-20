@@ -675,7 +675,7 @@ pub struct Replicated {
     pub fsync: bucket_cell::layout::Fsync,
     pub configuration: Option<u64>,
     /// cladefs: if the taking was forced and fenced fewer members than a take needs (TASK-681):
-    /// the epoch of the last commit it recovered, past which commits told replicated may be lost.
+    /// the epoch of the last commit the bucket held, past which commits told replicated may be lost.
     pub forced_after: Option<u64>,
 }
 
@@ -1424,9 +1424,9 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // configuration's members are given before it is active (TASK-537.3.4).
         let (seed, recovering, short) = match (&old, fenced) {
             (Some(old), Some(Fenced { members: fenced, short })) => {
-                let logs = self.read_longest(cell, old, &fenced).await?;
+                let logs = self.read_longest(cell, old, &fenced, &keys).await?;
                 let last = writer.taken().last_commit;
-                let seed = match crate::replicate::trimmed(cell, &logs, last) {
+                let seed = match crate::replicate::trimmed(cell, &logs, last, Some(&keys)) {
                     Ok(seed) => seed,
                     // Forced, what the members that answered hold, going not on from the head, is
                     // given up as what the others held is (TASK-681).
@@ -1440,7 +1440,22 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 // it: a later writer's, or this writer's beyond its own sync (TASK-537.3.4's review).
                 let own = recovering.last_commit_held();
                 let members = crate::replicate::last_commit(cell, &seed);
-                let recovering = match crate::replicate::members_ahead(own, members) {
+                let ahead = crate::replicate::members_ahead(own, members);
+                // Its own kept, the members' logs are given the new configuration only if they are
+                // of its history: else an earlier writer's, past what a later one, this store's
+                // own, went on from, none of it told replicated (TASK-678's review: a retake whose
+                // take before deferred, the head naming the configuration before still).
+                let seed = match ahead || members.is_none() || recovering.holds_commits(members) {
+                    true => seed,
+                    false => {
+                        log::info!(
+                            "cladefs: {cell:?}: its members' logs, through {members:?}, are an \
+                             earlier writer's than its own, through {own:?}: given up"
+                        );
+                        Vec::new()
+                    }
+                };
+                let recovering = match ahead {
                     false => recovering,
                     true => blocking(|| -> Result<_, Failure> {
                         #[cfg(test)]
@@ -1471,12 +1486,15 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         self.took(&writer, placement);
         // cladefs: taken by force from too few members: what may be lost said, and kept in its
         // status (TASK-681).
+        // Kept for sure: what the bucket holds. Past it, what the members that answered held, and
+        // its own write-ahead log, which may be an earlier writer's, past what a later one told
+        // replicated on the members that answered not (TASK-680's simulation, seed 129).
         if let Some(short) = short {
-            let kept = self.store().last_commit()?;
+            let kept = writer.taken().last_commit.map_or(0, epoch_of);
             log::warn!(
-                "cladefs: {cell:?} taken by force: {short}: recovered through commit {kept}, \
-                 what the members that answered held; commits told replicated past it that \
-                 only the others held are lost"
+                "cladefs: {cell:?} taken by force: {short}: the bucket holds its commits through \
+                 {kept}; commits told replicated past it that only the members that answered not \
+                 held may be lost"
             );
             self.forced_after(kept);
         }
@@ -1794,7 +1812,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     }
 
     /// cladefs: the writer's taking was forced, fewer members fenced than a take needs, and
-    /// recovered through the commit of epoch `kept`, as its status says from now (TASK-681).
+    /// the bucket holding its commits through epoch `kept`, as its status says from now (TASK-681).
     fn forced_after(&self, kept: u64) {
         if let Some(Taking { replication: Some(replicated), .. }) =
             self.progress.lock().unwrap().taking.as_mut()
@@ -1958,37 +1976,77 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
 
     /// cladefs: of each log the members `fenced` hold of `old`, the longest copy, read from the
     /// member holding it: every commit a guest was told replicated is on one of them, and each
-    /// member's logs are prefixes of the writer's (doc-21, TASK-537.3.4).
+    /// member's logs are prefixes of the writer's (doc-21, TASK-537.3.4). Of a segment's records,
+    /// the longest copy `keys`, the cell's, find authentic, cut to what of it is whole: what a member
+    /// answers is unauthenticated, and a longer copy garbled, or forged, would otherwise hide an
+    /// honest one (TASK-684). Only a copy found not authentic is passed over: one that can't be
+    /// read, or reads shorter than its member's fence said, fails the take, as it may be the only
+    /// one holding commits told replicated; and so does a log none of whose copies is authentic, as
+    /// a log missing would look like a writer's base, given up (`replicate::trimmed`).
     async fn read_longest(
         &self,
         cell: CellId,
         old: &bucket_cell::layout::Configuration,
         fenced: &[(bucket_cell::layout::Member, Vec<(u64, u64)>)],
+        keys: &Arc<Ring>,
     ) -> Result<Vec<(u64, Vec<u8>)>, Failure> {
-        let mut longest: BTreeMap<u64, (u64, &bucket_cell::layout::Member)> = BTreeMap::new();
+        // Each log's copies, by their members' fences' ends, the longest first.
+        let mut copies: BTreeMap<u64, Vec<(u64, bucket_cell::layout::Member)>> = BTreeMap::new();
         for (member, ends) in fenced {
             for &(log, end) in ends {
-                if longest.get(&log).is_none_or(|(had, _)| end > *had) {
-                    longest.insert(log, (end, member));
-                }
+                copies.entry(log).or_default().push((end, member.clone()));
             }
         }
+        for held in copies.values_mut() {
+            held.sort_by_key(|copy| std::cmp::Reverse(copy.0));
+        }
         let members = self.members()?;
-        let wanted: Vec<(u64, u64, bucket_cell::layout::Member)> =
-            longest.into_iter().map(|(log, (end, member))| (log, end, member.clone())).collect();
-        let old = old.clone();
+        let (old, keys) = (old.clone(), keys.clone());
         blocking(move || {
-            let mut logs = Vec::with_capacity(wanted.len());
-            for (log, end, member) in wanted {
-                let bytes = members.read(cell, &old, &member, log).map_err(Failure::msg)?;
-                if (bytes.len() as u64) < end {
-                    return Err(Failure::msg(format!(
-                        "{} gave {} bytes of log {log}, fenced at {end}",
-                        member.address,
-                        bytes.len()
-                    )));
+            let mut logs = Vec::with_capacity(copies.len());
+            for (log, held) in copies {
+                let segment = crate::layout::SegmentId { cell: cell.id, number: log >> 1 };
+                let (mut best, mut refused) = (None::<Vec<u8>>, Vec::new());
+                for (end, member) in held {
+                    if best.as_ref().is_some_and(|best| best.len() as u64 >= end) {
+                        break;
+                    }
+                    let mut bytes = members.read(cell, &old, &member, log).map_err(Failure::msg)?;
+                    if (bytes.len() as u64) < end {
+                        return Err(Failure::msg(format!(
+                            "{} gave {} bytes of log {log}, fenced at {end}",
+                            member.address,
+                            bytes.len()
+                        )));
+                    }
+                    // A segment's records, as far as they are whole and authentic; its own
+                    // extents' files, whose records name them, as they are.
+                    if log & 1 == 0 {
+                        match crate::wal::replica_whole(&bytes, segment, &keys) {
+                            Ok(whole) => bytes.truncate(whole),
+                            Err(err) => {
+                                log::warn!(
+                                    "cladefs: {}'s log {log} of {cell:?}: {err:#}: passed over",
+                                    member.address
+                                );
+                                refused.push(format!("{}: {err:#}", member.address));
+                                continue;
+                            }
+                        }
+                    }
+                    if best.as_ref().is_none_or(|best| bytes.len() > best.len()) {
+                        best = Some(bytes);
+                    }
                 }
-                logs.push((log, bytes));
+                match best {
+                    Some(bytes) => logs.push((log, bytes)),
+                    None => {
+                        return Err(Failure::msg(format!(
+                            "no member's copy of log {log} of {cell:?} is authentic: {}",
+                            refused.join("; ")
+                        )));
+                    }
+                }
             }
             Ok(logs)
         })

@@ -3,7 +3,7 @@ id: doc-21
 title: 'Replicated commits: a majority of hosts'' disks before the bucket'
 type: specification
 created_date: '2026-11-18T12:27:00Z'
-updated_date: '2026-11-20 01:58'
+updated_date: '2026-11-20 03:24'
 ---
 # Replicated commits: a majority of hosts' disks before the bucket
 
@@ -177,6 +177,12 @@ The new writer `W'`, at the VM manager's take, on any host:
    `W`'s one sequence in configuration `c`, so the longest contains each of the others: there are no
    conflicts to resolve, no per-entry terms, no truncation. Fetch it (`ReadLog`, from any fenced
    members that hold each log), verify its MACs, and write it as the local logs of `W'`.
+   *As built (TASK-684, found writing TASK-680's review test):* of a segment's records, the
+   longest copy the cell's keys find authentic, cut to what of it is whole: a longer copy,
+   garbled or forged, would otherwise hide an honest one. Only a copy found not authentic is
+   passed over; one that can't be read, or reads shorter than its fence said, fails the take,
+   as it may be the only copy of commits told Replicated, and so does a log with no authentic
+   copy.
 4. **Rebase** with the existing code (`Wal::rebase`, `bucket_cell/src/wal.rs:148`): the records
    through the head's `last_commit` are the bucket's already, and the rest is restamped onto
    `W'`'s chain. Members may have dropped segments the head acknowledged, so the replica tail can
@@ -192,7 +198,9 @@ The new writer `W'`, at the VM manager's take, on any host:
    naming a commit past `last` is refused (no writer's logs do; a forged record may, which would
    otherwise make honest logs after it look named, and drop them before any MAC is checked).
    *As built (TASK-680, found by the simulation):* logs whose first commit does not follow
-   `last_commit` are given up, not refused. Members are sent a segment's logs before the next's
+   `last_commit` are given up, not refused, once the cell's keys find them authentic (a forged
+   record past `last_commit` would otherwise make a take give up commits told Replicated:
+   TASK-680's review). Members are sent a segment's logs before the next's
    and drop only what the head names, so what is between is their writer's base, the commits it
    opened with, which it gave no member and told none of Replicated before the bucket held them.
    Refused, a writer that took a cell of f = 0 and died before the bucket held its base left the
@@ -216,6 +224,11 @@ The new writer `W'`, at the VM manager's take, on any host:
    is told Replicated before the bucket holds every commit through that one; until then its commits
    wait for Uploaded. A take while the bucket is out of reach serves, but its commits wait for the
    bucket (cladefs's `replicated_commits_survive_their_daemon_killed_and_reopened`).
+   *TASK-678's review:* the members' logs are given `c+1`'s members only if they are of the
+   store's own history, when its own log is what it recovers: a retake after a deferred one may
+   find `c`'s members holding an earlier writer's commits past what its own log, a later writer's,
+   went on from (none of them told Replicated). Of one writer's sequence, a log holding a commit
+   of that writer at or past the members' last place holds it (`Recovering::holds_commits`).
    *Corrected (TASK-678, found checking the spec against the code):* that note missed the commits
    the take recovered from its own write-ahead log past what the members it fenced gave, as on a
    reopen on the old writer's disk with the member holding them out of reach. They may have been
@@ -351,6 +364,8 @@ minutes at 11M states and more.
 | `ReplicationSweeps` | sweeps of superseded configurations, 3 takes | 238,260 | 11 s |
 | `ReplicationDeep` (deep) | 2 commits, 3 takes | 5,544,379 | 200 s |
 | `ReplicationFailuresDeep` (deep) | failures over 3 takes | 8,108,108 | 256 s |
+| `ReplicationDeferCommits` | deferred takes telling commits Replicated once the head names their configuration, members' streams starting after what the take recovered (`from`), 2 commits, 2 takes, a crash | 406,820 | 14 s on the Mac |
+| `ReplicationDeferReplaces` (deep) | a replacement after a deferred take, the replacement's streams starting where its configuration's do | over 16M | over 15 min on the Mac |
 | `ReplicationDefer` | takes deferring their activation to the acknowledgement that covers what they recovered (TASK-678): the old writer's host retaking after its daemon's crash, uploads, 3 takes | 11,656,113 | 382 s on the Mac |
 
 All on four hosts with f = 1, symmetric in hosts, under fxjob (`check-tla.sh`, 13.5 minutes for all

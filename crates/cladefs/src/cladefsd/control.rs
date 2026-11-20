@@ -314,7 +314,7 @@ fn stat_response(state: cells::CellState) -> StatCellResponse {
         degraded: upload.replication.is_some_and(|replication| replication.degraded),
         members_up: upload.replication.map_or(0, |replication| replication.members_up),
         active_replicas: upload.replication.map_or(0, |replication| u32::from(replication.f)),
-        forced_after: replicated.and_then(|replicated| replicated.forced_after).unwrap_or(0),
+        forced_after: replicated.and_then(|replicated| replicated.forced_after),
     }
 }
 

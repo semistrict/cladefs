@@ -568,10 +568,10 @@ message StatCellResponse {
   uint32 members_up = 26;
   // The f of its active configuration: less than replicas once it dropped to f = 0, degraded.
   uint32 active_replicas = 27;
-  // If its writer's taking was forced (PlaceCell's force) and fenced fewer members than a take
-  // needs: the commit number of the last commit it recovered, past which commits told replicated
-  // may be lost (TASK-681). 0 if not.
-  uint64 forced_after = 28;
+  // If its writer's taking was forced (PlaceCell's or CreateCell's force) and fenced fewer members
+  // than a take needs: the commit number of the last commit the bucket held, past which commits told
+  // replicated may be lost (TASK-681); 0 if the bucket held none. Unset if not.
+  optional uint64 forced_after = 28;
 }
 
 // Asks for the stores the daemon serves.

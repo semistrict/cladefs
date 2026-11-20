@@ -79,23 +79,29 @@ pub fn own_frames(mut bytes: &[u8]) -> Vec<(u64, Vec<u8>)> {
 /// goes on from `last`, the last commit the cell's head names (TASK-537.3.4): the segments after
 /// the last whose records name a commit through `last`, the head acknowledging whole segments, so
 /// that a member's copy of one it named, whole or cut short, its drop never come, is the bucket's
-/// already (TASK-537.3.5's review); and of those, from the first holding any record. None if the
-/// first commit they hold does not follow `last` (TASK-680, found by the simulation): members are
-/// sent a segment's logs before the next's, and drop only what the head names, so what is between
-/// is the writer's base, the commits it opened with ([`Replicator::base`]), which its members
-/// were never given and the bucket held not yet; and it tells nothing replicated before the
-/// bucket holds its base, so nothing they hold was told replicated. (A take's own commits it gives
-/// its configuration's members as their logs' first, or the head names the configuration before
-/// until the bucket holds them, TASK-678.) Refused if a segment at or before the last naming a
-/// commit through `last` names one past it, as no writer's logs do, but forged ones may. (Not the
-/// head's count of segments: a writer's local segments are numbered as its own, the bucket's as
-/// the cell's.)
+/// already (TASK-537.3.5's review); and of those, from the first holding any record.
+///
+/// None if the first commit they hold does not follow `last`, and `keys`, the cell's, find their
+/// logs authentic (TASK-680, found by the simulation): members are sent a segment's logs before
+/// the next's, and drop only what the head names, so what is between is the writer's base, the
+/// commits it opened with ([`Replicator::base`]), which its members were never given and the
+/// bucket held not yet; and it tells nothing replicated before the bucket holds its base, so
+/// nothing they hold was told replicated. (A take's own commits it gives its configuration's
+/// members as their logs' first, or the head names the configuration before until the bucket holds
+/// them, TASK-678.) Refused without `keys`, or if a log is not authentic: a forged record past the
+/// head's last would otherwise make a take give up commits told replicated (TASK-680's review).
+///
+/// Refused too if a segment at or before the last naming a commit through `last` names one past
+/// it, as no writer's logs do, but forged ones may. (Not the head's count of segments: a writer's
+/// local segments are numbered as its own, the bucket's as the cell's.)
 pub fn trimmed(
     cell: extent_frame::segment::CellId,
     logs: &[(u64, Vec<u8>)],
     last: Option<u64>,
+    keys: Option<&bucket_cell::keys::Ring>,
 ) -> Result<Vec<(u64, Vec<u8>)>, anyhow::Error> {
     use crate::layout::SegmentId;
+    use anyhow::Context as _;
     use extent_frame::segment::epoch_of;
     let segment = |number: u64| SegmentId { cell: cell.id, number };
     let through = |commit: u64| last.is_some_and(|last| epoch_of(commit) <= epoch_of(last));
@@ -139,6 +145,21 @@ pub fn trimmed(
         (Some(last), Some(commit)) => epoch_of(commit) == epoch_of(last) + 1,
     };
     if !follows {
+        let Some(keys) = keys else {
+            anyhow::bail!(
+                "the members' logs of {cell:?} from segment {first} begin at commit \
+                 {first_commit:?}, not going on from the head's last, {last:?}, and no key \
+                 authenticates them"
+            );
+        };
+        for (log, bytes) in logs.iter().filter(|(log, _)| log & 1 == 0) {
+            crate::wal::replica_authentic(bytes, segment(log >> 1), keys).with_context(|| {
+                format!(
+                    "the members' logs of {cell:?} begin at commit {first_commit:?}, not going \
+                     on from the head's last, {last:?}"
+                )
+            })?;
+        }
         log::info!(
             "cladefs: the members' logs of {cell:?} from segment {first} begin at commit \
              {first_commit:?}, past the head's last, {last:?}: their writer's base, which the \
@@ -194,7 +215,7 @@ pub fn restore<D: crate::Dir>(
     use crate::layout::{SegmentId, extent_path, log_path, open_segment_path};
     use anyhow::Context as _;
     let segment = |log: u64| SegmentId { cell: cell.id, number: log >> 1 };
-    let kept = trimmed(cell, logs, last)?;
+    let kept = trimmed(cell, logs, last, None)?;
     let write = |path: &str, bytes: &[u8], data: bool| -> Result<(), anyhow::Error> {
         let file = dir.create(path, data).with_context(|| format!("making {path}"))?;
         if !bytes.is_empty() {

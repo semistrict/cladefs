@@ -198,7 +198,7 @@ fn what_a_member_holds_recovers_on_another_host() {
     let mut partial = logs.clone();
     let cut = partial.iter_mut().find(|(log, _)| *log == replicate::log_of(first)).unwrap();
     cut.1.truncate(cut.1.len() * 2 / 3);
-    let kept = replicate::trimmed(cell, &partial, named).unwrap();
+    let kept = replicate::trimmed(cell, &partial, named, None).unwrap();
     assert!(kept.iter().all(|(log, _)| log >> 1 > first) && !kept.is_empty());
     let elsewhere = MemDir::new();
     LocalCell::make(&elsewhere, DESCRIPTION, Some(URL), None).unwrap();
@@ -929,5 +929,291 @@ fn takes_of_cells_whose_members_are_lost_go_on_by_force() {
     assert_eq!(taking.replication.unwrap().forced_after, Some(uploaded));
     let next = commit(&taken, 4, 2);
     uploader.wait_replicated(next).unwrap();
+    drop(uploader);
+}
+
+/// A store in memory taking `cell` on `host` as a replicated cell's, its bucket's writes failing
+/// as `faults` say.
+fn faulty_host(faults: &Arc<bucket_cell::faults::Faults>) -> Host {
+    let objects = Arc::new(InMemory::new());
+    let faulty = bucket_cell::faults::Faulty::new(objects, faults.clone());
+    let bucket = Arc::new(ObjectBucket::new(Arc::new(faulty), ""));
+    let runtime = runtime_of_its_own();
+    runtime.block_on(bucket_cell::lifecycle::create(&*bucket, cell(), 1)).unwrap();
+    Host { runtime, bucket }
+}
+
+/// The ends of the logs `replicas` holds of `cell()`'s `configuration`, by reading its fences at
+/// epoch 0, which no take fenced yet: no promise raised.
+fn ends(
+    replicas: &local_cell::replica::Replicas<MemDir>,
+    configuration: &bucket_cell::layout::Configuration,
+) -> u64 {
+    let of = (cell(), key(configuration), replicas.incarnation());
+    replicas.fence(of, 0).unwrap().iter().map(|&(_, end)| end).sum()
+}
+
+/// Whether the bucket's writes fail.
+fn writes_fail(faults: &bucket_cell::faults::Faults, fail: bool) {
+    use bucket_cell::faults::{Failing, Fault};
+    let failing = if fail { Failing::NoSpace } else { Failing::Not };
+    faults.set(Fault { latency: Duration::ZERO, failing });
+}
+
+/// TASK-678's verifying review: the old writer, on a, sends its last two commits to its member b
+/// and crashes before its own sync, its log ending before them. A retake on a, b out of reach,
+/// defers its configuration's activation, commits one of its own at the place of the first, and
+/// crashes with the bucket's writes failing. A retake on a again, c out of reach now, fences b
+/// alone: b's logs are the old writer's, past what this store's own log went on from. Given to the
+/// new configuration's members, a later take finds an old writer's segment naming a commit past
+/// the head's last, and refuses the cell for good, having lost what was told replicated since;
+/// given up, every commit told replicated is there after the next take, elsewhere.
+#[test]
+fn retakes_give_their_configurations_no_earlier_writers_logs() {
+    // How many of the writer's file system's operations its flush makes before its log's sync:
+    // a flush failing there has its records spooled, sent, and not synced.
+    for budget in 0..16 {
+        if earlier_writers_logs_given_up(budget) {
+            return;
+        }
+    }
+    panic!("no flush failed between sending its records and syncing them");
+}
+
+/// [`retakes_give_their_configurations_no_earlier_writers_logs`], its old writer's flush failing
+/// after `budget` operations: whether that flush sent its records unsynced, which the rest needs.
+fn earlier_writers_logs_given_up(budget: u64) -> bool {
+    let faults = bucket_cell::faults::Faults::new(Duration::ZERO, None);
+    let host = faulty_host(&faults);
+    let all = directories(&["a", "b", "c", "d", "e"]);
+    let lost = Lost::default();
+    let peers = |me: &str| Peers { me: me.into(), all: all.clone(), lost: lost.clone() };
+    let writer = Host { runtime: runtime_of_its_own(), bucket: host.bucket.clone() };
+    let dir = MemDir::new();
+    LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
+    let wish = bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated);
+    let recovering = LocalCell::recover_unmade(dir.clone()).unwrap();
+    let (store, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).unwrap();
+    store.made().unwrap();
+    store.close_segment().unwrap();
+    uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
+    let told = commit(&store, 0, 2);
+    uploader.wait_replicated(told).unwrap();
+    let first = configuration_named(&host);
+    assert_eq!(addresses(&first), ["a", "b", "c"]);
+
+    // c out of reach: commits on a's log and b's, past c's; then two flushed, sent to b, the log's
+    // sync failing.
+    lost.lock().unwrap().insert("c".into());
+    let synced = commit(&store, 2, 2);
+    uploader.wait_replicated(synced).unwrap();
+    let before = ends(&all["b"], &first);
+    for (sequence, round) in (store.info().unwrap().next_sequence..).zip(4..6) {
+        let extent = ExtentId { cell: cell().id, sequence };
+        store.write(extent, 0, &common::noise(round, BLOCK)).unwrap();
+        store.commit_ordered(Some(format!("root {round}").as_bytes())).unwrap();
+    }
+    let unsynced = store.last_commit().unwrap();
+    dir.fail_after(Some(budget));
+    let flushed = store.flush();
+    dir.fail_after(None);
+    let started = Instant::now();
+    while flushed.is_err() && ends(&all["b"], &first) == before {
+        if started.elapsed() > Duration::from_secs(2) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let sent = flushed.is_err() && ends(&all["b"], &first) > before;
+    let replicator = store.replicator().unwrap();
+    lose(writer, (uploader, store, replicator));
+    if !sent {
+        return false;
+    }
+    // a's log as a crash leaves it: without them.
+    let crashed = (0..64)
+        .map(|seed| dir.crash(seed))
+        .find(|crashed| {
+            let held = LocalCell::recover(crashed.clone()).unwrap().last_commit_held();
+            held.map_or(0, extent_frame::segment::epoch_of) < unsynced - 1
+        })
+        .expect("a crash that keeps neither of them");
+
+    // A retake on a, b out of reach, c back: deferred, the head naming a's first configuration.
+    lost.lock().unwrap().remove("c");
+    lost.lock().unwrap().insert("b".into());
+    let again = Host { runtime: runtime_of_its_own(), bucket: host.bucket.clone() };
+    let recovering = LocalCell::recover(crashed.clone()).unwrap();
+    let (retaken, uploader) = again.open_replicated(recovering, 2, None, peers("a")).unwrap();
+    writes_fail(&faults, true);
+    assert_eq!(configuration_named(&host).number, first.number, "deferred");
+    let own = commit(&retaken, 10, 1);
+    assert_eq!(own, unsynced - 1, "its own commit at the place of the first of them");
+    let replicator = retaken.replicator().unwrap();
+    lose(again, (uploader, retaken, replicator));
+
+    // A retake on a again, b back, c out of reach: it fences b alone.
+    writes_fail(&faults, false);
+    lost.lock().unwrap().remove("b");
+    lost.lock().unwrap().insert("c".into());
+    let third = Host { runtime: runtime_of_its_own(), bucket: host.bucket.clone() };
+    let recovering = LocalCell::recover(crashed.crash(1)).unwrap();
+    let (taken, uploader) = third.open_replicated(recovering, 3, None, peers("a")).unwrap();
+    let base = taken.last_commit().unwrap();
+    assert_eq!(base, own, "its own log's, not b's");
+    uploader.wait_uploaded(base).unwrap();
+    until("its configuration named", || configuration_named(&host).epoch == 3);
+    // A commit told replicated with the bucket's writes failing: on its configuration's members.
+    writes_fail(&faults, true);
+    let last = commit(&taken, 20, 1);
+    uploader.wait_replicated(last).unwrap();
+    assert!(uploader.last_uploaded() < last, "told replicated by its members, not the bucket");
+    let expected = third.contents(&taken);
+    let replicator = taken.replicator().unwrap();
+    lose(third, (uploader, taken, replicator));
+
+    // a lost: d takes the cell from that configuration's members and the bucket.
+    writes_fail(&faults, false);
+    lost.lock().unwrap().remove("c");
+    lost.lock().unwrap().insert("a".into());
+    let elsewhere = MemDir::new();
+    LocalCell::make(&elsewhere, DESCRIPTION, Some(URL), None).unwrap();
+    let recovering = LocalCell::recover_unmade(elsewhere).unwrap();
+    let (taken, uploader) = host.open_replicated(recovering, 4, None, peers("d")).unwrap();
+    taken.made().unwrap();
+    assert!(taken.last_commit().unwrap() >= last);
+    assert_eq!(host.contents(&taken), expected);
+    drop(uploader);
+    true
+}
+
+/// A host's peers as [`Peers`] reaches them, but `garbled`, whose answers say its logs of
+/// segments' records are `PAD` bytes longer than they are, padded with what no record frames.
+struct Garbling {
+    peers: Peers,
+    garbled: String,
+}
+
+/// What [`Garbling`] pads a member's logs with.
+const PAD: usize = 64 << 10;
+
+impl local_cell::upload::Members for Garbling {
+    fn me(&self) -> Result<bucket_cell::layout::Member, String> {
+        self.peers.me()
+    }
+
+    fn pick(
+        &self,
+        cell: bucket_cell::layout::CellId,
+        number: u64,
+        f: u8,
+        avoid: &[String],
+    ) -> Result<Vec<bucket_cell::layout::Member>, String> {
+        self.peers.pick(cell, number, f, avoid)
+    }
+
+    fn link(
+        &self,
+        cell: bucket_cell::layout::CellId,
+        configuration: &bucket_cell::layout::Configuration,
+        member: &bucket_cell::layout::Member,
+    ) -> Arc<dyn MemberLink> {
+        self.peers.link(cell, configuration, member)
+    }
+
+    fn fence(
+        &self,
+        cell: bucket_cell::layout::CellId,
+        configuration: &bucket_cell::layout::Configuration,
+        member: &bucket_cell::layout::Member,
+        epoch: u64,
+    ) -> Result<Vec<(u64, u64)>, String> {
+        let ends = self.peers.fence(cell, configuration, member, epoch)?;
+        Ok(match member.address == self.garbled {
+            true => ends
+                .into_iter()
+                .map(|(log, end)| (log, end + if log & 1 == 0 { PAD as u64 } else { 0 }))
+                .collect(),
+            false => ends,
+        })
+    }
+
+    fn read(
+        &self,
+        cell: bucket_cell::layout::CellId,
+        configuration: &bucket_cell::layout::Configuration,
+        member: &bucket_cell::layout::Member,
+        log: u64,
+    ) -> Result<Vec<u8>, String> {
+        let mut bytes = self.peers.read(cell, configuration, member, log)?;
+        if member.address == self.garbled && log & 1 == 0 {
+            bytes.extend(std::iter::repeat_n(0xa5, PAD));
+        }
+        Ok(bytes)
+    }
+
+    fn drop_before(
+        &self,
+        cell: bucket_cell::layout::CellId,
+        configuration: &bucket_cell::layout::Configuration,
+        member: &bucket_cell::layout::Member,
+    ) -> Result<(), String> {
+        self.peers.drop_before(cell, configuration, member)
+    }
+}
+
+/// TASK-684: a take finding a member whose copy of a segment's log is the longest by its bytes,
+/// garbled past a prefix shorter than another member's honest copy, takes the honest one: every
+/// commit told replicated, held by that member alone, is there.
+#[test]
+fn takes_prefer_whole_authentic_copies_to_longer_garbled_ones() {
+    let host = replicated_host();
+    let all = directories(&["a", "b", "c", "d", "e"]);
+    let lost = Lost::default();
+    let peers = |me: &str| Peers { me: me.into(), all: all.clone(), lost: lost.clone() };
+    let writer = Host { runtime: runtime_of_its_own(), bucket: host.bucket.clone() };
+    let dir = MemDir::new();
+    LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
+    let wish = bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated);
+    let recovering = LocalCell::recover_unmade(dir).unwrap();
+    let (store, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).unwrap();
+    store.made().unwrap();
+    store.close_segment().unwrap();
+    uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
+    assert_eq!(addresses(&configuration_named(&host)), ["a", "b", "c"]);
+    let both = commit(&store, 0, 2);
+    uploader.wait_replicated(both).unwrap();
+    // c out of reach: b alone holds what comes next.
+    lost.lock().unwrap().insert("c".into());
+    let last = commit(&store, 2, 3);
+    uploader.wait_replicated(last).unwrap();
+    assert!(uploader.last_uploaded() < last, "told replicated by b, not the bucket");
+    let expected = writer.contents(&store);
+    let replicator = store.replicator().unwrap();
+    lose(writer, (uploader, store, replicator));
+
+    // a lost, c back, answering its logs as longer than b's: d takes the cell.
+    lost.lock().unwrap().remove("c");
+    lost.lock().unwrap().insert("a".into());
+    let garbling = Garbling { peers: peers("d"), garbled: "c".into() };
+    let elsewhere = MemDir::new();
+    LocalCell::make(&elsewhere, DESCRIPTION, Some(URL), None).unwrap();
+    let recovering = LocalCell::recover_unmade(elsewhere).unwrap();
+    let runtime = Runtime {
+        handle: host.runtime.handle().clone(),
+        uploads: Budget::new(Limits::UNBOUNDED),
+        keys: bucket_cell::keys::testing::host(),
+    };
+    let options = upload::Options {
+        interval: Duration::from_secs(3600),
+        members: Some(upload::MembersOf(Arc::new(garbling))),
+        replace_after: Duration::from_secs(1),
+        ..upload::Options::default()
+    };
+    let opened = upload::open(recovering, OPTIONS, host.bucket.clone(), (2, options), &runtime);
+    let (taken, uploader) = opened.unwrap();
+    taken.made().unwrap();
+    assert!(taken.last_commit().unwrap() >= last);
+    assert_eq!(host.contents(&taken), expected);
     drop(uploader);
 }

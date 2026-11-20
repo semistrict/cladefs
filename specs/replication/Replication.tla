@@ -82,7 +82,10 @@
 (*   its own configuration in the same CAS, and none before it acknowledges*)
 (*   past it (AloneNoSwitch, TASK-537.3.6). So does a take that recovered  *)
 (*   from its own copy more than its members can be given (TASK-678), its  *)
-(*   own configuration of F members taking its commits meanwhile.          *)
+(*   own configuration of F members taking its commits meanwhile, from    *)
+(*   what it recovered on (`from`: the code's replicator starts after the  *)
+(*   take's base, its members given none of it, the bucket holding it once *)
+(*   the head names their configuration).                                  *)
 (* - deferQuiet: a take serving so tells nothing Replicated until the head *)
 (*   names its configuration (DeferTellsReplicated, TASK-678).             *)
 (***************************************************************************)
@@ -148,24 +151,31 @@ VARIABLES
     promise,    \* promise[h]: the greatest epoch that fenced h
     inc,        \* inc[h]: h's incarnation
     ses,        \* ses[h]: the writer session on h, or NoSes
+    from,       \* from[k]: the place in sent[k] its members' streams start after (its writer's own
+                \* copy takes all of it): what the bucket holds before they count, TASK-678's
     told,       \* the commits told Replicated or Uploaded
     next,       \* commits made
     losses,     \* disks lost
     crashes     \* daemons crashed
 
-vars == <<head, sent, cfgs, mlog, drop, promise, inc, ses, told, next, losses, crashes>>
+vars == <<head, sent, cfgs, mlog, drop, promise, inc, ses, from, told, next, losses, crashes>>
 
 Member(h, c) == [h |-> h, inc |-> inc[h]] \in c.members
           \/ (~R("incarnation") /\ \E m \in c.members : m.h = h)
 HostsOf(c) == {m.h : m \in c.members}
 
-\* How many of c's members hold its log's first k commits.
-Holding(c, k) == Cardinality({h \in HostsOf(c) : Member(h, c) /\ Len(mlog[h][c.key]) >= k})
+\* Where member h's stream of configuration k starts: after from[k], its writer's own copy at once.
+Start(h, k) == IF h = cfgs[k].w THEN 0 ELSE from[k]
+
+\* How many of c's members hold its log's first k commits: those before their streams' start the
+\* bucket's, which must hold them (the code's Replicator::told).
+Holding(c, k) == Cardinality({h \in HostsOf(c) : Member(h, c) /\ Start(h, c.key) + Len(mlog[h][c.key]) >= k})
 \* An f = 0 configuration holds no quorum: a taker that finds it reads the bucket alone, so nothing
 \* is Replicated in it, nor, by the joint rule, while a writer's drop to it is in flight (found by
 \* TLC: a commit told Replicated on the old configuration and the writer's own copy, the drop's
 \* swap landed, a taker recovering the bucket alone).
-Quorum(c, k) == (c.f >= 1 \/ ~R("zeroNoQuorum")) /\ Holding(c, k) >= c.f + 1
+Quorum(c, k) == (c.f >= 1 \/ ~R("zeroNoQuorum")) /\ Len(head.up) >= from[c.key]
+                /\ Holding(c, k) >= c.f + 1
 
 \* The longest prefix of a log every commit of which was told.
 ToldLen(log) == LET ks == {k \in 0..Len(log) : Range(SubSeq(log, 1, k)) \subseteq told}
@@ -179,6 +189,7 @@ TypeOK ==
 Init ==
     /\ head = [epoch |-> 0, cfg |-> NoCfg, up |-> <<>>]
     /\ sent = [k \in Keys |-> <<>>]
+    /\ from = [k \in Keys |-> 0]
     /\ cfgs = [k \in Keys |-> NoCfg]
     /\ mlog = [h \in Hosts |-> [k \in Keys |-> <<>>]]
     /\ drop = [h \in Hosts |-> [k \in Keys |-> 0]]
@@ -200,10 +211,10 @@ Deliver(h, k) ==
     LET c == cfgs[k] IN
     /\ c # NoCfg
     /\ Member(h, c)
-    /\ Len(mlog[h][k]) < Len(sent[k])
+    /\ Start(h, k) + Len(mlog[h][k]) < Len(sent[k])
     /\ h = c.w \/ ~R("promise") \/ promise[h] <= k[1]
-    /\ mlog' = [mlog EXCEPT ![h][k] = Append(@, sent[k][Len(@) + 1])]
-    /\ UNCHANGED <<head, sent, cfgs, drop, promise, inc, ses, told, next, losses, crashes>>
+    /\ mlog' = [mlog EXCEPT ![h][k] = Append(@, sent[k][Start(h, k) + Len(@) + 1])]
+    /\ UNCHANGED <<head, sent, cfgs, drop, promise, inc, ses, from, told, next, losses, crashes>>
 
 \* Member h drops what of configuration k the head acknowledged (dropAcked), or what its writer
 \* landed (without the rule); or the whole of a configuration the head no longer names.
@@ -212,15 +223,17 @@ Drop(h, k) ==
           /\ LET limit == IF R("dropAcked") THEN Len(head.up)
                           ELSE LET w == cfgs[k].w IN
                                IF w # NoHost /\ ses[w].cfg.key = k THEN ses[w].landed ELSE 0
-               IN /\ drop[h][k] < Min2(limit, Len(mlog[h][k]))
-                  /\ drop' = [drop EXCEPT ![h][k] = Min2(limit, Len(mlog[h][k]))]
+                 \* In its log's places, which start after Start(h, k).
+                 here == IF limit > Start(h, k) THEN limit - Start(h, k) ELSE 0
+               IN /\ drop[h][k] < Min2(here, Len(mlog[h][k]))
+                  /\ drop' = [drop EXCEPT ![h][k] = Min2(here, Len(mlog[h][k]))]
           /\ UNCHANGED mlog
        \/ /\ "sweep" \in Can
           /\ Later(head.cfg.key, k)
           /\ mlog[h][k] # <<>>
           /\ mlog' = [mlog EXCEPT ![h][k] = <<>>]
           /\ drop' = [drop EXCEPT ![h][k] = 0]
-    /\ UNCHANGED <<head, sent, cfgs, promise, inc, ses, told, next, losses, crashes>>
+    /\ UNCHANGED <<head, sent, cfgs, promise, inc, ses, from, told, next, losses, crashes>>
 
 
 (***************************************************************************)
@@ -247,7 +260,7 @@ Take(h) ==
                   !.replies = [m \in Hosts |-> IF self /\ m = h
                                    THEN [log |-> mlog[h][c.key], drop |-> drop[h][c.key]]
                                    ELSE NoReply]]]
-    /\ UNCHANGED <<sent, cfgs, mlog, drop, inc, told, next, losses, crashes>>
+    /\ UNCHANGED <<sent, cfgs, mlog, drop, inc, from, told, next, losses, crashes>>
 
 \* h's take fences member m of the configuration it found, and reads its log: if m has promised no
 \* greater epoch.
@@ -262,7 +275,7 @@ Fence(h, m) ==
     /\ promise' = FenceOf(m, c, s.ep)
     /\ ses' = [ses EXCEPT ![h].fenced = @ \cup {m},
                           ![h].replies[m] = [log |-> mlog[m][c.key], drop |-> drop[m][c.key]]]
-    /\ UNCHANGED <<head, sent, cfgs, mlog, drop, inc, told, next, losses, crashes>>
+    /\ UNCHANGED <<head, sent, cfgs, mlog, drop, inc, from, told, next, losses, crashes>>
 
 \* The members whose reads count: f+1 of them must be other than the old writer, whose own copy no
 \* fence stops, unless h is the old writer's host (fenceOthers).
@@ -271,11 +284,16 @@ Counted(h) ==
     IF R("fenceOthers") THEN {m \in s.fenced : m # s.old.w \/ m = h} ELSE s.fenced
 
 \* What h's take recovers: the head's uploaded prefix, extended by the longest log it read (or by
-\* any one it read, without the rule longest) that dropped nothing the head has not.
+\* any one it read, without the rule longest) that dropped nothing the head has not. A member's log
+\* starts after its stream's start: the head's prefix through it, if the head holds that much, then
+\* the log; if not, a gap, which members of a configuration activated before the bucket held its
+\* writer's base hold past, given up (the code's replicate::trimmed, TASK-680).
 Recovered(h, r) ==
     LET up == head.up
+        b == Start(r, ses[h].old.key)
         log == ses[h].replies[r].log
-    IN IF ses[h].replies[r].drop <= Len(up) /\ Len(log) > Len(up) THEN log ELSE up
+        whole == IF b = 0 THEN log ELSE IF Len(up) >= b THEN SubSeq(up, 1, b) \o log ELSE <<>>
+    IN IF b + ses[h].replies[r].drop <= Len(up) /\ Len(whole) > Len(up) THEN whole ELSE up
 
 \* What f+1 members of h's configuration must hold before it activates: all it recovered
 \* (installOwn); without the rule, only what the members it read held, its own copy aside if it is
@@ -315,7 +333,7 @@ Recover(h) ==
                 /\ ses' = [ses EXCEPT ![h].st = "installing", ![h].cfg = new, ![h].old = NoCfg,
                                       ![h].fenced = {}, ![h].replies = NoSes.replies,
                                       ![h].inst = InstallLen(h, rec)]
-    /\ UNCHANGED <<head, mlog, drop, promise, inc, told, next, losses, crashes>>
+    /\ UNCHANGED <<head, mlog, drop, promise, inc, from, told, next, losses, crashes>>
 
 \* h's take, fenced enough, recovers as Recover does, but has no members for a configuration of
 \* its own (TASK-537.3.6): it serves alone, at f = 0, the head naming the configuration before,
@@ -340,6 +358,8 @@ RecoverAlone(h) ==
                          members |-> {[h |-> m, inc |-> inc[m]] : m \in others \cup {h}}]
              IN /\ cfgs' = [cfgs EXCEPT ![k] = new]
                 /\ sent' = [sent EXCEPT ![k] = rec]
+                \* Its members given none of what it recovered (the code's Replicator::base).
+                /\ from' = [from EXCEPT ![k] = Len(rec)]
                 /\ ses' = [ses EXCEPT ![h].st = "serving", ![h].cfg = new, ![h].old = NoCfg,
                                       ![h].fenced = {}, ![h].replies = NoSes.replies,
                                       ![h].alone = TRUE, ![h].need = Len(rec)]
@@ -356,7 +376,7 @@ Activate(h) ==
        \/ /\ ~R("activate")
           /\ UNCHANGED head
     /\ ses' = [ses EXCEPT ![h].st = "serving"]
-    /\ UNCHANGED <<sent, cfgs, mlog, drop, promise, inc, told, next, losses, crashes>>
+    /\ UNCHANGED <<sent, cfgs, mlog, drop, promise, inc, from, told, next, losses, crashes>>
 
 (***************************************************************************)
 (* A serving writer                                                        *)
@@ -374,7 +394,7 @@ Commit(h) ==
     /\ next' = id
     /\ sent' = [k \in Keys |-> IF k = s.cfg.key \/ (s.pend # NoCfg /\ k = s.pend.key)
                                THEN Append(sent[k], id) ELSE sent[k]]
-    /\ UNCHANGED <<head, cfgs, mlog, drop, promise, inc, ses, told, losses, crashes>>
+    /\ UNCHANGED <<head, cfgs, mlog, drop, promise, inc, ses, from, told, losses, crashes>>
 
 \* h tells the guest the first k commits of its log are Replicated: on a quorum of its
 \* configuration, and of the one replacing it while that one's swap is in flight (joint).
@@ -388,7 +408,7 @@ AckReplicated(h) ==
           /\ Quorum(s.cfg, k)
           /\ s.pend = NoCfg \/ ~R("joint") \/ Quorum(s.pend, k)
           /\ told' = told \cup Range(SubSeq(Log(h), 1, k))
-    /\ UNCHANGED <<head, sent, cfgs, mlog, drop, promise, inc, ses, next, losses, crashes>>
+    /\ UNCHANGED <<head, sent, cfgs, mlog, drop, promise, inc, ses, from, next, losses, crashes>>
 
 \* h's uploader lands its log in the bucket, not yet named by the head. It lands the whole log as
 \* it is: a prefix landed later is the whole log landed earlier, so no behaviour is lost.
@@ -398,7 +418,7 @@ Land(h) ==
     /\ s.st = "serving"
     /\ s.landed < Len(Log(h))
     /\ ses' = [ses EXCEPT ![h].landed = Len(Log(h))]
-    /\ UNCHANGED <<head, sent, cfgs, mlog, drop, promise, inc, told, next, losses, crashes>>
+    /\ UNCHANGED <<head, sent, cfgs, mlog, drop, promise, inc, from, told, next, losses, crashes>>
 
 \* The head's swap acknowledging what h landed, a CAS on its epoch; the guest told it is Uploaded.
 Acknowledge(h) ==
@@ -414,7 +434,7 @@ Acknowledge(h) ==
                                   !.cfg = IF switch THEN s.cfg ELSE @]
           /\ ses' = IF switch THEN [ses EXCEPT ![h].alone = FALSE] ELSE ses
     /\ told' = told \cup Range(SubSeq(Log(h), 1, s.landed))
-    /\ UNCHANGED <<sent, cfgs, mlog, drop, promise, inc, next, losses, crashes>>
+    /\ UNCHANGED <<sent, cfgs, mlog, drop, promise, inc, from, next, losses, crashes>>
 
 \* h replaces members of its configuration, or drops to f = 0 (itself alone): the new one's
 \* stream starts with h's whole log, and takes its commits from now on.
@@ -432,6 +452,8 @@ Replace(h) ==
                          members |-> {[h |-> m, inc |-> inc[m]] : m \in others \cup {h}}]
              IN /\ cfgs' = [cfgs EXCEPT ![k] = new]
                 /\ sent' = [sent EXCEPT ![k] = Log(h)]
+                \* Given what the replicator spools, as its own configuration's members are.
+                /\ from' = [from EXCEPT ![k] = from[s.cfg.key]]
                 /\ ses' = [ses EXCEPT ![h].pend = new, ![h].replaces = @ + 1]
     /\ UNCHANGED <<head, mlog, drop, promise, inc, told, next, losses, crashes>>
 
@@ -448,7 +470,7 @@ Issue(h) ==
        THEN ~R("zeroAfterUpload") \/ Len(head.up) >= need
        ELSE ~R("installFirst") \/ Quorum(s.pend, need)
     /\ ses' = [ses EXCEPT ![h].issued = TRUE, ![h].cas = s.pend]
-    /\ UNCHANGED <<head, sent, cfgs, mlog, drop, promise, inc, told, next, losses, crashes>>
+    /\ UNCHANGED <<head, sent, cfgs, mlog, drop, promise, inc, from, told, next, losses, crashes>>
 
 \* The bucket applies h's CAS, if the head is still h's at its epoch and configuration: the CAS
 \* sent, `cas`, whether or not h gave its replacement up since.
@@ -459,7 +481,7 @@ Lands(h) ==
     /\ head.epoch = s.ep
     /\ head.cfg = s.cfg \/ s.alone
     /\ head' = [head EXCEPT !.cfg = s.cas]
-    /\ UNCHANGED <<sent, cfgs, mlog, drop, promise, inc, ses, told, next, losses, crashes>>
+    /\ UNCHANGED <<sent, cfgs, mlog, drop, promise, inc, ses, from, told, next, losses, crashes>>
 
 \* h learns its CAS landed: the replacement is its configuration from now on.
 Learn(h) ==
@@ -469,7 +491,7 @@ Learn(h) ==
     /\ head.cfg = s.pend
     /\ ses' = [ses EXCEPT ![h].cfg = s.pend, ![h].pend = NoCfg, ![h].issued = FALSE,
                           ![h].cas = NoCfg, ![h].alone = FALSE]
-    /\ UNCHANGED <<head, sent, cfgs, mlog, drop, promise, inc, told, next, losses, crashes>>
+    /\ UNCHANGED <<head, sent, cfgs, mlog, drop, promise, inc, from, told, next, losses, crashes>>
 
 \* h gives its replacement up, its CAS not sent (abandonUnissued), as its members took not the tail
 \* in time (TASK-537.3.5): its configuration alone counts again. Without the rule, a CAS in flight
@@ -481,7 +503,7 @@ Abandon(h) ==
     /\ s.pend # NoCfg
     /\ ~s.issued \/ ~R("abandonUnissued")
     /\ ses' = [ses EXCEPT ![h].pend = NoCfg, ![h].issued = FALSE]
-    /\ UNCHANGED <<head, sent, cfgs, mlog, drop, promise, inc, told, next, losses, crashes>>
+    /\ UNCHANGED <<head, sent, cfgs, mlog, drop, promise, inc, from, told, next, losses, crashes>>
 
 (***************************************************************************)
 (* Failures                                                                *)
@@ -493,7 +515,7 @@ CrashDaemon(h) ==
     /\ ses[h] # NoSes
     /\ crashes' = crashes + 1
     /\ ses' = [ses EXCEPT ![h] = NoSes]
-    /\ UNCHANGED <<head, sent, cfgs, mlog, drop, promise, inc, told, next, losses>>
+    /\ UNCHANGED <<head, sent, cfgs, mlog, drop, promise, inc, from, told, next, losses>>
 
 \* h's disk is lost: its logs and promises with it, its session too, and it comes back a new
 \* incarnation.
@@ -505,7 +527,7 @@ LoseDisk(h) ==
     /\ drop' = [drop EXCEPT ![h] = [k \in Keys |-> 0]]
     /\ promise' = [promise EXCEPT ![h] = 0]
     /\ inc' = [inc EXCEPT ![h] = @ + 1]
-    /\ UNCHANGED <<head, sent, cfgs, told, next, crashes>>
+    /\ UNCHANGED <<head, sent, cfgs, from, told, next, crashes>>
 
 Next ==
     \E h \in Hosts :
@@ -539,8 +561,9 @@ HistoryIsPrefix ==
     \A h \in Hosts :
         (ses[h].st = "serving" /\ ses[h].ep = head.epoch) => IsPrefix(head.up, Log(h))
 
-\* Every member's log of a configuration is a prefix of its writer's.
+\* Every member's log of a configuration is a prefix of its writer's, from its stream's start.
 MembersArePrefixes ==
-    \A h \in Hosts, k \in Keys : IsPrefix(mlog[h][k], sent[k])
+    \A h \in Hosts, k \in Keys :
+        IsPrefix(mlog[h][k], SubSeq(sent[k], Start(h, k) + 1, Len(sent[k])))
 
 =============================================================================

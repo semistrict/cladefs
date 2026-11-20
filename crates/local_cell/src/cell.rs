@@ -932,6 +932,22 @@ impl<D: Dir> Recovering<D> {
         commit == wal.start() || commit.is_some_and(|commit| commits.any(|&own| own == commit))
     }
 
+    /// cladefs: whether its write-ahead log holds `commit`, a member's last (TASK-678's review): a
+    /// commit of `commit`'s writer at or past its place, or its start. A writer makes one sequence,
+    /// so a log holding a commit of its past `commit`'s place holds `commit` too. Its segments'
+    /// footers name only some of their commits, each segment's last: a log holding `commit` may be
+    /// found not to, which costs a take its seed, never its safety.
+    pub fn holds_commits(&self, commit: Option<u64>) -> bool {
+        use extent_frame::segment::{epoch_of, writer_of};
+        let Some(commit) = commit else { return true };
+        let segments = self.wal.segments.iter().map(|(footer, _)| &footer.contents);
+        let closing = self.wal.closing.values().flatten();
+        let mut commits = segments.chain(closing).flat_map(|contents| &contents.commits);
+        let of =
+            |own: u64| writer_of(own) == writer_of(commit) && epoch_of(own) >= epoch_of(commit);
+        self.wal.start.is_some_and(of) || commits.any(|&own| of(own))
+    }
+
     /// The write-ahead log, as its directory holds it: stamped as it was.
     fn wal(&self) -> Wal<u64> {
         Wal::of(self.wal.start, self.wal.segments.iter().cloned())

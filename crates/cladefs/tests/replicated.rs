@@ -476,7 +476,7 @@ fn takes_of_cells_whose_members_are_lost_go_on_by_force() {
     let client = connect(&daemons[spare], &taken);
     check(&client, 1..=2);
     let stat = daemons[spare].control.stat_cell(&taken).unwrap();
-    assert_eq!(stat.forced_after, uploaded, "{stat:?}");
+    assert_eq!(stat.forced_after, Some(uploaded), "{stat:?}");
     write(&client, 5..=6);
     check(&client, 5..=6);
 }

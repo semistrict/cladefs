@@ -137,7 +137,7 @@ forced (TASK-681), on a host holding its store by placing that forced
 taking it forced (`cladefsctl take --force DIR CAPACITY CELL TOKEN`,
 `CreateCell`'s `force`). That placement's takes go on with the members that answer
 and the bucket, and lose what only the others held; `StatCell`'s `forced_after`
-names the last commit recovered.
+names the last commit the bucket held, past which commits told Replicated may be lost.
 
 ### Buckets and their numbers
 
