@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-18 21:17'
-updated_date: '2026-11-20 04:50'
+updated_date: '2026-11-20 08:21'
 labels:
   - cladefsd
   - flaky
@@ -41,4 +41,6 @@ On ubu1 (2026-11-18), three full workspace runs each had one test process abort 
 Seen again on ubu1 2026-11-19 (branch t3/mirrors at 439a7068c, TASK-633.8): cladefs::tenants tenants_hold_their_own_pages SIGABRT after 'test result: ok', stderr only the DAX window INFO lines; 3072/3073 otherwise. The run on 50933bf33 before it was clean (3069/3069).
 
 Seen 2026-11-20 on ubu1 (t3/sim-spike, scripts/test.sh workspace under fxjob, --test-threads 4): cladefsd::tests::snapshots_after_private_pages_are_rebound_restore_their_bytes passed, then SIGABRT at exit; passed alone right after.
+
+2026-11-20 on ubu1: cladefs's snapshots_after_private_pages_are_rebound_restore_their_bytes and tenants::tenants_hold_their_own_pages pass, then SIGABRT at exit; stressed together 60 times: main e052b73f 5 failed, t3/async-1 2 failed. Both seen in full workspace runs.
 <!-- SECTION:NOTES:END -->
