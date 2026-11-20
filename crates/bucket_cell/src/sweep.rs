@@ -428,6 +428,10 @@ impl<B: Bucket> Bucket for Counted<B> {
         self.bucket.delete_batch(keys)
     }
 
+    fn rewritable(&self, key: &str) -> impl Future<Output = ()> + Send {
+        self.bucket.rewritable(key)
+    }
+
     fn now(&self) -> u64 {
         self.bucket.now()
     }

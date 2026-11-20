@@ -19,6 +19,9 @@
 //! its credentials, stalls its stores' guests' commits at their lag bound (doc-7, decision 3),
 //! which the log says why of. And once a write fails, writes of its kind take turns ([`Turns`],
 //! TASK-382): one at a time, probing the bucket, until one is answered, then more as more are.
+//! Updates take none: each is of its own key, which GCS refuses a write of within about a second of
+//! the last, while it takes the others' (TASK-690). A bucket spaces its writes of a key as its
+//! store needs ([`Rewrites`]).
 //!
 //! cladefs: a level of keys listed by delimiter, it lists a page a request where the store pages
 //! (S3, GCS and Azure, [`PaginatedListStore`]), as many prefixes and objects as the page asks, never
@@ -80,6 +83,69 @@ pub struct ObjectBucket {
     /// those this process mirrors ([`ObjectBucket::mirror_wanted`]), each by its cell and where it
     /// is.
     mirrors: std::sync::Mutex<Mirrors>,
+    /// cladefs: how far apart its store takes writes of one key, and when it last wrote each
+    /// (TASK-690): shared with its own store's twin ([`ObjectBucket::own`]).
+    rewrites: Arc<Rewrites>,
+}
+
+/// cladefs: how long after GCS takes a write of an object it takes another: about one a second,
+/// refusing more with `429 Too Many Requests` ("The rate of change requests to the object ... exceeds
+/// the rate limit", Cloud Storage's quotas: "up to once per second" for one object). S3 and Azure
+/// have no such limit (TASK-690).
+pub const GCS_REWRITE_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// cladefs: how far apart a bucket's store takes writes of one key, and when the bucket's last write
+/// of each was answered, for each write of it to wait out the rest of that time first (TASK-690):
+/// GCS's second ([`GCS_REWRITE_EVERY`]), none for other stores, which wait for nothing.
+#[derive(Debug, Default)]
+struct Rewrites {
+    every: std::time::Duration,
+    written: std::sync::Mutex<Written>,
+}
+
+/// cladefs: when a bucket's last write of each key was answered, of those within [`Rewrites::every`]
+/// of their last pruning, at least.
+#[derive(Debug, Default)]
+struct Written {
+    at: std::collections::HashMap<Path, tokio::time::Instant>,
+    /// How many it may hold before those past [`Rewrites::every`] are pruned: twice as many as it
+    /// kept the last time, so that pruning costs each write a constant share.
+    prune_at: usize,
+}
+
+impl Rewrites {
+    /// The fewest keys whose writes are kept before any are pruned.
+    const PRUNE_AT: usize = 1024;
+
+    fn written(&self) -> std::sync::MutexGuard<'_, Written> {
+        self.written.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Waits until the store takes another write of `path`: [`Rewrites::every`] after its last
+    /// was answered.
+    async fn wait(&self, path: &Path) {
+        if self.every.is_zero() {
+            return;
+        }
+        let last = self.written().at.get(path).copied();
+        if let Some(last) = last {
+            tokio::time::sleep_until(last + self.every).await;
+        }
+    }
+
+    /// A write of `path` was answered, now.
+    fn wrote(&self, path: &Path) {
+        if self.every.is_zero() {
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        let mut written = self.written();
+        if written.at.len() >= written.prune_at.max(Self::PRUNE_AT) {
+            written.at.retain(|_, at| now.duration_since(*at) < self.every);
+            written.prune_at = 2 * written.at.len();
+        }
+        written.at.insert(path.clone(), now);
+    }
 }
 
 /// cladefs: a mirror's turn among this process's mirrors of one version, by its cell and where it
@@ -202,6 +268,14 @@ impl Request {
             Self::ListDelimited => "bucket.list_delimited",
             Self::DeleteBatch => "bucket.delete_batch",
         }
+    }
+
+    /// cladefs: whether its writes take turns once one failed ([`Turns`], TASK-382): all but an
+    /// update, of a key of its own, a cell's head, which says nothing of the store by failing as
+    /// GCS refuses a write of a key within about a second of the last, while it takes others'; it
+    /// backs off alone, as its retries do (TASK-690).
+    fn takes_turns(self) -> bool {
+        self != Self::Update
     }
 
     /// Its name in [`Stats::line`].
@@ -562,7 +636,9 @@ impl Timed<'_> {
             let answer = error(&failure);
             if answer == Error::Unavailable {
                 self.counts.failures[self.request as usize].fetch_add(1, Ordering::Relaxed);
-                self.counts.turns[self.request as usize].failed();
+                if self.request.takes_turns() {
+                    self.counts.turns[self.request as usize].failed();
+                }
                 self.counts.failing[self.request as usize].failed(
                     self.request,
                     &object(),
@@ -573,7 +649,9 @@ impl Timed<'_> {
         });
         if !matches!(answered, Err(Error::Unavailable)) {
             self.counts.failing[self.request as usize].answered(self.request);
-            self.counts.turns[self.request as usize].answered();
+            if self.request.takes_turns() {
+                self.counts.turns[self.request as usize].answered();
+            }
         }
         let logged = log::log_enabled!(log::Level::Debug).then(object);
         let ms = || self.started.elapsed().as_secs_f64() * 1e3;
@@ -624,7 +702,7 @@ impl ObjectBucket {
         let (counts, honoured, decoded, known) = Default::default();
         let (marks, objectids) = (crate::marks::Watch::new(), crate::objectid::Allocator::new());
         let (route, own, mirrored) = (None, std::sync::OnceLock::new(), Default::default());
-        let mirrors = Default::default();
+        let (mirrors, rewrites) = Default::default();
         Self {
             store,
             pages,
@@ -639,7 +717,21 @@ impl ObjectBucket {
             own,
             mirrored,
             mirrors,
+            rewrites,
         }
+    }
+
+    /// cladefs: the bucket `reached` reaches ([`reach`]), spacing its writes of a key as its store
+    /// needs.
+    fn reached(reached: Reached) -> Self {
+        let Reached { objects, pages, prefix, rewrite_every } = reached;
+        Self::paged(objects, pages, &prefix).rewriting_every(rewrite_every)
+    }
+
+    /// cladefs: the same bucket, each write of a key at least `every` after the last of it was
+    /// answered, as its store takes them no faster (TASK-690): GCS's [`GCS_REWRITE_EVERY`].
+    pub fn rewriting_every(self, every: std::time::Duration) -> Self {
+        Self { rewrites: Arc::new(Rewrites { every, ..Rewrites::default() }), ..self }
     }
 
     /// cladefs: its own store, every request of it there whatever cell its keys are of, unrouted
@@ -655,8 +747,10 @@ impl ObjectBucket {
 
     /// cladefs: its own store, unrouted, made once ([`ObjectBucket::own`]).
     fn twin(&self) -> &Arc<ObjectBucket> {
-        let own =
-            || Arc::new(ObjectBucket::paged(self.store.clone(), self.pages.clone(), &self.prefix));
+        let own = || {
+            let twin = ObjectBucket::paged(self.store.clone(), self.pages.clone(), &self.prefix);
+            Arc::new(ObjectBucket { rewrites: self.rewrites.clone(), ..twin })
+        };
         self.own.get_or_init(own)
     }
 
@@ -946,8 +1040,7 @@ impl ObjectBucket {
     /// reads them; the emulator, Azurite, with `AZURE_STORAGE_USE_EMULATOR=true`. Blob Storage's
     /// conditional writes (If-None-Match: *, If-Match on ETags) are those doc-7 relies on.
     pub fn from_url(url: &str) -> Result<Self, String> {
-        let Reached { objects, pages, prefix } = reach(url, std::env::vars(), &Client::DEFAULT)?;
-        Ok(Self::paged(objects, pages, &prefix))
+        Ok(Self::reached(reach(url, std::env::vars(), &Client::DEFAULT)?))
     }
 
     /// cladefs: the bucket numbered `number` at `url`, as [`ObjectBucket::from_url`] reaches it,
@@ -956,8 +1049,7 @@ impl ObjectBucket {
     /// registry of buckets never holds.
     pub fn from_url_numbered(url: &str, number: u16) -> Result<Self, String> {
         let options = numbered_options(std::env::vars(), number);
-        let Reached { objects, pages, prefix } = reach(url, options, &Client::DEFAULT)?;
-        Ok(Self::paged(objects, pages, &prefix))
+        Ok(Self::reached(reach(url, options, &Client::DEFAULT)?))
     }
 
     fn path(&self, key: &str) -> Path {
@@ -1032,6 +1124,10 @@ pub(crate) struct Reached {
     pub pages: Pages,
     /// The prefix the URL names in it.
     pub prefix: String,
+    /// cladefs: how far apart its store takes writes of one key ([`Rewrites`], TASK-690): GCS's
+    /// [`GCS_REWRITE_EVERY`], or a degraded store's that refuses them faster
+    /// ([`crate::faults::Fault::rewrite_every`]).
+    pub rewrite_every: std::time::Duration,
 }
 
 /// cladefs: opens other buckets by the registry of buckets (TASK-633.3, TASK-633.4): the bucket
@@ -1058,9 +1154,9 @@ impl Registered {
         let number = entry.number;
         let url = entry.details.url.as_deref().ok_or(crate::Error::NoBucket(number))?;
         let options = numbered_options(self.vars.iter().cloned(), number);
-        let Reached { objects, pages, prefix } = reach(url, options, &Client::DEFAULT)
+        let reached = reach(url, options, &Client::DEFAULT)
             .map_err(|err| crate::Error::Read(format!("bucket {number} at {url}: {err}")))?;
-        let bucket = ObjectBucket::paged(objects, pages, &prefix);
+        let bucket = ObjectBucket::reached(reached);
         crate::identity::verified(entry, crate::identity::get(&bucket).await?)?;
         Ok(bucket)
     }
@@ -1152,11 +1248,18 @@ pub(crate) fn reach(
         }
         _ => cloud(&url, options, client).map_err(|error| format!("{url}: {error}"))?,
     };
+    let mut rewrite_every = match provider_of(url.as_str())? {
+        "gcs" => GCS_REWRITE_EVERY,
+        _ => std::time::Duration::ZERO,
+    };
     let (objects, pages): (Arc<dyn ObjectStore>, _) = match crate::faults::Faults::from_env()? {
-        Some(faults) => (Arc::new(crate::faults::Faulty::new(store, faults)), None),
+        Some(faults) => {
+            rewrite_every = rewrite_every.max(faults.now().rewrite_every);
+            (Arc::new(crate::faults::Faulty::new(store, faults)), None)
+        }
         None => (store, pages),
     };
-    Ok(Reached { objects, pages, prefix: path.as_ref().to_owned() })
+    Ok(Reached { objects, pages, prefix: path.as_ref().to_owned(), rewrite_every })
 }
 
 /// The store of a URL of a cloud's, or of memory, the same store as it lists a level of keys a
@@ -1390,12 +1493,18 @@ impl ObjectBucket {
         };
         let upload = Upload::of(key);
         async move {
+            // cladefs: as long after its last write of the key as the store needs (TASK-690).
+            self.rewrites.wait(&path).await;
             // cladefs: its turn, once a write of its kind failed (TASK-382).
-            let _turn = self.counts.turns[request as usize].turn().await;
+            let _turn = match request.takes_turns() {
+                true => self.counts.turns[request as usize].turn().await,
+                false => None,
+            };
             let timed = self.counts.request(request, Some(&path));
             let len = bytes.len() as u64;
             let options = PutOptions { mode, ..PutOptions::default() };
             let result = store.put_opts(&path, PutPayload::from(bytes), options).await;
+            self.rewrites.wrote(&path);
             let result = timed.answered(result, |_| len as usize)?;
             self.counts.uploaded[upload as usize].fetch_add(len, Ordering::Relaxed);
             Ok(Version { e_tag: result.e_tag, version: result.version })
@@ -1526,6 +1635,15 @@ impl Bucket for ObjectBucket {
         match self.member(key).await? {
             Some(member) => member.store_put(key, bytes, mode).await,
             None => self.store_put(key, bytes, mode).await,
+        }
+    }
+
+    /// cladefs: as the store its writes of `key` go to takes them (TASK-690); its own, if which
+    /// that is can't be told now, as the write will find out.
+    async fn rewritable(&self, key: &str) {
+        match self.member(key).await {
+            Ok(Some(member)) => member.rewrites.wait(&member.path(key)).await,
+            Ok(None) | Err(_) => self.rewrites.wait(&self.path(key)).await,
         }
     }
 
@@ -2694,6 +2812,43 @@ pub(crate) mod tests {
         assert_eq!(waits, [50, 100, 200, 400, 800, 1600, 3200, 5000, 5000, 5000]);
     }
 
+    /// TASK-690: a bucket of a store that takes a key's writes a second apart, as GCS does, writes
+    /// each key no sooner than that after its last write of it, and other keys at once; none is
+    /// refused. And an update the store refuses holds back no update of another key, as a failed
+    /// write of a kind held back every write of its kind (TASK-382): each update is of its own key.
+    #[tokio::test(start_paused = true)]
+    async fn writes_of_a_key_are_spaced_as_its_store_takes_them() {
+        use crate::faults::{Fault, Faults, Faulty};
+        use std::time::Duration;
+        let second = Duration::from_secs(1);
+        let faults = Faults::new(Duration::ZERO, None);
+        faults.set(Fault { rewrite_every: second, ..Fault::default() });
+        let objects = Arc::new(object_store::memory::InMemory::new());
+        let gcs = Arc::new(Faulty::new(objects.clone(), faults.clone()));
+        let spaced = ObjectBucket::new(gcs, "").rewriting_every(second);
+        let start = tokio::time::Instant::now();
+        let first = spaced.put("head", vec![1].into(), PutMode::Create).await.unwrap();
+        spaced.put("head", vec![2].into(), PutMode::Update(first)).await.unwrap();
+        assert_eq!(start.elapsed(), second);
+        spaced.put("other", vec![1].into(), PutMode::Create).await.unwrap();
+        assert_eq!(start.elapsed(), second);
+        spaced.rewritable("head").await;
+        assert_eq!(start.elapsed(), 2 * second);
+        spaced.rewritable("never written").await;
+        assert_eq!(start.elapsed(), 2 * second);
+        assert_eq!(spaced.stats().failures(Request::Update), 0);
+
+        let unspaced = ObjectBucket::new(Arc::new(Faulty::new(objects, faults)), "");
+        let a = unspaced.put("a", vec![1].into(), PutMode::Create).await.unwrap();
+        let refused = unspaced.put("a", vec![2].into(), PutMode::Update(a)).await;
+        assert_eq!(refused, Err(Error::Unavailable));
+        let head = unspaced.head("head").await.unwrap().version;
+        let start = tokio::time::Instant::now();
+        unspaced.put("head", vec![3].into(), PutMode::Update(head)).await.unwrap();
+        assert_eq!(start.elapsed(), Duration::ZERO);
+        assert_eq!(unspaced.stats().failures(Request::Update), 1);
+    }
+
     /// TASK-382: a host's uploads, as many as its upload memory holds, each sending its object whole
     /// every try, to a full bucket: 48 creates failing for 92.5 s. Each tried on its own, they
     /// failed 25 times each, 1,200 objects sent; taking turns, the first fails and the others wait,
@@ -2721,7 +2876,7 @@ pub(crate) mod tests {
         // Reads answer meanwhile, a full bucket's, and take no turn.
         assert_eq!(store.get("other").await.map(|object| object.bytes), Err(Error::NotFound));
         let second = std::time::Duration::from_secs(1);
-        faults.set(Fault { latency: second, failing: Failing::Not });
+        faults.set(Fault { latency: second, failing: Failing::Not, ..Fault::default() });
         let mut landed = Vec::new();
         for create in creates {
             landed.push(create.await.unwrap());
@@ -3427,8 +3582,7 @@ pub(crate) mod tests {
     /// cladefs: a bucket of the S3 server in memory (TASK-205), under `prefix`, through `client`.
     fn s3(server: &S3Server, prefix: &str, client: &Client) -> Arc<ObjectBucket> {
         let url = format!("s3://{}/{prefix}", crate::s3_server::BUCKET);
-        let Reached { objects, pages, prefix } = reach(&url, server.options(), client).unwrap();
-        Arc::new(ObjectBucket::paged(objects, pages, &prefix))
+        Arc::new(ObjectBucket::reached(reach(&url, server.options(), client).unwrap()))
     }
 
     fn runtime() -> tokio::runtime::Runtime {

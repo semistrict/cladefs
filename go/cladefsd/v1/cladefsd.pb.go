@@ -222,7 +222,13 @@ type CreateCellRequest struct {
 	Replicas *uint32 `protobuf:"varint,9,opt,name=replicas,proto3,oneof" json:"replicas,omitempty"`
 	// What its guest's fsync waits for (doc-12, doc-21), given with `replicas` alone (INVALID_ARGUMENT
 	// otherwise): FSYNC_LEVEL_REPLICATED needs replicas of 1 or more.
-	Fsync         FsyncLevel `protobuf:"varint,10,opt,name=fsync,proto3,enum=cladefs.cladefsd.v1.FsyncLevel" json:"fsync,omitempty"`
+	Fsync FsyncLevel `protobuf:"varint,10,opt,name=fsync,proto3,enum=cladefs.cladefsd.v1.FsyncLevel" json:"fsync,omitempty"`
+	// Whether its taking of a replicated cell is forced (doc-21, TASK-681), as PlaceCell's `force`
+	// places a store: it goes on with the members of the configuration the cell's head names that
+	// answer, fewer than a take needs, as when f+1 of them are gone for good; commits told replicated
+	// that only the others held are lost, and StatCell's forced_after says past which commit. With
+	// `token`, the placement it is placed at is forced from then on.
+	Force         bool `protobuf:"varint,11,opt,name=force,proto3" json:"force,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -311,6 +317,13 @@ func (x *CreateCellRequest) GetFsync() FsyncLevel {
 		return x.Fsync
 	}
 	return FsyncLevel_FSYNC_LEVEL_ORDERED
+}
+
+func (x *CreateCellRequest) GetForce() bool {
+	if x != nil {
+		return x.Force
+	}
+	return false
 }
 
 // The store made.
@@ -917,7 +930,13 @@ type PlaceCellRequest struct {
 	// The store, or the fork, to place.
 	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
 	// The placement's fencing token, its boot ID: greater than every earlier placement's.
-	Token         uint64 `protobuf:"varint,2,opt,name=token,proto3" json:"token,omitempty"`
+	Token uint64 `protobuf:"varint,2,opt,name=token,proto3" json:"token,omitempty"`
+	// Whether this placement's takings of a replicated cell are forced (doc-21, TASK-681): a taking
+	// goes on with the members of the configuration the cell's head names that answer, fewer than
+	// a take needs, as when f+1 of them are gone for good, and recovers what they hold. Commits told
+	// replicated that only the others held are lost; StatCell's forced_after says past which
+	// commit. A later placement is not forced unless it asks.
+	Force         bool `protobuf:"varint,3,opt,name=force,proto3" json:"force,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -964,6 +983,13 @@ func (x *PlaceCellRequest) GetToken() uint64 {
 		return x.Token
 	}
 	return 0
+}
+
+func (x *PlaceCellRequest) GetForce() bool {
+	if x != nil {
+		return x.Force
+	}
+	return false
 }
 
 // The store placed.
@@ -1829,8 +1855,12 @@ type StatCellResponse struct {
 	MembersUp uint32 `protobuf:"varint,26,opt,name=members_up,json=membersUp,proto3" json:"members_up,omitempty"`
 	// The f of its active configuration: less than replicas once it dropped to f = 0, degraded.
 	ActiveReplicas uint32 `protobuf:"varint,27,opt,name=active_replicas,json=activeReplicas,proto3" json:"active_replicas,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// If its writer's taking was forced (PlaceCell's or CreateCell's force) and fenced fewer members
+	// than a take needs: the commit number of the last commit the bucket held, past which commits told
+	// replicated may be lost (TASK-681); 0 if the bucket held none. Unset if not.
+	ForcedAfter   *uint64 `protobuf:"varint,28,opt,name=forced_after,json=forcedAfter,proto3,oneof" json:"forced_after,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *StatCellResponse) Reset() {
@@ -2034,6 +2064,13 @@ func (x *StatCellResponse) GetMembersUp() uint32 {
 func (x *StatCellResponse) GetActiveReplicas() uint32 {
 	if x != nil {
 		return x.ActiveReplicas
+	}
+	return 0
+}
+
+func (x *StatCellResponse) GetForcedAfter() uint64 {
+	if x != nil && x.ForcedAfter != nil {
+		return *x.ForcedAfter
 	}
 	return 0
 }
@@ -4256,7 +4293,7 @@ var File_cladefs_cladefsd_v1_cladefsd_proto protoreflect.FileDescriptor
 
 const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\n" +
-	"\"cladefs/cladefsd/v1/cladefsd.proto\x12\x13cladefs.cladefsd.v1\"\xb8\x02\n" +
+	"\"cladefs/cladefsd/v1/cladefsd.proto\x12\x13cladefs.cladefsd.v1\"\xce\x02\n" +
 	"\x11CreateCellRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\x12\x19\n" +
@@ -4266,7 +4303,8 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x04kind\x18\a \x01(\x0e2\x1d.cladefs.cladefsd.v1.CellKindR\x04kind\x12\x1f\n" +
 	"\breplicas\x18\t \x01(\rH\x01R\breplicas\x88\x01\x01\x125\n" +
 	"\x05fsync\x18\n" +
-	" \x01(\x0e2\x1f.cladefs.cladefsd.v1.FsyncLevelR\x05fsyncB\b\n" +
+	" \x01(\x0e2\x1f.cladefs.cladefsd.v1.FsyncLevelR\x05fsync\x12\x14\n" +
+	"\x05force\x18\v \x01(\bR\x05forceB\b\n" +
 	"\x06_tokenB\v\n" +
 	"\t_replicasJ\x04\b\x03\x10\x04J\x04\b\b\x10\t\"F\n" +
 	"\x12CreateCellResponse\x12\x16\n" +
@@ -4299,10 +4337,11 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x11ResizeCellRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\"\x14\n" +
-	"\x12ResizeCellResponse\"<\n" +
+	"\x12ResizeCellResponse\"R\n" +
 	"\x10PlaceCellRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x14\n" +
-	"\x05token\x18\x02 \x01(\x04R\x05token\"\x13\n" +
+	"\x05token\x18\x02 \x01(\x04R\x05token\x12\x14\n" +
+	"\x05force\x18\x03 \x01(\bR\x05force\"\x13\n" +
 	"\x11PlaceCellResponse\"K\n" +
 	"\x12MakeVersionRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1b\n" +
@@ -4339,7 +4378,7 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x04path\x18\x01 \x01(\tR\x04path\"\x12\n" +
 	"\x10SyncCellResponse\"%\n" +
 	"\x0fStatCellRequest\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\"\xbb\x06\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\"\xf4\x06\n" +
 	"\x10StatCellResponse\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\x12\x12\n" +
 	"\x04used\x18\x03 \x01(\x04R\x04used\x12\x1c\n" +
@@ -4370,7 +4409,9 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\bdegraded\x18\x19 \x01(\bR\bdegraded\x12\x1d\n" +
 	"\n" +
 	"members_up\x18\x1a \x01(\rR\tmembersUp\x12'\n" +
-	"\x0factive_replicas\x18\x1b \x01(\rR\x0eactiveReplicasJ\x04\b\x01\x10\x02J\x04\b\x15\x10\x16\"\x12\n" +
+	"\x0factive_replicas\x18\x1b \x01(\rR\x0eactiveReplicas\x12&\n" +
+	"\fforced_after\x18\x1c \x01(\x04H\x00R\vforcedAfter\x88\x01\x01B\x0f\n" +
+	"\r_forced_afterJ\x04\b\x01\x10\x02J\x04\b\x15\x10\x16\"\x12\n" +
 	"\x10ListCellsRequest\"L\n" +
 	"\x11ListCellsResponse\x127\n" +
 	"\x06stores\x18\x01 \x03(\v2\x1f.cladefs.cladefsd.v1.ListedCellR\x06stores\"[\n" +
@@ -4793,6 +4834,7 @@ func file_cladefs_cladefsd_v1_cladefsd_proto_init() {
 		return
 	}
 	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[0].OneofWrappers = []any{}
+	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[30].OneofWrappers = []any{}
 	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[35].OneofWrappers = []any{}
 	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[38].OneofWrappers = []any{}
 	file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[42].OneofWrappers = []any{}

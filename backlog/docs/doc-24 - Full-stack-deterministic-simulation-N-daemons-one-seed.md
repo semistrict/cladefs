@@ -3,7 +3,7 @@ id: doc-24
 title: 'Full-stack deterministic simulation: N daemons, one seed'
 type: specification
 created_date: '2026-11-20 03:31'
-updated_date: '2026-11-20 08:00'
+updated_date: '2026-11-20 10:11'
 ---
 # Full-stack deterministic simulation
 
@@ -376,6 +376,67 @@ and check phase (`World::run`'s quiesce).
    - `MemDir` and the simulated bucket answering short reads and writes, and slow syncs.
 10. **Reseeding from a step** for triage: a failing seed replayed to step k, then reseeded, mapping
     how likely the failure is from each k.
+
+**What FoundationDB's history says found its bugs (2026-11-20).** Read from its 31,966 commits
+since 2017-05, as 12,001 PR-sized units. 2,560 of them are bug fixes, and 1,377 of those PRs'
+descriptions were read from GitHub. Only about 13% of the fixes say how their bug was found, so
+every share below is a floor.
+
+- **Simulation runs found the most.** 161 fixes were checked by hand as found by a simulation
+  seed; between 160 and 550 by estimate. 10% of the fixes in patch releases cite one.
+- **Sanitizers on simulation seeds came second**: valgrind, ASAN, UBSAN, TSAN and LSAN, with 139
+  fixes, at least 49 of them on simulation seeds. Their ensembles run the same seeds as the
+  simulation's.
+- **Everything else found little**: static analysis about 12, the binding tester about 9,
+  production about 6 (a floor, as Apple's and Snowflake's internal trackers aren't read), unit tests
+  about 4, review 2 or 3, fuzzers none.
+
+Within the simulation:
+
+- **How the 161 failures showed:**
+  - crashes and memory errors, about 55;
+  - asserts, about 49;
+  - hangs and timeouts, about 30 (19%);
+  - a workload's own invariant check, about 26;
+  - only an error event, about 17;
+  - a determinism mismatch, about 8.
+- **Faults named:**
+  - restart and upgrade tests, 11;
+  - kills, 8;
+  - clogging and partitions, 7 to 10;
+  - a buggified knob, 5 or 6;
+  - Rollback, 4;
+  - disk-fault injection, none.
+- **BUGGIFY**: runs with it on found about 1.9 times as many bugs as runs with it off (a small
+  sample: 0.9 to 3.9 times).
+- **Probe-coverage reports**: no fix cites one. Probes appear in fixes, to show the situation fixed
+  is reached.
+- **Scale**: fixes cite ensembles of 100,000 to 500,000 runs, and rates like 4 in 177,766.
+
+**So the adoptions, ranked again by evidence:**
+
+1. A mix of faults per seed (done: `swarm`).
+2. A heal phase with a bound in time, as hangs are a fifth of the finds. The invariant checks need
+   tests of their own: one broken check hid many failures (FoundationDB PR #9635).
+3. Every error not injected fails a seed.
+4. `buggify!` (done).
+5. Faults aimed at the protocol's state.
+6. Knobs.
+7. Timers jittered and I/O short: the bugs the simulation missed were of unusual timing (#4900,
+   #2481).
+8. A determinism digest.
+9. `probe!`.
+10. Reseeding from a step.
+
+**What doc-24 lacked, all with evidence:**
+
+- **Sanitizers on the simulation's seeds**: Miri, or ASAN, over `local_cell::sim` and the full
+  stack, for the unsafe code and the atomics.
+- **Workloads checked against a model of their own**: our checker against the world's model is one.
+  Each feature wants its own.
+- **Restarts from the disk alone**: write, stop everything, start again from the disks, check.
+- **Ensemble scale**: about 10^5 seeds, as fresh ones each run, in a nightly soak, a rare bug's
+  rate measured over as many.
 
 **What doesn't transfer:**
 

@@ -1056,7 +1056,7 @@ fn ends(
 fn writes_fail(faults: &bucket_cell::faults::Faults, fail: bool) {
     use bucket_cell::faults::{Failing, Fault};
     let failing = if fail { Failing::NoSpace } else { Failing::Not };
-    faults.set(Fault { latency: Duration::ZERO, failing });
+    faults.set(Fault { latency: Duration::ZERO, failing, ..Fault::default() });
 }
 
 /// TASK-678's verifying review: the old writer, on a, sends its last two commits to its member b

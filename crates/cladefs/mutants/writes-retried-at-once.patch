@@ -6,12 +6,15 @@
 # Killer: cladefsd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound
 --- a/crates/bucket_cell/src/object_bucket.rs
 +++ b/crates/bucket_cell/src/object_bucket.rs
-@@ -820,8 +820,6 @@
-         };
-         let upload = Upload::of(key);
+@@ -1495,11 +1495,6 @@
          async move {
+             // cladefs: as long after its last write of the key as the store needs (TASK-690).
+             self.rewrites.wait(&path).await;
 -            // cladefs: its turn, once a write of its kind failed (TASK-382).
--            let _turn = self.counts.turns[request as usize].turn().await;
+-            let _turn = match request.takes_turns() {
+-                true => self.counts.turns[request as usize].turn().await,
+-                false => None,
+-            };
              let timed = self.counts.request(request, Some(&path));
              let len = bytes.len() as u64;
              let options = PutOptions { mode, ..PutOptions::default() };
