@@ -2462,7 +2462,7 @@ fn payloads_of_kinds_that_carry_none_end_their_connections() {
         let mut sent = &stream;
         std::io::Write::write_all(&mut sent, zerocopy::IntoBytes::as_bytes(&said)).unwrap();
         std::io::Write::write_all(&mut sent, &[7; 4096]).unwrap();
-        super::assert_let_go(&sender, &stream);
+        super::assert_let_go(&sender, &stream, WAIT);
     }
 }
 
@@ -2509,9 +2509,14 @@ fn mappings_asked_for_past_the_credit_let_their_vm_process_go() {
     }
     let credit = credit(size);
     let held = peak_while(|| {
+        let began = std::time::Instant::now();
         let asked = (0..256).map(|n| Header::new(MAPPINGS, id + n));
         super::send_until_let_go(&sender, asked);
-        super::assert_let_go(&sender, &stream);
+        // TASK-677: before it is let go, the daemon makes two replies of a million mappings, 32
+        // MiB each, the third past its credit: some 6 s of the case's 16 in a debug build, alone,
+        // and past 10 s in a loaded run. Within what any of the case's steps may take.
+        super::assert_let_go(&sender, &stream, WAIT);
+        println!("TASK677 let go after {:?}", began.elapsed());
     });
     assert!(held <= credit + SLACK, "{} MiB held, past {} MiB", held >> 20, credit >> 20);
 }
