@@ -73,14 +73,6 @@ pub fn within<F: Future>(request: Option<RequestId>, future: F) -> InRequest<F> 
     InRequest { request, future }
 }
 
-/// Runs `f` with `request`, or none, current, and the one current before after.
-pub(crate) fn within_now<R>(request: Option<RequestId>, f: impl FnOnce() -> R) -> R {
-    let before = CURRENT.replace(request);
-    let result = f();
-    CURRENT.set(before);
-    result
-}
-
 pin_project_lite::pin_project! {
     /// A future polled with a guest request, or none, current ([`guest_request`], [`within`]).
     pub struct InRequest<F> {
