@@ -1,0 +1,8 @@
+# Regression seeds of the full-stack simulation (crates/cladefs/tests/madsim.rs, TASK-685.8): each
+# a seed that once failed, one a line with what it found, run before the fresh seeds by
+# scripts/test.sh's madsim part (MADSIM_TEST_SEED=SEED replays it). A seed's run is the code's of
+# its day: a seed kept is a regression check of that code's paths, as much as the seed still
+# reaches them.
+#
+# SEED  what it found
+3       TASK-699: the conditional-write probe took a bucket out of reach for one refusing updates

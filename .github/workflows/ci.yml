@@ -66,6 +66,8 @@ jobs:
             packages: libclang-dev
     env:
       CLADEFS_TEST_PARTS: ${{ matrix.parts }}
+      # The madsim part's: 200 seeds of each full-stack profile on each push (TASK-685.8).
+      CLADEFS_MADSIM_SEEDS: 200
     steps:
       # With vendor/firecracker, whose seccompiler cladefs's tests compile Firecracker's seccomp
       # filters with, to run the VMM's side of DAX windows under them (TASK-149.28).

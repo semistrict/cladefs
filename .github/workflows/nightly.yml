@@ -106,6 +106,37 @@ jobs:
             /mnt/nightly/results/**/*.log
             /mnt/nightly/results/**/*.json
 
+  # The full-stack simulation's soak (doc-24, TASK-685.8): 2,000 seeds of each madsim profile,
+  # from a base the night's date makes, so that each night's are new; a failing seed's replay
+  # command is in the log (MADSIM_TEST_SEED=SEED), kept, once fixed, in
+  # crates/cladefs/tests/madsim-seeds.
+  madsim-soak:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install the build's tools
+        uses: ./.github/actions/apt-install
+        with:
+          packages: clang elfutils sqlite3 fuse3 libseccomp-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-madsim-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-madsim-
+      - name: Soak 2,000 seeds
+        run: |
+          base=$(( $(date -u +%Y%m%d) * 10000 ))
+          echo "seeds from $base"
+          MADSIM_TEST_SEED=$base CLADEFS_MADSIM_SEEDS=2000 CLADEFS_TEST_PARTS=madsim scripts/test.sh
+
   # guest/sim's 3,000 seeds, as CI runs them when what they test changed (TASK-149.14).
   guest-sim:
     runs-on: ubuntu-24.04

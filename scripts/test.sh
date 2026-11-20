@@ -93,10 +93,12 @@ if part madsim; then
     # Each test over CLADEFS_MADSIM_SEEDS seeds, 20 unless said, from MADSIM_TEST_SEED's, 1 unless
     # said: each seed a process of its own, as what a simulation's hosts held, leaked as their
     # node-local values are, stays in its process for the next to find (TASK-685.15).
-    # A rule search, `*_needs_*`, runs its own seeds, once.
+    # A rule search, `*_needs_*`, runs its own seeds, once. The regression seeds first, those that
+    # once failed (crates/cladefs/tests/madsim-seeds, TASK-685.8).
     simulated=(-p node_local -p bucket_cell -p local_cell -p cladefs --test madsim)
     first=${MADSIM_TEST_SEED:-1}
-    for seed in $(seq "$first" $((first + ${CLADEFS_MADSIM_SEEDS:-20} - 1))); do
+    regressions=$(sed -e 's/#.*//' "$root/crates/cladefs/tests/madsim-seeds" | awk 'NF {print $1}')
+    for seed in $regressions $(seq "$first" $((first + ${CLADEFS_MADSIM_SEEDS:-20} - 1))); do
         "${madsim[@]}" MADSIM_TEST_SEED="$seed" cargo nextest run --manifest-path "$root/Cargo.toml" \
             "${simulated[@]}" -E 'not test(/_needs_/)' "$@" \
             || { echo "madsim: seed $seed failed: MADSIM_TEST_SEED=$seed replays it" >&2; exit 1; }
