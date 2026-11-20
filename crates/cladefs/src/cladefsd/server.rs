@@ -778,7 +778,8 @@ impl Drop for Turn {
 /// and, its serving panicking, it answers `EIO` as it is dropped, rather than leave its VM process
 /// waiting for good, those bytes counted for good; and halts its store, which the panic went
 /// through: past the store's locks, which halt it themselves (`crate::halt`, TASK-153.16).
-/// cladefs: and the request's span, which ends as it is answered (`super::otel`, TASK-258).
+/// cladefs: and the request's span, which ends as it is answered, before its reply is sent
+/// (`super::otel`, TASK-258).
 struct Answer {
     connection: Arc<Connection>,
     request: Header,
@@ -866,6 +867,9 @@ impl Answer {
         }
         // Counted before its reply, which its VM process may then count on.
         super::metrics::served(header.kind, self.started.elapsed(), reply.status != 0);
+        // cladefs: and its span ended, its trace recorded once nothing of it runs, which whoever
+        // waits for the reply may then look for on /z/tracez (TASK-672.1).
+        drop(std::mem::replace(&mut self.span, trace::Span::none()));
         // cladefs: and its tenant's, which its reply's bytes are counted in as they're queued.
         drop(self.charge.take());
         if let Err(err) = self.connection.peer.sender.send(reply, payload, &fds) {

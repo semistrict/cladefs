@@ -136,9 +136,10 @@ since the daemon started.
 
 The recorder holds each trace's spans as they end, until no span of the trace runs. It then keeps
 each span as a sample of its name and latency bucket, with the whole trace: the latest 4 of each
-name and bucket, and the latest 4 failures. Memory is bounded: 64 spans per trace (more are counted
-as dropped), and 4096 traces held at once (the oldest is dropped past that, as when a span never
-ends). A span that ends after its trace was kept starts a partial trace of its own.
+name and bucket, and the latest 4 failures. Memory is bounded. A trace holds its last 64 spans to
+end, and counts the earlier ones as dropped; a span's ancestors end after it, so they are always
+held. At most 4096 traces are held at once; past that the oldest is dropped, as when a span never
+ends. A span that ends after its trace was kept starts a partial trace of its own.
 
 ### CPU profiles
 

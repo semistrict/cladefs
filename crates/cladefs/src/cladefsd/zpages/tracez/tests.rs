@@ -117,8 +117,9 @@ fn the_latest_samples_are_kept() {
     assert_eq!((counts.ended[1], counts.failed), (10, 5));
 }
 
-/// A trace holds [`TRACE_SPANS`] spans at most, those after counted; and at most [`OPEN_TRACES`]
-/// are held at once, the oldest dropped, its spans that end then kept alone.
+/// A trace holds its last [`TRACE_SPANS`] spans to end, those before counted, so its root, which
+/// ends last, is held; and at most [`OPEN_TRACES`] are held at once, the oldest dropped, its spans
+/// that end then kept alone.
 #[test]
 fn what_is_held_is_bounded() {
     let recorder = Recorder::default();
@@ -129,7 +130,11 @@ fn what_is_held_is_bounded() {
     }
     recorder.ended(root);
     let kept = recorder.samples("upload.segment", None);
+    assert_eq!(kept.len(), 1);
     assert_eq!((kept[0].trace.spans.len(), kept[0].trace.dropped), (TRACE_SPANS, 4));
+    assert_eq!(kept[0].span().name, "upload.segment");
+    let first = &kept[0].trace.spans[0];
+    assert_eq!(first.span_context.span_id(), SpanId::from(104), "the first 4 to end dropped");
 
     // Traces whose last byte puts them in one shard: OPEN_TRACES / SHARDS of them fill it.
     let in_shard = |number: u128| number << 8;

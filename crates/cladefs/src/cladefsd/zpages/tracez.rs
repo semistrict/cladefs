@@ -50,8 +50,9 @@ pub const BOUNDS: [Duration; 9] = [
 /// the latest.
 pub const SAMPLES: usize = 4;
 
-/// The most spans held of one trace, those that end after dropped and counted: an upload's
-/// requests, many, are a trace.
+/// The most spans held of one trace: the last to end, those that ended before them dropped and
+/// counted, as a span's ancestors end after it, and so are held however many spans their trace
+/// has, as an upload's requests are many.
 pub const TRACE_SPANS: usize = 64;
 
 /// The most traces held at once, until none of each runs: those that started first dropped past
@@ -110,9 +111,9 @@ impl Sample {
 
 /// The spans of a trace held.
 pub struct Trace {
-    /// Its spans, in the order they ended, [`TRACE_SPANS`] at most.
+    /// Its last spans to end, [`TRACE_SPANS`] at most, in the order they ended.
     pub spans: Vec<SpanData>,
-    /// How many more of its spans ended, past [`TRACE_SPANS`].
+    /// How many of its spans ended before those, dropped.
     pub dropped: usize,
 }
 
@@ -130,7 +131,7 @@ struct Open {
     /// Which trace the shard opened it as, the oldest first dropped.
     number: u64,
     running: HashMap<SpanId, Running>,
-    ended: Vec<SpanData>,
+    ended: VecDeque<SpanData>,
     dropped: usize,
 }
 
@@ -232,10 +233,11 @@ impl Recorder {
             // One its start was not held of, as its trace was dropped: held alone.
             let open = shard.open.entry(trace).or_default();
             open.running.remove(&span.span_context.span_id());
-            match open.ended.len() < TRACE_SPANS {
-                true => open.ended.push(span),
-                false => open.dropped += 1,
+            if open.ended.len() == TRACE_SPANS {
+                open.ended.pop_front();
+                open.dropped += 1;
             }
+            open.ended.push_back(span);
             match open.running.is_empty() {
                 true => shard.open.remove(&trace),
                 false => None,
@@ -249,7 +251,7 @@ impl Recorder {
     /// Keeps the spans of `trace`, none of which runs, as samples, each the latest of its name and
     /// its latency bucket, and of those that failed if it did.
     fn keep(&self, trace: Open) {
-        let trace = Arc::new(Trace { spans: trace.ended, dropped: trace.dropped });
+        let trace = Arc::new(Trace { spans: trace.ended.into(), dropped: trace.dropped });
         for (index, span) in trace.spans.iter().enumerate() {
             let sample = Sample { trace: trace.clone(), at: index };
             let latency = span.end_time.duration_since(span.start_time).unwrap_or_default();
