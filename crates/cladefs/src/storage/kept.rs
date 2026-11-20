@@ -121,7 +121,8 @@ impl KeptImage {
         let epoch = self.store.commit_version(version, false).map_err(Error::new)?;
         drop(held);
         futures::executor::block_on(self.uploader.uploaded(epoch)).map_err(Error::from)?;
-        let forking = host_cell::fork_through(&self.store, &self.uploader, id, path, child, |_| Ok(()));
+        let forking =
+            host_cell::fork_through(&self.store, &self.uploader, id, path, child, |_| Ok(()));
         futures::executor::block_on(forking)
     }
 
@@ -303,8 +304,9 @@ mod tests {
         let scenario = fail::FailScenario::setup();
         fail::cfg("upload::stopped", "sleep(500)").unwrap();
         drop(Storage::create(&path, SIZE).unwrap());
-        let reopened = futures::executor::block_on(host_cell::open(&path, host_cell::keeping().unwrap()))
-            .map(|opened| opened.store.description().cell);
+        let reopened =
+            futures::executor::block_on(host_cell::open(&path, host_cell::keeping().unwrap()))
+                .map(|opened| opened.store.description().cell);
         scenario.teardown();
         let cell = reopened.map_err(|err| format!("{err:#}"));
         assert_eq!(cell.map(|_| ()), Ok(()));

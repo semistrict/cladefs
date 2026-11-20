@@ -751,10 +751,7 @@ impl OpenCell {
 
     /// cladefs: the store at `path`, as [`OpenCell::open`] has it, a tenant's (TASK-43), its own
     /// extents' pages of `arena` ([`OpenCell::open_with`]).
-    pub async fn open_in(
-        path: impl AsRef<Path>,
-        arena: Option<Arc<Arena>>,
-    ) -> Result<Self, Error> {
+    pub async fn open_in(path: impl AsRef<Path>, arena: Option<Arc<Arena>>) -> Result<Self, Error> {
         Self::open_with(path, Opening { arena, ..Opening::here()? }).await
     }
 
@@ -2471,10 +2468,11 @@ impl Base {
             None => {
                 let arena = attached_to.arenas.own.clone();
                 // cladefs: the read path's, async in its step (doc-24, step 5).
-                let opened = not_yet_async(OpenCell::open_base(&self.path, arena)).map_err(|err| {
-                    log::warn!("cladefs: opening {}, attached: {err:#}", self.path.display());
-                    err.errno().unwrap_or(Errno::EIO)
-                })?;
+                let opened =
+                    not_yet_async(OpenCell::open_base(&self.path, arena)).map_err(|err| {
+                        log::warn!("cladefs: opening {}, attached: {err:#}", self.path.display());
+                        err.errno().unwrap_or(Errno::EIO)
+                    })?;
                 Arc::new(opened)
             }
         };
@@ -2707,7 +2705,12 @@ mod tests {
     /// `path` is in ([`store`]).
     fn made(path: &Path, capacity: u64) -> OpenCell {
         let named = path.parent().unwrap().file_name().unwrap().to_string_lossy().into_owned();
-        futures::executor::block_on(OpenCell::create_kept_in(path, capacity, &format!("memory:///{named}"))).unwrap()
+        futures::executor::block_on(OpenCell::create_kept_in(
+            path,
+            capacity,
+            &format!("memory:///{named}"),
+        ))
+        .unwrap()
     }
 
     /// A new store, as [`store`] makes, whose uploader uploads nothing until a commit waits for it
@@ -2722,8 +2725,13 @@ mod tests {
         };
         let url = format!("memory:///{named}");
         let cell = host_cell::new_alone();
-        let held =
-            futures::executor::block_on(OpenCell::create_kept_with(dir.path().join("store"), capacity, cell, &url, keeping));
+        let held = futures::executor::block_on(OpenCell::create_kept_with(
+            dir.path().join("store"),
+            capacity,
+            cell,
+            &url,
+            keeping,
+        ));
         (held.unwrap(), dir)
     }
 
@@ -2942,14 +2950,19 @@ mod tests {
         assert_eq!(read(&store, a, 0, 2 * BLOCK), Ok(data));
 
         // A store of a tenant with no KEK there: none, its cell refused, as destroyed.
-        let none = futures::executor::block_on(OpenCell::create_in(dir.path().join("none"), 1 << 20, 6));
+        let none =
+            futures::executor::block_on(OpenCell::create_in(dir.path().join("none"), 1 << 20, 6));
         let refused = none.err().expect("a store of a tenant with no KEK");
         assert_eq!(refused.errno(), Some(Errno::EACCES), "{refused:#}");
         assert!(format!("{refused:#}").contains("tenant 6: no KEK in the KMS"), "{refused:#}");
 
         // The default tenant's, encrypted, into a cell of a tenant with no KEK.
         let common = dir.path().join("common");
-        let common = futures::executor::block_on(OpenCell::create_in(&common, 1 << 20, host_cell::DEFAULT_TENANT));
+        let common = futures::executor::block_on(OpenCell::create_in(
+            &common,
+            1 << 20,
+            host_cell::DEFAULT_TENANT,
+        ));
         let common = common.unwrap();
         assert!(!common.store.keys().is_empty());
         write(&common, id(&common, 1), 0, &pattern(2, BLOCK)).unwrap();
@@ -3038,7 +3051,10 @@ mod tests {
         assert_eq!((first.read_stored_bytes, first.page_ins), (0, 1));
 
         let path = dir.path().join("fork");
-        futures::executor::block_on(store.fork_to(&path, crate::host_cell::fork_child(store.cell()))).unwrap();
+        futures::executor::block_on(
+            store.fork_to(&path, crate::host_cell::fork_child(store.cell())),
+        )
+        .unwrap();
         let fork = futures::executor::block_on(OpenCell::open(&path)).unwrap();
         let before = stats::stats();
         assert_eq!(read(&fork, extent, 0, 2 * BLOCK), Ok(pattern(1, 2 * BLOCK)));
@@ -3143,7 +3159,9 @@ mod tests {
         assert_eq!(futures::executor::block_on(follower.commit(None)), Err(Errno::EROFS));
         assert_eq!(futures::executor::block_on(follower.commit_ordered(None)), Err(Errno::EROFS));
         assert_eq!(follower.set_capacity(2 << 20), Err(Errno::EROFS));
-        let forked = futures::executor::block_on(follower.fork_to(dir.path().join("fork"), host_cell::new_alone()));
+        let forked = futures::executor::block_on(
+            follower.fork_to(dir.path().join("fork"), host_cell::new_alone()),
+        );
         assert_eq!(forked.map_err(|err| err.errno()), Err(Some(Errno::EROFS)));
         // cladefs: a window that copies on write, nor so.
         let copying = follower.create_copying_dax_window(4 * page_size(), None, 1);
@@ -3323,9 +3341,11 @@ mod tests {
         // Nor what the control API changes of it: its capacity, its versions (TASK-611).
         let committed = store.store.last_commit().unwrap();
         assert_eq!(store.set_capacity(1 << 27), Err(Errno::EIO));
-        let dropped = futures::executor::block_on(store.drop_versions(&[1].into())).map_err(|err| err.errno());
+        let dropped = futures::executor::block_on(store.drop_versions(&[1].into()))
+            .map_err(|err| err.errno());
         assert_eq!(dropped, Err(Some(Errno::EIO)));
-        let shared = futures::executor::block_on(store.share_version(1, true)).map_err(|err| err.errno());
+        let shared =
+            futures::executor::block_on(store.share_version(1, true)).map_err(|err| err.errno());
         assert_eq!(shared, Err(Some(Errno::EIO)));
         assert_eq!(store.store.last_commit().unwrap(), committed, "the halted store committed");
         drop((window, store));
@@ -3395,7 +3415,8 @@ mod tests {
         }
         futures::executor::block_on(store.commit(None)).unwrap();
         drop(store);
-        let store = futures::executor::block_on(OpenCell::open_in(path, Some(arena.clone()))).unwrap();
+        let store =
+            futures::executor::block_on(OpenCell::open_in(path, Some(arena.clone()))).unwrap();
         let window = store.create_dax_window(extents * EXTENT, None).unwrap();
         for sequence in 1..=extents {
             store.map(id(&store, sequence), 0, EXTENT, (sequence - 1) * EXTENT).unwrap();
@@ -3515,7 +3536,8 @@ mod tests {
         let error = futures::executor::block_on(OpenCell::create(&small, block - 1)).err().unwrap();
         assert_eq!(error.to_string(), "the store is smaller than a block");
         assert!(!small.exists());
-        let store = futures::executor::block_on(OpenCell::create(dir.path().join("one"), block)).unwrap();
+        let store =
+            futures::executor::block_on(OpenCell::create(dir.path().join("one"), block)).unwrap();
         assert_eq!(store.info().unwrap().capacity, block);
     }
 
@@ -3526,8 +3548,10 @@ mod tests {
         let (store, dir) = store(1 << 20);
         let fork = dir.path().join("fork");
         let made = fail::FailGuard::new("fork::made", "return").unwrap();
-        let failed = futures::executor::block_on(store.fork_to(&fork, crate::host_cell::fork_child(store.cell())))
-            .expect_err("the fork was made");
+        let failed = futures::executor::block_on(
+            store.fork_to(&fork, crate::host_cell::fork_child(store.cell())),
+        )
+        .expect_err("the fork was made");
         drop(made);
         assert_eq!(failed.errno(), None, "{failed:#}");
         assert!(!fork.exists(), "the failed fork's store stays");
@@ -3570,7 +3594,10 @@ mod tests {
         );
 
         let path = dir.path().join("fork");
-        futures::executor::block_on(store.fork_to(&path, crate::host_cell::fork_child(store.cell()))).unwrap();
+        futures::executor::block_on(
+            store.fork_to(&path, crate::host_cell::fork_child(store.cell())),
+        )
+        .unwrap();
         let fork = futures::executor::block_on(OpenCell::open(&path)).unwrap();
         let fork_window = fork.create_dax_window(8 * ps, None).unwrap();
         for mapping in &mappings {
@@ -3756,8 +3783,14 @@ mod tests {
         write(&base, extent, 0, &pattern(5, len)).unwrap();
         futures::executor::block_on(base.commit(None)).unwrap();
         let (first, second) = (dir.path().join("first"), dir.path().join("second"));
-        futures::executor::block_on(base.fork_to(&first, crate::host_cell::fork_child(base.cell()))).unwrap();
-        futures::executor::block_on(base.fork_to(&second, crate::host_cell::fork_child(base.cell()))).unwrap();
+        futures::executor::block_on(
+            base.fork_to(&first, crate::host_cell::fork_child(base.cell())),
+        )
+        .unwrap();
+        futures::executor::block_on(
+            base.fork_to(&second, crate::host_cell::fork_child(base.cell())),
+        )
+        .unwrap();
         let profile = profile::path(&dir.path().join("store"), base.cell().id);
         drop(base);
 
@@ -3833,7 +3866,10 @@ mod tests {
         let window = base.create_dax_window(len, None).unwrap();
         futures::executor::block_on(base.commit(None)).unwrap();
         let forked = dir.path().join("fork");
-        futures::executor::block_on(base.fork_to(&forked, crate::host_cell::fork_child(base.cell()))).unwrap();
+        futures::executor::block_on(
+            base.fork_to(&forked, crate::host_cell::fork_child(base.cell())),
+        )
+        .unwrap();
         base.map(extent, 0, len, 0).unwrap();
         // Each part paged in by a fault of its own, at once, as a guest's threads fault.
         std::thread::scope(|scope| {
@@ -3930,10 +3966,10 @@ mod tests {
                         Request::Fork => {
                             let (path, fork) = forks.next().unwrap();
                             futures::executor::block_on(store.fork_to(
-                                    path,
-                                    crate::CellId { id: store.cell().id + fork, ..store.cell() },
-                                ))
-                                .map_err(|_| Errno::EIO)
+                                path,
+                                crate::CellId { id: store.cell().id + fork, ..store.cell() },
+                            ))
+                            .map_err(|_| Errno::EIO)
                         }
                     };
                 }
@@ -3965,7 +4001,12 @@ mod tests {
         let ps = page_size();
         let len = ps as usize + BLOCK;
         let url = format!("memory:///maps-bucket-{:016x}", rand::random::<u64>());
-        let first = futures::executor::block_on(OpenCell::create_kept_in(dir.path().join("first"), 1 << 20, &url)).unwrap();
+        let first = futures::executor::block_on(OpenCell::create_kept_in(
+            dir.path().join("first"),
+            1 << 20,
+            &url,
+        ))
+        .unwrap();
         let extent = id(&first, 1);
         write(&first, extent, 0, &pattern(7, len)).unwrap();
         futures::executor::block_on(first.commit(None)).unwrap();
@@ -4118,7 +4159,10 @@ mod tests {
         write(&store, extent, 0, &pattern(6, ps as usize)).unwrap();
         futures::executor::block_on(store.commit(None)).unwrap();
         let copy_path = dir.path().join("copy");
-        futures::executor::block_on(store.fork_to(&copy_path, crate::host_cell::fork_child(store.cell()))).unwrap();
+        futures::executor::block_on(
+            store.fork_to(&copy_path, crate::host_cell::fork_child(store.cell())),
+        )
+        .unwrap();
         let copy = futures::executor::block_on(OpenCell::open(&copy_path)).unwrap();
         let (window, copy_window) =
             (store.create_dax_window(ps, None).unwrap(), copy.create_dax_window(ps, None).unwrap());
@@ -4168,7 +4212,10 @@ mod tests {
         write(&store, extent, 0, &pattern(6, ps as usize)).unwrap();
         futures::executor::block_on(store.commit(None)).unwrap();
         let fork_path = dir.path().join("fork");
-        futures::executor::block_on(store.fork_to(&fork_path, crate::host_cell::fork_child(store.cell()))).unwrap();
+        futures::executor::block_on(
+            store.fork_to(&fork_path, crate::host_cell::fork_child(store.cell())),
+        )
+        .unwrap();
         let fork = futures::executor::block_on(OpenCell::open(&fork_path)).unwrap();
         assert_eq!(read(&fork, extent, 0, BLOCK), Ok(pattern(6, BLOCK)));
 
@@ -4194,7 +4241,10 @@ mod tests {
         let forks: Vec<OpenCell> = (1..=2)
             .map(|fork| {
                 let path = dir.path().join(format!("fork-{fork}"));
-                futures::executor::block_on(base.fork_to(&path, crate::host_cell::fork_child(base.cell()))).unwrap();
+                futures::executor::block_on(
+                    base.fork_to(&path, crate::host_cell::fork_child(base.cell())),
+                )
+                .unwrap();
                 futures::executor::block_on(OpenCell::open(&path)).unwrap()
             })
             .collect();
@@ -4469,7 +4519,10 @@ mod tests {
         write(&publisher, extent, 0, data).unwrap();
         futures::executor::block_on(publisher.commit(None)).unwrap();
         // A cell of its own, as a cell has one cell (doc-20).
-        futures::executor::block_on(publisher.fork_to(path, crate::host_cell::fork_child(publisher.cell()))).unwrap();
+        futures::executor::block_on(
+            publisher.fork_to(path, crate::host_cell::fork_child(publisher.cell())),
+        )
+        .unwrap();
         let ancestry = futures::executor::block_on(OpenCell::open(path)).unwrap().ancestry();
         (extent, ancestry)
     }
@@ -4482,7 +4535,8 @@ mod tests {
             if let Some(store) = open.get(path) {
                 return Ok(store.clone());
             }
-            let store = Arc::new(futures::executor::block_on(OpenCell::open_base(path, None)).unwrap());
+            let store =
+                Arc::new(futures::executor::block_on(OpenCell::open_base(path, None)).unwrap());
             open.insert(path.to_owned(), store.clone());
             Ok(store)
         })
@@ -4532,7 +4586,13 @@ mod tests {
         let base = dir.path().join("base");
         let (extent, ancestry) = generation(&base, &pattern(4, ps as usize));
         let stores: Vec<OpenCell> = (0..2)
-            .map(|at| futures::executor::block_on(OpenCell::create(dir.path().join(format!("{at}")), 1 << 20)).unwrap())
+            .map(|at| {
+                futures::executor::block_on(OpenCell::create(
+                    dir.path().join(format!("{at}")),
+                    1 << 20,
+                ))
+                .unwrap()
+            })
             .collect();
         let windows: Vec<DaxWindow> =
             stores.iter().map(|store| store.create_dax_window(ps, None).unwrap()).collect();
@@ -4575,11 +4635,19 @@ mod tests {
         let extent = id(&publisher, 1);
         write(&publisher, extent, 0, &data).unwrap();
         futures::executor::block_on(publisher.commit(None)).unwrap();
-        futures::executor::block_on(publisher.fork_to(&base, crate::host_cell::fork_child(publisher.cell()))).unwrap();
+        futures::executor::block_on(
+            publisher.fork_to(&base, crate::host_cell::fork_child(publisher.cell())),
+        )
+        .unwrap();
         drop(publisher);
-        futures::executor::block_on(OpenCell::open(&base)).unwrap().make_public_attach_only().unwrap();
+        futures::executor::block_on(OpenCell::open(&base))
+            .unwrap()
+            .make_public_attach_only()
+            .unwrap();
         let tenant = Arena::new();
-        let publisher = futures::executor::block_on(OpenCell::open_in(&publisher_path, Some(tenant.clone()))).unwrap();
+        let publisher =
+            futures::executor::block_on(OpenCell::open_in(&publisher_path, Some(tenant.clone())))
+                .unwrap();
         // The publisher's VM maps its first page, from the tenant's copy.
         let window = publisher.create_dax_window(len as u64, None).unwrap();
         publisher.map(extent, 0, len as u64, 0).unwrap();
@@ -4629,10 +4697,15 @@ mod tests {
         let extent = id(&publisher, 1);
         write(&publisher, extent, 0, &data).unwrap();
         futures::executor::block_on(publisher.commit(None)).unwrap();
-        futures::executor::block_on(publisher.fork_to(&base, crate::host_cell::fork_child(publisher.cell()))).unwrap();
+        futures::executor::block_on(
+            publisher.fork_to(&base, crate::host_cell::fork_child(publisher.cell())),
+        )
+        .unwrap();
         drop(publisher);
         let tenant = Arena::new();
-        let publisher = futures::executor::block_on(OpenCell::open_in(&publisher_path, Some(tenant.clone()))).unwrap();
+        let publisher =
+            futures::executor::block_on(OpenCell::open_in(&publisher_path, Some(tenant.clone())))
+                .unwrap();
         assert_eq!(read(&publisher, extent, 0, len), Ok(data.clone()));
         let pages = len as u64 / ps;
         let held = |arena| cache::find(arena, extent).map(|cached| cached.held());
@@ -4669,7 +4742,10 @@ mod tests {
         let extent = id(&publisher, 1);
         write(&publisher, extent, 0, &pattern(5, BLOCK)).unwrap();
         futures::executor::block_on(publisher.commit(None)).unwrap();
-        futures::executor::block_on(publisher.fork_to(&base, crate::host_cell::fork_child(publisher.cell()))).unwrap();
+        futures::executor::block_on(
+            publisher.fork_to(&base, crate::host_cell::fork_child(publisher.cell())),
+        )
+        .unwrap();
         publisher.free(extent).unwrap();
         futures::executor::block_on(publisher.commit(None)).unwrap();
         assert_eq!(read(&publisher, extent, 0, BLOCK), Err(Errno::ENOENT));
@@ -4694,7 +4770,10 @@ mod tests {
         futures::executor::block_on(store.commit(None)).unwrap();
 
         let fork = dir.path().join("fork");
-        futures::executor::block_on(store.fork_to(&fork, crate::host_cell::fork_child(store.cell()))).unwrap();
+        futures::executor::block_on(
+            store.fork_to(&fork, crate::host_cell::fork_child(store.cell())),
+        )
+        .unwrap();
         let forked = futures::executor::block_on(OpenCell::open(&fork)).unwrap();
         forked.open_bases(open.clone()).unwrap();
         assert_eq!(read(&forked, extent, 0, BLOCK), Ok(pattern(6, BLOCK)));
@@ -4757,11 +4836,19 @@ mod tests {
         write(&store, inherited, 0, &pattern(9, BLOCK)).unwrap();
         futures::executor::block_on(store.commit(None)).unwrap();
         let (fork, base) = (dir.path().join("fork"), dir.path().join("base"));
-        futures::executor::block_on(store.fork_to(&fork, crate::host_cell::fork_child(store.cell()))).unwrap();
+        futures::executor::block_on(
+            store.fork_to(&fork, crate::host_cell::fork_child(store.cell())),
+        )
+        .unwrap();
         let base_cell = crate::host_cell::fork_child(store.cell());
         futures::executor::block_on(store.fork_to(&base, base_cell)).unwrap();
         let forked = futures::executor::block_on(OpenCell::open(&fork)).unwrap();
-        forked.attach_base(&base, &futures::executor::block_on(OpenCell::open(&base)).unwrap().ancestry()).unwrap();
+        forked
+            .attach_base(
+                &base,
+                &futures::executor::block_on(OpenCell::open(&base)).unwrap().ancestry(),
+            )
+            .unwrap();
         assert!(!forked.bases.routes(inherited.cell));
         assert!(forked.bases.routes(base_cell.id));
         forked.free(inherited).unwrap();
@@ -4782,8 +4869,10 @@ mod tests {
         fail::cfg("extents::public_cells", "return").unwrap();
         let opened = [
             futures::executor::block_on(OpenCell::open(&path)).map(|store| store.is_public()),
-            futures::executor::block_on(OpenCell::open_base(&path, None)).map(|store| store.is_public()),
-            futures::executor::block_on(OpenCell::open_without_profile(&path)).map(|store| store.is_public()),
+            futures::executor::block_on(OpenCell::open_base(&path, None))
+                .map(|store| store.is_public()),
+            futures::executor::block_on(OpenCell::open_without_profile(&path))
+                .map(|store| store.is_public()),
         ];
         fail::remove("extents::public_cells");
         for opened in opened {
@@ -4851,7 +4940,10 @@ mod tests {
         let refused = futures::executor::block_on(store.make_version(None)).unwrap_err();
         assert_eq!(refused.errno(), Some(Errno::EBUSY));
         assert!(format!("{refused:#}").contains("holds 1 private pages"), "{refused:#}");
-        let forked = futures::executor::block_on(store.fork_quiescent_to(dir.path().join("fork"), crate::host_cell::fork_child(store.cell())));
+        let forked = futures::executor::block_on(store.fork_quiescent_to(
+            dir.path().join("fork"),
+            crate::host_cell::fork_child(store.cell()),
+        ));
         assert_eq!(forked.err().and_then(|error| error.errno()), Some(Errno::EBUSY));
         assert_eq!(store.window_mappings(), Err(Errno::EBUSY));
 

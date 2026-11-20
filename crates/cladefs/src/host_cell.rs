@@ -389,9 +389,8 @@ async fn learn_taken(bucket: &ObjectBucket, cell: CellId) -> Result<bool, Failur
 /// TASK-165.9). Fails as that does: a log another writer's commits moved past (`ESTALE`), a cell
 /// deleted (`ENOENT`) or a later placement's (`ESTALE`); and a store never made whole (`Unmade`).
 pub(crate) async fn open(path: &Path, keeping: upload::Options) -> Result<Opened, Failure> {
-    let recovering = upload::blocking(|| -> Result<_, Failure> {
-        Ok(LocalCell::recover(host_dir(path)?)?)
-    })?;
+    let recovering =
+        upload::blocking(|| -> Result<_, Failure> { Ok(LocalCell::recover(host_dir(path)?)?) })?;
     opened(recovering, keeping).await
 }
 
@@ -733,7 +732,14 @@ mod tests {
     fn stores_unmade_open_not() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
-        let made = futures::executor::block_on(create_unmade(&path, MIB, new(), cell::Kind::Fxfs, None, keeping().unwrap()));
+        let made = futures::executor::block_on(create_unmade(
+            &path,
+            MIB,
+            new(),
+            cell::Kind::Fxfs,
+            None,
+            keeping().unwrap(),
+        ));
         let cell = made.unwrap().store.description().cell;
         assert!(unmade(&path));
         let refused = futures::executor::block_on(open(&path, keeping().unwrap())).err().unwrap();
@@ -742,7 +748,9 @@ mod tests {
         local_cell::made_host(&path).unwrap();
         assert!(!unmade(&path));
         assert_eq!(
-            futures::executor::block_on(open(&path, keeping().unwrap())).map(|opened| opened.store.description().cell).ok(),
+            futures::executor::block_on(open(&path, keeping().unwrap()))
+                .map(|opened| opened.store.description().cell)
+                .ok(),
             Some(cell)
         );
     }
@@ -807,8 +815,14 @@ mod tests {
         let (one, two) = (dir.path().join("one"), dir.path().join("two"));
         let url = format!("memory:///new-cells-{}", std::process::id());
         let made = |path: &Path, of| {
-            let made =
-                futures::executor::block_on(create_unmade(path, MIB, of, cell::Kind::Fxfs, Some(&url), keeping().unwrap()));
+            let made = futures::executor::block_on(create_unmade(
+                path,
+                MIB,
+                of,
+                cell::Kind::Fxfs,
+                Some(&url),
+                keeping().unwrap(),
+            ));
             made.unwrap().store.description().cell
         };
         let first = made(&one, new());
@@ -852,16 +866,32 @@ mod tests {
 
         // Where no host's bucket is, as in this test's process.
         let (made, fork) = (dir.path().join("made"), dir.path().join("fork"));
-        let Opened { store, bucket, uploader } =
-            futures::executor::block_on(create(&made, MIB, new(), cell::Kind::Fxfs, keeping().unwrap())).unwrap();
-        let forked = futures::executor::block_on(new_cell(&bucket, store.description().cell.tenant)).unwrap();
+        let Opened { store, bucket, uploader } = futures::executor::block_on(create(
+            &made,
+            MIB,
+            new(),
+            cell::Kind::Fxfs,
+            keeping().unwrap(),
+        ))
+        .unwrap();
+        let forked =
+            futures::executor::block_on(new_cell(&bucket, store.description().cell.tenant))
+                .unwrap();
         let child = Child { cell: forked, owner: 1 };
         let version = bucket_cell::layout::NewVersion { id: 1, keep_last: None };
         futures::executor::block_on(
             uploader.uploaded(store.commit_version(version, false).unwrap()),
         )
         .unwrap();
-        futures::executor::block_on(fork_through(&store, &uploader, version.id, &fork, child, |_| Ok(()))).unwrap();
+        futures::executor::block_on(fork_through(
+            &store,
+            &uploader,
+            version.id,
+            &fork,
+            child,
+            |_| Ok(()),
+        ))
+        .unwrap();
         let own = dir.path().canonicalize().unwrap().join("made.bucket");
         let url = format!("file://{}/", own.display());
         for named in [&made, &fork] {
@@ -888,7 +918,16 @@ mod tests {
     fn older_stores_are_refused_by_their_format() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
-        drop(futures::executor::block_on(create(&path, MIB, new(), cell::Kind::Fxfs, keeping().unwrap())).unwrap());
+        drop(
+            futures::executor::block_on(create(
+                &path,
+                MIB,
+                new(),
+                cell::Kind::Fxfs,
+                keeping().unwrap(),
+            ))
+            .unwrap(),
+        );
         let description = path.join("store");
         let text = std::fs::read_to_string(&description).unwrap();
         let older: String = std::iter::once("cladefs extent store 5")

@@ -201,8 +201,13 @@ fn open_with<K: Kms>(
     };
     let options = Options { token: host.token, ..options };
     let holding = (rand::random(), options);
-    let opened =
-        futures::executor::block_on(open(recovering, crate::Options::default(), world.bucket.clone(), holding, &host.runtime))?;
+    let opened = futures::executor::block_on(open(
+        recovering,
+        crate::Options::default(),
+        world.bucket.clone(),
+        holding,
+        &host.runtime,
+    ))?;
     opened.0.made()?;
     Ok(opened)
 }

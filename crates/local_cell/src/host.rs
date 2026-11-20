@@ -375,7 +375,8 @@ mod tests {
         let unmade = temp.path().join("unmade");
         std::fs::create_dir_all(unmade.join("segments")).unwrap();
         std::fs::write(unmade.join("stray"), "").unwrap();
-        futures::executor::block_on(delete_host(&unmade, async |_| Err(anyhow!("called")))).unwrap();
+        futures::executor::block_on(delete_host(&unmade, async |_| Err(anyhow!("called"))))
+            .unwrap();
         assert!(!unmade.exists());
     }
 
@@ -387,14 +388,18 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = stored(temp.path());
         let opened = open(&path).unwrap();
-        let refused = futures::executor::block_on(delete_host(&path, async |_| Err(anyhow!("called"))));
+        let refused =
+            futures::executor::block_on(delete_host(&path, async |_| Err(anyhow!("called"))));
         assert!(refused.is_err() && path.join(DESCRIPTION).exists(), "{refused:?}");
         drop(opened);
-        let stopped = futures::executor::block_on(delete_host(&path, async |cell| Err(anyhow!("stopped at {cell}"))));
+        let stopped = futures::executor::block_on(delete_host(&path, async |cell| {
+            Err(anyhow!("stopped at {cell}"))
+        }));
         assert_eq!(stopped.map_err(|err| err.to_string()), Err("stopped at 1/3".to_owned()));
         assert!(open(&path).is_ok(), "a store stopped opens no more");
         let called = std::cell::Cell::new(None);
-        futures::executor::block_on(delete_host(&path, async |cell| Ok(called.set(Some(cell))))).unwrap();
+        futures::executor::block_on(delete_host(&path, async |cell| Ok(called.set(Some(cell)))))
+            .unwrap();
         assert_eq!((called.get(), path.exists()), (Some(bucket_cell::layout::test_cell(3)), false));
     }
 
@@ -409,14 +414,18 @@ mod tests {
             assert_eq!(err.root_cause().to_string(), "stopped", "stopped {at}: {err:#}");
         };
         let finished = |temp: &Path, path: &Path, at: &str| {
-            futures::executor::block_on(delete_host(path, async |_| Ok(()))).unwrap_or_else(|err| panic!("stopped {at}: {err:#}"));
+            futures::executor::block_on(delete_host(path, async |_| Ok(())))
+                .unwrap_or_else(|err| panic!("stopped {at}: {err:#}"));
             let left: Vec<_> = std::fs::read_dir(temp).unwrap().collect();
             assert_eq!(left.len(), 0, "stopped {at}: {left:?} left");
         };
         let at = "before the cell went";
         let temp = tempfile::tempdir().unwrap();
         let path = stored(temp.path());
-        stopped(futures::executor::block_on(delete_host(&path, async |_| Err(anyhow!("stopped")))), at);
+        stopped(
+            futures::executor::block_on(delete_host(&path, async |_| Err(anyhow!("stopped")))),
+            at,
+        );
         finished(temp.path(), &path, at);
         // The removals' steps, as a deletion stopped at none takes them.
         let temp = tempfile::tempdir().unwrap();

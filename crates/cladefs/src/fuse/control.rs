@@ -210,11 +210,8 @@ impl proto::mount_server::Mount for Control {
         // A new cell's ID is the bucket's to give, its cell's too (TASK-364).
         let cell = match cell {
             0 => {
-                let url = self.stores.bucket.clone();
-                let made = tokio::task::spawn_blocking(move || {
-                    crate::host_cell::new_cell_at(&url, tenant).map_err(Error::new)
-                });
-                made.await.map_err(|err| failed(Error::new(err)))?.map_err(failed)?
+                let made = crate::host_cell::new_cell_at(&self.stores.bucket, tenant).await;
+                made.map_err(Error::new).map_err(failed)?
             }
             id => CellId { tenant, id },
         };

@@ -1052,7 +1052,9 @@ impl<D: Dir> Drop for Uploader<D> {
     fn drop(&mut self) {
         self.shared.stop();
         if let Some(stopped) = self.stopped.get_mut().unwrap().take() {
-            crate::blocks!("an uploader dropped unclosed, waiting for it to stop (Uploader::close)");
+            crate::blocks!(
+                "an uploader dropped unclosed, waiting for it to stop (Uploader::close)"
+            );
             let _ = futures::executor::block_on(stopped);
         }
     }
@@ -2520,15 +2522,14 @@ mod tests {
         runtime.block_on(lifecycle::create(&*bucket, CELL, 1)).unwrap();
         let options = Options { token: 5, ..Options::default() };
         let recovering = LocalCell::recover_unmade(dir).unwrap();
-        let (store, uploader) =
-            futures::executor::block_on(open(
-                recovering,
-                crate::Options::default(),
-                bucket.clone(),
-                (1, options),
-                &host,
-            ))
-            .unwrap();
+        let (store, uploader) = futures::executor::block_on(open(
+            recovering,
+            crate::Options::default(),
+            bucket.clone(),
+            (1, options),
+            &host,
+        ))
+        .unwrap();
         store.made().unwrap();
         let head = runtime.block_on(bucket_cell::head::get(&*bucket, CELL)).unwrap().unwrap();
         assert_eq!((head.epoch, head.holder, head.token), (1, 1, 5));
@@ -2570,15 +2571,14 @@ mod tests {
         let hour = Duration::from_secs(3600);
         let options = Options { interval: hour, filling_wait: hour, ..Options::default() };
         let recovering = LocalCell::recover_unmade(dir).unwrap();
-        let (store, uploader) =
-            futures::executor::block_on(open(
-                recovering,
-                crate::Options::default(),
-                bucket.clone(),
-                (1, options),
-                &host,
-            ))
-            .unwrap();
+        let (store, uploader) = futures::executor::block_on(open(
+            recovering,
+            crate::Options::default(),
+            bucket.clone(),
+            (1, options),
+            &host,
+        ))
+        .unwrap();
         store.made().unwrap();
         store.write(ExtentId::new(CELL.id, 1), 0, &[1; 4096]).unwrap();
         store.commit(None).unwrap();
@@ -2615,15 +2615,14 @@ mod tests {
         runtime.block_on(lifecycle::create(&*bucket, CELL, 1)).unwrap();
         let options = Options { interval: Duration::from_millis(20), ..Options::default() };
         let recovering = LocalCell::recover_unmade(dir).unwrap();
-        let (store, uploader) =
-            futures::executor::block_on(open(
-                recovering,
-                crate::Options::default(),
-                bucket.clone(),
-                (1, options),
-                &host,
-            ))
-            .unwrap();
+        let (store, uploader) = futures::executor::block_on(open(
+            recovering,
+            crate::Options::default(),
+            bucket.clone(),
+            (1, options),
+            &host,
+        ))
+        .unwrap();
         store.made().unwrap();
         fail::cfg("wal::start", "return").unwrap();
         store.write(ExtentId::new(CELL.id, 1), 0, &[1; 4096]).unwrap();
@@ -2659,15 +2658,14 @@ mod tests {
         // Its uploader uploads nothing it is not asked to within the hour: the test gathers.
         let options = Options { interval: Duration::from_secs(3600), ..Options::default() };
         let recovering = LocalCell::recover_unmade(dir).unwrap();
-        let (store, uploader) =
-            futures::executor::block_on(open(
-                recovering,
-                crate::Options::default(),
-                bucket.clone(),
-                (1, options),
-                &host,
-            ))
-            .unwrap();
+        let (store, uploader) = futures::executor::block_on(open(
+            recovering,
+            crate::Options::default(),
+            bucket.clone(),
+            (1, options),
+            &host,
+        ))
+        .unwrap();
         store.made().unwrap();
         // Each commit closes its segment.
         let closed = 2 * IN_FLIGHT + 1;
