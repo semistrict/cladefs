@@ -103,6 +103,7 @@ impl Host {
     }
 
     /// The ephemeral cell `child`'s entry, if it has one.
+    #[cfg(test)]
     pub fn entry(&self, child: CellId) -> Option<Entry> {
         let bytes = std::fs::read(self.entry_path(child)).ok()?;
         serde_json::from_slice(&bytes).ok()
