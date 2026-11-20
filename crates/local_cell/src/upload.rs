@@ -160,6 +160,7 @@ pub fn uploaders() -> tokio::sync::watch::Receiver<usize> {
 /// served, from its own few threads, the sockets of the connections they left in the pool, which
 /// the host's uploads and fetches went on to use.
 pub fn block_on<F: std::future::Future>(future: F) -> Result<F::Output, Failure> {
+    crate::blocks!("upload::block_on");
     Ok(bucket_runtime()?.block_on(future))
 }
 
@@ -477,6 +478,7 @@ pub fn open<D: Dir>(
         let _ = stop.send(());
         fail::fail_point!("upload::stopped");
     });
+    crate::blocks!("a store's opening, waiting for its uploader to start");
     let opened = match start.recv() {
         Ok(Ok(store)) => store,
         Ok(Err(err)) => {
@@ -1035,6 +1037,7 @@ impl<D: Dir> Drop for Uploader<D> {
     fn drop(&mut self) {
         self.shared.stop();
         if let Some(stopped) = self.stopped.get_mut().unwrap().take() {
+            crate::blocks!("an uploader's drop, waiting for it to stop");
             let _ = stopped.recv();
         }
     }
@@ -2508,13 +2511,13 @@ mod tests {
 
         store.write(ExtentId::new(CELL.id, 1), 0, &[1; 4096]).unwrap();
         store.commit(None).unwrap();
-        uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
+        futures::executor::block_on(uploader.uploaded(store.last_commit().unwrap())).unwrap();
         // Another placement takes the cell, fencing it (TASK-371).
         let taken = runtime.block_on(bucket_cell::testing::take(&*bucket, CELL, 0x66, 6));
         assert_eq!(taken.map(|held| held.head.epoch), Ok(2));
         store.write(ExtentId::new(CELL.id, 2), 0, &[2; 4096]).unwrap();
         store.commit(None).unwrap();
-        let fenced = uploader.wait_uploaded(store.last_commit().unwrap());
+        let fenced = futures::executor::block_on(uploader.uploaded(store.last_commit().unwrap()));
         assert!(matches!(fenced, Err(Failure::Bucket(bucket_cell::Error::Fenced))), "{fenced:?}");
         let back = runtime.block_on(bucket_cell::testing::take(&*bucket, CELL, 0x55, 5));
         assert_eq!(back.map(|held| held.head), Err(bucket_cell::Error::Stale));
@@ -2595,7 +2598,7 @@ mod tests {
         store.write(ExtentId::new(CELL.id, 2), 0, &[2; 4096]).unwrap();
         store.commit(None).unwrap();
         fail::remove("wal::start");
-        uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
+        futures::executor::block_on(uploader.uploaded(store.last_commit().unwrap())).unwrap();
         assert_eq!(store.closed(usize::MAX).unwrap().len(), 0, "its segments left in it");
         scenario.teardown();
     }
