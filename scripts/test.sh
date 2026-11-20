@@ -10,8 +10,8 @@
 # (vendor/firecracker, built as cladefs builds it: scripts/firecracker-cargo.sh): what CI runs, a
 # part a job.
 # Arguments are passed to the suite's and the simulation's `cargo nextest run`. CLADEFS_TEST_PARTS
-# names the parts to run, separated by spaces (default: all of clippy, workspace, sim, shuttle,
-# scripts, go, and guest and firecracker on Linux). The part unit, in no default, runs the
+# names the parts to run, separated by spaces (default: all of clippy, workspace, sim, madsim,
+# shuttle, scripts, go, and guest and firecracker on Linux). The part unit, in no default, runs the
 # workspace's unit tests alone, about a minute: the workspace part's tests but the slow ones the
 # nextest profile unit leaves out (.config/nextest.toml).
 #
@@ -25,7 +25,7 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 # keep, rather than the terminal they have none of: an abort said nothing else (TASK-100).
 export LIBC_FATAL_STDERR_=1
 
-parts="clippy workspace sim shuttle scripts go"
+parts="clippy workspace sim madsim shuttle scripts go"
 [[ $(uname) != Linux ]] || parts+=" guest firecracker"
 parts=${CLADEFS_TEST_PARTS:-$parts}
 part() { # name: whether CLADEFS_TEST_PARTS has it
@@ -80,6 +80,18 @@ fi
 if part sim; then
     cargo nextest run --manifest-path "$root/Cargo.toml" --cargo-profile sim -p local_cell \
         -E "$sim" "$@"
+fi
+# The build under madsim, the daemon's deterministic simulation (doc-24, TASK-685.12): the crates
+# the simulation runs, built with `--cfg madsim`, its target a directory of its own, as every crate
+# beneath them builds otherwise; and their tests under madsim, each crate's tests/madsim.rs. Their
+# other tests are tokio's and std's, which madsim has no stand-ins for: they run in the workspace
+# part.
+if part madsim; then
+    madsim=(env RUSTFLAGS="--cfg madsim" CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}/madsim")
+    "${madsim[@]}" cargo check --manifest-path "$root/Cargo.toml" -p node_local -p bucket_cell \
+        -p local_cell -p cladefs
+    "${madsim[@]}" cargo nextest run --manifest-path "$root/Cargo.toml" -p node_local \
+        -p bucket_cell -p local_cell --test madsim "$@"
 fi
 # The concurrency tests under Shuttle, built with each crate's `shuttle` feature, which only they
 # can run (TASK-44).

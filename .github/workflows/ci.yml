@@ -48,8 +48,10 @@ jobs:
         # workspace of their own; the Go client, its generated code checked against the .proto,
         # and its tests against the daemon, which it builds
         # (TASK-219); the VMM's own that cladefs adds to, vendor/firecracker's workspace, which ran
-        # on hosts of guests alone and broke unseen there (TASK-220); the rest, minutes.
-        parts: [workspace, sim, shuttle, clippy scripts, guest, go, firecracker]
+        # on hosts of guests alone and broke unseen there (TASK-220); the build under madsim, the
+        # daemon's simulation, a build of its own, which no other part made (TASK-685.12); the
+        # rest, minutes.
+        parts: [workspace, sim, madsim, shuttle, clippy scripts, guest, go, firecracker]
         # What a part's tests run beyond what every part builds with: Coccinelle, whose rules the
         # scripts' tests check; xfsprogs, for the guest tests' own of reflinks; libclang, which the
         # VMM's userfaultfd-sys builds its bindings with (bindgen). Coccinelle and its
