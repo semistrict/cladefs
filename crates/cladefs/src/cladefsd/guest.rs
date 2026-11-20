@@ -9,7 +9,7 @@
 //! level, FREE, versions. No window: nothing is mapped, no stage operation made. The daemon's asks
 //! of it, its stats and a shrink, it answers as a VM process without a guest of its own would.
 
-use super::codec::{Data, Opened, Opening, ReadInto, Request, Told};
+use super::codec::{Data, Forked, Opened, Opening, ReadInto, Request, Told};
 use super::wire::{AsyncReceiver, AsyncSender, Header, Message, REPLY};
 use crate::{Commit, Errno, ExtentId, WriteBarriers};
 use bucket_cell::cell::Kind;
@@ -109,9 +109,11 @@ impl Guest {
         self.call(&Request::Free(extent)).await.map(drop)
     }
 
-    /// Makes a version of its store's cell, as a VM snapshot does: its number.
+    /// Makes a version of its store's cell, as a VM snapshot does: its number. cladefs: the reply's
+    /// version, as `CellClient::make_version` reads it, not its first argument, the cell's
+    /// (TASK-698.5 found it so).
     pub async fn make_version(&self) -> Result<u64, Errno> {
-        Ok(self.call(&Request::Version).await?.header.args[0])
+        Ok(Forked::from_args(self.call(&Request::Version).await?.header.args).version)
     }
 
     /// Closes its connection, as a VM process that exits does: the daemon lets its store go once
