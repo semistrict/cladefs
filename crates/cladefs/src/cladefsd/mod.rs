@@ -149,12 +149,13 @@ node_local::node_local! {
 }
 
 /// Says the daemon stops serving, as it is about to exit: once the control API's health service, if
-/// it serves, reports so to its callers. cladefs: the first of a drain's steps ([`drain::drain`]).
-pub fn stop_serving() {
+/// it serves, reports so to its callers. cladefs: the first of a drain's steps ([`drain::drain`]),
+/// awaited, holding no thread (doc-24 step 12).
+pub async fn stop_serving() {
     SERVING.get().send_replace(false);
     if control::is_serving() {
         let mut reported = REPORTED.get().subscribe();
-        let _ = futures::executor::block_on(reported.wait_for(|serving| !*serving));
+        let _ = reported.wait_for(|serving| !*serving).await;
     }
 }
 

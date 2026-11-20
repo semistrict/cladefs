@@ -183,7 +183,7 @@ fn drain_on_sigterm(bound: std::time::Duration) -> std::io::Result<()> {
         }
         log::info!("cladefsd: draining, on SIGTERM, within {}s", bound.as_secs());
         let began = std::time::Instant::now();
-        let drained = cladefs::cladefsd::drain::drain(bound);
+        let drained = local_cell::upload::wait_on(cladefs::cladefsd::drain::drain(bound));
         cladefs::cladefsd::otel::shutdown();
         match drained {
             Ok(()) => {

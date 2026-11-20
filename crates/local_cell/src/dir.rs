@@ -530,6 +530,9 @@ fn closed_in(
             ));
         }
         fail::fail_point!("dir::claim_waits");
+        // cladefs: never under madsim, where a store's close runs inline, awaiting nothing, so that
+        // no opening finds one closing (doc-24, TASK-685.3).
+        crate::blocks!("an opening, waiting for a store of its directory closing in the process");
         claimed = UNCLAIMED.get().wait_timeout(claimed, left).unwrap().0;
     }
     Ok(claimed)

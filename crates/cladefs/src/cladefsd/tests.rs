@@ -6566,7 +6566,10 @@ fn drains_close_every_connection_and_take_no_more() {
     write(&store, extent, 0, &pattern(1, BLOCK)).unwrap();
     store.commit_ordered(Some(b"drained")).unwrap();
 
-    assert_eq!(super::drain::drain(std::time::Duration::from_secs(60)), Ok(()));
+    assert_eq!(
+        local_cell::upload::wait_on(super::drain::drain(std::time::Duration::from_secs(60))),
+        Ok(())
+    );
     let mut told: Vec<_> = lost.try_iter().collect();
     told.sort();
     assert_eq!(told, ["store", "tenant's"]);
@@ -6590,7 +6593,8 @@ fn drains_close_every_connection_and_take_no_more() {
 fn drains_give_up_past_their_bound() {
     host();
     let connection = super::server::CONNECTIONS.begin().unwrap();
-    let left = super::drain::drain(std::time::Duration::from_millis(100));
+    let left =
+        local_cell::upload::wait_on(super::drain::drain(std::time::Duration::from_millis(100)));
     let left = left.err().expect("a drain gave up");
     assert_eq!(left, super::drain::Left { connections: 1, calls: 0, uploaders: 0, mount: false });
     assert_eq!(

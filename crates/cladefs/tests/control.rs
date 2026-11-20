@@ -402,7 +402,7 @@ fn health_follows_whether_the_daemon_serves() {
         assert_eq!(next().await, ServingStatus::Serving);
         assert_eq!(status(api).await, ServingStatus::Serving);
 
-        tokio::task::spawn_blocking(cladefs::cladefsd::stop_serving).await.unwrap();
+        cladefs::cladefsd::stop_serving().await;
         assert_eq!(next().await, ServingStatus::NotServing);
         assert_eq!(status(api).await, ServingStatus::NotServing);
     });

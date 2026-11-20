@@ -96,12 +96,13 @@ impl std::fmt::Display for Left {
 }
 
 /// Drains the daemon, as the module says, within `within`: `Err` with what is left past it.
-/// It blocks.
-pub fn drain(within: Duration) -> Result<(), Left> {
-    super::stop_serving();
+/// cladefs: a future, awaited where the daemon is told to drain, its signal's thread blocking on it
+/// there, its outermost entry (doc-24 step 12).
+pub async fn drain(within: Duration) -> Result<(), Left> {
+    super::stop_serving().await;
     DRAINING.get().send_replace(true);
     super::server::stop_accepting();
-    let drained = super::server::IO.block_on(async {
+    let drained = async {
         tokio::time::timeout(within, async {
             super::server::CONNECTIONS.done().await;
             super::control::CALLS.done().await;
@@ -115,8 +116,8 @@ pub fn drain(within: Duration) -> Result<(), Left> {
             mount.is_ok() && uploaded
         })
         .await
-    });
-    match drained {
+    };
+    match drained.await {
         Ok(true) => Ok(()),
         Ok(false) | Err(_) => Err(Left {
             connections: super::server::CONNECTIONS.count(),
