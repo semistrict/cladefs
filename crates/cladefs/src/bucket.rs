@@ -3188,7 +3188,7 @@ mod tests {
             kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let cell = first.cell();
         write(&first, 1, &pattern(1, BLOCK));
-        first.commit(None).unwrap();
+        futures::executor::block_on(first.commit(None)).unwrap();
         drop(first);
         let second =
             kept_in(dir.path().join("second"), (1 << 30, Some(cell)), &bucket.clone(), idle())

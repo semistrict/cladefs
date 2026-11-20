@@ -1496,7 +1496,7 @@ fn two_processes_map_the_same_pages() {
         let store = OpenCell::create(&parent, 1 << 24).unwrap();
         let extent = ExtentId { cell: store.cell().id, sequence: 1 };
         store.write(extent, 0, &[VolatileSlice::from(&pattern(9, ps)[..])]).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         store.fork_to(&child, crate::host_cell::fork_child(store.cell())).unwrap();
         extent
     };
@@ -1794,7 +1794,7 @@ fn two_vm_processes(env: &[&str]) -> TwoVmProcesses {
         let store = OpenCell::create_in(&parent, 1 << 24, tenant.id()).unwrap();
         let extent = ExtentId { cell: store.cell().id, sequence: 1 };
         store.write(extent, 0, &[VolatileSlice::from(&pattern(9, ps)[..])]).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         store.fork_to(&child, crate::host_cell::fork_child(store.cell())).unwrap();
         extent
     };
@@ -3426,7 +3426,7 @@ fn forks_opening_reads_nothing_more_of_a_larger_base() {
             base.write(ExtentId { cell: cell.id, sequence }, 0, &[VolatileSlice::from(&data[..])])
                 .unwrap();
             if sequence % 1024 == 0 {
-                base.commit(None).unwrap();
+                futures::executor::block_on(base.commit(None)).unwrap();
             }
         }
         let forks: Vec<_> = (1..=FORKS)
@@ -3477,7 +3477,7 @@ fn counting_followers_walks_no_extents() {
         base.write(ExtentId { cell: cell.id, sequence }, 0, &[VolatileSlice::from(&data[..])])
             .unwrap();
         if sequence % 1024 == 0 {
-            base.commit(None).unwrap();
+            futures::executor::block_on(base.commit(None)).unwrap();
         }
     }
     let forks: Vec<_> = (1..=FORKS)
@@ -3827,7 +3827,7 @@ fn forks_to_stores_there_already_fail_with_eexist() {
     let dir = tempfile::tempdir().unwrap();
     let (path, fork) = (dir.path().join("store"), dir.path().join("fork"));
     let store = OpenCell::create(&path, 1 << 20).unwrap();
-    store.commit(None).unwrap();
+    futures::executor::block_on(store.commit(None)).unwrap();
     drop(store);
     fork_cell(&path, &fork).unwrap();
     let again = fork_cell(&path, &fork);
@@ -3849,7 +3849,7 @@ fn requests_attach_nothing() {
     let store = OpenCell::create(&base, 1 << 20).unwrap();
     let extent = ExtentId { cell: store.cell().id, sequence: 1 };
     store.write(extent, 0, &[VolatileSlice::from(&[7; 4096][..])]).unwrap();
-    store.commit(None).unwrap();
+    futures::executor::block_on(store.commit(None)).unwrap();
     drop(store);
     let vm = CellClient::connect(&socket, dir.path().join("vm"), 1 << 20).unwrap();
     // But those nothing replies to.
@@ -3878,7 +3878,7 @@ fn stores_worked_on_here_read_no_boot_profile() {
     let store = OpenCell::create(&base, 1 << 24).unwrap();
     let extent = ExtentId { cell: store.cell().id, sequence: 1 };
     store.write(extent, 0, &[VolatileSlice::from(&pattern(7, ps)[..])]).unwrap();
-    store.commit(None).unwrap();
+    futures::executor::block_on(store.commit(None)).unwrap();
     store.fork_to(&fork, crate::host_cell::fork_child(store.cell())).unwrap();
     drop(store);
     // The base's profile, as its first fork to boot recorded it.
@@ -3906,7 +3906,7 @@ fn stores_synced_here_are_closed_before_they_are_let_go() {
     for round in 0..20 {
         let path = dir.path().join(format!("store-{round}"));
         let store = OpenCell::create(&path, 1 << 20).unwrap();
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         drop(store);
         wait_uploaded(&path).unwrap();
         let deleted = delete_cell(&path).map_err(|error| error.errno());
@@ -5149,7 +5149,7 @@ fn faults_waiting_for_object_storage_hold_up_no_request() {
                 .write(ExtentId { cell: cell.id, sequence }, 0, &[VolatileSlice::from(&data[..])])
                 .unwrap();
         }
-        store.commit(None).unwrap();
+        futures::executor::block_on(store.commit(None)).unwrap();
         cell
     };
     let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
@@ -5593,7 +5593,7 @@ fn vm_processes_of_any_tenant_write_no_public_base() {
     std::thread::spawn(move || serve(listener));
     let (base, fork) = (dir.path().join("base"), dir.path().join("fork"));
     let store = OpenCell::create(&base, 1 << 24).unwrap();
-    store.commit(None).unwrap();
+    futures::executor::block_on(store.commit(None)).unwrap();
     store.make_public().unwrap();
     let forked = crate::host_cell::fork_child(store.cell());
     drop(store);
