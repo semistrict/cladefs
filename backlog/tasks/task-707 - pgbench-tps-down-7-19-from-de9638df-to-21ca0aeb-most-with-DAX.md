@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-20 21:24'
-updated_date: '2026-11-20 21:38'
+updated_date: '2026-11-20 22:40'
 labels:
   - perf
   - regression
@@ -39,3 +39,9 @@ Reported by the sandbox team (GCE 16 vCPU, Firecracker nested, 4-vCPU VM, pgbenc
 <!-- SECTION:PLAN:BEGIN -->
 1. Read the range's hot-path changes (no bisect, user 2026-11-20). 2. Hypothesis: 9a04595e7 (TASK-672.1) makes every span real: otel::install always builds a provider with Sampler::AlwaysOn and the tracez Processor, so trace::enabled() is true and each request, page-in, commit phase and bucket request pays SDK span creation, attributes, random IDs, two shard locks and a Named lookup; before, spans were off (2 ns) unless CLADEFSD_TRACES=otlp, then 1% sampled. Fits the pattern: DAX makes the most requests (first-store CoW faults), a smaller window more; no-DAX fewest. 3. Test: 21ca0aeb with an experiment-only env switch skipping install, same binary on/off, fxfs-guest-pgbench-dax on ubu1 under fxjob --bench.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-20 ubu1, main f247775cf, fxfs-guest-pgbench-dax, 3x30 s, same binary, interleaved, fxjob --bench: spans recorded (unset) 2853/2918/2832 and 2690/2960/2864 tps, mean 2853; CLADEFSD_TRACES=off (daemon logged 'spans off') 2808/2938/2924 and 2287/2922/2828, mean 2785 (2884 without the 2287 first run). No difference beyond noise: span recording does not explain the drop on ubu1 (not nested virt; their GCE is). CLADEFSD_TRACES=off landed anyway (f247775cf) for the sandbox team's retest. Every run failed its encryption check after pgbench: TASK-711.
+<!-- SECTION:NOTES:END -->
