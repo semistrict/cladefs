@@ -231,7 +231,7 @@ fn trace(sample: &Sample, html: &mut String) {
     let began = roots.iter().map(|at| spans[*at].start_time).min().unwrap_or(span.start_time);
     let mut stack: Vec<(usize, usize)> = roots.iter().rev().map(|at| (*at, 0)).collect();
     while let Some((at, depth)) = stack.pop() {
-        line(&spans[at], depth, began, at == sample.span, html);
+        line(&spans[at], depth, began, at == sample.at, html);
         let of = children.get(&spans[at].span_context.span_id());
         stack.extend(of.into_iter().flatten().rev().map(|child| (*child, depth + 1)));
     }

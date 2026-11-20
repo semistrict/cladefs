@@ -1,17 +1,18 @@
 # Tracing cladefsd with OpenTelemetry
 
-`cladefsd` can export spans of what it does over OTLP: the requests it serves, the commits
-they cause and each commit's phases, uploads to the bucket and each bucket request, store opens
-and forks, extent-cache page-ins, and memory-relief passes. Tracing is off by default. While it is
-off, a span costs one relaxed atomic load (measured below), and nothing is allocated or exported.
-The code is `crates/bucket_cell/src/trace.rs`, which makes the spans, and
-`crates/cladefs/src/cladefsd/otel.rs`, which starts the exporter (TASK-258).
+`cladefsd` makes spans of what it does: the requests it serves, the commits they cause and each
+commit's phases, uploads to the bucket and each bucket request, store opens and forks,
+extent-cache page-ins, and memory-relief passes. It records every span in its own memory and shows
+them at `/z/tracez` (see [z-pages](#z-pages)). It exports them over OTLP only when told to.
+The code is `crates/bucket_cell/src/trace.rs`, which makes the spans,
+`crates/cladefs/src/cladefsd/otel.rs`, which starts the recorder and the exporter (TASK-258), and
+`crates/cladefs/src/cladefsd/zpages/`, which serves the pages (TASK-672).
 
 ## Turning it on
 
 | Variable | Meaning | Default |
 |---|---|---|
-| `CLADEFSD_TRACES` | `otlp` turns tracing on. Any other value except empty makes the daemon refuse to start. | off |
+| `CLADEFSD_TRACES` | `otlp` exports spans. Any other value except empty makes the daemon refuse to start. Spans are recorded for `/z/tracez` either way. | not exported |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | The collector, OTLP over HTTP with protobuf. `/v1/traces` is appended. `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` names the full URL instead. | `http://localhost:4318` |
 | `OTEL_SERVICE_NAME` | The service the spans belong to. | `cladefsd` |
 | `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG` | OpenTelemetry's standard sampler variables. | see Sampling |
@@ -23,10 +24,11 @@ it exports what it has left before it exits.
 ### Sampling
 
 Each request, each background flush, each upload and each relief pass starts a trace, and a busy
-daemon starts thousands a second. So unless `OTEL_TRACES_SAMPLER` is set, the daemon samples
-`parentbased_traceidratio` with ratio `0.01`: it keeps one trace in a hundred, whole. A commit's
-spans follow the decision made for the request that caused it. `OTEL_TRACES_SAMPLER_ARG` alone
-changes the ratio. To keep everything while debugging:
+daemon starts thousands a second. So unless `OTEL_TRACES_SAMPLER` is set, the daemon exports
+`parentbased_traceidratio` with ratio `0.01`: one trace in a hundred, whole. The sampler decides
+per trace, from the trace ID, as it would for a root span, so every span of an exported trace is
+exported. Sampling only limits what is exported: `/z/tracez` records every span.
+`OTEL_TRACES_SAMPLER_ARG` alone changes the ratio. To export everything while debugging:
 
 ```sh
 OTEL_TRACES_SAMPLER=always_on
@@ -65,7 +67,7 @@ request also has `cladefs.errno`.
 | `commit.upload_wait` | a commit waiting for the bucket (uploaded: until uploaded; otherwise: within its lag) | `store.commit` | `epoch` |
 | `store.open`, `store.create` | opening a store, or making a new one | the request or control call | `store`, `cell` |
 | `store.fork` | a fork or version of a store | the request or control call | `cell`, `child`, `version` |
-| `cache.page_in` | reading a part of a cached extent into memory | the fault or read that needed it | `cell`, `extent`, `arena`, `bytes` |
+| `cache.page_in` | reading a part of a cached extent into memory | the fault or read that needed it | `cell`, `extent`, `arena`, `bytes`, `source` (see below) |
 | `cache.relief` | an eviction pass freeing memory for an arena under pressure | root | `arena`, `bytes` evicted, `extents` evicted |
 | `upload.segment` | uploading a segment, its large extents first | root, on the uploader | `cell`, `segment`, `extents`, `bytes` |
 | `upload.checkpoint` | writing a cell checkpoint | root, on the uploader | `cell`, `segment`, `extents` |
@@ -84,6 +86,75 @@ the connection's `store`; TASK-260). A call for no guest request, as one the VMM
 own, has none. Work done for the request on other threads, as object storage's reads and the
 pager's, reads it from `cladefs::request::current()`.
 
+### Where a page-in's data came from
+
+`cladefs.source` on `cache.page_in` names the farthest place its read went (TASK-672.2):
+
+| Value | Meaning |
+|---|---|
+| `local` | the host's stores. The fetcher was not used. |
+| `memory` | parts and tails the host's fetchers keep in memory |
+| `part_cache` | the host's part cache, on its disk |
+| `peer` | another host that owns the part |
+| `bucket` | a GET or a listing of the bucket: every cache missed |
+
+A read that joins another read's GET while it is in flight also says `bucket`, because it waited
+for that GET. When the source is `bucket`, the request that waited for the page-in carries
+`cladefs.backtrace`: the stack of the thread that waited, captured as it woke. A page-in runs as a
+task of its own, so a stack taken there would show only the runtime. The stack is taken from the
+request's own poll instead, which includes every future awaiting the page. It is captured as frame
+addresses, in hexadecimal, innermost first, only on bucket misses, and resolved to function names
+only when `/z/tracez` shows it. An exported span carries the raw addresses, which mean nothing
+outside the process.
+
+## z-pages
+
+With `CLADEFSD_METRICS` naming an address, the daemon serves these pages there, beside
+`/metrics`. They are for operators: bind the address to localhost, or to a network only operators
+reach.
+
+| Page | Shows |
+|---|---|
+| `/z/` | the list of pages |
+| `/z/tracez` | each span name's counts by latency bucket, failed and running, each linking to its samples |
+| `/z/tracez?name=N&bucket=B` | samples of span `N` in latency bucket `B` (0 to 8), whole traces |
+| `/z/tracez?name=N&failed` | samples of span `N` that failed |
+| `/z/tracez?name=N` | samples of span `N` in every bucket, the slowest first |
+| `/z/tracez?name=N&tag=KEY=VALUE` | samples whose trace has a span with that attribute |
+| `/z/tracez?name=N&running` | spans `N` running now, the longest running first |
+| `/z/pprof/profile?seconds=S` | a CPU profile of `S` seconds (1 to 300, default 30), pprof's protobuf |
+| `/z/pprof/flamegraph?seconds=S` | the same, as an SVG flamegraph |
+
+The summary page links to page-ins that went to the bucket:
+`/z/tracez?name=cache.page_in&tag=cladefs.source=bucket`.
+
+### tracez
+
+Latencies are wall clock, so a span that waited for the bucket lands in the slow buckets on its
+own. The buckets are Census's: >0, >10µs, >100µs, >1ms, >10ms, >100ms, >1s, >10s, >100s. Counts are
+since the daemon started.
+
+The recorder holds each trace's spans as they end, until no span of the trace runs. It then keeps
+each span as a sample of its name and latency bucket, with the whole trace: the latest 4 of each
+name and bucket, and the latest 4 failures. Memory is bounded: 64 spans per trace (more are counted
+as dropped), and 4096 traces held at once (the oldest is dropped past that, as when a span never
+ends). A span that ends after its trace was kept starts a partial trace of its own.
+
+### CPU profiles
+
+```sh
+go tool pprof http://HOST:PORT/z/pprof/profile?seconds=30
+curl -o cpu.svg 'http://HOST:PORT/z/pprof/flamegraph?seconds=30'
+```
+
+The profiler is pprof-rs (Apache-2.0), with inferno (CDDL-1.0) drawing flamegraphs. It samples
+running threads 99 times per CPU second with SIGPROF, walking frame pointers. Every build here keeps
+frame pointers (`.cargo/config.toml`). Only one profile runs at a time. A second request gets
+`409 Conflict`. SIGPROF interrupts system calls. It is installed with `SA_RESTART`, and the calls
+the kernel does not restart fail with `EINTR`, which the daemon's own loops retry (`wire.rs`,
+`storage/io.rs`) as Rust's standard library and tokio do. Samples are not tagged with cells or
+requests: pprof-rs has no place for tags.
+
 ## Cost while off
 
 `spans_off_are_nothing_and_cost_a_load` (`crates/bucket_cell/src/trace.rs`) times a bucket
@@ -93,6 +164,10 @@ debug build, the fastest of 5 rounds of a million. With tracing off, no tracer e
 attribute is ever computed. The request path adds one more load per request, in
 `otel::request_span`.
 
+## Cost while recorded
+
+TODO(TASK-672.1): `a_recorded_span_costs` figures.
+
 ## Tests
 
 - `crates/cladefs/src/cladefsd/tests/otel.rs` serves a write, a read and an uploaded commit through
@@ -101,3 +176,10 @@ attribute is ever computed. The request path adds one more load per request, in
 - `crates/cladefs/tests/tracing.rs` runs the `cladefsd` binary against an OTLP/HTTP collector
   in the test. It checks that the spans arrive at `/v1/traces` and that nothing is sent without
   `CLADEFSD_TRACES`.
+- `crates/cladefs/src/cladefsd/tests/otel.rs` also checks that spans are recorded without export,
+  and that a fork restored from the bucket reads with `cladefs.source=bucket` and a backtrace that
+  `/z/tracez` resolves to `bring_in`.
+- `crates/bucket_cell/src/fetch.rs` (`reads_say_how_far_they_went`) checks each source, and that a
+  read that joined another's GET says `bucket`.
+- `crates/cladefs/src/cladefsd/zpages/` checks the recorder's buckets, samples and bounds, exports of
+  whole traces, the pages, and CPU profiles naming the function that ran.

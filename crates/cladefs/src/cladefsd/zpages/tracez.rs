@@ -92,24 +92,27 @@ struct Samples {
     failed: VecDeque<Sample>,
 }
 
-/// A span kept: of its trace, the span at `span`.
+/// A span kept, with its trace.
 #[derive(Clone)]
 pub struct Sample {
+    /// The trace it is of.
     pub trace: Arc<Trace>,
-    pub span: usize,
+    /// Where it is among the trace's spans.
+    pub at: usize,
 }
 
 impl Sample {
     /// Its span.
     pub fn span(&self) -> &SpanData {
-        &self.trace.spans[self.span]
+        &self.trace.spans[self.at]
     }
 }
 
-/// The spans of a trace held, in the order they ended, and how many more ended, past
-/// [`TRACE_SPANS`].
+/// The spans of a trace held.
 pub struct Trace {
+    /// Its spans, in the order they ended, [`TRACE_SPANS`] at most.
     pub spans: Vec<SpanData>,
+    /// How many more of its spans ended, past [`TRACE_SPANS`].
     pub dropped: usize,
 }
 
@@ -134,26 +137,37 @@ struct Open {
 /// A span running.
 #[derive(Clone, Debug)]
 pub struct Running {
+    /// Its name.
     pub name: Cow<'static, str>,
+    /// The ID of its trace.
     pub trace: TraceId,
+    /// Its ID.
     pub span: SpanId,
+    /// Its parent's ID, invalid for a root.
     pub parent: SpanId,
+    /// When it started.
     pub start: SystemTime,
 }
 
-/// Which samples of a span name: of a latency bucket, or those that failed.
+/// Which samples of a span name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Which {
+    /// Those of a latency bucket, by its index in [`BOUNDS`].
     Latency(usize),
+    /// Those that failed.
     Failed,
 }
 
-/// A span name's counts: how many ended in each latency bucket, how many failed, and how many run.
+/// A span name's counts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Counts {
+    /// The name.
     pub name: String,
+    /// How many of its spans ended in each latency bucket.
     pub ended: [u64; BOUNDS.len()],
+    /// How many of its spans ended failed.
     pub failed: u64,
+    /// How many of its spans run now.
     pub running: u64,
 }
 
@@ -237,7 +251,7 @@ impl Recorder {
     fn keep(&self, trace: Open) {
         let trace = Arc::new(Trace { spans: trace.ended, dropped: trace.dropped });
         for (index, span) in trace.spans.iter().enumerate() {
-            let sample = Sample { trace: trace.clone(), span: index };
+            let sample = Sample { trace: trace.clone(), at: index };
             let latency = span.end_time.duration_since(span.start_time).unwrap_or_default();
             let named = self.named(&span.name);
             let mut samples = named.samples.lock().unwrap();
@@ -326,6 +340,7 @@ pub struct Export {
 }
 
 impl Export {
+    /// Spans handed to `processor`, of the traces `sampler` keeps.
     pub fn new(processor: impl SpanProcessor + 'static, sampler: Box<dyn ShouldSample>) -> Self {
         Self { sampler, processor: Box::new(processor) }
     }
