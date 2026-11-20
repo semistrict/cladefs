@@ -32,7 +32,11 @@ use world::{Profile, Weights, World};
 fn violations(seed: u64, profile: Profile) -> (Vec<String>, String) {
     let mut world = World::new(seed, profile);
     world.run();
-    let description = if world.violations.is_empty() { String::new() } else { world.describe() };
+    let description = match world.violations.is_empty() {
+        true => String::new(),
+        // cladefs: and the buggify sites the run asked about, on or off (doc-24).
+        false => format!("{}\nbuggify: {:#?}", world.describe(), bucket_cell::buggify::sites()),
+    };
     (world.violations, description)
 }
 
@@ -75,12 +79,36 @@ fn holds(profile: Profile, seeds: Range<u64>) {
 }
 
 /// Runs `seeds` as [`holds`] does, and `found` first, seeds past them that found a bug once, which
-/// every run replays.
+/// every run replays; then [`fresh`] seeds, which no run before ran.
 fn holds_with(profile: Profile, seeds: Range<u64>, found: &[u64]) {
     for seed in found.iter().copied().chain(soaked(seeds)) {
         let (found, description) = violations(seed, profile);
         assert!(found.is_empty(), "seed {seed}: {found:#?}\n{description}");
     }
+    for seed in fresh() {
+        let (found, description) = violations(seed, profile);
+        assert!(
+            found.is_empty(),
+            "fresh seed {seed}, found by this run alone: keep it with the test's seeds that found a \
+             bug once, and replay it with SIM_SEED={seed}: {found:#?}\n{description}"
+        );
+    }
+}
+
+/// cladefs: seeds drawn anew by each run, past the fixed ones, so that each run of the simulation
+/// reaches states none before it did, as FoundationDB's harness draws its seeds (doc-24, TASK-685.12):
+/// a run of fixed seeds replays the same states every time. `SIM_FRESH` of them (16 by default,
+/// 0 for none), from `SIM_FRESH_BASE` if set, to run a run's again, or else from a base drawn at
+/// random, said on standard output (which a failing test's output shows), at 2^40 or past it,
+/// away from the fixed seeds.
+fn fresh() -> Range<u64> {
+    let count: u64 = std::env::var("SIM_FRESH").map_or(16, |count| count.parse().unwrap());
+    let base = match std::env::var("SIM_FRESH_BASE") {
+        Ok(base) => base.parse().unwrap(),
+        Err(_) => (1 << 40) | (rand::random::<u64>() >> 2),
+    };
+    println!("fresh seeds: {count} from {base} (SIM_FRESH_BASE={base} runs them again)");
+    base..base + count
 }
 
 /// Runs `seeds` with `rules`, expecting one of them to find a violation other than garbage left:
@@ -262,6 +290,101 @@ fn seeds_replay() {
     ];
     for profile in profiles {
         replays(profile, 0..20);
+    }
+}
+
+/// cladefs: every buggify site the code has is asked about by the simulation (doc-24): a site no
+/// run reaches makes no run do its unusual thing, as FoundationDB reports a probe no run hits.
+#[test]
+fn buggify_sites_are_reached() {
+    let sites = ["segments.rs", "upload.rs", "writer.rs"];
+    let mut asked = std::collections::BTreeSet::<&str>::new();
+    for seed in 0..20 {
+        let mut world = World::new(seed, Profile::default());
+        world.run();
+        for site in bucket_cell::buggify::sites() {
+            asked.extend(sites.iter().copied().filter(|file| site.contains(file)));
+        }
+    }
+    bucket_cell::buggify::disable();
+    assert_eq!(asked.len(), sites.len(), "reached only {asked:?} of {sites:?}");
+}
+
+/// cladefs: FoundationDB's swarm of faults (doc-24): a profile the seed draws, so that each seed
+/// runs its own mix of what happens, as each of FoundationDB's runs adds fault workloads at random
+/// with their parameters. One of the named profiles as its base; each of its families of steps
+/// kept, dropped, halved or doubled, but those that drive the world (requests completing, calls
+/// delivered); its rates of failures, holds, restarts, forgetting, passes over one cell and
+/// corrupting crashes drawn again. Replication and regions only as the profiles made for them
+/// have them, whose worlds hold what they need.
+fn swarm(seed: u64) -> Profile {
+    use rand::{RngExt as _, SeedableRng as _};
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed ^ 0x5a5a_f00d);
+    let bases: [fn() -> Profile; 25] = [
+        Profile::default,
+        forks,
+        deleted_bases,
+        regions,
+        stale_placements,
+        collected,
+        children,
+        fresh_cells,
+        takeovers,
+        recreated,
+        late_checkpoints,
+        taken,
+        crashes,
+        wals,
+        versioned_wals,
+        spanning_wals,
+        restores,
+        forgotten_restores,
+        twin_restores,
+        whole_restores,
+        collectors,
+        recovering,
+        versions,
+        replicated,
+        retakes,
+    ];
+    let mut profile = bases[rng.random_range(0..bases.len())]();
+    profile.weights.scale(|name, weight| match name {
+        "complete" | "deliver" => weight,
+        _ => match rng.random_range(0..6) {
+            0 => 0,
+            1 => weight / 2,
+            2 => weight.saturating_mul(2),
+            _ => weight,
+        },
+    });
+    let mut either = |kept: f64, drawn: f64| match rng.random_range(0..3) {
+        0 => kept,
+        1 => 0.0,
+        _ => drawn,
+    };
+    profile.fail_before = either(profile.fail_before, 0.15);
+    profile.fail_after = either(profile.fail_after, 0.15);
+    profile.hold = either(profile.hold, 0.5);
+    profile.forget = either(profile.forget, 0.5);
+    if profile.replicated > 0.0 {
+        profile.net_faults = either(profile.net_faults, 0.2);
+    }
+    profile.one_cell = rng.random_range(0.0..=1.0);
+    profile.restarts = rng.random_bool(0.5);
+    profile.corrupting = rng.random_bool(0.5);
+    profile
+}
+
+/// cladefs: seeds of [`swarm`] profiles, each its own, find no violation; and replay as they ran.
+#[test]
+fn swarms() {
+    for seed in soaked(0..200).chain(fresh()) {
+        let profile = swarm(seed);
+        let (found, description) = violations(seed, profile);
+        assert!(found.is_empty(), "seed {seed} of {profile:#?}: {found:#?}\n{description}");
+    }
+    for seed in 0..10 {
+        replays(swarm(seed), seed..seed + 1);
     }
 }
 

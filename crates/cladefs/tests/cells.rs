@@ -36,7 +36,7 @@ fn cell(url: &str, args: &[&str]) -> String {
 /// The store at `path`, which keeps its cell in the bucket its description names, opened as a
 /// copy never placed here takes it, as the first placement (TASK-165.9).
 fn attached(path: &Path) -> OpenCell {
-    OpenCell::open(path).unwrap()
+    local_cell::upload::wait_on(OpenCell::open(path)).unwrap()
 }
 
 fn read(store: &OpenCell, extent: ExtentId, len: usize) -> Vec<u8> {
@@ -82,7 +82,7 @@ fn forks_and_takes_cells_in(url: &str) {
     let data = pattern(7, 5 << 20);
     let extent = ExtentId { cell: parent.cell().id, sequence: 1 };
     parent.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
-    parent.commit(Some(b"root")).unwrap();
+    local_cell::upload::wait_on(parent.commit(Some(b"root"))).unwrap();
     let parent_cell = parent.cell();
     drop(parent);
 
@@ -149,12 +149,12 @@ fn places_and_syncs_stores_in(url: &str) {
 
     // Made by cladefsctl, naming the bucket at `url`, its cell the bucket's to name (TASK-364).
     let made = cell(&url, &["create", &path("first"), &(1u64 << 30).to_string()]);
-    let store = OpenCell::open(path("first")).unwrap();
+    let store = local_cell::upload::wait_on(OpenCell::open(path("first"))).unwrap();
     let cell_id = store.cell();
     assert_eq!(made.parse::<cladefs::CellId>(), Ok(cell_id));
     let extent = ExtentId { cell: cell_id.id, sequence: 1 };
     store.write(extent, 0, &[VolatileSlice::from(&pattern(3, 1 << 20)[..])]).unwrap();
-    store.commit(Some(b"synced")).unwrap();
+    local_cell::upload::wait_on(store.commit(Some(b"synced"))).unwrap();
     drop(store);
     cell(&url, &["place", &path("first"), "5"]);
     cell(&url, &["sync", &path("first")]);

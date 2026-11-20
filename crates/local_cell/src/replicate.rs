@@ -878,6 +878,7 @@ fn serve(shared: &Shared, m: usize, link: &dyn MemberLink) {
                     if state.stopping || state.members[m].retired {
                         return;
                     }
+                    crate::blocks!("a replicator's member thread, idle");
                     state = shared.changed.wait(state).unwrap();
                 }
             }

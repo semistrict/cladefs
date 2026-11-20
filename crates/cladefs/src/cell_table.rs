@@ -114,6 +114,7 @@ fn wait_blocking(released: EventListener, deadline: Option<Instant>) -> bool {
     #[cfg(not(feature = "shuttle"))]
     {
         use event_listener::Listener as _;
+        local_cell::blocks!("a hold of a store, waiting for its holder on this thread");
         match deadline {
             None => {
                 released.wait();

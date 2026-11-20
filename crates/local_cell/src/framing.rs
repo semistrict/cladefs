@@ -595,7 +595,8 @@ fn on_threads<T: Send>(
         PACKERS.give(packer);
         (done, runnable_ns().saturating_sub(since))
     };
-    if per >= count {
+    // cladefs: on the calling thread under madsim, which has no other (doc-24).
+    if per >= count || cfg!(madsim) {
         return run(0..count);
     }
     std::thread::scope(|scope| {

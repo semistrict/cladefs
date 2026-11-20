@@ -96,7 +96,14 @@ impl Host {
         // Nothing uploaded but what is asked for: the members hold the rest.
         let options =
             upload::Options { interval: Duration::from_secs(3600), ..upload::Options::default() };
-        upload::open(recovering, OPTIONS, self.bucket.clone(), (holder, options), &runtime).unwrap()
+        local_cell::upload::wait_on(upload::open(
+            recovering,
+            OPTIONS,
+            self.bucket.clone(),
+            (holder, options),
+            &runtime,
+        ))
+        .unwrap()
     }
 }
 
@@ -159,7 +166,7 @@ fn what_a_member_holds_recovers_on_another_host() {
     store.made().unwrap();
     // What it made opening, uploaded, its segment closed: what no member holds is in the bucket.
     let base = store.last_commit().unwrap();
-    uploader.wait_uploaded(base).unwrap();
+    local_cell::upload::wait_on(uploader.uploaded(base)).unwrap();
     store.close_segment().unwrap();
     let member = Arc::new(Member::default());
     let links: Vec<Arc<dyn MemberLink>> = vec![member.clone(), Arc::new(Down)];
@@ -178,7 +185,7 @@ fn what_a_member_holds_recovers_on_another_host() {
     store.flush().unwrap();
     let last = store.last_commit().unwrap();
     until("the commits replicated", || replicator.told(uploader.last_uploaded()) >= last);
-    uploader.wait_replicated(last).unwrap();
+    local_cell::upload::wait_on(uploader.replicated(last)).unwrap();
     let expected = lost.contents(&store);
     assert!(member.logs.lock().unwrap().keys().any(|log| log & 1 == 1), "own extents sent");
     // What it sends is spooled on the store's disk, not held in memory (TASK-537.3.3).
@@ -380,7 +387,13 @@ impl Host {
             replace_after: Duration::from_secs(1),
             ..upload::Options::default()
         };
-        upload::open(recovering, OPTIONS, self.bucket.clone(), (holder, options), &runtime)
+        local_cell::upload::wait_on(upload::open(
+            recovering,
+            OPTIONS,
+            self.bucket.clone(),
+            (holder, options),
+            &runtime,
+        ))
     }
 }
 
@@ -423,7 +436,7 @@ fn takes_recover_what_a_lost_writers_members_hold() {
     // nothing to close: the commits after are on the members alone.
     store.made().unwrap();
     store.close_segment().unwrap();
-    uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
+    local_cell::upload::wait_on(uploader.uploaded(store.last_commit().unwrap())).unwrap();
     let mut sequence = store.info().unwrap().next_sequence;
     for round in 0..9u64 {
         let len = if round % 3 == 0 { 40 << 10 } else { BLOCK * (1 + round as usize % 4) };
@@ -433,7 +446,7 @@ fn takes_recover_what_a_lost_writers_members_hold() {
     }
     store.flush().unwrap();
     let last = store.last_commit().unwrap();
-    uploader.wait_replicated(last).unwrap();
+    local_cell::upload::wait_on(uploader.replicated(last)).unwrap();
     let expected = lost.contents(&store);
 
     // Host a is lost, its disk and replica directory with it; d takes the cell from b and c.
@@ -551,7 +564,7 @@ fn replicated_waiters_are_woken_by_members_or_the_bucket() {
     store.made().unwrap();
     store.close_segment().unwrap();
     let base = store.last_commit().unwrap();
-    uploader.wait_uploaded(base).unwrap();
+    local_cell::upload::wait_on(uploader.uploaded(base)).unwrap();
     let gated = Arc::new(Gated::default());
     let links: Vec<Arc<dyn MemberLink>> = vec![gated.clone(), Arc::new(Down)];
     let replicator = Replicator::start(1, base, store.spool().unwrap(), links, uploader.waker());
@@ -565,7 +578,7 @@ fn replicated_waiters_are_woken_by_members_or_the_bucket() {
     let uploader = Arc::new(uploader);
     let waiting = {
         let uploader = uploader.clone();
-        std::thread::spawn(move || uploader.wait_replicated(epoch))
+        std::thread::spawn(move || local_cell::upload::wait_on(uploader.replicated(epoch)))
     };
     std::thread::sleep(Duration::from_millis(200));
     assert!(!waiting.is_finished(), "told replicated before a member held it");
@@ -590,7 +603,7 @@ fn replicated_waiters_are_woken_by_members_or_the_bucket() {
     store.flush().unwrap();
     let epoch = store.last_commit().unwrap();
     until("degraded", || down.degraded());
-    uploader.wait_replicated(epoch).unwrap();
+    local_cell::upload::wait_on(uploader.replicated(epoch)).unwrap();
     // The head named it as the waiter was woken: the replicator counts the logs it dropped as the
     // head named them, the uploader's progress said so a moment after.
     until("woken by the bucket", || uploader.last_uploaded() >= epoch);
@@ -658,15 +671,15 @@ fn lost_members_are_replaced_and_commits_stay_replicated() {
     let (store, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).unwrap();
     store.made().unwrap();
     store.close_segment().unwrap();
-    uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
+    local_cell::upload::wait_on(uploader.uploaded(store.last_commit().unwrap())).unwrap();
     assert_eq!(addresses(&configuration_named(&host)), ["a", "b", "c"]);
     let last = commit(&store, 0, 4);
-    uploader.wait_replicated(last).unwrap();
+    local_cell::upload::wait_on(uploader.replicated(last)).unwrap();
 
     // b lost: c alone holds what comes next, until the writer replaces b.
     lost.lock().unwrap().insert("b".into());
     let last = commit(&store, 4, 3);
-    uploader.wait_replicated(last).unwrap();
+    local_cell::upload::wait_on(uploader.replicated(last)).unwrap();
     until("b replaced", || configuration_named(&host).number == 2);
     let configuration = configuration_named(&host);
     assert_eq!((configuration.f, addresses(&configuration)), (1, vec!["a", "c", "d"]));
@@ -679,7 +692,7 @@ fn lost_members_are_replaced_and_commits_stay_replicated() {
     // c lost too: d, given the tail, holds every commit.
     lost.lock().unwrap().insert("c".into());
     let last = commit(&store, 7, 3);
-    uploader.wait_replicated(last).unwrap();
+    local_cell::upload::wait_on(uploader.replicated(last)).unwrap();
     assert!(uploader.last_uploaded() < last, "told replicated by the bucket, not d");
     let expected = writer.contents(&store);
     let replicator = store.replicator().unwrap();
@@ -714,12 +727,12 @@ fn degraded_cells_drop_to_f_zero_and_come_back() {
     let (store, uploader) = host.open_replicated(recovering, 1, wish, a).unwrap();
     store.made().unwrap();
     let last = commit(&store, 0, 3);
-    uploader.wait_replicated(last).unwrap();
+    local_cell::upload::wait_on(uploader.replicated(last)).unwrap();
 
     lost.lock().unwrap().extend(["b".to_string(), "c".to_string()]);
     let last = commit(&store, 3, 3);
     // Woken by the bucket: the interval an hour, its upload asked for at once as it is degraded.
-    uploader.wait_replicated(last).unwrap();
+    local_cell::upload::wait_on(uploader.replicated(last)).unwrap();
     // The head named it as the waiter was woken; the uploader's progress says so a moment after.
     until("uploaded", || uploader.last_uploaded() >= last);
     until("degraded", || uploader.status().unwrap().replication.unwrap().degraded);
@@ -732,7 +745,7 @@ fn degraded_cells_drop_to_f_zero_and_come_back() {
     });
     // Its commits go on, each waiting for the bucket, uploaded at once.
     let last = commit(&store, 6, 2);
-    uploader.wait_replicated(last).unwrap();
+    local_cell::upload::wait_on(uploader.replicated(last)).unwrap();
 
     lost.lock().unwrap().clear();
     until("replicated again", || configuration_named(&host).f == 1);
@@ -740,7 +753,7 @@ fn degraded_cells_drop_to_f_zero_and_come_back() {
     assert_eq!((configuration.number, addresses(&configuration)), (3, vec!["a", "b", "c"]));
     until("degraded no more", || !uploader.status().unwrap().replication.unwrap().degraded);
     let last = commit(&store, 8, 2);
-    uploader.wait_replicated(last).unwrap();
+    local_cell::upload::wait_on(uploader.replicated(last)).unwrap();
     assert!(uploader.last_uploaded() < last, "told replicated by the bucket, not its members");
 
     // Its members lost again, it drops to f = 0 again; its writer gone, a take needs no peers
@@ -748,7 +761,7 @@ fn degraded_cells_drop_to_f_zero_and_come_back() {
     lost.lock().unwrap().extend(["b".to_string(), "c".to_string()]);
     // A writer finds its members lost as it sends them what it commits.
     let last = commit(&store, 10, 1);
-    uploader.wait_replicated(last).unwrap();
+    local_cell::upload::wait_on(uploader.replicated(last)).unwrap();
     until("dropped to f = 0 again", || configuration_named(&host).f == 0);
     let expected = host.contents(&store);
     drop((uploader, store));
@@ -762,7 +775,7 @@ fn degraded_cells_drop_to_f_zero_and_come_back() {
     let status = uploader.status().unwrap().replication.unwrap();
     assert!(status.degraded && status.f == 0, "{status:?}");
     let last = commit(&taken, 11, 2);
-    uploader.wait_replicated(last).unwrap();
+    local_cell::upload::wait_on(uploader.replicated(last)).unwrap();
     until("uploaded", || uploader.last_uploaded() >= last);
     drop(uploader);
 }
@@ -784,9 +797,9 @@ fn takes_asking_for_f_zero_drop_once_the_bucket_holds_what_was_told() {
     let (store, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).unwrap();
     store.made().unwrap();
     store.close_segment().unwrap();
-    uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
+    local_cell::upload::wait_on(uploader.uploaded(store.last_commit().unwrap())).unwrap();
     let last = commit(&store, 0, 5);
-    uploader.wait_replicated(last).unwrap();
+    local_cell::upload::wait_on(uploader.replicated(last)).unwrap();
     let expected = writer.contents(&store);
     let replicator = store.replicator().unwrap();
     lose(writer, (uploader, store, replicator));
@@ -806,7 +819,7 @@ fn takes_asking_for_f_zero_drop_once_the_bucket_holds_what_was_told() {
     until("replicated no more", || taken.replicator().is_none());
     assert!(uploader.last_uploaded() >= recovered, "dropped to f = 0 before the bucket held it");
     let last = commit(&taken, 5, 2);
-    uploader.wait_replicated(last).unwrap();
+    local_cell::upload::wait_on(uploader.replicated(last)).unwrap();
     drop(uploader);
 }
 
@@ -830,13 +843,13 @@ fn retakes_on_the_writers_disk_install_what_its_own_log_holds() {
     let (store, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).unwrap();
     store.made().unwrap();
     store.close_segment().unwrap();
-    uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
+    local_cell::upload::wait_on(uploader.uploaded(store.last_commit().unwrap())).unwrap();
     assert_eq!(addresses(&configuration_named(&host)), ["a", "b", "c"]);
 
     // c out of reach: b alone holds the commits, with a's own log.
     lost.lock().unwrap().insert("c".into());
     let last = commit(&store, 0, 5);
-    uploader.wait_replicated(last).unwrap();
+    local_cell::upload::wait_on(uploader.replicated(last)).unwrap();
     assert!(uploader.last_uploaded() < last, "told replicated by b, not the bucket");
     let expected = writer.contents(&store);
     let replicator = store.replicator().unwrap();
@@ -897,10 +910,10 @@ fn takes_of_cells_whose_members_are_lost_go_on_by_force() {
     let (store, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).unwrap();
     store.made().unwrap();
     store.close_segment().unwrap();
-    uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
+    local_cell::upload::wait_on(uploader.uploaded(store.last_commit().unwrap())).unwrap();
     assert_eq!(addresses(&configuration_named(&host)), ["a", "b", "c"]);
     let last = commit(&store, 0, 4);
-    uploader.wait_replicated(last).unwrap();
+    local_cell::upload::wait_on(uploader.replicated(last)).unwrap();
     assert!(uploader.last_uploaded() < last, "told replicated by b and c, not the bucket");
     let replicator = store.replicator().unwrap();
     lose(writer, (uploader, store, replicator));
@@ -928,7 +941,7 @@ fn takes_of_cells_whose_members_are_lost_go_on_by_force() {
     let taking = uploader.status().unwrap().taking.unwrap();
     assert_eq!(taking.replication.unwrap().forced_after, Some(uploaded));
     let next = commit(&taken, 4, 2);
-    uploader.wait_replicated(next).unwrap();
+    local_cell::upload::wait_on(uploader.replicated(next)).unwrap();
     drop(uploader);
 }
 
@@ -952,9 +965,9 @@ fn retakes_on_the_writers_disk_count_its_empty_log() {
     let (store, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).unwrap();
     store.made().unwrap();
     let last = commit(&store, 0, 4);
-    uploader.wait_replicated(last).unwrap();
+    local_cell::upload::wait_on(uploader.replicated(last)).unwrap();
     store.close_segment().unwrap();
-    uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
+    local_cell::upload::wait_on(uploader.uploaded(store.last_commit().unwrap())).unwrap();
     assert_eq!(addresses(&configuration_named(&host)), ["a", "b", "c"]);
     let expected = writer.contents(&store);
     // a's daemon restarts, every commit uploaded, its disk kept; b's disk lost meanwhile.
@@ -980,7 +993,7 @@ fn retakes_on_the_writers_disk_count_its_empty_log() {
     assert!(retaken.last_commit().unwrap() >= last);
     assert_eq!(again.contents(&retaken), expected);
     let next = commit(&retaken, 4, 2);
-    uploader.wait_replicated(next).unwrap();
+    local_cell::upload::wait_on(uploader.replicated(next)).unwrap();
     drop(uploader);
 }
 
@@ -1001,7 +1014,7 @@ fn dropped_logs_are_no_writers_copy() {
     let (store, uploader) = writer.open_replicated(recovering, 1, wish, peers).unwrap();
     store.made().unwrap();
     let last = commit(&store, 0, 4);
-    uploader.wait_replicated(last).unwrap();
+    local_cell::upload::wait_on(uploader.replicated(last)).unwrap();
     let configuration = configuration_named(&host);
     let replicator = store.replicator().unwrap();
     lose(writer, (uploader, store, replicator));
@@ -1082,9 +1095,9 @@ fn earlier_writers_logs_given_up(budget: u64) -> bool {
     let (store, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).unwrap();
     store.made().unwrap();
     store.close_segment().unwrap();
-    uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
+    local_cell::upload::wait_on(uploader.uploaded(store.last_commit().unwrap())).unwrap();
     let told = commit(&store, 0, 2);
-    uploader.wait_replicated(told).unwrap();
+    local_cell::upload::wait_on(uploader.replicated(told)).unwrap();
     let first = configuration_named(&host);
     assert_eq!(addresses(&first), ["a", "b", "c"]);
 
@@ -1092,7 +1105,7 @@ fn earlier_writers_logs_given_up(budget: u64) -> bool {
     // sync failing.
     lost.lock().unwrap().insert("c".into());
     let synced = commit(&store, 2, 2);
-    uploader.wait_replicated(synced).unwrap();
+    local_cell::upload::wait_on(uploader.replicated(synced)).unwrap();
     let before = ends(&all["b"], &first);
     for (sequence, round) in (store.info().unwrap().next_sequence..).zip(4..6) {
         let extent = ExtentId { cell: cell().id, sequence };
@@ -1147,12 +1160,12 @@ fn earlier_writers_logs_given_up(budget: u64) -> bool {
     let (taken, uploader) = third.open_replicated(recovering, 3, None, peers("a")).unwrap();
     let base = taken.last_commit().unwrap();
     assert_eq!(base, own, "its own log's, not b's");
-    uploader.wait_uploaded(base).unwrap();
+    local_cell::upload::wait_on(uploader.uploaded(base)).unwrap();
     until("its configuration named", || configuration_named(&host).epoch == 3);
     // A commit told replicated with the bucket's writes failing: on its configuration's members.
     writes_fail(&faults, true);
     let last = commit(&taken, 20, 1);
-    uploader.wait_replicated(last).unwrap();
+    local_cell::upload::wait_on(uploader.replicated(last)).unwrap();
     assert!(uploader.last_uploaded() < last, "told replicated by its members, not the bucket");
     let expected = third.contents(&taken);
     let replicator = taken.replicator().unwrap();
@@ -1265,14 +1278,14 @@ fn takes_prefer_whole_authentic_copies_to_longer_garbled_ones() {
     let (store, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).unwrap();
     store.made().unwrap();
     store.close_segment().unwrap();
-    uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
+    local_cell::upload::wait_on(uploader.uploaded(store.last_commit().unwrap())).unwrap();
     assert_eq!(addresses(&configuration_named(&host)), ["a", "b", "c"]);
     let both = commit(&store, 0, 2);
-    uploader.wait_replicated(both).unwrap();
+    local_cell::upload::wait_on(uploader.replicated(both)).unwrap();
     // c out of reach: b alone holds what comes next.
     lost.lock().unwrap().insert("c".into());
     let last = commit(&store, 2, 3);
-    uploader.wait_replicated(last).unwrap();
+    local_cell::upload::wait_on(uploader.replicated(last)).unwrap();
     assert!(uploader.last_uploaded() < last, "told replicated by b, not the bucket");
     let expected = writer.contents(&store);
     let replicator = store.replicator().unwrap();
@@ -1296,7 +1309,13 @@ fn takes_prefer_whole_authentic_copies_to_longer_garbled_ones() {
         replace_after: Duration::from_secs(1),
         ..upload::Options::default()
     };
-    let opened = upload::open(recovering, OPTIONS, host.bucket.clone(), (2, options), &runtime);
+    let opened = local_cell::upload::wait_on(upload::open(
+        recovering,
+        OPTIONS,
+        host.bucket.clone(),
+        (2, options),
+        &runtime,
+    ));
     let (taken, uploader) = opened.unwrap();
     taken.made().unwrap();
     assert!(taken.last_commit().unwrap() >= last);

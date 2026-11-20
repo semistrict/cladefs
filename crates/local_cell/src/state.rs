@@ -592,6 +592,7 @@ impl<'a, F: File> Locked<'a, F> {
 
     /// Waits for `condvar`, letting the state go meanwhile, and returns it, locked again.
     pub fn wait(mut self, condvar: &Condvar) -> Self {
+        crate::blocks!("a store's state, waiting for another thread's work on it");
         let guard = audited(self.guard.take().expect("the state is locked"));
         Self::new(guard.unlocked(|guard| condvar.wait(guard).unwrap()))
     }

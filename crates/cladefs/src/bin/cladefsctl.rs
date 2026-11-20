@@ -172,6 +172,8 @@
 
 // Every unsafe block says why it is sound, other threads included (TASK-444.4).
 #![deny(clippy::undocumented_unsafe_blocks)]
+// cladefs: its commands' futures, which hold the stores' (TASK-685.3), nest deeper than the default.
+#![recursion_limit = "256"]
 
 use anyhow::{Context as _, bail};
 use cladefs::OpenCell;
@@ -689,39 +691,70 @@ impl Command {
                  store's cell here: {why}"
             );
         }
+        // cladefs: outside the daemon, cladefsctl blocks on what the stores do, at its one entry
+        // here; each store it opens it closes, its uploads done (TASK-685.3).
+        // An import's walk of its image makes its store through FUSE storage, which blocks on the
+        // bucket runtime itself: on no runtime's thread, as it always did.
+        if let Self::Import { dir, capacity, image, reference } = self {
+            let made = cladefs::import::store(&dir, capacity, &image, reference.as_deref());
+            return futures::executor::block_on(made)
+                .with_context(|| format!("importing {}", image.display()));
+        }
+        local_cell::upload::wait_on(self.locally_async())
+    }
+
+    /// cladefs: what [`Command::locally`] does, once its checks pass.
+    async fn locally_async(self) -> anyhow::Result<()> {
         match self {
             Self::Create { dir, capacity } => {
-                println!("{}", OpenCell::create(&dir, capacity)?.cell());
+                let store = OpenCell::create(&dir, capacity).await?;
+                println!("{}", store.cell());
+                store.close().await;
             }
             Self::Take { dir, capacity, cell, token, force } => {
                 let mut opening = cladefs::Opening::here()?;
                 opening.keeping.force = force;
-                drop(OpenCell::take_with(&dir, (capacity, cell, token), opening)?);
+                OpenCell::take_with(&dir, (capacity, cell, token), opening).await?.close().await;
             }
             Self::Place { dir, token, force: false } => OpenCell::place(&dir, token)?,
             Self::Place { dir, token, force: true } => OpenCell::place_forced(&dir, token)?,
             Self::Sync { dir } => {
-                let store = OpenCell::open(&dir)?;
-                store.wait_uploaded()?;
+                let store = OpenCell::open(&dir).await?;
+                let synced = store.wait_uploaded().await;
+                store.close().await;
+                synced?;
             }
-            Self::Import { dir, capacity, image, reference } => {
-                let made = cladefs::import::store(&dir, capacity, &image, reference.as_deref());
-                futures::executor::block_on(made)
-                    .with_context(|| format!("importing {}", image.display()))?;
-            }
+            Self::Import { .. } => unreachable!("imported above, on no runtime's thread"),
             Self::Fork { src, dst } => {
-                let store = OpenCell::open(&src)?;
+                let store = OpenCell::open(&src).await?;
                 // A new cell of the store's tenant's (TASK-364).
                 let tenant = store.cell().tenant;
-                println!("{}", store.fork(&dst, tenant)?);
+                let forked = store.fork(&dst, tenant).await;
+                store.close().await;
+                println!("{}", forked?);
             }
-            Self::Version { dir } => println!("{:x}", OpenCell::open(&dir)?.make_version(None)?),
-            Self::Versions { dir } => print_versions(&OpenCell::open(&dir)?.versions()),
+            Self::Version { dir } => {
+                let store = OpenCell::open(&dir).await?;
+                let made = store.make_version(None).await;
+                store.close().await;
+                println!("{:x}", made?);
+            }
+            Self::Versions { dir } => {
+                let store = OpenCell::open(&dir).await?;
+                print_versions(&store.versions().await);
+                store.close().await;
+            }
             Self::DropVersions { dir, versions } => {
-                OpenCell::open(&dir)?.drop_versions(&versions.into_iter().collect())?;
+                let store = OpenCell::open(&dir).await?;
+                let dropped = store.drop_versions(&versions.into_iter().collect()).await;
+                store.close().await;
+                dropped?;
             }
             Self::Share { dir, version, shared } => {
-                OpenCell::open(&dir)?.share_version(version, shared)?;
+                let store = OpenCell::open(&dir).await?;
+                let shared = store.share_version(version, shared).await;
+                store.close().await;
+                shared?;
             }
             Self::ForkVersion { from, dst } => bail!(
                 "forking version {:x} of cell {:x} to {} needs the extent daemon (CLADEFSD_GRPC)",
@@ -731,26 +764,47 @@ impl Command {
             ),
             Self::Delete { dir } => {
                 let bucket = OpenCell::bucket_at(&dir)?;
-                OpenCell::delete(&dir, bucket.as_deref())?
+                OpenCell::delete(&dir, bucket.as_deref()).await?
             }
-            Self::Drop { dir } => OpenCell::delete(&dir, None)?,
+            Self::Drop { dir } => OpenCell::delete(&dir, None).await?,
             Self::Resize { dir, capacity } => {
-                let store = OpenCell::open(&dir)?;
+                let store = OpenCell::open(&dir).await?;
                 // Opened, it says whether it is a version, whose capacity changes nowhere
                 // (TASK-160.10).
-                if capacity < store.info()?.capacity {
-                    bail!(
+                let resized = match store.info() {
+                    Ok(info) if capacity < info.capacity => Err(anyhow::anyhow!(
                         "shrinking a store needs its guest to agree: resize it through the \
                          extent daemon serving its VM (CLADEFSD_GRPC)"
-                    );
-                }
-                store.set_capacity(capacity)?;
+                    )),
+                    Ok(_) => store.set_capacity(capacity).map_err(anyhow::Error::from),
+                    Err(err) => Err(err.into()),
+                };
+                store.close().await;
+                resized?;
             }
-            Self::Public { dir } => OpenCell::open(&dir)?.make_public()?,
-            Self::PublicAttachOnly { dir } => OpenCell::open(&dir)?.make_public_attach_only()?,
+            Self::Public { dir } => {
+                let store = OpenCell::open(&dir).await?;
+                let made = store.make_public();
+                store.close().await;
+                made?;
+            }
+            Self::PublicAttachOnly { dir } => {
+                let store = OpenCell::open(&dir).await?;
+                let made = store.make_public_attach_only();
+                store.close().await;
+                made?;
+            }
             Self::Attach { dir, base } => {
-                let ancestry = OpenCell::open(&base)?.ancestry();
-                OpenCell::open(&dir)?.attach_base(&base.canonicalize()?, &ancestry)?;
+                let based = OpenCell::open(&base).await?;
+                let ancestry = based.ancestry();
+                based.close().await;
+                let store = OpenCell::open(&dir).await?;
+                let attached = match base.canonicalize() {
+                    Ok(base) => store.attach_base(&base, &ancestry).map_err(anyhow::Error::from),
+                    Err(err) => Err(err.into()),
+                };
+                store.close().await;
+                attached?;
             }
             Self::Stats { .. }
             | Self::Grant { .. }
@@ -763,11 +817,10 @@ impl Command {
             | Self::AddBucket { .. }
             | Self::Buckets { .. } => unreachable!("refused above"),
             Self::Stat { dir } => {
-                let store = OpenCell::open(&dir)?;
-                let info = store.info()?;
-                print!(
-                    "{}",
-                    Stat {
+                let store = OpenCell::open(&dir).await?;
+                let stat = || -> anyhow::Result<Stat> {
+                    let info = store.info()?;
+                    Ok(Stat {
                         cell: store.cell(),
                         capacity: info.capacity,
                         used: info.used,
@@ -775,8 +828,11 @@ impl Command {
                         holding: store.holding()?,
                         public: store.is_public(),
                         open: None,
-                    }
-                );
+                    })
+                };
+                let stat = stat();
+                store.close().await;
+                print!("{}", stat?);
             }
         }
         Ok(())

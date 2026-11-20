@@ -40,7 +40,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, Weak, mpsc};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use storage_device::ExtentId;
 
@@ -136,6 +136,44 @@ pub struct Profile {
     pub corrupting: bool,
     pub weights: Weights,
     pub options: Options,
+}
+
+impl Weights {
+    /// cladefs: each weight as `scale` says, given its name and weight: a swarm's draw of which of
+    /// a profile's families a seed runs, and how often (doc-24).
+    pub fn scale(&mut self, mut scale: impl FnMut(&'static str, u32) -> u32) {
+        macro_rules! scaled {
+            ($($field:ident),*) => {
+                $(self.$field = scale(stringify!($field), self.$field);)*
+            };
+        }
+        scaled!(
+            complete,
+            write,
+            commit,
+            close,
+            checkpoint,
+            open,
+            takeover,
+            crash,
+            delete,
+            delete_base,
+            collect,
+            stop_collector,
+            reclaim,
+            stale_delete,
+            unfork,
+            twins,
+            stale_checkpoint,
+            version,
+            drop_version,
+            restore_version,
+            tick,
+            deliver,
+            late,
+            partition
+        );
+    }
 }
 
 /// cladefs: the chance, each step, that a region's bucket goes down, or comes up again.
@@ -279,6 +317,10 @@ const REPLICA_MOST: u64 = 1 << 40;
 /// cladefs: how many turns of draining the replicators and running out the takes' clocks a
 /// settling takes at most: a take waiting on members it never reaches waits for ever.
 const PUMPS: usize = 64;
+
+/// cladefs: the most requests one settling completes before the world is found livelocked: far
+/// past what a seed's steps leave waiting, so that only a world that never quiets down reaches it.
+const SETTLE_MOST: usize = 200_000;
 
 /// cladefs: a host's peer address, as configurations name their members.
 fn address(host: usize) -> String {
@@ -679,7 +721,7 @@ struct Session {
     uploader: Arc<Uploader>,
     intervals: Arc<Intervals>,
     /// What opening the store gave, once it did.
-    started: mpsc::Receiver<Result<Arc<LocalCell<MemDir>>, Failure>>,
+    started: futures::channel::oneshot::Receiver<Result<Arc<LocalCell<MemDir>>, Failure>>,
     /// The store, once open.
     store: Option<Arc<LocalCell<MemDir>>>,
     /// The uploader's task.
@@ -843,6 +885,8 @@ impl Drop for Running {
 
 impl World {
     pub fn new(seed: u64, profile: Profile) -> Self {
+        // cladefs: the code's buggify sites, on as the seed says, for this run alone (doc-24).
+        bucket_cell::buggify::enable(seed);
         let pool = LocalPool::new();
         let spawner = pool.spawner();
         let mut world = Self {
@@ -1183,13 +1227,13 @@ impl World {
                     self.follow_restore(host, cell, &from);
                     changed = true;
                 }
-                let session = &self.hosts[host].sessions[&cell];
+                let session = self.hosts[host].sessions.get_mut(&cell).unwrap();
                 if session.store.is_none() {
                     match session.started.try_recv() {
-                        Ok(Ok(store)) => self.opened(host, cell, store),
-                        Ok(Err(failure)) => self.refused(host, cell, failure),
-                        Err(mpsc::TryRecvError::Empty) => continue,
-                        Err(mpsc::TryRecvError::Disconnected) => {
+                        Ok(Some(Ok(store))) => self.opened(host, cell, store),
+                        Ok(Some(Err(failure))) => self.refused(host, cell, failure),
+                        Ok(None) => continue,
+                        Err(futures::channel::oneshot::Canceled) => {
                             unreachable!("an uploader stopped without saying how its store opened")
                         }
                     }
@@ -1375,7 +1419,7 @@ impl World {
         let keeping = kept.clone();
         let spawn: Spawn = Arc::new(move |task| keeping.lock().unwrap().push(task));
         let uploader = Shared::new(options, uploads, (intervals.clock(), spawn), keys);
-        let (started, start) = mpsc::channel();
+        let (started, start) = futures::channel::oneshot::channel();
         let (running, bucket) = (uploader.clone(), self.host_bucket(host));
         let running = self.spawn_uploader(async move {
             let recovering = (recovering, None);
@@ -2498,7 +2542,7 @@ impl World {
     /// Requests complete, without failing, until none is left, those held too.
     fn settle(&mut self) {
         self.bucket.release();
-        let mut pumps = 0;
+        let (mut pumps, mut completed) = (0, 0);
         loop {
             self.settle_tasks();
             // cladefs: replicated cells' members sent what they lack, and takes waiting for them
@@ -2512,6 +2556,18 @@ impl World {
             }
             self.bucket.complete(0, Fault::None);
             trace!("{}", self.bucket.journal().last().unwrap());
+            // cladefs: within a bound, as FoundationDB's runs must quiet down once their faults
+            // stop: a world whose tasks ask for requests for ever, no fault answering them,
+            // livelocks, which hung the run before (doc-24).
+            completed += 1;
+            if completed > SETTLE_MOST {
+                let waiting = self.bucket.waiting();
+                self.violation(format!(
+                    "the world doesn't settle: {SETTLE_MOST} requests completed, every one \
+                     answered, and {waiting} more waiting: a livelock"
+                ));
+                return;
+            }
         }
     }
 
