@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-20 19:46'
+updated_date: '2026-11-20 22:22'
 labels:
   - sandbox
   - cache
@@ -36,3 +37,9 @@ A prediction of a version's reads must reach every host and outlive daemon resta
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+From TASK-702.1 (2026-11-20): a recording must take the VM's MAPs (and READs), not its faults alone: a warm host's VM faults on none of what its MAPs install (crates/cladefs/src/cladefsd/reads.rs records all three). Units are MiBs of extents (an Fxfs extent is a MiB at most). Keep the last K = 8 recordings; older ones are what the collector removes beyond the count.
+<!-- SECTION:NOTES:END -->

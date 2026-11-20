@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-20 19:46'
+updated_date: '2026-11-20 22:22'
 labels:
   - sandbox
   - performance
@@ -39,3 +40,9 @@ A cold host's first fork of a version reads its base a part at a time (TASK-670:
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+From TASK-702.1 (2026-11-20): predict the units any of the last 8 recordings read, no score threshold, fetched in the order of each unit's earliest read in any of them (5x less modelled waiting than by mean time when one set serves two workloads, docs/measurements/ubu1-python-sandbox-2026-11-20T2043Z-dc6e5dff); concurrency matters (modelled waiting 16.5 s at 32 fetches at once, 7.4 s at 64, ~0 at 128, 30 ms a fetch).
+<!-- SECTION:NOTES:END -->
