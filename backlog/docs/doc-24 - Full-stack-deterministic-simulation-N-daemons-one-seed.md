@@ -3,7 +3,7 @@ id: doc-24
 title: 'Full-stack deterministic simulation: N daemons, one seed'
 type: specification
 created_date: '2026-11-20 03:31'
-updated_date: '2026-11-20 05:02'
+updated_date: '2026-11-20 07:21'
 ---
 # Full-stack deterministic simulation
 
@@ -149,7 +149,7 @@ what was Replicated; every host lost, what was Uploaded.
 - **Decision: go on with madsim.** The madsim build's target is `target/madsim`
   (`CARGO_TARGET_DIR`), as `--cfg madsim` rebuilds everything.
 
-## What the thread inventory found (TASK-685.4, 2026-11-20)
+## What the thread inventory found (TASK-685.3, 2026-11-20)
 
 cladefsd starts its threads at 41 sites outside tests. They fall into four groups:
 
@@ -197,7 +197,13 @@ larger change than step 4 assumed. The ways forward:
    `Replicator::drive`, and `local_cell::sim` below them, without the request pool. Most of what
    the replicated simulation does already, at the daemon's level, and no more.
 
-Until this is decided, the steps that serve any of the three go on:
+**Decision (the user, 2026-11-20): 1, the daemon async down to its waits**, madsim as planned.
+Every wait on another task's work on the request, control, peer and replication paths becomes an
+`.await` (an async form beside each synchronous one that the in-process device, the CLI and FUSE
+storage keep), the request pool's jobs become tasks, and `block_on` leaves the daemon's paths. The
+plan for it is TASK-685.3's, sized by an inventory of those waits.
+
+Before the decision, the steps that served any of the three went on:
 
 - per-node statics (done);
 - a per-node environment and the daemon core (step 2);
