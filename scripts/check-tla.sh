@@ -25,6 +25,8 @@
 # - specs/head-slots: a cell's head kept in N objects, written in turn (TASK-690), as GCS takes
 #   about one write a second of an object: a swap conditional on its slot, a read of every slot
 #   taking the newest, together the one head specs/bucket models;
+# - specs/ephemeral: ephemeral cells (doc-25, TASK-698.1): forks referring by incarnation, daemons
+#   retiring their references on start, decommissioning, and live migration's hand-over;
 #
 #   check-tla.sh [MODEL...|deep]
 #   check-tla.sh cover MODEL [NAME=VALUE...]
