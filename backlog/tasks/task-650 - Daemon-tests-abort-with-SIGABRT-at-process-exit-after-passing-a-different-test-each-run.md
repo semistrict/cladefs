@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-18 21:17'
-updated_date: '2026-11-20 17:50'
+updated_date: '2026-11-20 18:41'
 labels:
   - cladefsd
   - flaky
@@ -45,4 +45,6 @@ Seen 2026-11-20 on ubu1 (t3/sim-spike, scripts/test.sh workspace under fxjob, --
 2026-11-20 on ubu1: cladefs's snapshots_after_private_pages_are_rebound_restore_their_bytes and tenants::tenants_hold_their_own_pages pass, then SIGABRT at exit; stressed together 60 times: main e052b73f 5 failed, t3/async-1 2 failed. Both seen in full workspace runs.
 
 2026-11-20 (TASK-691 Linux run, ubu1, f4f4f4c78): cladefs::disk tenants_past_their_disk_limits_are_refused_while_others_write passed, then SIGABRT at exit.
+
+2026-11-20: seen again on ubu1 (async rewrite's guest transport batch): cladefsd::tests::shrinks_return_once_the_pages_they_evict_are_free reported ok, then SIGABRT; its stderr's last line 'letting a VM process go, as it stopped answering stage operations' (the test's own unresponsive VM process). Passed 3/3 alone.
 <!-- SECTION:NOTES:END -->
