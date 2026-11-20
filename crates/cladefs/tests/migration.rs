@@ -184,3 +184,61 @@ fn ephemeral_cells_migrate_live_between_hosts() {
         BEFORE + DURING
     );
 }
+
+/// A hand-over the target never answers leaves the cell given up on the source, its store opened
+/// there no more; the target restarted gives up the migration it was taking, and its reference;
+/// asked again, it refuses, and the source serves the cell again, holding all it held, the only
+/// one referring to its origin.
+#[test]
+fn hand_overs_refused_leave_the_source_serving() {
+    let dir = tempfile::tempdir().unwrap();
+    let bucket = dir.path().join("bucket");
+    let hosts = [dir.path().join("source"), dir.path().join("target")];
+    for path in [&bucket, &hosts[0], &hosts[1]] {
+        std::fs::create_dir(path).unwrap();
+    }
+    let [source_at, target_at] = addresses();
+    let source = daemon(&hosts[0], &bucket, &[source_at.clone(), target_at.clone()]);
+    let target_peers = [target_at.clone(), source_at];
+    let target = daemon(&hosts[1], &bucket, &target_peers);
+
+    let base = hosts[0].join("base");
+    let store = CellClient::connect(&source.vms, &base, CAPACITY).unwrap();
+    let inherited = ExtentId { cell: store.cell(), sequence: 1 };
+    write(&store, inherited);
+    drop(store);
+    let version = source.control.make_version(&base, None).unwrap();
+    source.control.sync_cell(&base).unwrap();
+    let stated = source.control.stat_cell(&base).unwrap();
+    let from = cladefs::CellVersion { tenant: stated.tenant, cell: stated.cell, version };
+    let here = hosts[0].join("ephemeral-cell");
+    let child = source.control.fork_ephemeral(from, &here).unwrap();
+    let own = |sequence| ExtentId { cell: child.id, sequence };
+    let store = CellClient::connect(&source.vms, &here, CAPACITY).unwrap();
+    for sequence in 1..=4 {
+        write(&store, own(sequence));
+    }
+    drop(store);
+    let there = hosts[1].join("ephemeral-cell");
+    source.control.migrate_cell(&here, &target_at, &there).unwrap();
+    assert_eq!(referring(&bucket).len(), 2, "the source's and the target's");
+
+    drop(target);
+    let unanswered = source.control.hand_over_cell(&here).unwrap_err();
+    assert_eq!(unanswered.errno(), Some(cladefs::Errno::ENOTCONN));
+    assert!(CellClient::connect(&source.vms, &here, CAPACITY).is_err(), "given up, it opens not");
+
+    let target = daemon(&hosts[1], &bucket, &target_peers);
+    assert_eq!(referring(&bucket).len(), 1, "the target's given up as it started again");
+    let refused = source.control.hand_over_cell(&here).unwrap_err();
+    assert_eq!(refused.errno(), Some(cladefs::Errno::EAGAIN));
+    assert!(!there.exists());
+    let noted =
+        |daemon: &Daemon| std::fs::read_dir(daemon.ephemeral.join("cells")).unwrap().count();
+    assert_eq!((noted(&source), noted(&target)), (1, 0), "the cell is the source's alone");
+    let store = CellClient::connect(&source.vms, &here, CAPACITY).unwrap();
+    assert!(read(&store, inherited) == data(1));
+    for sequence in 1..=4 {
+        assert!(read(&store, own(sequence)) == data(sequence), "extent {sequence} read otherwise");
+    }
+}
