@@ -3,9 +3,11 @@ id: TASK-690
 title: >-
   A cell's head is swapped per uploaded segment, past GCS's one write a second
   to an object
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-20 08:19'
+updated_date: '2026-11-20 08:23'
 labels:
   - bucket
   - gcs
