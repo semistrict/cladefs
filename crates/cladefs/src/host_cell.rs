@@ -125,14 +125,16 @@ const OWN_BUCKET: &str = ".bucket";
 /// one, as for the cladefs CLI's images ([`token`]): the first placement's.
 const FIRST_PLACEMENT: u64 = 1;
 
-/// The buckets this process keeps stores' cells in, by their URLs: one each, which every store
-/// naming it shares, so that a memory bucket (`memory:///NAME`) is one for the process, as a
-/// bucket elsewhere is one for every process.
-static BUCKETS: Mutex<BTreeMap<String, Arc<ObjectBucket>>> = Mutex::new(BTreeMap::new());
+node_local::node_local! {
+    /// The buckets this process keeps stores' cells in, by their URLs: one each, which every store
+    /// naming it shares, so that a memory bucket (`memory:///NAME`) is one for the process, as a
+    /// bucket elsewhere is one for every process.
+    static BUCKETS: Mutex<BTreeMap<String, Arc<ObjectBucket>>> = Mutex::new(BTreeMap::new());
+}
 
 /// The bucket at `url` ([`ObjectBucket::from_url`]): this process's, made if it has none yet.
 pub(crate) fn bucket(url: &str) -> anyhow::Result<Arc<ObjectBucket>> {
-    let mut buckets = BUCKETS.lock().unwrap();
+    let mut buckets = BUCKETS.get().lock().unwrap();
     if let Some(bucket) = buckets.get(url) {
         return Ok(bucket.clone());
     }
@@ -163,7 +165,7 @@ pub(crate) fn bucket_numbered(home: &str, number: u16) -> Result<Arc<ObjectBucke
 /// (`bucket_cell::recovery::Decoded::held`, TASK-453).
 #[cfg(any(target_os = "linux", test))]
 pub(crate) fn decoded_held() -> bucket_cell::recovery::Held {
-    let buckets = BUCKETS.lock().unwrap();
+    let buckets = BUCKETS.get().lock().unwrap();
     (buckets.values())
         .filter_map(|bucket| bucket_cell::Bucket::decoded(&**bucket))
         .map(bucket_cell::recovery::Decoded::held)
@@ -174,7 +176,7 @@ pub(crate) fn decoded_held() -> bucket_cell::recovery::Held {
 /// buckets they put themselves in front of; unless it is already, the same.
 #[cfg(test)]
 pub(crate) fn use_bucket(url: &str, bucket: Arc<ObjectBucket>) {
-    let mut buckets = BUCKETS.lock().unwrap();
+    let mut buckets = BUCKETS.get().lock().unwrap();
     let had = buckets.entry(url.to_owned()).or_insert_with(|| bucket.clone());
     assert!(Arc::ptr_eq(had, &bucket), "this process has another bucket at {url}");
 }
@@ -497,37 +499,39 @@ pub(crate) fn fork(
     Err(Error::new(err))
 }
 
-/// cladefs: the stores this process made versions of, by the version (cell and ID): what a store at
-/// the version made here inherits of what cladefs keeps beside its store, what is attached to it
-/// ([`cell_dir::inherit_attached`]), as a fork of the store does. In memory alone: a restore on
-/// another host, or after the process went, inherits none. cladefs: of versions their cells
-/// name, made here or uploaded, alone: one dropped, by a drop or a later version's window, or whose
-/// store was deleted, goes (TASK-610).
-static VERSIONS_MADE: Mutex<BTreeMap<(CellId, u64), PathBuf>> = Mutex::new(BTreeMap::new());
+node_local::node_local! {
+    /// cladefs: the stores this process made versions of, by the version (cell and ID): what a store at
+    /// the version made here inherits of what cladefs keeps beside its store, what is attached to it
+    /// ([`cell_dir::inherit_attached`]), as a fork of the store does. In memory alone: a restore on
+    /// another host, or after the process went, inherits none. cladefs: of versions their cells
+    /// name, made here or uploaded, alone: one dropped, by a drop or a later version's window, or whose
+    /// store was deleted, goes (TASK-610).
+    static VERSIONS_MADE: Mutex<BTreeMap<(CellId, u64), PathBuf>> = Mutex::new(BTreeMap::new());
+}
 
 /// cladefs: the store at `path`, of `cell`, made the version `version` here, `cell`'s versions now
 /// those of `named`, and it: those of `cell`'s it names no more, dropped since, go.
 pub(crate) fn made_version(cell: CellId, version: u64, path: &Path, named: &BTreeSet<u64>) {
-    let mut made = VERSIONS_MADE.lock().unwrap();
+    let mut made = VERSIONS_MADE.get().lock().unwrap();
     made.retain(|&(of, id), _| of != cell || named.contains(&id));
     made.insert((cell, version), path.to_owned());
 }
 
 /// cladefs: the versions `ids` of `cell` were dropped.
 pub(crate) fn dropped_versions(cell: CellId, ids: &BTreeSet<u64>) {
-    VERSIONS_MADE.lock().unwrap().retain(|&(of, id), _| of != cell || !ids.contains(&id));
+    VERSIONS_MADE.get().lock().unwrap().retain(|&(of, id), _| of != cell || !ids.contains(&id));
 }
 
 /// cladefs: how many versions it says this process made, which the tests bound.
 #[cfg(test)]
 pub(crate) fn versions_made() -> usize {
-    VERSIONS_MADE.lock().unwrap().len()
+    VERSIONS_MADE.get().lock().unwrap().len()
 }
 
 /// cladefs: where the store this process made the version `version` of `cell` of is, if it did.
 #[cfg(target_os = "linux")]
 pub(crate) fn version_made_of(cell: CellId, version: u64) -> Option<PathBuf> {
-    VERSIONS_MADE.lock().unwrap().get(&(cell, version)).cloned()
+    VERSIONS_MADE.get().lock().unwrap().get(&(cell, version)).cloned()
 }
 
 /// cladefs: where a store at the version `version` of `cell` is kept for forks of it: a directory of
@@ -666,7 +670,7 @@ pub(crate) fn delete_with(
         }
     })?;
     // cladefs: what it made versions of is gone (TASK-610).
-    VERSIONS_MADE.lock().unwrap().retain(|_, of| of != path);
+    VERSIONS_MADE.get().lock().unwrap().retain(|_, of| of != path);
     Ok(())
 }
 

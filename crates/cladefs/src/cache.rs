@@ -141,23 +141,29 @@ impl Holders {
     }
 }
 
-/// The cache's clock, which counts the extents asked for.
-static CACHE_CLOCK: AtomicU64 = AtomicU64::new(0);
+node_local::node_local! {
+    /// The cache's clock, which counts the extents asked for.
+    static CACHE_CLOCK: AtomicU64 = AtomicU64::new(0);
+}
 
-/// The most extents the cache keeps (TASK-104): each its table of pages, and the stores it reads
-/// through, which an extent nothing maps and whose pages were evicted keeps still. Under pgbench,
-/// small extents by the hundred thousand, the tables of extents never asked for again would be
-/// most of what the cache holds. Past this, those asked for longest ago that nothing else holds (no
-/// window maps them) go, down to seven eighths of it; one asked for again is read anew from its
-/// store. Tests lower it.
-pub(crate) static MOST_CACHED: AtomicUsize = AtomicUsize::new(1 << 16);
+node_local::node_local! {
+    /// The most extents the cache keeps (TASK-104): each its table of pages, and the stores it reads
+    /// through, which an extent nothing maps and whose pages were evicted keeps still. Under pgbench,
+    /// small extents by the hundred thousand, the tables of extents never asked for again would be
+    /// most of what the cache holds. Past this, those asked for longest ago that nothing else holds (no
+    /// window maps them) go, down to seven eighths of it; one asked for again is read anew from its
+    /// store. Tests lower it.
+    pub(crate) static MOST_CACHED: AtomicUsize = AtomicUsize::new(1 << 16);
+}
 
-/// The number of extents past which the cache next lets go of those over its bound: the bound, or,
-/// if its last pass couldn't get below it, as the windows' mappings hold the extents they map, an
-/// eighth of the bound more than it left (TASK-109.2). Each lookup past the bound sorted every
-/// extent cached, under the cache's lock, and let go of none: an 8 GiB window, mapping more than
-/// the bound, never full, so never reclaiming, made each MAP 3-6 ms.
-static TRIM_AT: AtomicUsize = AtomicUsize::new(0);
+node_local::node_local! {
+    /// The number of extents past which the cache next lets go of those over its bound: the bound, or,
+    /// if its last pass couldn't get below it, as the windows' mappings hold the extents they map, an
+    /// eighth of the bound more than it left (TASK-109.2). Each lookup past the bound sorted every
+    /// extent cached, under the cache's lock, and let go of none: an 8 GiB window, mapping more than
+    /// the bound, never full, so never reclaiming, made each MAP 3-6 ms.
+    static TRIM_AT: AtomicUsize = AtomicUsize::new(0);
+}
 
 /// How many threads the cache's pager reads extents' pages on: a read of the store, and the
 /// decompression of a part, keep one busy, while page-ins of other extents, and of what a fork's
@@ -167,10 +173,12 @@ pub(crate) const PAGER_THREADS: usize = 6;
 /// How many parts after those a reader reading on asks for are read ahead of its requests.
 pub(crate) const PARTS_AHEAD: u64 = 2;
 
-static EXTENT_CACHE: OnceLock<ExtentCache> = OnceLock::new();
+node_local::node_local! {
+    static EXTENT_CACHE: OnceLock<ExtentCache> = OnceLock::new();
+}
 
 fn extent_cache() -> &'static ExtentCache {
-    EXTENT_CACHE.get_or_init(|| {
+    EXTENT_CACHE.get().get_or_init(|| {
         let pager = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(PAGER_THREADS)
             .thread_name("cladefs pager")
@@ -204,7 +212,7 @@ pub(crate) fn evict_least_used(arena: Option<ArenaId>, enough: impl FnMut(u64) -
 
 /// Evicts as [`evict_least_used`] says: returns the bytes it evicted, and of how many extents.
 fn evict_in_order(arena: Option<ArenaId>, mut enough: impl FnMut(u64) -> bool) -> (u64, u64) {
-    let Some(cache) = EXTENT_CACHE.get() else { return (0, 0) };
+    let Some(cache) = EXTENT_CACHE.get().get() else { return (0, 0) };
     let candidates: Vec<Arc<CachedExtent>> = {
         let extents = cache.extents.with(Mutex::lock);
         (extents.iter())
@@ -234,8 +242,10 @@ fn evict_in_order(arena: Option<ArenaId>, mut enough: impl FnMut(u64) -> bool) -
 /// cached extents (`physmem::relieve_with`): before a store of any arena opens, whose allocations
 /// may wait for it.
 pub(crate) fn relieve_pressure() {
-    static STARTED: std::sync::Once = std::sync::Once::new();
-    STARTED.call_once(|| {
+    node_local::node_local! {
+        static STARTED: std::sync::Once = std::sync::Once::new();
+    }
+    STARTED.get().call_once(|| {
         let relieved = physmem::relieve_with(|arena, bytes| {
             evict_least_used(arena, |evicted| evicted >= bytes)
         });
@@ -250,7 +260,7 @@ pub(crate) fn relieve_pressure() {
 /// (`crate::pages::Arena`, TASK-43.4). Their pages are freed as the last holders of the extents,
 /// page-ins in flight, let them go.
 pub(crate) fn evict_arena(arena: ArenaId) {
-    let Some(cache) = EXTENT_CACHE.get() else { return };
+    let Some(cache) = EXTENT_CACHE.get().get() else { return };
     let evicted: Vec<Cached> = {
         let mut extents = cache.extents.with(Mutex::lock);
         cache.arenas.with(Mutex::lock).remove(&arena);
@@ -269,7 +279,7 @@ pub(crate) fn evict_arena(arena: ArenaId) {
 /// base, a fork that inherited it). Returns the bytes of pages it evicted, and of how many
 /// extents.
 pub(crate) fn forget(scope: impl Fn(crate::CellId) -> bool) -> (u64, u64) {
-    let Some(cache) = EXTENT_CACHE.get() else { return (0, 0) };
+    let Some(cache) = EXTENT_CACHE.get().get() else { return (0, 0) };
     let gone: Vec<Cached> = {
         let mut extents = cache.extents.with(Mutex::lock);
         let doomed: Vec<(ArenaId, ExtentId)> = (extents.iter())
@@ -343,11 +353,11 @@ pub(crate) fn cached(
     cached.extent.used();
     cached.holders.add(store, fetcher.as_ref());
     let found = cached.extent.clone();
-    let most = MOST_CACHED.load(Ordering::Relaxed);
-    let gone = (extents.len() > most.max(TRIM_AT.load(Ordering::Relaxed))).then(|| {
+    let most = MOST_CACHED.get().load(Ordering::Relaxed);
+    let gone = (extents.len() > most.max(TRIM_AT.get().load(Ordering::Relaxed))).then(|| {
         let started = std::time::Instant::now();
         let gone = let_go_least_used(&mut extents, most);
-        TRIM_AT.store(extents.len() + most / 8, Ordering::Relaxed);
+        TRIM_AT.get().store(extents.len() + most / 8, Ordering::Relaxed);
         stats::count_since(Counter::CacheTrims, Counter::CacheTrimNs, started);
         gone
     });
@@ -393,7 +403,7 @@ fn held_key(
 /// The cached `extent` of `arena`, if it is cached.
 #[cfg(test)]
 pub(crate) fn find(arena: ArenaId, extent: ExtentId) -> Option<Arc<CachedExtent>> {
-    let cache = EXTENT_CACHE.get()?;
+    let cache = EXTENT_CACHE.get().get()?;
     let extents = cache.extents.with(Mutex::lock);
     extents.get(&(arena, extent)).map(|cached| cached.extent.clone())
 }
@@ -407,7 +417,7 @@ pub(crate) fn freed(
     arena: ArenaId,
     extent: ExtentId,
 ) -> Option<Arc<CachedExtent>> {
-    let cache = EXTENT_CACHE.get()?;
+    let cache = EXTENT_CACHE.get().get()?;
     let (key, cached, holders) = {
         let extents = cache.extents.with(Mutex::lock);
         let key = held_key(&extents, arena, extent);
@@ -439,7 +449,7 @@ pub(crate) struct Entries {
 /// The extents cached, as of now: a pass over them, under the cache's lock.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn entries() -> Entries {
-    let Some(cache) = EXTENT_CACHE.get() else { return Entries::default() };
+    let Some(cache) = EXTENT_CACHE.get().get() else { return Entries::default() };
     let extents = cache.extents.with(Mutex::lock);
     let idle = extents.values().filter(|cached| Arc::strong_count(&cached.extent) == 1).count();
     Entries { pinned: (extents.len() - idle) as u64, idle: idle as u64 }
@@ -448,7 +458,7 @@ pub(crate) fn entries() -> Entries {
 /// The extents cached, by arena and ID.
 #[cfg(test)]
 pub(crate) fn keys() -> Vec<(ArenaId, ExtentId)> {
-    let Some(cache) = EXTENT_CACHE.get() else { return Vec::new() };
+    let Some(cache) = EXTENT_CACHE.get().get() else { return Vec::new() };
     cache.extents.with(Mutex::lock).keys().copied().collect()
 }
 
@@ -704,7 +714,7 @@ impl CachedExtent {
     /// Notes that it is in use now: asked for, or faulted on, as a guest keeping its mapping asks
     /// for it only once (TASK-92.32).
     fn used(&self) {
-        self.used.store(CACHE_CLOCK.fetch_add(1, Ordering::Relaxed) + 1, Ordering::Relaxed);
+        self.used.store(CACHE_CLOCK.get().fetch_add(1, Ordering::Relaxed) + 1, Ordering::Relaxed);
     }
 
     /// When relief evicts it, those first that sort first: whether a window maps it, as what

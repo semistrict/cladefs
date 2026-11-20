@@ -60,12 +60,14 @@ fn new_collector(options: Options) -> Collector {
     Collector::new(options).kmses(crate::bucket::kms().ok().map(|kms| kms.kmses().clone()))
 }
 
-/// The collectors of the buckets this process has images of open, by their URLs.
-static COLLECTING: Mutex<BTreeMap<String, Weak<Collecting>>> = Mutex::new(BTreeMap::new());
+node_local::node_local! {
+    /// The collectors of the buckets this process has images of open, by their URLs.
+    static COLLECTING: Mutex<BTreeMap<String, Weak<Collecting>>> = Mutex::new(BTreeMap::new());
+}
 
 /// The collector of `bucket`, at `url`, an image's own, which this process's images of it share.
 pub(crate) fn of(url: &str, bucket: &Arc<ObjectBucket>) -> Arc<Collecting> {
-    let mut collecting = COLLECTING.lock().unwrap();
+    let mut collecting = COLLECTING.get().lock().unwrap();
     collecting.retain(|_, collector| collector.strong_count() > 0);
     if let Some(collector) = collecting.get(url).and_then(Weak::upgrade) {
         return collector;

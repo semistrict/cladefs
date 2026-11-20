@@ -258,9 +258,11 @@ struct Asked {
     answered: tokio::sync::oneshot::Sender<Vm>,
 }
 
-/// The connections' reports, as they are made, each as long as its connection, or a taking of
-/// stats, holds it.
-static REPORTS: Mutex<Vec<Weak<Report>>> = Mutex::new(Vec::new());
+node_local::node_local! {
+    /// The connections' reports, as they are made, each as long as its connection, or a taking of
+    /// stats, holds it.
+    static REPORTS: Mutex<Vec<Weak<Report>>> = Mutex::new(Vec::new());
+}
 
 /// The connections' numbers, given in turn ([`Report::id`]).
 static IDS: AtomicU64 = AtomicU64::new(0);
@@ -273,7 +275,7 @@ pub(super) fn asks_waiting() -> Vec<usize> {
 
 /// The reports there are now, in the order their connections were made.
 fn reports() -> Vec<Arc<Report>> {
-    let mut reports = REPORTS.lock().unwrap();
+    let mut reports = REPORTS.get().lock().unwrap();
     reports.retain(|report| report.strong_count() > 0);
     reports.iter().filter_map(Weak::upgrade).collect()
 }
@@ -292,7 +294,7 @@ impl Report {
             window: OnceLock::new(),
             asked: Mutex::new(Vec::new()),
         });
-        REPORTS.lock().unwrap().push(Arc::downgrade(&report));
+        REPORTS.get().lock().unwrap().push(Arc::downgrade(&report));
         report
     }
 

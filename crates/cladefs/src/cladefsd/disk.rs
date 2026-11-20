@@ -48,10 +48,12 @@ use std::sync::{Arc, Mutex, Weak};
 /// What a store a tenant's VM process makes is admitted as ([`footprint::STORE_MADE`]).
 pub const STORE_MADE: u64 = footprint::STORE_MADE;
 
-/// The tenants' disks alive, and their limits, under one lock, so that a tenant made as its limit
-/// is set is limited as it was set.
-static REGISTRY: Mutex<Registry> =
-    Mutex::new(Registry { disks: Vec::new(), limits: None, weights: None });
+node_local::node_local! {
+    /// The tenants' disks alive, and their limits, under one lock, so that a tenant made as its limit
+    /// is set is limited as it was set.
+    static REGISTRY: Mutex<Registry> =
+        Mutex::new(Registry { disks: Vec::new(), limits: None, weights: None });
+}
 
 struct Registry {
     /// The disks of the tenants alive: a tenant revoked and granted again with another directory,
@@ -91,7 +93,7 @@ impl Disk {
     /// those this process hasn't counted yet by one listing each, limited as its ID is.
     pub(super) fn new(tenant: u64, dir: &Path) -> std::io::Result<Arc<Self>> {
         let allotment = footprint::allotment(dir)?;
-        let mut registry = REGISTRY.lock().unwrap();
+        let mut registry = REGISTRY.get().lock().unwrap();
         allotment.set_limit(registry.limit(tenant));
         allotment.set_weight(registry.weight(tenant));
         let disk = Arc::new(Self { tenant, allotment });
@@ -126,7 +128,7 @@ pub fn set_limit(tenant: Option<u64>, bytes: Option<u64>) -> Result<(), Errno> {
         return Ok(());
     };
     super::grants::check_tenant(id)?;
-    let mut registry = REGISTRY.lock().unwrap();
+    let mut registry = REGISTRY.get().lock().unwrap();
     let limits = registry.limits.get_or_insert_with(HashMap::new);
     match bytes {
         Some(bytes) => limits.insert(id, bytes),
@@ -144,7 +146,7 @@ pub fn set_limit(tenant: Option<u64>, bytes: Option<u64>) -> Result<(), Errno> {
 /// its share writing on. Every tenant's weight is [`footprint::DEFAULT_WEIGHT`] until set.
 pub fn set_weight(tenant: u64, weight: u64) -> Result<(), Errno> {
     super::grants::check_tenant(tenant)?;
-    let mut registry = REGISTRY.lock().unwrap();
+    let mut registry = REGISTRY.get().lock().unwrap();
     registry.weights.get_or_insert_with(HashMap::new).insert(tenant, weight);
     for disk in registry.alive().filter(|disk| disk.tenant == tenant) {
         disk.allotment.set_weight(weight);
@@ -182,7 +184,7 @@ pub fn count(tenant: Option<u64>) -> Result<Counted, Errno> {
         let reserved = all.reserved() + all.pledged();
         return Ok(Counted { bytes: all.bytes(), limit: total_limit(), reserved });
     };
-    let registry = REGISTRY.lock().unwrap();
+    let registry = REGISTRY.get().lock().unwrap();
     let disks: Vec<_> = registry.alive().filter(|disk| disk.tenant == id).collect();
     if disks.is_empty() {
         return Err(Errno::ENOENT);
@@ -223,7 +225,7 @@ pub struct TenantDisk {
 /// The disk of each tenant alive, by ID: a tenant alive twice, revoked and granted again with
 /// another directory, is counted once, with both its directories'.
 pub fn tenants() -> Vec<TenantDisk> {
-    let registry = REGISTRY.lock().unwrap();
+    let registry = REGISTRY.get().lock().unwrap();
     let mut by_tenant: HashMap<u64, Vec<Arc<Disk>>> = HashMap::new();
     for disk in registry.alive() {
         by_tenant.entry(disk.tenant).or_default().push(disk);
@@ -282,8 +284,10 @@ impl DiskConfig {
 /// every [`super::governor::INTERVAL`], and at once when a write is refused or the part cache passes
 /// what its stores leave it (`bucket_cell::host_disk::wake_governor`). Later starts change nothing.
 pub fn start(config: DiskConfig) -> Result<(), String> {
-    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    if STARTED.set(()).is_err() {
+    node_local::node_local! {
+        static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    }
+    if STARTED.get().set(()).is_err() {
         return Ok(());
     }
     std::thread::Builder::new()

@@ -126,9 +126,10 @@ pub const FETCHES: u64 = 3 * (64 << 20);
 /// its tables need passes.
 pub const OWN: u64 = 64 << 20;
 
-/// The budget's parts and the samples, under one lock, as the stats' thread takes them.
-static STATE: Mutex<State> = Mutex::new(State {
-    sample: Sample {
+node_local::node_local! {
+    /// The budget's parts and the samples, under one lock, as the stats' thread takes them.
+    static STATE: Mutex<State> = Mutex::new(State {
+        sample: Sample {
         cpu_ns: 0,
         anon: 0,
         max_anon: 0,
@@ -137,11 +138,12 @@ static STATE: Mutex<State> = Mutex::new(State {
         anon_budget: 0,
         over_budget: 0,
         max_over_budget: 0,
-    },
-    writers: 0,
-    in_flight: 0,
-    extents: 0,
-});
+        },
+        writers: 0,
+        in_flight: 0,
+        extents: 0,
+        });
+}
 
 struct State {
     sample: Sample,
@@ -155,7 +157,7 @@ struct State {
 /// The budget of the daemon's anonymous memory as of now, its parts' most so far: so that what the
 /// allocator keeps of what was freed, which it uses again, is within it as it was when held.
 pub fn anon_budget() -> AnonBudget {
-    budget(&mut STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+    budget(&mut STATE.get().lock().unwrap_or_else(std::sync::PoisonError::into_inner))
 }
 
 fn budget(state: &mut State) -> AnonBudget {
@@ -183,7 +185,7 @@ pub fn extents_held() -> u64 {
 /// Samples what the daemon holds and spent now, against its budget now; and returns the sample.
 pub fn sample() -> Sample {
     let (anon, shmem) = resident();
-    let mut state = STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut state = STATE.get().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let parts = budget(&mut state);
     let budget = parts.total();
     let last = state.sample;
@@ -211,7 +213,7 @@ pub fn sample() -> Sample {
 
 /// The last sample.
 pub fn last() -> Sample {
-    STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).sample
+    STATE.get().lock().unwrap_or_else(std::sync::PoisonError::into_inner).sample
 }
 
 /// The last sample as a line of `NAME=COUNT` after `process:`, which the daemon's stats file

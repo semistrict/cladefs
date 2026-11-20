@@ -64,7 +64,7 @@ pub fn serve_control(
         );
         // Its first status reported before it serves: the reporter starts with the server's, "",
         // SERVING, which a check served before a task of its own reported otherwise saw.
-        let mut serving = super::SERVING.subscribe();
+        let mut serving = super::SERVING.get().subscribe();
         let now = *serving.borrow_and_update();
         report_health(&reporter, now).await;
         tokio::spawn(async move {
@@ -73,7 +73,7 @@ pub fn serve_control(
                 report_health(&reporter, now).await;
             }
         });
-        CONTROL_SERVING.store(true, std::sync::atomic::Ordering::Release);
+        CONTROL_SERVING.get().store(true, std::sync::atomic::Ordering::Release);
         tonic::transport::Server::builder()
             .add_service(health)
             .add_service(Drained(CladefsdServer::new(control)))
@@ -164,11 +164,13 @@ where
     }
 }
 
-/// Whether this process serves the control API ([`serve_control`]).
-static CONTROL_SERVING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+node_local::node_local! {
+    /// Whether this process serves the control API ([`serve_control`]).
+    static CONTROL_SERVING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+}
 
 pub(super) fn is_serving() -> bool {
-    CONTROL_SERVING.load(std::sync::atomic::Ordering::Acquire)
+    CONTROL_SERVING.get().load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// Reports, through the standard gRPC health service (grpc.health.v1.Health), whether the daemon
@@ -181,7 +183,7 @@ async fn report_health(reporter: &tonic_health::server::HealthReporter, serving:
     let status = if serving { ServingStatus::Serving } else { ServingStatus::NotServing };
     reporter.set_service_status("", status).await;
     reporter.set_service_status(<CladefsdServer<Control> as NamedService>::NAME, status).await;
-    super::REPORTED.send_replace(serving);
+    super::REPORTED.get().send_replace(serving);
 }
 
 /// A channel to the control API of the daemon listening at `socket`: for its clients, the API's

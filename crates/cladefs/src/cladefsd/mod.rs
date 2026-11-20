@@ -123,22 +123,24 @@ pub use device::DaemonDevice;
 pub use http::serve_http;
 pub use server::{Tenant, serve, serve_tenant};
 
-/// Whether the daemon accepts VM processes' connections ([`serve`]): what the control API's health
-/// service reports (TASK-48). Not as it starts, nor once it is told to stop ([`stop_serving`]).
-static SERVING: std::sync::LazyLock<tokio::sync::watch::Sender<bool>> =
-    std::sync::LazyLock::new(|| tokio::sync::watch::channel(false).0);
+node_local::node_local! {
+    /// Whether the daemon accepts VM processes' connections ([`serve`]): what the control API's health
+    /// service reports (TASK-48). Not as it starts, nor once it is told to stop ([`stop_serving`]).
+    static SERVING: tokio::sync::watch::Sender<bool> = tokio::sync::watch::channel(false).0;
+}
 
-/// Whether the control API's health service reports the daemon serving: as [`SERVING`] says, once
-/// it has said so to its callers.
-static REPORTED: std::sync::LazyLock<tokio::sync::watch::Sender<bool>> =
-    std::sync::LazyLock::new(|| tokio::sync::watch::channel(false).0);
+node_local::node_local! {
+    /// Whether the control API's health service reports the daemon serving: as [`SERVING`] says, once
+    /// it has said so to its callers.
+    static REPORTED: tokio::sync::watch::Sender<bool> = tokio::sync::watch::channel(false).0;
+}
 
 /// Says the daemon stops serving, as it is about to exit: once the control API's health service, if
 /// it serves, reports so to its callers. cladefs: the first of a drain's steps ([`drain::drain`]).
 pub fn stop_serving() {
-    SERVING.send_replace(false);
+    SERVING.get().send_replace(false);
     if control::is_serving() {
-        let mut reported = REPORTED.subscribe();
+        let mut reported = REPORTED.get().subscribe();
         let _ = futures::executor::block_on(reported.wait_for(|serving| !*serving));
     }
 }

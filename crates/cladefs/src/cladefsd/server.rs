@@ -69,9 +69,9 @@ const COMMITS_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 /// default tenant's ([`default_tenant`]). Their requests run on threads every connection shares
 /// (TASK-34).
 pub fn serve(listener: UnixListener) {
-    super::SERVING.send_replace(true);
+    super::SERVING.get().send_replace(true);
     serve_as(listener, default_tenant);
-    super::SERVING.send_replace(false);
+    super::SERVING.get().send_replace(false);
 }
 
 /// Serves the VM processes of `tenant` that connect to `listener`, as [`serve`] does (TASK-43):
@@ -137,11 +137,13 @@ fn serve_as(listener: UnixListener, tenant: impl Fn() -> Result<Arc<Tenant>, Err
     }
 }
 
-/// cladefs: the descriptors of the listeners of the VM sockets served ([`serve_as`]), the daemon's
-/// own and its tenants', which a drain shuts down ([`stop_accepting`], TASK-141.4). Each is there
-/// while its listener lives ([`Accepting`]): not a descriptor of its own, which a daemon with as
-/// many files open as it may would have none of (TASK-79.35).
-static ACCEPTING: Mutex<Vec<std::os::fd::RawFd>> = Mutex::new(Vec::new());
+node_local::node_local! {
+    /// cladefs: the descriptors of the listeners of the VM sockets served ([`serve_as`]), the daemon's
+    /// own and its tenants', which a drain shuts down ([`stop_accepting`], TASK-141.4). Each is there
+    /// while its listener lives ([`Accepting`]): not a descriptor of its own, which a daemon with as
+    /// many files open as it may would have none of (TASK-79.35).
+    static ACCEPTING: Mutex<Vec<std::os::fd::RawFd>> = Mutex::new(Vec::new());
+}
 
 /// cladefs: a VM socket's listener served, in [`ACCEPTING`] until dropped, before the listener is:
 /// shut down at once if the daemon drains, as it may have as it came.
@@ -150,7 +152,7 @@ struct Accepting(std::os::fd::RawFd);
 impl Accepting {
     fn new(listener: &UnixListener) -> Self {
         use std::os::fd::AsRawFd;
-        let mut accepting = ACCEPTING.lock().unwrap();
+        let mut accepting = ACCEPTING.get().lock().unwrap();
         if super::drain::draining() {
             super::shut_down(listener.as_fd());
         }
@@ -161,14 +163,14 @@ impl Accepting {
 
 impl Drop for Accepting {
     fn drop(&mut self) {
-        ACCEPTING.lock().unwrap().retain(|fd| *fd != self.0);
+        ACCEPTING.get().lock().unwrap().retain(|fd| *fd != self.0);
     }
 }
 
 /// cladefs: has every VM socket served take no more connections, as the daemon drains (TASK-141.4):
 /// their listeners shut down, their accepts failing (`EINVAL`), and connecting refused.
 pub(super) fn stop_accepting() {
-    for &fd in ACCEPTING.lock().unwrap().iter() {
+    for &fd in ACCEPTING.get().lock().unwrap().iter() {
         // SAFETY: Its listener lives while it is there: its `Accepting` takes it out first.
         super::shut_down(unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) });
     }
@@ -279,12 +281,14 @@ impl Drop for Counted {
     }
 }
 
-/// cladefs: the default tenant, once made ([`default_tenant`]).
-static DEFAULT: OnceLock<Arc<Tenant>> = OnceLock::new();
+node_local::node_local! {
+    /// cladefs: the default tenant, once made ([`default_tenant`]).
+    static DEFAULT: OnceLock<Arc<Tenant>> = OnceLock::new();
+}
 
 /// cladefs: the default tenant, if a VM process of its made it ([`default_tenant`]).
 pub(super) fn default_tenant_made() -> Option<Arc<Tenant>> {
-    DEFAULT.get().cloned()
+    DEFAULT.get().get().cloned()
 }
 
 /// cladefs: the default tenant, of the daemon's own socket, which its user's VM processes connect to
@@ -294,7 +298,7 @@ pub(super) fn default_tenant_made() -> Option<Arc<Tenant>> {
 /// holds public bases' pages, which every VM process holds read-only, and nothing of a VM
 /// process's own. `EIO`, logged, if its memory can't be made.
 pub(super) fn default_tenant() -> Result<Arc<Tenant>, Errno> {
-    if let Some(tenant) = DEFAULT.get() {
+    if let Some(tenant) = DEFAULT.get().get() {
         return Ok(tenant.clone());
     }
     let memory = Memory::new().map_err(|err| {
@@ -304,7 +308,7 @@ pub(super) fn default_tenant() -> Result<Arc<Tenant>, Errno> {
     let (policy, disk) = (Policy::default_tenant(), None);
     let id = crate::host_cell::DEFAULT_TENANT;
     let tenant = Tenant { id, policy, memory, disk };
-    Ok(DEFAULT.get_or_init(|| Arc::new(tenant)).clone())
+    Ok(DEFAULT.get().get_or_init(|| Arc::new(tenant)).clone())
 }
 
 impl Tenant {
@@ -968,7 +972,9 @@ impl Writer for Connection {
 /// `CLADEFSD_ROOTS` (separated by colons), if it names any (TASK-43.4). One that doesn't exist
 /// is no root, and with none, the daemon refuses every path.
 fn roots() -> Option<&'static [PathBuf]> {
-    static ROOTS: OnceLock<Option<Vec<PathBuf>>> = OnceLock::new();
+    node_local::node_local! {
+        static ROOTS: OnceLock<Option<Vec<PathBuf>>> = OnceLock::new();
+    }
     ROOTS
         .get_or_init(|| {
             let roots = std::env::var_os("CLADEFSD_ROOTS").filter(|roots| !roots.is_empty())?;
@@ -1965,8 +1971,9 @@ async fn flush_behind(store: Arc<OpenCell>, mut stopped: tokio::sync::oneshot::R
             continue;
         }
         let behind = store.clone();
-        let flushed =
-            FLUSHERS.call(move || if behind.flush_pending() { behind.flush() } else { Ok(()) });
+        let flushed = FLUSHERS
+            .get()
+            .call(move || if behind.flush_pending() { behind.flush() } else { Ok(()) });
         match flushed.await {
             Some(Ok(())) => store.flush_turned(),
             Some(Err(err)) => {
@@ -1993,9 +2000,10 @@ async fn flush_behind(store: Arc<OpenCell>, mut stopped: tokio::sync::oneshot::R
 /// twice as long (`hundreds_of_writers_flush_on_threads_they_share`).
 pub(super) const FLUSHES: usize = 32;
 
-/// cladefs: the threads stores' flushes run on ([`FLUSHES`]).
-static FLUSHERS: std::sync::LazyLock<Pool> =
-    std::sync::LazyLock::new(|| Pool::new("cladefsd flush", FLUSHES));
+node_local::node_local! {
+    /// cladefs: the threads stores' flushes run on ([`FLUSHES`]).
+    static FLUSHERS: Pool = Pool::new("cladefsd flush", FLUSHES);
+}
 
 /// cladefs: tells the VM process at the other end of `sender` of each commit of its follower's
 /// store after the one numbered `commit` ([`COMMITTED`]): the latest, of each run of them; until
@@ -2290,8 +2298,10 @@ struct Peer {
     mappings: std::sync::atomic::AtomicU64,
 }
 
-/// cladefs: the VM processes connected ([`Peer`]).
-static PEERS: Mutex<Vec<Arc<Peer>>> = Mutex::new(Vec::new());
+node_local::node_local! {
+    /// cladefs: the VM processes connected ([`Peer`]).
+    static PEERS: Mutex<Vec<Arc<Peer>>> = Mutex::new(Vec::new());
+}
 
 impl Peer {
     /// The VM process at the other end of `stream`, which `sender` sends to, among those
@@ -2300,8 +2310,10 @@ impl Peer {
     /// it, as it would once it stopped answering: its process unknown, or the daemon not allowed
     /// to signal it, as one of another user is unless the daemon has `CAP_KILL`.
     fn connected(stream: &UnixStream, sender: Arc<AsyncSender>) -> std::io::Result<Arc<Self>> {
-        static WATCHING: std::sync::Once = std::sync::Once::new();
-        WATCHING.call_once(|| {
+        node_local::node_local! {
+            static WATCHING: std::sync::Once = std::sync::Once::new();
+        }
+        WATCHING.get().call_once(|| {
             physmem::quarantine_with(quarantine);
             IO.spawn(watch());
         });
@@ -2319,7 +2331,7 @@ impl Peer {
             let_go: AtomicBool::new(false),
             mappings: Default::default(),
         });
-        PEERS.lock().unwrap().push(peer.clone());
+        PEERS.get().lock().unwrap().push(peer.clone());
         Ok(peer)
     }
 
@@ -2342,7 +2354,7 @@ impl Peer {
     /// Its connection is gone: no page waits for it from now on.
     fn forget(self: &Arc<Self>) {
         let forgotten: Vec<_> =
-            PEERS.lock().unwrap().extract_if(.., |peer| Arc::ptr_eq(peer, self)).collect();
+            PEERS.get().lock().unwrap().extract_if(.., |peer| Arc::ptr_eq(peer, self)).collect();
         // Dropped without holding the lock, as what it frees may be quarantined.
         drop(forgotten);
     }
@@ -2529,7 +2541,7 @@ fn quarantine(pages: physmem::Quarantined) {
         *waiting.parked.lock().unwrap() += 1;
     }
     let pages: Arc<dyn Send + Sync> = Arc::new(Parked { pages: Some(pages), waiting });
-    for peer in PEERS.lock().unwrap().iter() {
+    for peer in PEERS.get().lock().unwrap().iter() {
         peer.acks.park(&pages);
     }
 }
@@ -2598,7 +2610,7 @@ impl Drop for Parking {
 /// taken.
 #[cfg(test)]
 pub(super) fn most_queued() -> u64 {
-    PEERS.lock().unwrap().iter().map(|peer| peer.sender.queued()).max().unwrap_or(0)
+    PEERS.get().lock().unwrap().iter().map(|peer| peer.sender.queued()).max().unwrap_or(0)
 }
 
 /// cladefs: lets the VM processes that stopped answering go ([`Peer::watch`]), looking every
@@ -2608,7 +2620,7 @@ async fn watch() {
     loop {
         every.tick().await;
         let now = std::time::Instant::now();
-        let unresponsive: Vec<_> = (PEERS.lock().unwrap().iter())
+        let unresponsive: Vec<_> = (PEERS.get().lock().unwrap().iter())
             .filter_map(|peer| Some((peer.clone(), peer.unresponsive(now)?)))
             .collect();
         // Let go without holding the VM processes connected, which every page freed takes.

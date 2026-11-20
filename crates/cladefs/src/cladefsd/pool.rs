@@ -46,8 +46,10 @@ impl Pool {
 
     /// The process's, which requests run on, of up to 16 threads a processor, and 64 at least.
     pub(super) fn get() -> &'static Pool {
-        static POOL: OnceLock<Pool> = OnceLock::new();
-        POOL.get_or_init(|| {
+        node_local::node_local! {
+            static POOL: OnceLock<Pool> = OnceLock::new();
+        }
+        POOL.get().get_or_init(|| {
             let cpus = std::thread::available_parallelism().map_or(4, |cpus| cpus.get());
             Pool::new("cladefsd reqs", (16 * cpus).max(64))
         })

@@ -198,8 +198,8 @@ impl From<crate::faults::Failpoint> for Failure {
 /// host's keys, its KMS and those its fetchers share (TASK-411.3). Fails if the runtime can't be
 /// made, a later call making it anew ([`bucket_runtime`]).
 pub fn runtime() -> Result<Runtime, Failure> {
-    let keys = keys::Host::new(kms()?, MEMORY.keys().clone());
-    Ok(Runtime { handle: bucket_runtime()?, uploads: UPLOADS.clone(), keys })
+    let keys = keys::Host::new(kms()?, MEMORY.get().keys().clone());
+    Ok(Runtime { handle: bucket_runtime()?, uploads: UPLOADS.get().clone(), keys })
 }
 
 /// The runtime every store's uploader, and its fetches, run on, and the calls from no runtime's
@@ -220,19 +220,21 @@ pub(crate) fn bucket_runtime() -> Result<tokio::runtime::Handle, Failure> {
 /// TASK-411.28). Fails, keeping nothing, if the runtime its pools refill on can't be made
 /// ([`bucket_runtime`], TASK-449's review).
 pub fn kms() -> Result<Arc<keys::CachingKms>, Failure> {
-    if let Some(kms) = POOLED.get() {
+    if let Some(kms) = POOLED.get().get() {
         return Ok(kms.clone());
     }
     let runtime = bucket_runtime()?;
-    let kms = POOLED.get_or_init(|| match host_keys() {
+    let kms = POOLED.get().get_or_init(|| match host_keys() {
         Ok(keys) => host_kms(keys.kmses.clone(), runtime),
         Err(why) => host_kms(one(Arc::new(Unreached(why.clone()))), runtime),
     });
     Ok(kms.clone())
 }
 
-/// cladefs: [`kms`], once made.
-static POOLED: std::sync::OnceLock<Arc<keys::CachingKms>> = std::sync::OnceLock::new();
+node_local::node_local! {
+    /// cladefs: [`kms`], once made.
+    static POOLED: std::sync::OnceLock<Arc<keys::CachingKms>> = std::sync::OnceLock::new();
+}
 
 /// cladefs: whether the host has a KMS ([`kms`]): the refusal, naming `CLADEFS_KMS` and
 /// `CLADEFS_MASTER_KEY`, if its environment chooses none, or why the one it chooses can't be had.
@@ -250,7 +252,7 @@ pub fn bucket_kms() -> Option<Arc<BucketKms<ObjectBucket>>> {
 
 /// cladefs: the host's KMS ([`kms`]), chosen once: or why it has none.
 fn host_keys() -> &'static Result<HostKeys, String> {
-    KMS.get_or_init(|| match bucket_cell::bucket_kms::from_env(host_bucket) {
+    KMS.get().get_or_init(|| match bucket_cell::bucket_kms::from_env(host_bucket) {
         Ok(chosen) => {
             let bucket = chosen.bucket().cloned();
             // cladefs: each other bucket's cells under that bucket's KMS (TASK-633.6), given the
@@ -312,12 +314,15 @@ fn host_kms(kmses: Arc<dyn keys::Kmses>, runtime: tokio::runtime::Handle) -> Arc
 
 /// cladefs: has the host use `kms` as its KMS, before any store opens: tests' (TASK-411.3). Once.
 pub fn set_kms(kms: extent_keys::kms::Shared) -> Result<(), String> {
-    KMS.set(Ok(HostKeys { kmses: one(kms), bucket: None, by_bucket: None }))
+    KMS.get()
+        .set(Ok(HostKeys { kmses: one(kms), bucket: None, by_bucket: None }))
         .map_err(|_| "the host's KMS is set already".to_owned())
 }
 
-/// cladefs: the host's KMS ([`host_keys`]).
-static KMS: std::sync::OnceLock<Result<HostKeys, String>> = std::sync::OnceLock::new();
+node_local::node_local! {
+    /// cladefs: the host's KMS ([`host_keys`]).
+    static KMS: std::sync::OnceLock<Result<HostKeys, String>> = std::sync::OnceLock::new();
+}
 
 /// cladefs: the KMS tests' and benches' processes encrypt under, their environment naming none
 /// (TASK-411.28): every store is encrypted, and a process given no KMS opens none.
@@ -337,7 +342,7 @@ pub mod testing {
             .into_iter()
             .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()));
         if !named {
-            let set = super::KMS.set(Ok(host_keys()));
+            let set = super::KMS.get().set(Ok(host_keys()));
             assert!(set.is_ok(), "the tests' KMS, set before any store opens");
         }
     }
@@ -383,12 +388,12 @@ pub fn forget(scope: keys::Scope, why: &str) -> Forgotten {
     let halted = format!("as {scope}'s keys are forgotten: {why}");
     let stores = crate::halt::halt_stores(|cell| scope.covers(cell), Errno::EACCES, &halted);
     let (bytes, extents) = crate::cache::forget(|cell| scope.covers(cell));
-    let kept = MEMORY.forget_kept(scope);
+    let kept = MEMORY.get().forget_kept(scope);
     // Its KMS, if it made it: one not made yet unwrapped nothing.
-    if let Some(kms) = POOLED.get() {
+    if let Some(kms) = POOLED.get().get() {
         kms.forget(scope, why);
     }
-    let rings = MEMORY.keys().forget(scope);
+    let rings = MEMORY.get().keys().forget(scope);
     let forgotten = Forgotten { stores, rings, kept, extents, bytes };
     log::warn!("cladefs: {scope}'s keys forgotten, {why}: {forgotten:?}");
     forgotten
@@ -496,32 +501,39 @@ pub(crate) fn uploaders() -> tokio::sync::watch::Receiver<usize> {
     local_cell::upload::uploaders()
 }
 
-/// The GETs of extents' data a host has in flight: one connection to object storage gives roughly
-/// 80-100 MB/s, so a host needs tens (doc-7, Reading); each holds a part, of 1 MiB. cladefs: so many
-/// for each bucket its stores read (TASK-633.4), so that one slow or failing, another cloud
-/// region's, holds up none of another's.
-static BUDGET: std::sync::LazyLock<fetch::Budgets> = std::sync::LazyLock::new(|| {
-    fetch::Budgets::per_bucket(Limits { requests: 64, bytes: 64 << 20 })
-});
+node_local::node_local! {
+    /// The GETs of extents' data a host has in flight: one connection to object storage gives roughly
+    /// 80-100 MB/s, so a host needs tens (doc-7, Reading); each holds a part, of 1 MiB. cladefs: so many
+    /// for each bucket its stores read (TASK-633.4), so that one slow or failing, another cloud
+    /// region's, holds up none of another's.
+    static BUDGET: fetch::Budgets = {
+        fetch::Budgets::per_bucket(Limits { requests: 64, bytes: 64 << 20 })
+        };
+}
 
-/// What a host's stores' reads keep in memory, objects' tails and the parts fetched last: once for
-/// the host, however many of its stores read them, as the forks of one base read its parts, within
-/// bounds that hold for the host, not for each store (TASK-92.21, TASK-92.22).
-static MEMORY: std::sync::LazyLock<Arc<fetch::Memory>> =
-    std::sync::LazyLock::new(fetch::Memory::new);
+node_local::node_local! {
+    /// What a host's stores' reads keep in memory, objects' tails and the parts fetched last: once for
+    /// the host, however many of its stores read them, as the forks of one base read its parts, within
+    /// bounds that hold for the host, not for each store (TASK-92.21, TASK-92.22).
+    static MEMORY: Arc<fetch::Memory> = fetch::Memory::new();
+}
 
-/// The PUTs of objects a host's stores upload, each holding its object's bytes while it goes:
-/// bounded in bytes, so that a host whose stores are far behind, object storage out of reach for a
-/// while, holds no more than these at once, whatever their number (TASK-79.19); and in number, as
-/// its GETs are. cladefs: in bytes, its upload memory ([`set_upload_memory`], TASK-317).
-static UPLOADS: std::sync::LazyLock<Arc<Budget>> = std::sync::LazyLock::new(|| {
-    let bytes = *UPLOAD_MEMORY.get_or_init(|| UPLOAD_BYTES);
-    Budget::new(Limits { requests: 64, bytes })
-});
+node_local::node_local! {
+    /// The PUTs of objects a host's stores upload, each holding its object's bytes while it goes:
+    /// bounded in bytes, so that a host whose stores are far behind, object storage out of reach for a
+    /// while, holds no more than these at once, whatever their number (TASK-79.19); and in number, as
+    /// its GETs are. cladefs: in bytes, its upload memory ([`set_upload_memory`], TASK-317).
+    static UPLOADS: Arc<Budget> = {
+        let bytes = *UPLOAD_MEMORY.get().get_or_init(|| UPLOAD_BYTES);
+        Budget::new(Limits { requests: 64, bytes })
+        };
+}
 
-/// cladefs: the most bytes of objects the host's uploads hold at once ([`UPLOADS`]), as
-/// [`set_upload_memory`] set it, or [`UPLOAD_BYTES`].
-static UPLOAD_MEMORY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+node_local::node_local! {
+    /// cladefs: the most bytes of objects the host's uploads hold at once ([`UPLOADS`]), as
+    /// [`set_upload_memory`] set it, or [`UPLOAD_BYTES`].
+    static UPLOAD_MEMORY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+}
 
 /// cladefs: has the host's uploads hold at most `bytes` of the objects they upload at once
 /// (TASK-317): cladefsd's `CLADEFSD_UPLOAD_MEMORY`. However far behind the bucket its stores
@@ -535,9 +547,9 @@ pub fn set_upload_memory(bytes: u64) -> Result<(), String> {
             crate::OpenCell::MAX_EXTENT
         ));
     }
-    match UPLOAD_MEMORY.set(bytes) {
+    match UPLOAD_MEMORY.get().set(bytes) {
         Ok(()) => Ok(()),
-        Err(_) if UPLOAD_MEMORY.get() == Some(&bytes) => Ok(()),
+        Err(_) if UPLOAD_MEMORY.get().get() == Some(&bytes) => Ok(()),
         Err(_) => Err("the upload memory is set already, as stores opened".to_owned()),
     }
 }
@@ -555,8 +567,8 @@ pub struct UploadMemory {
 
 /// cladefs: what the host's uploads hold now, the most they held, and their budget (TASK-317).
 pub fn upload_memory() -> UploadMemory {
-    let (held, max_held) = UPLOADS.held();
-    UploadMemory { held, max_held, budget: UPLOADS.limits().bytes }
+    let (held, max_held) = UPLOADS.get().held();
+    UploadMemory { held, max_held, budget: UPLOADS.get().limits().bytes }
 }
 
 /// Reads the extents a store holds whose data is in object storage (`local_cell::LocalCell::adopt`),
@@ -581,8 +593,8 @@ impl HostFetcher {
         let spawn: fetch::Spawn = Arc::new(move |future| {
             drop(runs.spawn(crate::request::within(crate::request::current(), future)))
         });
-        let peers = PEERS.get().filter(|(theirs, _)| Arc::ptr_eq(theirs, &bucket));
-        let parts = fetch::Fetcher::new(bucket, BUDGET.clone(), MEMORY.clone(), cache);
+        let peers = PEERS.get().get().filter(|(theirs, _)| Arc::ptr_eq(theirs, &bucket));
+        let parts = fetch::Fetcher::new(bucket, BUDGET.get().clone(), MEMORY.get().clone(), cache);
         let parts = match peers {
             Some((_, peers)) => parts.asking(peers.clone()),
             None => parts,
@@ -612,35 +624,39 @@ impl HostFetcher {
     }
 }
 
-/// cladefs: the hosts sharing the host's bucket, the one they share, which its stores' fetchers of it
-/// ask for parts before it, if it has any ([`ask_peers`], TASK-406.2).
-static PEERS: std::sync::OnceLock<(Arc<ObjectBucket>, Arc<peers::Peers>)> =
-    std::sync::OnceLock::new();
+node_local::node_local! {
+    /// cladefs: the hosts sharing the host's bucket, the one they share, which its stores' fetchers of it
+    /// ask for parts before it, if it has any ([`ask_peers`], TASK-406.2).
+    static PEERS: std::sync::OnceLock<(Arc<ObjectBucket>, Arc<peers::Peers>)> =
+        std::sync::OnceLock::new();
+}
 
 /// cladefs: has the fetchers of `bucket`, the host's, made from now on ask `peers`, the hosts sharing
 /// it, for the parts they own before it (TASK-406.2): before any store opens. Once.
 pub fn ask_peers(bucket: Arc<ObjectBucket>, peers: Arc<peers::Peers>) -> Result<(), String> {
-    PEERS.set((bucket, peers)).map_err(|_| "the host's peers are set already".to_owned())
+    PEERS.get().set((bucket, peers)).map_err(|_| "the host's peers are set already".to_owned())
 }
 
 /// cladefs: the hosts sharing the host's bucket, if it asks them for parts ([`ask_peers`]).
 pub fn peers() -> Option<Arc<peers::Peers>> {
-    PEERS.get().map(|(_, peers)| peers.clone())
+    PEERS.get().get().map(|(_, peers)| peers.clone())
 }
 
-static MEMBERS: std::sync::OnceLock<Arc<dyn local_cell::upload::Members>> =
-    std::sync::OnceLock::new();
+node_local::node_local! {
+    static MEMBERS: std::sync::OnceLock<Arc<dyn local_cell::upload::Members>> =
+        std::sync::OnceLock::new();
+}
 
 /// cladefs: has the host's replicated cells' configurations be made of `members`, its peers, from
 /// now on (doc-21, TASK-537.3.3): before any store opens. Once.
 pub fn replicate_with(members: Arc<dyn local_cell::upload::Members>) -> Result<(), String> {
-    MEMBERS.set(members).map_err(|_| "the host's members are set already".to_owned())
+    MEMBERS.get().set(members).map_err(|_| "the host's members are set already".to_owned())
 }
 
 /// cladefs: the hosts the host's replicated cells' configurations are made of, if it has peers
 /// and a replica directory ([`replicate_with`]).
 pub fn members() -> Option<Arc<dyn local_cell::upload::Members>> {
-    MEMBERS.get().cloned()
+    MEMBERS.get().get().cloned()
 }
 
 /// cladefs: what serves the hosts sharing `bucket`, the host's, the parts they ask it for, as stored
@@ -649,7 +665,12 @@ pub fn members() -> Option<Arc<dyn local_cell::upload::Members>> {
 pub fn serving_peers(bucket: Arc<ObjectBucket>, cache: Arc<Cache>) -> Result<Serving, Failure> {
     Ok(Serving {
         runtime: bucket_runtime()?,
-        parts: Arc::new(fetch::Fetcher::new(bucket, BUDGET.clone(), MEMORY.clone(), Some(cache))),
+        parts: Arc::new(fetch::Fetcher::new(
+            bucket,
+            BUDGET.get().clone(),
+            MEMORY.get().clone(),
+            Some(cache),
+        )),
     })
 }
 

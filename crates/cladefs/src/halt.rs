@@ -44,15 +44,17 @@ struct HaltState {
     why: OnceLock<(Errno, String)>,
 }
 
-/// cladefs: the halts of the stores open in the process, each with its store's cell, held weakly,
-/// so that a host told to forget a tenant's or a cell's keys halts theirs (TASK-411.7).
-static HALTS: Mutex<Vec<(CellId, Weak<HaltState>)>> = Mutex::new(Vec::new());
+node_local::node_local! {
+    /// cladefs: the halts of the stores open in the process, each with its store's cell, held weakly,
+    /// so that a host told to forget a tenant's or a cell's keys halts theirs (TASK-411.7).
+    static HALTS: Mutex<Vec<(CellId, Weak<HaltState>)>> = Mutex::new(Vec::new());
+}
 
 impl Halt {
     /// The halt of the store at `store`, of `cell`, not halted: listed among the process's.
     pub(crate) fn new(store: &Path, cell: CellId) -> Self {
         let state = Arc::new(HaltState { store: store.to_owned(), why: OnceLock::new() });
-        let mut halts = HALTS.lock().unwrap();
+        let mut halts = HALTS.get().lock().unwrap();
         halts.retain(|(_, halt)| halt.strong_count() > 0);
         halts.push((cell, Arc::downgrade(&state)));
         Self(state)
@@ -117,7 +119,7 @@ impl HaltState {
 /// destroyed, or a cell shredded, does to their stores (TASK-411.7), which it can't open again
 /// either. Returns how many it halted, those halted already left out.
 pub(crate) fn halt_stores(scope: impl Fn(CellId) -> bool, errno: Errno, why: &str) -> usize {
-    let halts: Vec<Arc<HaltState>> = (HALTS.lock().unwrap().iter())
+    let halts: Vec<Arc<HaltState>> = (HALTS.get().lock().unwrap().iter())
         .filter(|(cell, _)| scope(*cell))
         .filter_map(|(_, halt)| halt.upgrade())
         .collect();

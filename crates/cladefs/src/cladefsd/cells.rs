@@ -46,8 +46,10 @@ pub(super) type Hold = cell_table::Hold<'static, Connection, OpenCell, Kept>;
 
 /// The daemon's stores ([`Table`]).
 pub(super) fn table() -> &'static Table {
-    static TABLE: OnceLock<Table> = OnceLock::new();
-    TABLE.get_or_init(CellTable::new)
+    node_local::node_local! {
+        static TABLE: OnceLock<Table> = OnceLock::new();
+    }
+    TABLE.get().get_or_init(CellTable::new)
 }
 
 /// Holds the store `key` names for `connection` to write it, once a connection whose VM process
@@ -1291,18 +1293,20 @@ pub(super) async fn stat(path: PathBuf) -> Result<CellState, Errno> {
     .await
 }
 
-/// The bucket [`daemon_bucket`] made, once a store needs it.
-static BUCKET: OnceLock<Arc<bucket_cell::object_bucket::ObjectBucket>> = OnceLock::new();
+node_local::node_local! {
+    /// The bucket [`daemon_bucket`] made, once a store needs it.
+    static BUCKET: OnceLock<Arc<bucket_cell::object_bucket::ObjectBucket>> = OnceLock::new();
+}
 
 /// What the daemon did with its bucket so far, if it made it (`metrics`).
 pub(super) fn bucket_stats() -> Option<bucket_cell::object_bucket::Stats> {
-    BUCKET.get().map(|bucket| bucket.stats())
+    BUCKET.get().get().map(|bucket| bucket.stats())
 }
 
 /// cladefs: what the daemon asked of each bucket, its own and those of other buckets' cells
 /// (TASK-633.4), by number (`metrics`).
 pub(super) fn bucket_stats_by_bucket() -> Vec<(u16, bucket_cell::object_bucket::Stats)> {
-    BUCKET.get().map(|bucket| bucket.stats_by_bucket()).unwrap_or_default()
+    BUCKET.get().get().map(|bucket| bucket.stats_by_bucket()).unwrap_or_default()
 }
 
 /// cladefs: the stats file's line of what the daemon asked of other buckets than its own
@@ -1349,7 +1353,7 @@ pub(super) fn follower_views() -> usize {
 /// cladefs: the bucket `CLADEFSD_BUCKET` names, which the stores opened keep their cells in:
 /// `EIO` if it names none, as the daemon's host must (`crate::bucket::Host`, TASK-45).
 pub(crate) fn daemon_bucket() -> Result<Arc<bucket_cell::object_bucket::ObjectBucket>, Errno> {
-    if let Some(bucket) = BUCKET.get() {
+    if let Some(bucket) = BUCKET.get().get() {
         return Ok(bucket.clone());
     }
     let host = crate::bucket::Host::from_env().map_err(|err| {
@@ -1391,7 +1395,7 @@ pub(super) fn use_bucket(bucket: bucket_cell::object_bucket::ObjectBucket) {
     let bucket = Arc::new(bucket);
     let host = crate::bucket::Host::from_env().expect("the daemon's host");
     crate::host_cell::use_bucket(&host.bucket, bucket.clone());
-    assert!(BUCKET.set(bucket.clone()).is_ok(), "the daemon has its bucket already");
+    assert!(BUCKET.get().set(bucket.clone()).is_ok(), "the daemon has its bucket already");
     watch_stats(Arc::downgrade(&bucket));
 }
 
@@ -1515,7 +1519,7 @@ fn uploads_line() -> String {
 
 /// cladefs: the daemon's part cache, if it opened one ([`part_cache`]): opening none.
 pub(super) fn opened_cache() -> Option<Arc<Cache>> {
-    CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone().flatten()
+    CACHE.get().lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone().flatten()
 }
 
 /// cladefs: what the daemon's part cache keeps, in bytes, and the most it may (TASK-406.1).
@@ -1689,9 +1693,11 @@ pub fn cache_config() -> Result<Option<(std::path::PathBuf, u64)>, String> {
     Ok(dir.map(|dir| (dir.into(), capacity)))
 }
 
-/// cladefs: the daemon's part cache, once its first store opened it, if it keeps one
-/// ([`part_cache`]).
-static CACHE: std::sync::Mutex<Option<Option<Arc<Cache>>>> = std::sync::Mutex::new(None);
+node_local::node_local! {
+    /// cladefs: the daemon's part cache, once its first store opened it, if it keeps one
+    /// ([`part_cache`]).
+    static CACHE: std::sync::Mutex<Option<Option<Arc<Cache>>>> = std::sync::Mutex::new(None);
+}
 
 /// cladefs: the cache the environment configures ([`cache_config`]), if it does, where what the
 /// stores opened read from their bucket is kept. Opened once, by the first store to open, those
@@ -1699,7 +1705,7 @@ static CACHE: std::sync::Mutex<Option<Option<Arc<Cache>>>> = std::sync::Mutex::n
 /// a daemon's VMs booting at once open their stores, failed the second (TASK-67). A failure is the
 /// caller's, and the next tries again.
 pub(super) fn part_cache() -> Result<Option<Arc<Cache>>, Errno> {
-    let mut opened = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut opened = CACHE.get().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(cache) = &*opened {
         return Ok(cache.clone());
     }

@@ -18,19 +18,23 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
-/// The tenants alive, and their limits, under one lock, so that a tenant made as its limit is set
-/// is limited as it was set.
-static REGISTRY: Mutex<Registry> = Mutex::new(Registry {
-    tenants: Vec::new(),
-    limits: None,
-    in_flight: None,
-    weights: None,
-    total: None,
-});
+node_local::node_local! {
+    /// The tenants alive, and their limits, under one lock, so that a tenant made as its limit is set
+    /// is limited as it was set.
+    static REGISTRY: Mutex<Registry> = Mutex::new(Registry {
+        tenants: Vec::new(),
+        limits: None,
+        in_flight: None,
+        weights: None,
+        total: None,
+        });
+}
 
-/// cladefs: what the governor allows every tenant's memory together, as the host's free memory goes
-/// ([`super::governor`], TASK-358): unlimited for a daemon not governed.
-static GOVERNED: AtomicU64 = AtomicU64::new(u64::MAX);
+node_local::node_local! {
+    /// cladefs: what the governor allows every tenant's memory together, as the host's free memory goes
+    /// ([`super::governor`], TASK-358): unlimited for a daemon not governed.
+    static GOVERNED: AtomicU64 = AtomicU64::new(u64::MAX);
+}
 
 /// cladefs: a tenant's weight unless it is set: each tenant alike.
 pub const DEFAULT_WEIGHT: u64 = 1;
@@ -71,7 +75,7 @@ impl Registry {
     /// Limits every tenant's memory together to the least of the control API's limit and the
     /// governor's allowance.
     fn apply_total(&self) {
-        let cap = self.total.unwrap_or(u64::MAX).min(GOVERNED.load(Ordering::Relaxed));
+        let cap = self.total.unwrap_or(u64::MAX).min(GOVERNED.get().load(Ordering::Relaxed));
         physmem::set_total_cap((cap != u64::MAX).then_some(cap));
     }
 }
@@ -79,13 +83,13 @@ impl Registry {
 /// The tenant of the ID `id`, whose stores are in `dir`, alive, if one is: one revoked whose VM
 /// processes live on, which a grant of it again goes on with (TASK-79.36).
 pub(super) fn alive(id: u64, dir: &std::path::Path) -> Option<Arc<Tenant>> {
-    let registry = REGISTRY.lock().unwrap();
+    let registry = REGISTRY.get().lock().unwrap();
     registry.alive().find(|tenant| tenant.id() == id && tenant.dir() == Some(dir))
 }
 
 /// Counts `tenant`, new, among those alive, limited as its ID is.
 pub(super) fn register(tenant: &Arc<Tenant>) {
-    let mut registry = REGISTRY.lock().unwrap();
+    let mut registry = REGISTRY.get().lock().unwrap();
     if let Some(bytes) = registry.limit(tenant.id()) {
         physmem::set_arena_cap(tenant.arena(), Some(bytes));
     }
@@ -104,13 +108,13 @@ pub fn set_limit(tenant: Option<u64>, bytes: Option<u64>) -> Result<(), Errno> {
         return Err(Errno::EINVAL);
     }
     let Some(id) = tenant else {
-        let mut registry = REGISTRY.lock().unwrap();
+        let mut registry = REGISTRY.get().lock().unwrap();
         registry.total = bytes;
         registry.apply_total();
         return Ok(());
     };
     super::grants::check_tenant(id)?;
-    let mut registry = REGISTRY.lock().unwrap();
+    let mut registry = REGISTRY.get().lock().unwrap();
     let limits = registry.limits.get_or_insert_with(HashMap::new);
     match bytes {
         Some(bytes) => limits.insert(id, bytes),
@@ -129,7 +133,7 @@ pub fn set_limit(tenant: Option<u64>, bytes: Option<u64>) -> Result<(), Errno> {
 /// given.
 pub fn set_weight(tenant: u64, weight: u64) -> Result<(), Errno> {
     super::grants::check_tenant(tenant)?;
-    let mut registry = REGISTRY.lock().unwrap();
+    let mut registry = REGISTRY.get().lock().unwrap();
     registry.weights.get_or_insert_with(HashMap::new).insert(tenant, weight);
     Ok(())
 }
@@ -138,9 +142,10 @@ pub fn set_weight(tenant: u64, weight: u64) -> Result<(), Errno> {
 /// which they share (`local_cell::HeldParts`, TASK-400): memory the daemon holds, which the
 /// governor lets go of before any tenant's ([`govern`]).
 pub fn held_parts() -> &'static Arc<local_cell::HeldParts> {
-    static HELD: std::sync::LazyLock<Arc<local_cell::HeldParts>> =
-        std::sync::LazyLock::new(local_cell::HeldParts::new);
-    &HELD
+    node_local::node_local! {
+        static HELD: Arc<local_cell::HeldParts> = local_cell::HeldParts::new();
+    }
+    HELD.get()
 }
 
 /// cladefs: the memory the governor governs ([`govern`]), in bytes: what every tenant's arena holds,
@@ -164,7 +169,7 @@ pub fn governed_bytes() -> u64 {
 /// was counted free; and sized to what is left it ([`local_cell::pages::PageCache::size_to`]),
 /// as Linux sizes its page cache to the memory free.
 pub fn govern(allowance: u64) {
-    GOVERNED.store(allowance, Ordering::Relaxed);
+    GOVERNED.get().store(allowance, Ordering::Relaxed);
     let parts = held_parts();
     let room = allowance.saturating_sub(physmem::arenas_bytes());
     if parts.bytes() > room {
@@ -185,7 +190,7 @@ pub fn govern(allowance: u64) {
         pages.evict_to(room);
     }
     let weighted: Vec<(u64, u64)> = {
-        let registry = REGISTRY.lock().unwrap();
+        let registry = REGISTRY.get().lock().unwrap();
         registry.apply_total();
         if physmem::arenas_bytes() <= allowance {
             return;
@@ -212,7 +217,7 @@ pub fn govern(allowance: u64) {
 
 /// What the tenants alive of the ID `id` hold.
 fn held_by(id: u64) -> u64 {
-    let registry = REGISTRY.lock().unwrap();
+    let registry = REGISTRY.get().lock().unwrap();
     registry
         .alive()
         .filter(|tenant| tenant.id() == id)
@@ -239,7 +244,7 @@ pub fn shrink(tenant: Option<u64>, target: u64) -> Result<u64, Errno> {
         parking.wait();
         return Ok(physmem::arenas_bytes());
     };
-    let arenas: Vec<_> = (REGISTRY.lock().unwrap().alive())
+    let arenas: Vec<_> = (REGISTRY.get().lock().unwrap().alive())
         .filter(|tenant| tenant.id() == id)
         .map(|tenant| tenant.arena())
         .collect();
@@ -271,7 +276,7 @@ pub struct TenantMemory {
 /// The memory of each tenant alive, by ID: a tenant alive twice, revoked and granted again with
 /// another directory, is counted once, with both its arenas'.
 pub fn tenants() -> Vec<TenantMemory> {
-    let registry = REGISTRY.lock().unwrap();
+    let registry = REGISTRY.get().lock().unwrap();
     let mut memory: HashMap<u64, TenantMemory> = HashMap::new();
     for tenant in registry.alive() {
         let entry = memory.entry(tenant.id()).or_insert_with(|| TenantMemory {
@@ -289,7 +294,7 @@ pub fn tenants() -> Vec<TenantMemory> {
 /// cladefs: what every tenant's connections have the daemon hold of their VM processes' requests
 /// now, together ([`InFlight`]): the default tenant's, if made, and each granted one's alive.
 pub(super) fn in_flight_held() -> u64 {
-    let registry = REGISTRY.lock().unwrap();
+    let registry = REGISTRY.get().lock().unwrap();
     let granted: u64 = registry.alive().map(|tenant| tenant.in_flight().held()).sum();
     let default =
         super::server::default_tenant_made().map_or(0, |tenant| tenant.in_flight().held());
@@ -331,8 +336,10 @@ pub fn return_large_allocations() {
 /// density case, 300 forks reading their base, held 16 MiB of the tenant's at most.
 pub const DEFAULT_TENANT_IN_FLIGHT: u64 = 8 << 30;
 
-/// cladefs: the bytes in flight of every tenant whose own aren't set ([`set_in_flight`]).
-static TENANT_IN_FLIGHT: AtomicU64 = AtomicU64::new(DEFAULT_TENANT_IN_FLIGHT);
+node_local::node_local! {
+    /// cladefs: the bytes in flight of every tenant whose own aren't set ([`set_in_flight`]).
+    static TENANT_IN_FLIGHT: AtomicU64 = AtomicU64::new(DEFAULT_TENANT_IN_FLIGHT);
+}
 
 /// cladefs: sets the bytes in flight the connections of the tenant `tenant` share to `bytes`, or,
 /// without `bytes`, to every tenant's; or, without `tenant`, every tenant's whose own aren't set,
@@ -344,9 +351,9 @@ pub fn set_in_flight(tenant: Option<u64>, bytes: Option<u64>) -> Result<(), Errn
         return Err(Errno::EINVAL);
     }
     let Some(id) = tenant else {
-        TENANT_IN_FLIGHT.store(bytes.unwrap_or(DEFAULT_TENANT_IN_FLIGHT), Ordering::Relaxed);
+        TENANT_IN_FLIGHT.get().store(bytes.unwrap_or(DEFAULT_TENANT_IN_FLIGHT), Ordering::Relaxed);
         // Larger, it lets those waiting go on.
-        let registry = REGISTRY.lock().unwrap();
+        let registry = REGISTRY.get().lock().unwrap();
         registry.alive().for_each(|tenant| tenant.in_flight().changed());
         if let Ok(tenant) = super::server::default_tenant() {
             tenant.in_flight().changed();
@@ -354,7 +361,7 @@ pub fn set_in_flight(tenant: Option<u64>, bytes: Option<u64>) -> Result<(), Errn
         return Ok(());
     };
     super::grants::check_tenant(id)?;
-    let mut registry = REGISTRY.lock().unwrap();
+    let mut registry = REGISTRY.get().lock().unwrap();
     let in_flight = registry.in_flight.get_or_insert_with(HashMap::new);
     match bytes {
         Some(bytes) => in_flight.insert(id, bytes),
@@ -398,7 +405,7 @@ impl InFlight {
     /// Its budget: its own, or every tenant's.
     pub fn budget(&self) -> u64 {
         match self.budget.load(Ordering::Relaxed) {
-            0 => TENANT_IN_FLIGHT.load(Ordering::Relaxed),
+            0 => TENANT_IN_FLIGHT.get().load(Ordering::Relaxed),
             budget => budget,
         }
     }

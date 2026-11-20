@@ -39,6 +39,7 @@ loom = ["dep:loom"]
 tests-kms = ["testing"]
 
 [dependencies]
+node_local.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 bitflags.workspace = true

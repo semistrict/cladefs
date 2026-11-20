@@ -33,17 +33,19 @@ use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::sync::watch;
 
-/// Whether the daemon drains: from [`drain`] on, for good.
-static DRAINING: LazyLock<watch::Sender<bool>> = LazyLock::new(|| watch::channel(false).0);
+node_local::node_local! {
+    /// Whether the daemon drains: from [`drain`] on, for good.
+    static DRAINING: watch::Sender<bool> = watch::channel(false).0;
+}
 
 /// Whether the daemon drains.
 pub(super) fn draining() -> bool {
-    *DRAINING.borrow()
+    *DRAINING.get().borrow()
 }
 
 /// Returns once the daemon drains: at once if it does.
 pub(super) async fn started() {
-    let mut draining = DRAINING.subscribe();
+    let mut draining = DRAINING.get().subscribe();
     // The sender lives as long as the process.
     let _ = draining.wait_for(|draining| *draining).await;
 }
@@ -97,7 +99,7 @@ impl std::fmt::Display for Left {
 /// It blocks.
 pub fn drain(within: Duration) -> Result<(), Left> {
     super::stop_serving();
-    DRAINING.send_replace(true);
+    DRAINING.get().send_replace(true);
     super::server::stop_accepting();
     let drained = super::server::IO.block_on(async {
         tokio::time::timeout(within, async {

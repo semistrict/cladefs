@@ -4164,7 +4164,7 @@ mod tests {
     /// by the hundred thousand, those never asked for again would be most of what it holds.
     #[test]
     fn the_cache_keeps_its_bound() {
-        cache::MOST_CACHED.store(8, Ordering::Relaxed);
+        cache::MOST_CACHED.get().store(8, Ordering::Relaxed);
         let (store, _dir) = store(1 << 20);
         let ps = page_size();
         for sequence in 1..=20 {
@@ -4190,7 +4190,7 @@ mod tests {
     #[test]
     fn the_cache_trims_what_windows_hold_once_per_eighth_of_its_bound() {
         const MOST: usize = 64;
-        cache::MOST_CACHED.store(MOST, Ordering::Relaxed);
+        cache::MOST_CACHED.get().store(MOST, Ordering::Relaxed);
         let (store, _dir) = store(8 << 20);
         let ps = page_size();
         let (mapped, looked_up) = (2 * MOST as u64, 4 * MOST as u64);
