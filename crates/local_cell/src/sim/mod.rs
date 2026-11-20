@@ -75,12 +75,36 @@ fn holds(profile: Profile, seeds: Range<u64>) {
 }
 
 /// Runs `seeds` as [`holds`] does, and `found` first, seeds past them that found a bug once, which
-/// every run replays.
+/// every run replays; then [`fresh`] seeds, which no run before ran.
 fn holds_with(profile: Profile, seeds: Range<u64>, found: &[u64]) {
     for seed in found.iter().copied().chain(soaked(seeds)) {
         let (found, description) = violations(seed, profile);
         assert!(found.is_empty(), "seed {seed}: {found:#?}\n{description}");
     }
+    for seed in fresh() {
+        let (found, description) = violations(seed, profile);
+        assert!(
+            found.is_empty(),
+            "fresh seed {seed}, found by this run alone: keep it with the test's seeds that found a \
+             bug once, and replay it with SIM_SEED={seed}: {found:#?}\n{description}"
+        );
+    }
+}
+
+/// cladefs: seeds drawn anew by each run, past the fixed ones, so that each run of the simulation
+/// reaches states none before it did, as FoundationDB's harness draws its seeds (doc-24, TASK-685.12):
+/// a run of fixed seeds replays the same states every time. `SIM_FRESH` of them (16 by default,
+/// 0 for none), from `SIM_FRESH_BASE` if set, to run a run's again, or else from a base drawn at
+/// random, said on standard output (which a failing test's output shows), at 2^40 or past it,
+/// away from the fixed seeds.
+fn fresh() -> Range<u64> {
+    let count: u64 = std::env::var("SIM_FRESH").map_or(16, |count| count.parse().unwrap());
+    let base = match std::env::var("SIM_FRESH_BASE") {
+        Ok(base) => base.parse().unwrap(),
+        Err(_) => (1 << 40) | (rand::random::<u64>() >> 2),
+    };
+    println!("fresh seeds: {count} from {base} (SIM_FRESH_BASE={base} runs them again)");
+    base..base + count
 }
 
 /// Runs `seeds` with `rules`, expecting one of them to find a violation other than garbage left:
