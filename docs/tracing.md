@@ -167,7 +167,23 @@ attribute is ever computed. The request path adds one more load per request, in
 
 ## Cost while recorded
 
-TODO(TASK-672.1): `a_recorded_span_costs` figures.
+The daemon records every span, so each request, commit, page-in and bucket request pays for a real
+span. `span-bench` (`crates/cladefs-examples/examples/span-bench.rs`) times a bucket request's span
+(started, three attributes set, ended, its trace kept as a sample), off and recorded, the fastest of
+5 rounds of a million. On ubu1 (x86_64), release build, under `fxjob --bench`, 2026-11-19:
+
+| | per span |
+|---|---|
+| off | 2 ns |
+| recorded | 497 ns |
+
+A request makes one span, or a few with its commit's phases. A page-in that reads from the host's
+disk takes tens of microseconds, and one from the bucket milliseconds, so their spans cost them
+little. At 20 000 requests a second, recording takes about 1% of a core.
+
+```sh
+cargo run --release -p cladefs-examples --example span-bench
+```
 
 ## Tests
 

@@ -2604,11 +2604,9 @@ mod tests {
                 return futures::future::ready(Some(vec![0xa5; PART as usize])).boxed();
             };
             let key = key.to_owned();
-            async move {
-                let served = fetcher.stored_part(&key, part).await;
-                Some(served.unwrap()?.to_vec())
-            }
-            .boxed()
+            // Where it went for the part its own to note, as another host's are (TASK-672.2).
+            let serving = trace::sourced(async move { fetcher.stored_part(&key, part).await });
+            async move { Some(serving.await.0.unwrap()?.to_vec()) }.boxed()
         }
 
         fn failed(&self) {
@@ -2661,6 +2659,37 @@ mod tests {
         assert_eq!(complete_all(&bucket, &mut reads), [tail], "the third host's tail alone");
         assert_eq!(reads.result(read), Some(Ok(data)));
         assert_eq!(owner.counts(), (4, 0));
+    }
+
+    /// TASK-672.2: a read of a part another host owns says it went to that peer, once its object's
+    /// tail, the host's own GET, is in memory: the first read went to the bucket for the tail.
+    #[test]
+    fn reads_of_parts_a_peer_gave_say_so() {
+        trace::enable(true);
+        let data = noise(2 * PART);
+        let bucket = bucket(&data);
+        let owning = Fetcher::new(bucket.clone(), limits(8), memory(), None);
+        let owner = Owner::of(Some(Arc::new(owning.asking(Arc::new(Alone)))));
+        let fetcher = Fetcher::new(bucket.clone(), limits(8), memory(), None);
+        let fetcher = Rc::new(fetcher.asking(Arc::new(owner.clone())));
+        let mut reads = Reads::new();
+        let sourced = |offset: u64, reads: &mut Reads| {
+            let landed = Rc::new(RefCell::new(None));
+            let (fetcher, into) = (fetcher.clone(), landed.clone());
+            let read = async move {
+                let at = location(2 * PART);
+                let read = fetcher.read(EXTENT, &at, offset, 10, Priority::Demand);
+                let (read, source) = trace::sourced(read).await;
+                *into.borrow_mut() = Some((read.map(|bytes| bytes.len()), source));
+            };
+            reads.pool.spawner().spawn_local(read).unwrap();
+            reads.run();
+            complete_all(&bucket, reads);
+            landed.borrow_mut().take()
+        };
+        assert_eq!(sourced(0, &mut reads), Some((Ok(10), Some(Source::Bucket))));
+        assert_eq!(sourced(PART, &mut reads), Some((Ok(10), Some(Source::Peer))));
+        assert_eq!(owner.counts(), (2, 0));
     }
 
     /// TASK-406.2: a part its owner gives wrong, failing the CRC the asker's tail gives it, is
