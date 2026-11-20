@@ -36,7 +36,7 @@ fn cell(url: &str, args: &[&str]) -> String {
 /// The store at `path`, which keeps its cell in the bucket its description names, opened as a
 /// copy never placed here takes it, as the first placement (TASK-165.9).
 fn attached(path: &Path) -> OpenCell {
-    OpenCell::open(path).unwrap()
+    futures::executor::block_on(OpenCell::open(path)).unwrap()
 }
 
 fn read(store: &OpenCell, extent: ExtentId, len: usize) -> Vec<u8> {
@@ -149,7 +149,7 @@ fn places_and_syncs_stores_in(url: &str) {
 
     // Made by cladefsctl, naming the bucket at `url`, its cell the bucket's to name (TASK-364).
     let made = cell(&url, &["create", &path("first"), &(1u64 << 30).to_string()]);
-    let store = OpenCell::open(path("first")).unwrap();
+    let store = futures::executor::block_on(OpenCell::open(path("first"))).unwrap();
     let cell_id = store.cell();
     assert_eq!(made.parse::<cladefs::CellId>(), Ok(cell_id));
     let extent = ExtentId { cell: cell_id.id, sequence: 1 };

@@ -564,7 +564,13 @@ fn sigterm_drains_vms_stores_and_the_mount_of_cells() {
     vm.commit_ordered(Some(b"vm drained")).unwrap();
     terminate(child, &m);
     drop(vm);
-    assert_eq!(cladefs::OpenCell::open(first.join("vm")).unwrap().root().unwrap(), b"vm drained");
+    assert_eq!(
+        futures::executor::block_on(cladefs::OpenCell::open(first.join("vm")))
+            .unwrap()
+            .root()
+            .unwrap(),
+        b"vm drained"
+    );
 
     let second = dir.path().join("second");
     std::fs::create_dir(&second).unwrap();
