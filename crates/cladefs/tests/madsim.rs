@@ -26,9 +26,18 @@ fn control(host: u8) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, host)), CONTROL)
 }
 
+/// The peer port, on each host's address, of the hosts that keep ephemeral cells.
+const PEER: u16 = 7100;
+
+/// The address of host `host`'s daemon's peer server.
+fn peer(host: u8) -> SocketAddr {
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, host)), PEER)
+}
+
 /// Boots host `host`'s daemon, its stores under `root`, its cells in `bucket`, at placement token
-/// `host`, and serves for as long as the host runs.
-async fn boot(host: u8, root: &Path, bucket: Arc<ObjectBucket>) {
+/// `host`, and serves for as long as the host runs. With `ephemeral`, of `ephemeral` hosts, it keeps
+/// ephemeral cells (doc-25), and serves and asks its peers, the others of them.
+async fn boot(host: u8, root: &Path, bucket: Arc<ObjectBucket>, ephemeral: Option<u8>) {
     // As a host's process boots: its statics anew, its node started again after a kill too.
     node_local::starting();
     let tenants = root.join("tenants").display().to_string();
@@ -38,6 +47,16 @@ async fn boot(host: u8, root: &Path, bucket: Arc<ObjectBucket>) {
         ("CLADEFSD_GRPC", control(host).to_string()),
         ("CLADEFSD_TENANTS", tenants),
     ]);
+    if let Some(hosts) = ephemeral {
+        let others =
+            (1..=hosts).filter(|&other| other != host).map(|other| peer(other).to_string());
+        let peers: Vec<String> = std::iter::once(peer(host).to_string()).chain(others).collect();
+        node_local::env::set_vars([
+            ("CLADEFSD_EPHEMERAL", root.join("ephemeral").display().to_string()),
+            ("CLADEFSD_PEER_ADDRESS", peer(host).to_string()),
+            ("CLADEFSD_PEERS", peers.join(",")),
+        ]);
+    }
     cladefs::cladefsd::use_bucket(bucket);
     cladefs::cladefsd::boot(&root.join("vms.sock"), Some(256 << 20)).await.unwrap();
     // As cladefsd's main parks once it booted: a node whose init returns exits, its tasks with it.
@@ -86,6 +105,16 @@ fn hosts(
     dir: &Path,
     bucket: &Arc<ObjectBucket>,
 ) -> (Vec<madsim::runtime::NodeHandle>, Vec<PathBuf>) {
+    hosts_keeping(count, dir, bucket, false)
+}
+
+/// Hosts as [`hosts`] boots them, keeping ephemeral cells and peers of each other, if `ephemeral`.
+fn hosts_keeping(
+    count: u8,
+    dir: &Path,
+    bucket: &Arc<ObjectBucket>,
+    ephemeral: bool,
+) -> (Vec<madsim::runtime::NodeHandle>, Vec<PathBuf>) {
     let handle = madsim::runtime::Handle::current();
     let roots: Vec<PathBuf> = (1..=count).map(|host| dir.join(format!("host{host}"))).collect();
     let nodes = (1..=count)
@@ -99,7 +128,7 @@ fn hosts(
                 .ip(control(host).ip())
                 .init(move || {
                     let (root, bucket) = (root.clone(), bucket.clone());
-                    async move { boot(host, &root, bucket).await }
+                    async move { boot(host, &root, bucket, ephemeral.then_some(count)).await }
                 })
                 .build()
         })
@@ -406,5 +435,202 @@ async fn attrition() -> Result<(), String> {
     match lost.is_empty() {
         true => Ok(()),
         false => Err(format!("blocks told uploaded, lost or other: {lost:?} of {:?}", told.keys())),
+    }
+}
+
+/// TASK-698.5, doc-25: an ephemeral cell forked from a version on one of three hosts, its guest
+/// writing and committing in rounds, each commit Local; between rounds, as the seed says, its host
+/// killed as it writes, started again after, or the cell migrated live to the next host, that host
+/// itself killed before the hand-over now and then, the hand-over refused then and the cell kept
+/// where it was. The bucket's requests fail and stall meanwhile. Then the bucket heals, and every
+/// block the guest was told committed reads as written where the cell is, one reference to its
+/// origin left, its host's alone (doc-12's ephemeral rows).
+#[madsim::test]
+async fn ephemeral_cells_survive_crashes_and_migrations() {
+    if let Err(lost) = ephemeral_attrition().await {
+        panic!("{lost}");
+    }
+}
+
+/// Calls `call` on host `host`'s control API until it answers otherwise than the bucket or a peer
+/// being out of reach: what it answered.
+async fn calling<T, F>(host: u8, call: impl Fn() -> F) -> Result<T, cladefs::Errno>
+where
+    F: std::future::Future<Output = Result<T, tonic::Status>>,
+{
+    for _ in 0..100 {
+        match call().await {
+            Ok(done) => return Ok(done),
+            Err(status) => match cladefs::cladefsd::control::errno(&status) {
+                Some(errno @ (cladefs::Errno::ENOTCONN | cladefs::Errno::EIO)) | None => {
+                    log::info!("host {host}: {errno:?} {}", status.message());
+                    madsim::time::sleep(Duration::from_millis(200)).await;
+                }
+                Some(errno) => return Err(errno),
+            },
+        }
+    }
+    panic!("host {host} never answered")
+}
+
+/// The ephemeral attrition profile, as [`ephemeral_cells_survive_crashes_and_migrations`] says:
+/// what was lost, if anything.
+async fn ephemeral_attrition() -> Result<(), String> {
+    use cladefs::cladefsd::control::proto::{
+        ForkCellRequest, HandOverCellRequest, MigrateCellRequest,
+    };
+    use madsim::rand::Rng as _;
+    const ROUNDS: u64 = 6;
+    const WRITES: u64 = 5;
+    let (dir, bucket, faults) = world();
+    let (nodes, roots) = hosts_keeping(3, dir.path(), &bucket, true);
+    let handle = madsim::runtime::Handle::current();
+    let manager = manager();
+    let node = |host: usize| handle.get_node(nodes[host].id()).unwrap();
+    let restart = |host: usize| {
+        let handle = handle.clone();
+        let id = nodes[host].id();
+        async move {
+            let after = Duration::from_millis(madsim::rand::thread_rng().gen_range(0..3000));
+            madsim::time::sleep(after).await;
+            handle.restart(id);
+        }
+    };
+
+    // The version on host 1, of a base whose block the ephemeral cell inherits.
+    let base = roots[0].join("base");
+    let (parent, version) = node(0)
+        .spawn(async move {
+            let guest = guest().await;
+            let cell = guest.open(&base, 64 << 20).await.unwrap();
+            let extent = cladefs::ExtentId { cell, sequence: 1 };
+            guest.write(extent, 0, &block_of(99, 1)).await.unwrap();
+            guest.commit(cladefs::Commit::Uploaded).await.unwrap();
+            let version = guest.make_version().await.unwrap();
+            guest.close();
+            (cell, version)
+        })
+        .await
+        .unwrap();
+    let path = |host: usize, round: u64| roots[host].join(format!("ephemeral{round}"));
+    let (mut host, mut at) = (0usize, path(0, 0));
+    let to = at.display().to_string();
+    let forked = manager.spawn(async move {
+        calling(1, || {
+            let request = ForkCellRequest {
+                to: to.clone(),
+                version,
+                cell: parent,
+                ephemeral: true,
+                ..ForkCellRequest::default()
+            };
+            async move { connect(1).await.fork_cell(request).await }
+        })
+        .await
+    });
+    let child = forked.await.unwrap().map_err(|errno| format!("forking: {errno:?}"))?;
+    let child = child.into_inner().cell;
+
+    let told: Uploaded = Arc::default();
+    for round in 0..ROUNDS {
+        let writing = write_round(at.clone(), round, WRITES, told.clone());
+        let mut written = node(host).spawn(writing);
+        let wait = Duration::from_millis(madsim::rand::thread_rng().gen_range(0..2000));
+        if madsim::time::timeout(wait, &mut written).await.is_err() {
+            // Killed as it writes: what it was told committed is Local, on the disk kept.
+            if madsim::rand::thread_rng().gen_bool(0.5) {
+                handle.kill(nodes[host].id());
+                restart(host).await;
+            } else {
+                written.await.unwrap();
+            }
+        }
+        if !madsim::rand::thread_rng().gen_bool(0.6) {
+            continue;
+        }
+        // Migrated live to the next host, that host killed before the hand-over now and then.
+        let target = (host + 1) % 3;
+        let (from, there) = (at.display().to_string(), path(target, round + 1));
+        let to = there.display().to_string();
+        let source = host as u8 + 1;
+        let migrating = manager.spawn(async move {
+            let request =
+                MigrateCellRequest { path: from, peer: peer(source % 3 + 1).to_string(), to };
+            calling(source, || {
+                let request = request.clone();
+                async move { connect(source).await.migrate_cell(request).await }
+            })
+            .await
+        });
+        if migrating.await.unwrap().is_err() {
+            continue;
+        }
+        madsim::time::sleep(Duration::from_millis(madsim::rand::thread_rng().gen_range(0..1000)))
+            .await;
+        if madsim::rand::thread_rng().gen_bool(0.3) {
+            handle.kill(nodes[target].id());
+            restart(target).await;
+        }
+        let from = at.display().to_string();
+        let handing = manager.spawn(async move {
+            calling(source, || {
+                let request = HandOverCellRequest { path: from.clone() };
+                async move { connect(source).await.hand_over_cell(request).await }
+            })
+            .await
+        });
+        match handing.await.unwrap() {
+            Ok(_) => (host, at) = (target, there),
+            Err(cladefs::Errno::EAGAIN) => log::info!("round {round}: the hand-over refused"),
+            Err(errno) => return Err(format!("round {round}: handing over: {errno:?}")),
+        }
+    }
+
+    faults.set(bucket_cell::faults::Odds::NONE);
+    let expected = told.lock().unwrap().clone();
+    let reading = at.clone();
+    let read = node(host)
+        .spawn(async move {
+            let guest = guest().await;
+            let cell = guest.open(&reading, 64 << 20).await.unwrap();
+            let inherited = cladefs::ExtentId { cell: parent, sequence: 1 };
+            let mut read = vec![(0, guest.read(inherited, 0, 4096).await)];
+            for &sequence in expected.keys() {
+                read.push((
+                    sequence,
+                    guest.read(cladefs::ExtentId { cell, sequence }, 0, 4096).await,
+                ));
+            }
+            (cell, read)
+        })
+        .await
+        .unwrap();
+    let (cell, read) = read;
+    assert_eq!(cell, child, "the cell read is the ephemeral one");
+    let told = told.lock().unwrap().clone();
+    assert!(!told.is_empty(), "no write was told committed");
+    let mut lost = Vec::new();
+    for (sequence, block) in read {
+        let expected = match sequence {
+            0 => Some(block_of(99, 1)),
+            sequence => told.get(&sequence).cloned(),
+        };
+        if block.ok() != expected {
+            lost.push(sequence);
+        }
+    }
+    // One journal entry of the cell's, its holder's.
+    let noted: Vec<usize> = (0..3)
+        .filter(|&each| {
+            let cells = roots[each].join("ephemeral/cells");
+            std::fs::read_dir(cells).is_ok_and(|mut found| found.next().is_some())
+        })
+        .collect();
+    match (lost.is_empty(), noted == vec![host]) {
+        (true, true) => Ok(()),
+        (false, _) => {
+            Err(format!("blocks told committed, lost or other: {lost:?} of {:?}", told.keys()))
+        }
+        (true, false) => Err(format!("the cell noted on hosts {noted:?}, held on {host}")),
     }
 }
