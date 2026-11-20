@@ -1,10 +1,10 @@
 ---
 id: TASK-685.3
 title: 'Threads, runtimes and blocking through one seam for the simulation'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-20 03:32'
-updated_date: '2026-11-20 07:40'
+updated_date: '2026-11-20 14:36'
 labels:
   - testing
   - simulation
@@ -35,4 +35,6 @@ doc-24 step 3: about 100 thread spawn sites, the runtimes cladefsd builds (serve
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-20, after the user's decision (the daemon async down to its waits): the plan is doc-24's 'The async rewrite's plan', 12 steps from the inventory of cross-task waits; each step leaves the normal build as it is. Step 1 (fail fast under madsim) and step 2 (async uploader waits) first. Found meanwhile: TASK-688 (a store taken on the control runtime's worker).
+
+2026-11-20: steps 1-4, 6, 8 landed on main by PR #2 (5f65a04ee). The rest goes to main directly (the user: no more PRs). Next batch: step 9 (explicit async close of daemon-owned stores) and step 5 (read path), with TASK-685.12 (madsim build in test.sh/CI).
 <!-- SECTION:NOTES:END -->
