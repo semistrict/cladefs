@@ -44,7 +44,7 @@ pub fn fires(file: &'static str, line: u32, p: f64) -> bool {
         let Some(run) = run.as_mut() else { return false };
         let on = *run.sites.entry((file, line)).or_insert_with(|| {
             // One in four, as `hash(seed, file, line)` says.
-            mix(run.seed ^ mix(fnv(file) ^ u64::from(line))) % 4 == 0
+            mix(run.seed ^ mix(fnv(file) ^ u64::from(line))).is_multiple_of(4)
         });
         on && (run.next() as f64 / u64::MAX as f64) < p
     })
@@ -77,7 +77,7 @@ thread_local! {
 /// did.
 #[cfg(any(test, feature = "testing"))]
 pub fn enable(seed: u64) -> bool {
-    let on = mix(seed ^ 0xb066_1f1e) % 5 != 0;
+    let on = !mix(seed ^ 0xb066_1f1e).is_multiple_of(5);
     RUN.with(|run| {
         let state = mix(seed ^ 0x5eed);
         *run.borrow_mut() = on.then(|| Run { seed, sites: Default::default(), state });

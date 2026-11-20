@@ -310,6 +310,84 @@ fn buggify_sites_are_reached() {
     assert_eq!(asked.len(), sites.len(), "reached only {asked:?} of {sites:?}");
 }
 
+/// cladefs: FoundationDB's swarm of faults (doc-24): a profile the seed draws, so that each seed
+/// runs its own mix of what happens, as each of FoundationDB's runs adds fault workloads at random
+/// with their parameters. One of the named profiles as its base; each of its families of steps
+/// kept, dropped, halved or doubled, but those that drive the world (requests completing, calls
+/// delivered); its rates of failures, holds, restarts, forgetting, passes over one cell and
+/// corrupting crashes drawn again. Replication and regions only as the profiles made for them
+/// have them, whose worlds hold what they need.
+fn swarm(seed: u64) -> Profile {
+    use rand::{RngExt as _, SeedableRng as _};
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed ^ 0x5a5a_f00d);
+    let bases: [fn() -> Profile; 25] = [
+        Profile::default,
+        forks,
+        deleted_bases,
+        regions,
+        stale_placements,
+        collected,
+        children,
+        fresh_cells,
+        takeovers,
+        recreated,
+        late_checkpoints,
+        taken,
+        crashes,
+        wals,
+        versioned_wals,
+        spanning_wals,
+        restores,
+        forgotten_restores,
+        twin_restores,
+        whole_restores,
+        collectors,
+        recovering,
+        versions,
+        replicated,
+        retakes,
+    ];
+    let mut profile = bases[rng.random_range(0..bases.len())]();
+    profile.weights.scale(|name, weight| match name {
+        "complete" | "deliver" => weight,
+        _ => match rng.random_range(0..6) {
+            0 => 0,
+            1 => weight / 2,
+            2 => weight.saturating_mul(2),
+            _ => weight,
+        },
+    });
+    let mut either = |kept: f64, drawn: f64| match rng.random_range(0..3) {
+        0 => kept,
+        1 => 0.0,
+        _ => drawn,
+    };
+    profile.fail_before = either(profile.fail_before, 0.15);
+    profile.fail_after = either(profile.fail_after, 0.15);
+    profile.hold = either(profile.hold, 0.5);
+    profile.forget = either(profile.forget, 0.5);
+    if profile.replicated > 0.0 {
+        profile.net_faults = either(profile.net_faults, 0.2);
+    }
+    profile.one_cell = rng.random_range(0.0..=1.0);
+    profile.restarts = rng.random_bool(0.5);
+    profile.corrupting = rng.random_bool(0.5);
+    profile
+}
+
+/// cladefs: seeds of [`swarm`] profiles, each its own, find no violation; and replay as they ran.
+#[test]
+fn swarms() {
+    for seed in soaked(0..200).chain(fresh()) {
+        let profile = swarm(seed);
+        let (found, description) = violations(seed, profile);
+        assert!(found.is_empty(), "seed {seed} of {profile:#?}: {found:#?}\n{description}");
+    }
+    for seed in 0..10 {
+        replays(swarm(seed), seed..seed + 1);
+    }
+}
+
 /// Everything, at the default rates.
 #[test]
 fn everything() {

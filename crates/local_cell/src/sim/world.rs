@@ -138,6 +138,44 @@ pub struct Profile {
     pub options: Options,
 }
 
+impl Weights {
+    /// cladefs: each weight as `scale` says, given its name and weight: a swarm's draw of which of
+    /// a profile's families a seed runs, and how often (doc-24).
+    pub fn scale(&mut self, mut scale: impl FnMut(&'static str, u32) -> u32) {
+        macro_rules! scaled {
+            ($($field:ident),*) => {
+                $(self.$field = scale(stringify!($field), self.$field);)*
+            };
+        }
+        scaled!(
+            complete,
+            write,
+            commit,
+            close,
+            checkpoint,
+            open,
+            takeover,
+            crash,
+            delete,
+            delete_base,
+            collect,
+            stop_collector,
+            reclaim,
+            stale_delete,
+            unfork,
+            twins,
+            stale_checkpoint,
+            version,
+            drop_version,
+            restore_version,
+            tick,
+            deliver,
+            late,
+            partition
+        );
+    }
+}
+
 /// cladefs: the chance, each step, that a region's bucket goes down, or comes up again.
 const REGION_FLIPS: f64 = 0.02;
 
