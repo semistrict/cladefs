@@ -111,7 +111,7 @@ message Range {
 message MigrateFileRequest {
   // The migration.
   uint64 migration = 1;
-  // The file's path in the store.
+  // The file's path in the store; a directory's, made if it is not there, ends with `/`.
   string path = 2;
   // Where `bytes` go in it.
   uint64 offset = 3;

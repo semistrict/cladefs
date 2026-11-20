@@ -249,7 +249,7 @@ type MigrateFileRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The migration.
 	Migration uint64 `protobuf:"varint,1,opt,name=migration,proto3" json:"migration,omitempty"`
-	// The file's path in the store.
+	// The file's path in the store; a directory's, made if it is not there, ends with `/`.
 	Path string `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
 	// Where `bytes` go in it.
 	Offset uint64 `protobuf:"varint,3,opt,name=offset,proto3" json:"offset,omitempty"`

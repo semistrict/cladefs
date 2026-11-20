@@ -162,6 +162,26 @@ async fn round(outgoing: &Outgoing, path: &Path) -> Result<(), Status> {
     Ok(())
 }
 
+/// The directories of the store at `path`, by their paths in it: those its files are in, and those
+/// it keeps empty, which its opening lists.
+fn dirs(path: &Path) -> std::io::Result<Vec<String>> {
+    let mut found = Vec::new();
+    let mut pending = vec![String::new()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(path.join(&dir))? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let relative = if dir.is_empty() { name } else { format!("{dir}/{name}") };
+            if entry.metadata()?.is_dir() && relative != "replica-spool" {
+                found.push(relative.clone());
+                pending.push(relative);
+            }
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
 /// The files of the store at `path`, by their paths in it, with their lengths: all but its marker
 /// and what deleting or replicating leaves.
 fn files(path: &Path) -> std::io::Result<Vec<(String, u64)>> {
@@ -350,6 +370,18 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
 /// whole. Returns every file of the store, as the hand-over names them.
 async fn finish(outgoing: &Outgoing, path: &Path) -> Result<Vec<FileDigest>, Status> {
     let mut sent = outgoing.sent.lock().await;
+    // Its directories first, the empty ones among them: a directory's path ends with `/`.
+    for dir in dirs(path).map_err(|err| status("listing", err))? {
+        let request = MigrateFileRequest {
+            migration: outgoing.migration,
+            path: format!("{dir}/"),
+            offset: 0,
+            bytes: Vec::new(),
+            len: 0,
+            holes: Vec::new(),
+        };
+        outgoing.client.clone().migrate_file(request).await?;
+    }
     let mut named = Vec::new();
     for (relative, len) in files(path).map_err(|err| status("listing", err))? {
         let kept = relative.starts_with("kept/");
@@ -455,6 +487,13 @@ pub(super) mod target {
         let host = host()?;
         let MigrateFileRequest { migration, path, offset, bytes, len, holes } = request;
         let (_, staged) = staged(&host, migration)?;
+        // A directory, empty or not, its path ending with `/`.
+        if let Some(dir) = path.strip_suffix('/') {
+            if dir.split('/').any(|part| part == ".." || part.is_empty()) {
+                return Err(Status::invalid_argument(format!("{path:?} leaves the store")));
+            }
+            return std::fs::create_dir_all(staged.join(dir)).map_err(|err| status(&path, err));
+        }
         if path.split('/').any(|part| part == ".." || part.is_empty()) {
             return Err(Status::invalid_argument(format!("{path:?} leaves the store")));
         }
