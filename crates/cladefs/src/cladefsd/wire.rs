@@ -23,6 +23,118 @@ use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::Mutex;
+
+/// cladefs: a VM process's connection in memory, under madsim (doc-24).
+#[cfg(madsim)]
+mod memory;
+
+/// cladefs: a VM process's connection, as the daemon serves it: a Unix stream; under madsim, which
+/// has no Unix sockets, an end of a connection in memory, a simulated guest's at the other
+/// ([`memory::Stream::pair`], doc-24's boundary).
+#[cfg(not(madsim))]
+pub(crate) type Stream = UnixStream;
+#[cfg(madsim)]
+pub(crate) use memory::Stream;
+
+/// cladefs: the socket the daemon's async sender and receiver use, the one place they differ
+/// under madsim: a [`Stream`] on the runtime's reactor, sending with `sendmsg` and reading with
+/// `recvmsg`; or the connection in memory, its calls those of [`memory::Stream`] (doc-24).
+pub(crate) struct Socket {
+    #[cfg(not(madsim))]
+    fd: tokio::io::unix::AsyncFd<UnixStream>,
+    #[cfg(madsim)]
+    stream: memory::Stream,
+}
+
+/// cladefs: that a [`Socket`] takes more, until cleared: the reactor's readiness, or, in memory,
+/// always, as it takes all it is sent.
+pub(crate) struct Writable<'a> {
+    #[cfg(not(madsim))]
+    ready: tokio::io::unix::AsyncFdReadyGuard<'a, UnixStream>,
+    #[cfg(madsim)]
+    socket: std::marker::PhantomData<&'a Socket>,
+}
+
+impl Writable<'_> {
+    /// It took what it could: to be waited for again.
+    pub(crate) fn clear_ready(&mut self) {
+        #[cfg(not(madsim))]
+        self.ready.clear_ready();
+    }
+}
+
+impl Socket {
+    /// `stream`, the caller's, non-blocking, to write.
+    fn writing(stream: Stream) -> io::Result<Self> {
+        #[cfg(not(madsim))]
+        return Ok(Self {
+            fd: tokio::io::unix::AsyncFd::with_interest(stream, tokio::io::Interest::WRITABLE)?,
+        });
+        #[cfg(madsim)]
+        return Ok(Self { stream });
+    }
+
+    /// `stream`, made non-blocking, to read.
+    fn reading(stream: Stream) -> io::Result<Self> {
+        stream.set_nonblocking(true)?;
+        #[cfg(not(madsim))]
+        return Ok(Self { fd: tokio::io::unix::AsyncFd::new(stream)? });
+        #[cfg(madsim)]
+        return Ok(Self { stream });
+    }
+
+    /// Once it takes more bytes.
+    async fn writable(&self) -> io::Result<Writable<'_>> {
+        #[cfg(not(madsim))]
+        return Ok(Writable { ready: self.fd.writable().await? });
+        #[cfg(madsim)]
+        return Ok(Writable { socket: std::marker::PhantomData });
+    }
+
+    /// Sends what of `parts`, in order, one write does, with `fds`: how many bytes it sent.
+    fn send_parts(&self, parts: &[&[u8]], fds: &[BorrowedFd<'_>]) -> io::Result<usize> {
+        #[cfg(not(madsim))]
+        return send_parts(self.fd.get_ref(), parts, fds);
+        #[cfg(madsim)]
+        return self.stream.send_parts(parts, fds);
+    }
+
+    /// Reads what of `bytes` it has, once it has any: with the descriptors that came with them,
+    /// if `with_fds`.
+    async fn read(&self, bytes: &mut [u8], with_fds: bool) -> io::Result<(usize, Vec<OwnedFd>)> {
+        #[cfg(not(madsim))]
+        loop {
+            let mut ready = self.fd.readable().await?;
+            let read = ready.try_io(|stream| match with_fds {
+                true => receive_with_fds(stream.get_ref(), bytes, 0),
+                false => (&*stream.get_ref()).read(bytes).map(|read| (read, Vec::new())),
+            });
+            match read {
+                Ok(read) => return read,
+                // Not ready after all: waited for again.
+                Err(_) => continue,
+            }
+        }
+        #[cfg(madsim)]
+        return self.stream.read(bytes, with_fds).await;
+    }
+
+    /// Shuts the connection down both ways.
+    fn shutdown(&self) -> io::Result<()> {
+        #[cfg(not(madsim))]
+        return self.fd.get_ref().shutdown(std::net::Shutdown::Both);
+        #[cfg(madsim)]
+        return self.stream.shutdown(std::net::Shutdown::Both);
+    }
+
+    /// Whether the other end hung up.
+    fn hung_up(&self) -> bool {
+        #[cfg(not(madsim))]
+        return hung_up(self.fd.get_ref().as_fd());
+        #[cfg(madsim)]
+        return self.stream.hung_up();
+    }
+}
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 /// A message's header: what it is, the request it is for, and its arguments.
@@ -421,7 +533,7 @@ impl Sender {
 /// would hold them for good. What the socket has no room for waits in a queue, which a task on the
 /// runtime it was made on writes as the socket takes it; what is sent meanwhile queues behind.
 pub(crate) struct AsyncSender {
-    stream: tokio::io::unix::AsyncFd<UnixStream>,
+    stream: Socket,
     queue: Mutex<Queue>,
     /// How many bytes the queue holds, which the socket has not taken (TASK-79.16).
     queued: std::sync::atomic::AtomicU64,
@@ -470,26 +582,26 @@ impl Queued {
 
 impl AsyncSender {
     /// Sends through `stream`, which the caller made non-blocking, on the runtime it is made on.
-    #[cfg(test)]
-    pub fn new(stream: UnixStream) -> io::Result<Self> {
+    /// cladefs: and a simulated guest's (`super::guest`).
+    #[cfg(any(test, madsim))]
+    pub fn new(stream: Stream) -> io::Result<Self> {
         Self::made(stream, None)
     }
 
     /// cladefs: sends through `stream` as [`AsyncSender::new`] does, the bytes it queues counted in
     /// `counted` too, as long as they are queued (TASK-149.35).
     pub fn counting(
-        stream: UnixStream,
+        stream: Stream,
         counted: std::sync::Arc<super::memory::InFlight>,
     ) -> io::Result<Self> {
         Self::made(stream, Some(counted))
     }
 
     fn made(
-        stream: UnixStream,
+        stream: Stream,
         counted: Option<std::sync::Arc<super::memory::InFlight>>,
     ) -> io::Result<Self> {
-        let stream =
-            tokio::io::unix::AsyncFd::with_interest(stream, tokio::io::Interest::WRITABLE)?;
+        let stream = Socket::writing(stream)?;
         let runtime = tokio::runtime::Handle::current();
         let queued = Default::default();
         Ok(Self { stream, queue: Mutex::default(), queued, counted, runtime })
@@ -526,7 +638,7 @@ impl AsyncSender {
     /// Whether the other end hung up, as a VM process that went does, though the receiving end
     /// may not have read so yet.
     pub fn peer_gone(&self) -> bool {
-        hung_up(self.stream.get_ref().as_fd())
+        self.stream.hung_up()
     }
 
     /// Sends `header`, with `payload` as its payload, and `fds`, at most [`MAX_FDS`], after what
@@ -657,7 +769,7 @@ impl AsyncSender {
                 let (header, payload) = message.unsent();
                 parts.extend([header, payload]);
             }
-            let sent = match send_parts(self.stream.get_ref(), &parts, &fds) {
+            let sent = match self.stream.send_parts(&parts, &fds) {
                 Ok(sent) => sent,
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(false),
                 Err(err) => return Err(err),
@@ -717,7 +829,7 @@ impl AsyncSender {
     /// Shuts the connection down, which ends its receiver's messages: a failure logged, but for
     /// the connection's being gone already (`ENOTCONN`).
     pub fn shutdown(&self) {
-        if let Err(err) = self.stream.get_ref().shutdown(std::net::Shutdown::Both)
+        if let Err(err) = self.stream.shutdown()
             && err.kind() != io::ErrorKind::NotConnected
         {
             log::warn!("cladefsd: shutting a VM process's connection down: {err}");
@@ -1013,14 +1125,13 @@ impl Receiver {
 /// cladefs: the receiving half of one of the daemon's connections, on a runtime, which receives every
 /// connection's messages on a few threads rather than a thread each (TASK-34): its socket
 /// non-blocking, read as it is ready.
-pub(crate) struct AsyncReceiver(tokio::io::unix::AsyncFd<UnixStream>);
+pub(crate) struct AsyncReceiver(Socket);
 
 impl AsyncReceiver {
     /// Receives from `stream`, which it makes non-blocking, as the runtime it is made on is ready
     /// to.
-    pub fn new(stream: UnixStream) -> io::Result<Self> {
-        stream.set_nonblocking(true)?;
-        Ok(Self(tokio::io::unix::AsyncFd::new(stream)?))
+    pub fn new(stream: Stream) -> io::Result<Self> {
+        Ok(Self(Socket::reading(stream)?))
     }
 
     /// The next message, or `None` once the other end has closed the connection, as
@@ -1068,18 +1179,7 @@ impl AsyncReceiver {
     /// Reads what of `bytes` the socket has, once it has any: with the descriptors that came with
     /// them, if `with_fds`.
     async fn read(&self, bytes: &mut [u8], with_fds: bool) -> io::Result<(usize, Vec<OwnedFd>)> {
-        loop {
-            let mut ready = self.0.readable().await?;
-            let read = ready.try_io(|stream| match with_fds {
-                true => receive_with_fds(stream.get_ref(), bytes, 0),
-                false => (&*stream.get_ref()).read(bytes).map(|read| (read, Vec::new())),
-            });
-            match read {
-                Ok(read) => return read,
-                // Not ready after all: waited for again.
-                Err(_) => continue,
-            }
-        }
+        self.0.read(bytes, with_fds).await
     }
 }
 

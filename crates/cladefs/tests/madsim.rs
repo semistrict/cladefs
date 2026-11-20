@@ -57,13 +57,13 @@ async fn connect(
     panic!("host {host}'s control API never answered: {failed:?}");
 }
 
-#[madsim::test]
-async fn two_daemons_boot_as_hosts_and_one_takes_the_others_cell() {
+/// What every test's hosts share: their logger, their KMS's master key, and a bucket in memory,
+/// its requests delayed and failed as the seed says.
+fn world() -> (tempfile::TempDir, Arc<ObjectBucket>) {
     // Once a process: a determinism check runs the test twice in it.
     let _ = cladefs::cladefsd::logging::to_stderr();
     // SAFETY: the simulation's one thread, before any node reads the environment.
     unsafe { std::env::set_var("CLADEFS_MASTER_KEY", "ab".repeat(32)) };
-    let dir = tempfile::tempdir().unwrap();
     let odds = bucket_cell::faults::Odds {
         delay_most: Duration::from_millis(50),
         fail_before: 0.05,
@@ -74,23 +74,56 @@ async fn two_daemons_boot_as_hosts_and_one_takes_the_others_cell() {
     let objects = Arc::new(object_store::memory::InMemory::new());
     let seeded = bucket_cell::faults::Seeded::new(objects, madsim::rand::random(), odds);
     let seeded = bucket_cell::faults::SeededStore(Arc::new(seeded));
-    let bucket = Arc::new(ObjectBucket::new(Arc::new(seeded), ""));
+    (tempfile::tempdir().unwrap(), Arc::new(ObjectBucket::new(Arc::new(seeded), "")))
+}
+
+/// Hosts 1 to `count`, booted, their stores under `dir`'s `hostN`, their cells in `bucket`: their
+/// nodes, and their roots.
+fn hosts(
+    count: u8,
+    dir: &Path,
+    bucket: &Arc<ObjectBucket>,
+) -> (Vec<madsim::runtime::NodeHandle>, Vec<PathBuf>) {
     let handle = madsim::runtime::Handle::current();
-    let roots: Vec<PathBuf> = (1..=2).map(|host| dir.path().join(format!("host{host}"))).collect();
-    for (host, root) in (1..=2u8).zip(&roots) {
-        std::fs::create_dir_all(root).unwrap();
-        let (root, bucket) = (root.clone(), bucket.clone());
-        handle
-            .create_node()
-            .name(format!("host{host}"))
-            .ip(control(host).ip())
-            .init(move || {
-                let (root, bucket) = (root.clone(), bucket.clone());
-                async move { boot(host, &root, bucket).await }
-            })
-            .build();
+    let roots: Vec<PathBuf> = (1..=count).map(|host| dir.join(format!("host{host}"))).collect();
+    let nodes = (1..=count)
+        .zip(&roots)
+        .map(|(host, root)| {
+            std::fs::create_dir_all(root).unwrap();
+            let (root, bucket) = (root.clone(), bucket.clone());
+            handle
+                .create_node()
+                .name(format!("host{host}"))
+                .ip(control(host).ip())
+                .init(move || {
+                    let (root, bucket) = (root.clone(), bucket.clone());
+                    async move { boot(host, &root, bucket).await }
+                })
+                .build()
+        })
+        .collect();
+    (nodes, roots)
+}
+
+/// A guest of this host's daemon, once it serves.
+async fn guest() -> cladefs::cladefsd::guest::Guest {
+    while !cladefs::cladefsd::serving() {
+        madsim::time::sleep(Duration::from_millis(100)).await;
     }
-    let client = handle.create_node().name("vm manager").ip("10.0.0.100".parse().unwrap()).build();
+    cladefs::cladefsd::guest::Guest::connect().unwrap()
+}
+
+/// The VM manager's node, which calls the hosts' control APIs.
+fn manager() -> madsim::runtime::NodeHandle {
+    let handle = madsim::runtime::Handle::current();
+    handle.create_node().name("vm manager").ip("10.0.0.100".parse().unwrap()).build()
+}
+
+#[madsim::test]
+async fn two_daemons_boot_as_hosts_and_one_takes_the_others_cell() {
+    let (dir, bucket) = world();
+    let (_nodes, roots) = hosts(2, dir.path(), &bucket);
+    let client = manager();
     let (first, second) = (roots[0].join("store"), roots[1].join("store"));
     client
         .spawn(async move {
@@ -125,4 +158,62 @@ async fn two_daemons_boot_as_hosts_and_one_takes_the_others_cell() {
         })
         .await
         .unwrap();
+}
+
+/// TASK-685.6: a simulated guest of host 1's writes a block and commits it, uploaded; once it is
+/// gone and host 2 has taken its cell, a guest of host 2's reads the block as written: through the
+/// daemons' own handling of a VM process's requests, its connection in memory.
+#[madsim::test]
+async fn a_guests_commit_uploaded_on_one_host_reads_back_on_another() {
+    let (dir, bucket) = world();
+    let (nodes, roots) = hosts(2, dir.path(), &bucket);
+    let (first, second) = (roots[0].join("store"), roots[1].join("store"));
+    let block: Vec<u8> = (0..4096u32).map(|at| (at * 7 % 251) as u8).collect();
+    let written = block.clone();
+    let cell = nodes[0]
+        .spawn(async move {
+            let guest = guest().await;
+            let cell = guest.open(&first, 64 << 20).await.unwrap();
+            let extent = cladefs::ExtentId { cell, sequence: 1 };
+            guest.write(extent, 0, &written).await.unwrap();
+            guest.commit(cladefs::Commit::Uploaded).await.unwrap();
+            guest.close();
+            cell
+        })
+        .await
+        .unwrap();
+    manager()
+        .spawn(async move {
+            let mut two = connect(2).await;
+            let taking = CreateCellRequest {
+                path: second.display().to_string(),
+                capacity: 64 << 20,
+                token: Some(2),
+                cell,
+                ..CreateCellRequest::default()
+            };
+            // Its first host's teardown may hold the cell's head a while yet: taken once it lets go.
+            loop {
+                match two.create_cell(taking.clone()).await {
+                    Ok(_) => break,
+                    Err(status) => {
+                        log::info!("taking the cell: {status:?}");
+                        madsim::time::sleep(Duration::from_millis(200)).await;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+    let second = roots[1].join("store");
+    let read = nodes[1]
+        .spawn(async move {
+            let guest = guest().await;
+            assert_eq!(guest.open(&second, 64 << 20).await.unwrap(), cell);
+            let extent = cladefs::ExtentId { cell, sequence: 1 };
+            guest.read(extent, 0, 4096).await.unwrap()
+        })
+        .await
+        .unwrap();
+    assert!(read == block, "host 2 read another block than host 1's guest committed");
 }

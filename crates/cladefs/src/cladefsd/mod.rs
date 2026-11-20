@@ -101,6 +101,9 @@ pub mod disk;
 pub mod drain;
 pub mod governor;
 mod grants;
+/// cladefs: a simulated guest's connection, under madsim (doc-24, TASK-685.6).
+#[cfg(madsim)]
+pub mod guest;
 mod http;
 pub mod logging;
 pub mod memory;
@@ -146,6 +149,12 @@ node_local::node_local! {
     /// Whether the control API's health service reports the daemon serving: as [`SERVING`] says, once
     /// it has said so to its callers.
     static REPORTED: tokio::sync::watch::Sender<bool> = tokio::sync::watch::channel(false).0;
+}
+
+/// cladefs: whether the daemon serves VM processes: booted, and not draining. A simulated guest
+/// connects once its host's does (doc-24).
+pub fn serving() -> bool {
+    *SERVING.get().borrow()
 }
 
 /// Says the daemon stops serving, as it is about to exit: once the control API's health service, if

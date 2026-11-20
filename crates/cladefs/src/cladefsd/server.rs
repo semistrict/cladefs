@@ -119,7 +119,7 @@ fn serve_as(listener: UnixListener, tenant: impl Fn() -> Result<Arc<Tenant>, Err
             Ok((stream, _)) => {
                 failing = false;
                 if let Ok(tenant) = tenant() {
-                    drop(start_connection(stream, tenant));
+                    drop(start_connection(stream.into(), tenant));
                 }
             }
             Err(err) if err.raw_os_error() == Some(libc::EINVAL) => return,
@@ -409,14 +409,23 @@ fn reopen_read_only(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<std::os:
 /// connections one by one.
 #[cfg(test)]
 pub(crate) fn serve_connection(stream: UnixStream, tenant: Arc<Tenant>) {
-    let _ = start_connection(stream, tenant).recv();
+    let _ = start_connection(stream.into(), tenant).recv();
+}
+
+/// cladefs: a connection of a simulated guest's to the daemon, in memory, served as a VM process's
+/// is, of `tenant`'s: the guest's end (doc-24, TASK-685.6). Under madsim, which has no VM socket.
+#[cfg(madsim)]
+pub(crate) fn connect_in_memory(tenant: Arc<Tenant>) -> super::wire::Stream {
+    let (daemons, guests) = super::wire::Stream::pair();
+    drop(start_connection(daemons, tenant));
+    guests
 }
 
 /// Starts serving the VM process at the other end of `stream`, as [`serve_connection`] does, on
 /// the daemon's runtime: no thread of its own. What it returns says when it is done.
 /// cladefs: one of a tenant past [`MAX_CONNECTIONS`] it closes at once.
 /// cladefs: one coming as the daemon drains it closes at once (TASK-141.4).
-fn start_connection(stream: UnixStream, tenant: Arc<Tenant>) -> mpsc::Receiver<()> {
+fn start_connection(stream: super::wire::Stream, tenant: Arc<Tenant>) -> mpsc::Receiver<()> {
     let (done, finished) = mpsc::channel();
     let Some(counted) = Counted::new(&tenant.memory) else {
         log::error!(
@@ -447,7 +456,7 @@ pub(super) fn connections() -> usize {
 
 /// Receives the VM process's messages, serving its requests ([`receive`]), until it is gone; then,
 /// once its requests are done, lets its store go.
-async fn run_connection(stream: UnixStream, tenant: Arc<Tenant>) {
+async fn run_connection(stream: super::wire::Stream, tenant: Arc<Tenant>) {
     let sender = match stream.try_clone().and_then(|clone| {
         clone.set_nonblocking(true)?;
         // cladefs: what it queues held in its tenant's bytes in flight too (TASK-149.35).
@@ -944,6 +953,23 @@ fn serve_future(turn: Turn, serving: impl std::future::Future<Output = ()> + Sen
         let ended = answered.lock().unwrap().take();
         drop(ended);
     };
+    // cladefs: under madsim, polled here first, in its turn, as on the pool; then, if it waits, a
+    // task of the simulated host's, which polls it again at once: its wakers the simulation's, no
+    // pool's to be found from wherever they fire (doc-24).
+    #[cfg(madsim)]
+    {
+        let mut future = Box::pin(future);
+        let waker = futures::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+        if future.as_mut().poll(&mut context).is_pending() {
+            drop(tokio::spawn(future));
+            if let Some(turn) = turn.lock().unwrap().as_mut() {
+                turn.defer();
+            }
+        }
+        #[allow(clippy::needless_return)]
+        return;
+    }
     let poll = |runnable: async_task::Runnable| {
         let _io = IO.enter();
         runnable.run();
@@ -2320,12 +2346,18 @@ impl Peer {
     /// another, may reach, and the watchdog, started first. An error if the daemon may not kill
     /// it, as it would once it stopped answering: its process unknown, or the daemon not allowed
     /// to signal it, as one of another user is unless the daemon has `CAP_KILL`.
-    fn connected(stream: &UnixStream, sender: Arc<AsyncSender>) -> std::io::Result<Arc<Self>> {
+    fn connected(
+        stream: &super::wire::Stream,
+        sender: Arc<AsyncSender>,
+    ) -> std::io::Result<Arc<Self>> {
         node_local::node_local! {
             static WATCHING: std::sync::Once = std::sync::Once::new();
         }
         WATCHING.get().call_once(|| {
-            physmem::quarantine_with(quarantine);
+            // cladefs: physical memory's quarantine is the process's, as physmem is, given once,
+            // whichever simulated host is first (TASK-685.14); the watchdog is each daemon's.
+            static QUARANTINED: std::sync::Once = std::sync::Once::new();
+            QUARANTINED.call_once(|| physmem::quarantine_with(quarantine));
             IO.spawn(watch());
         });
         let process = peer_process(stream)?;
@@ -2449,6 +2481,13 @@ fn signal(process: &std::os::fd::OwnedFd, signal: libc::c_int) -> std::io::Resul
 /// it was opened may have left its pid to another, which the daemon would kill in its place: so,
 /// the socket's other end hung up by then, the connection is refused. That leaves a race, on a
 /// kernel before 6.5, with a VM process that exits leaving the socket to another, as its child.
+#[cfg(madsim)]
+fn peer_process(_: &super::wire::Stream) -> std::io::Result<Option<std::os::fd::OwnedFd>> {
+    // cladefs: a simulated guest's, in this process, as a test's is (doc-24).
+    Ok(None)
+}
+
+#[cfg(not(madsim))]
 fn peer_process(stream: &UnixStream) -> std::io::Result<Option<std::os::fd::OwnedFd>> {
     use std::os::fd::{AsRawFd, FromRawFd};
     let fd = stream.as_raw_fd();
