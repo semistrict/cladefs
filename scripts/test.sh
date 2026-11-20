@@ -90,8 +90,10 @@ if part madsim; then
     madsim=(env RUSTFLAGS="--cfg madsim" CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}/madsim")
     "${madsim[@]}" cargo check --manifest-path "$root/Cargo.toml" -p node_local -p bucket_cell \
         -p local_cell -p cladefs
-    "${madsim[@]}" cargo nextest run --manifest-path "$root/Cargo.toml" -p node_local \
-        -p bucket_cell -p local_cell -p cladefs --test madsim "$@"
+    # Each test over MADSIM_TEST_NUM seeds, 20 unless said, from MADSIM_TEST_SEED's, if given.
+    "${madsim[@]}" MADSIM_TEST_NUM="${MADSIM_TEST_NUM:-20}" cargo nextest run \
+        --manifest-path "$root/Cargo.toml" -p node_local -p bucket_cell -p local_cell -p cladefs \
+        --test madsim "$@"
 fi
 # The concurrency tests under Shuttle, built with each crate's `shuttle` feature, which only they
 # can run (TASK-44).

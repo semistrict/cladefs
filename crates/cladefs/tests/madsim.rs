@@ -5,7 +5,9 @@
 //! TASK-685.9 (doc-24): cladefsd under madsim, built with `RUSTFLAGS="--cfg madsim"`: two daemons
 //! booted as simulated hosts, each its own node with its own environment, sharing a bucket in
 //! memory, their control APIs on the simulated network. A cell made on one, its commits synced, is
-//! taken by the other at a later placement's token.
+//! taken by the other at a later placement's token. TASK-685.5: the bucket's requests delayed and
+//! failed, before or after landing, and the bucket out of reach for stretches, as the seed says
+//! (`bucket_cell::faults::Seeded`), which the daemons' retries ride out.
 
 #![cfg(all(madsim, target_os = "linux"))]
 
@@ -62,7 +64,17 @@ async fn two_daemons_boot_as_hosts_and_one_takes_the_others_cell() {
     // SAFETY: the simulation's one thread, before any node reads the environment.
     unsafe { std::env::set_var("CLADEFS_MASTER_KEY", "ab".repeat(32)) };
     let dir = tempfile::tempdir().unwrap();
-    let bucket = Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
+    let odds = bucket_cell::faults::Odds {
+        delay_most: Duration::from_millis(50),
+        fail_before: 0.05,
+        fail_after: 0.05,
+        out_of_reach: 0.01,
+        out_for: Duration::from_millis(500),
+    };
+    let objects = Arc::new(object_store::memory::InMemory::new());
+    let seeded = bucket_cell::faults::Seeded::new(objects, madsim::rand::random(), odds);
+    let seeded = bucket_cell::faults::SeededStore(Arc::new(seeded));
+    let bucket = Arc::new(ObjectBucket::new(Arc::new(seeded), ""));
     let handle = madsim::runtime::Handle::current();
     let roots: Vec<PathBuf> = (1..=2).map(|host| dir.path().join(format!("host{host}"))).collect();
     for (host, root) in (1..=2u8).zip(&roots) {

@@ -336,6 +336,209 @@ impl ObjectStore for Faulty {
     }
 }
 
+/// cladefs: how often a [`Seeded`] bucket does what to a request (TASK-685.5, doc-24): each request
+/// waits up to `delay_most`, as the seed draws it; then, as it draws, fails before it lands
+/// (`fail_before`), or lands and fails after (`fail_after`), as a request answered with an error or
+/// lost on its way back does, its write in the bucket all the same; and the bucket goes out of reach
+/// for `out_for` at a time (`out_of_reach`, at each request), every request failing meanwhile, as a
+/// region's link does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Odds {
+    pub delay_most: Duration,
+    pub fail_before: f64,
+    pub fail_after: f64,
+    pub out_of_reach: f64,
+    pub out_for: Duration,
+}
+
+impl Odds {
+    /// None: every request answered at once.
+    pub const NONE: Self = Self {
+        delay_most: Duration::ZERO,
+        fail_before: 0.0,
+        fail_after: 0.0,
+        out_of_reach: 0.0,
+        out_for: Duration::ZERO,
+    };
+}
+
+/// cladefs: an object store whose requests are delayed and failed as a seed says, before `objects`
+/// ([`Odds`]): the simulation's bucket, which the simulated hosts share (TASK-685.5, doc-24). Its
+/// draws are its own generator's, seeded, and its waits the clock's, so that under madsim a seed's
+/// run is a function of the seed.
+#[derive(Debug)]
+pub struct Seeded {
+    objects: Arc<dyn ObjectStore>,
+    odds: Mutex<Odds>,
+    rng: Mutex<rand::rngs::StdRng>,
+    /// Until when it is out of reach, if it is.
+    out_until: Mutex<Option<tokio::time::Instant>>,
+}
+
+/// What a [`Seeded`] bucket does to a request it lets through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fate {
+    /// Answered as it is.
+    Answered,
+    /// Landed, then failed: its write in the bucket.
+    FailedAfter,
+}
+
+impl Seeded {
+    /// `objects`, its requests as `odds` says, drawn from `seed`.
+    pub fn new(objects: Arc<dyn ObjectStore>, seed: u64, odds: Odds) -> Self {
+        use rand::SeedableRng as _;
+        let rng = Mutex::new(rand::rngs::StdRng::seed_from_u64(seed));
+        Self { objects, odds: Mutex::new(odds), rng, out_until: Mutex::new(None) }
+    }
+
+    /// Has the requests from now on go as `odds` says: [`Odds::NONE`] heals it.
+    pub fn set(&self, odds: Odds) {
+        *self.odds.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = odds;
+        if odds.out_of_reach == 0.0 {
+            *self.out_until.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+    }
+
+    /// Waits as a request does, then fails it before it lands, or says what it does after.
+    async fn request(&self) -> object_store::Result<Fate> {
+        use rand::RngExt as _;
+        let odds = *self.odds.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (delay, before, after, out) = {
+            let mut rng = self.rng.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let delay = match odds.delay_most.is_zero() {
+                true => Duration::ZERO,
+                false => odds.delay_most.mul_f64(rng.random_range(0.0..1.0)),
+            };
+            let before = rng.random_bool(odds.fail_before.clamp(0.0, 1.0));
+            let after = rng.random_bool(odds.fail_after.clamp(0.0, 1.0));
+            let out = rng.random_bool(odds.out_of_reach.clamp(0.0, 1.0));
+            (delay, before, after, out)
+        };
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        let now = tokio::time::Instant::now();
+        let reachable = {
+            let mut until = self.out_until.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if until.is_some_and(|until| now >= until) {
+                *until = None;
+            }
+            if until.is_none() && out && !odds.out_for.is_zero() {
+                *until = Some(now + odds.out_for);
+            }
+            until.is_none()
+        };
+        if !reachable || before {
+            return Err(Self::failure("out of reach, or failed before landing"));
+        }
+        Ok(if after { Fate::FailedAfter } else { Fate::Answered })
+    }
+
+    /// What it answers a request it fails with: a server's error, which a client retries.
+    fn failure(why: &'static str) -> object_store::Error {
+        let source = format!("HTTP status server error (503 Service Unavailable): {why}").into();
+        object_store::Error::Generic { store: "Seeded", source }
+    }
+
+    /// `answered`, or, a request failed after landing, its failure.
+    fn fated<T>(fate: Fate, answered: object_store::Result<T>) -> object_store::Result<T> {
+        match (fate, answered) {
+            (Fate::FailedAfter, Ok(_)) => Err(Self::failure("landed, then failed")),
+            (_, answered) => answered,
+        }
+    }
+
+    /// A stream of what `stream` yields, once a request has waited and failed, or not.
+    fn streamed<T: Send + 'static>(
+        self: &Arc<Self>,
+        stream: BoxStream<'static, object_store::Result<T>>,
+    ) -> BoxStream<'static, object_store::Result<T>> {
+        let this = self.clone();
+        let waited = async move {
+            match this.request().await {
+                Ok(_) => stream,
+                Err(error) => futures::stream::once(async { Err(error) }).boxed(),
+            }
+        };
+        futures::stream::once(waited).flatten().boxed()
+    }
+}
+
+impl std::fmt::Display for Seeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Seeded({})", self.objects)
+    }
+}
+
+/// cladefs: a [`Seeded`] bucket, shared: what an [`ObjectStore`] is made of where its streams
+/// outlive the call that made them.
+#[derive(Clone, Debug)]
+pub struct SeededStore(pub Arc<Seeded>);
+
+impl std::fmt::Display for SeededStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for SeededStore {
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        opts: PutOptions,
+    ) -> object_store::Result<PutResult> {
+        let fate = self.0.request().await?;
+        Seeded::fated(fate, self.0.objects.put_opts(location, payload, opts).await)
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        opts: PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        let fate = self.0.request().await?;
+        Seeded::fated(fate, self.0.objects.put_multipart_opts(location, opts).await)
+    }
+
+    async fn get_opts(
+        &self,
+        location: &Path,
+        options: GetOptions,
+    ) -> object_store::Result<GetResult> {
+        let fate = self.0.request().await?;
+        Seeded::fated(fate, self.0.objects.get_opts(location, options).await)
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        self.0.streamed(self.0.objects.delete_stream(locations))
+    }
+
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.0.streamed(self.0.objects.list(prefix))
+    }
+
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
+        let fate = self.0.request().await?;
+        Seeded::fated(fate, self.0.objects.list_with_delimiter(prefix).await)
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        let fate = self.0.request().await?;
+        Seeded::fated(fate, self.0.objects.copy_opts(from, to, options).await)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
