@@ -3,10 +3,11 @@ id: TASK-495
 title: >-
   fuse_differential: a mkdir on a FUSE mount changes its parent's mtime but not
   its ctime (tmpfs changes both)
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-16 11:47'
-updated_date: '2026-11-20 17:50'
+updated_date: '2026-11-20 18:50'
 labels:
   - bug
   - fuse

@@ -3,10 +3,11 @@ id: TASK-650
 title: >-
   Daemon tests abort with SIGABRT at process exit after passing (a different
   test each run)
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 21:17'
-updated_date: '2026-11-20 18:41'
+updated_date: '2026-11-20 18:50'
 labels:
   - cladefsd
   - flaky
