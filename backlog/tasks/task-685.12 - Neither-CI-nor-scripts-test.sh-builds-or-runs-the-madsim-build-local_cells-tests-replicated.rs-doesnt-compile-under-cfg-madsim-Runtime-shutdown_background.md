@@ -4,9 +4,10 @@ title: >-
   Neither CI nor scripts/test.sh builds or runs the madsim build: local_cell's
   tests/replicated.rs doesn't compile under --cfg madsim
   (Runtime::shutdown_background)
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-20 14:18'
+updated_date: '2026-11-20 14:36'
 labels: []
 dependencies: []
 parent_task_id: TASK-685
