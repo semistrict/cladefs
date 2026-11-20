@@ -3,7 +3,7 @@ id: doc-24
 title: 'Full-stack deterministic simulation: N daemons, one seed'
 type: specification
 created_date: '2026-11-20 03:31'
-updated_date: '2026-11-20 07:40'
+updated_date: '2026-11-20 07:44'
 ---
 # Full-stack deterministic simulation
 
@@ -234,8 +234,13 @@ client and tests.
 `Dir`, because the work they wait for runs inline, as long as nothing awaits between `begin_write`
 and `finish_write`. They get fail-fast asserts, not async forms.
 
-Every step leaves the normal build as it is: an async form is added beside each sync one, and the
-sync one keeps its code for the in-process device, the CLI and FUSE storage. Smallest first:
+**One code path (the user, 2026-11-20).** A simulation is worth what it shares with production,
+so production runs the code the simulation runs. Each wait has one form, async. The daemon awaits
+it all the way up, on tokio in production and on madsim in the simulation, with no blocking form
+beside it and no `block_on` in the daemon's code. Only callers outside the daemon block on it, at
+their outermost entry point: `cladefsctl`'s `main`, FUSE storage's threads, the tests' bodies. Under
+madsim, step 1's panics fail any `block_on` or blocking wait left on the daemon's paths. Each step
+converts a path end to end, smallest first:
 
 1. Fail fast under `cfg(madsim)`: "would block" panics in each blocking wait above, and
    `framing::on_threads` gated on `Dir::concurrent()`.
