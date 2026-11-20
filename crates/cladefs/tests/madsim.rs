@@ -54,7 +54,14 @@ async fn boot(host: u8, root: &Path, bucket: Arc<ObjectBucket>, ephemeral: Optio
         let peers: Vec<String> = std::iter::once(peer(host).to_string()).chain(others).collect();
         vars.extend([
             ("CLADEFSD_EPHEMERAL", root.join("ephemeral").display().to_string()),
-            ("CLADEFSD_PART_CACHE", root.join("cache").display().to_string()),
+            // A cache of its own each boot: a killed node's lock on its cache, in this one process,
+            // outlives it, which a host's process's never does.
+            (
+                "CLADEFSD_PART_CACHE",
+                root.join(format!("cache{:x}", madsim::rand::random::<u64>()))
+                    .display()
+                    .to_string(),
+            ),
             ("CLADEFSD_PEER_ADDRESS", peer(host).to_string()),
             ("CLADEFSD_PEERS", peers.join(",")),
         ]);
