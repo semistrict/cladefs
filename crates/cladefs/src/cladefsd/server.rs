@@ -1429,7 +1429,7 @@ impl Connection {
         fds: &mut Vec<std::os::fd::BorrowedFd<'a>>,
     ) -> Result<(), Errno> {
         if let Request::Open { path, opening: codec::Opening::ReadOnly } = request {
-            let cell = self.follow(path)?;
+            let cell = self.follow(path).await?;
             let commit = self.store().ok_or(Errno::EBADF)?.view_commit()?;
             let max_map_count = max_map_count();
             reply.args = Opened { cell, arena: self.arena_id(), commit, max_map_count }.args();
@@ -1505,7 +1505,7 @@ impl Connection {
                 // A VM snapshot's: a version of the store's cell, made here (doc-20), refused while
                 // the window holds private pages, whose bytes no extent holds (TASK-203). Each
                 // refusal says why here, as the VMM's error can't (TASK-92.14).
-                let version = store.make_version(None).map_err(|err| {
+                let version = store.make_version(None).await.map_err(|err| {
                     if err.errno() == Some(Errno::EBUSY) {
                         log::warn!("cladefsd: a version refused: {err:#}");
                     }
@@ -1523,7 +1523,7 @@ impl Connection {
                     return Err(Errno::EPERM);
                 }
                 let ids = std::collections::BTreeSet::from([*version]);
-                store.drop_versions(&ids).map_err(|err| {
+                store.drop_versions(&ids).await.map_err(|err| {
                     cells::errno_of(format_args!("dropping version {version:x}"), err)
                 })?;
                 self.versions_made.with(Mutex::lock).remove(version);
@@ -1532,7 +1532,7 @@ impl Connection {
             // Authorized, as every path a request names ([`Connection::serve_in_turn`]).
             Request::Fork { path } => {
                 // cladefs: a new cell of the store's tenant's, its ID the bucket's (TASK-364).
-                let forked = store.fork(path, store.cell().tenant);
+                let forked = store.fork(path, store.cell().tenant).await;
                 if let Err(err) = &forked
                     && err.errno() == Some(Errno::EBUSY)
                 {
@@ -1659,10 +1659,10 @@ impl Connection {
     /// a writer's connection, or followers', have open, or, if none has, of the store as of its
     /// last commit, which a writer opening it then takes over ([`cells::followed`]); tells its VM
     /// process of the writer's commits after its view's ([`COMMITTED`]); and returns its cell.
-    fn follow(&self, path: &Path) -> Result<u64, Errno> {
+    async fn follow(&self, path: &Path) -> Result<u64, Errno> {
         let opening = self.opening()?;
         self.tenant.reaches(path)?;
-        let follower = cells::followed(path, self.arena())?;
+        let follower = cells::followed(path, self.arena()).await?;
         if follower.access().public && !self.tenant.policy.follows_public_bases {
             return Err(Errno::EPERM);
         }
@@ -1757,7 +1757,7 @@ impl Connection {
         {
             let store = match hold.instance() {
                 Some((store, _)) => store,
-                None => Arc::new(open_store(path, None, Some(arena))?),
+                None => Arc::new(open_store(path, None, Some(arena)).await?),
             };
             cells::at_version(
                 (crate::CellId { tenant, id: cell }, version),
@@ -1779,13 +1779,13 @@ impl Connection {
                 cells::removed_if_unmade(path)?;
                 let forked = (crate::CellId { tenant, id: cell }, version);
                 cells::fork_version(forked, capacity, (path, self.tenant.granted())).await?;
-                Arc::new(open_store(path, None, Some(arena))?)
+                Arc::new(open_store(path, None, Some(arena)).await?)
             }
             (None, codec::Opening::Create(capacity, kind)) => {
                 let new = cells::New { capacity: *capacity, kind: *kind, tenant: self.tenant.id };
-                Arc::new(open_store(path, Some(new), Some(arena))?)
+                Arc::new(open_store(path, Some(new), Some(arena)).await?)
             }
-            (None, _) => Arc::new(open_store(path, None, Some(arena))?),
+            (None, _) => Arc::new(open_store(path, None, Some(arena)).await?),
         };
         hold.open(&store)?;
         Ok(store)

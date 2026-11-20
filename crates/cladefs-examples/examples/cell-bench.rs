@@ -445,7 +445,7 @@ impl Host {
         let bucket = self.bucket.clone();
         let _entered = self.runtime.enter();
         let (store, uploader) =
-            local_cell::upload::open(recovering, options, bucket, holding, &self.upload).unwrap();
+            futures::executor::block_on(local_cell::upload::open(recovering, options, bucket, holding, &self.upload)).unwrap();
         store.made().unwrap();
         assert!(store.keys().encrypts());
         (store, uploader)

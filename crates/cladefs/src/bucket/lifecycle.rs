@@ -446,7 +446,7 @@ impl Made {
         let description = local_cell::Description { block_size: BLOCK as u32, capacity, cell };
         let kind = bucket_cell::cell::Kind::Fxfs;
         OpenCell::create_at_version(&self.at(name), (&url, kind), description, version).unwrap();
-        OpenCell::take_with(self.at(name), (capacity, cell, None), opening()).unwrap()
+        futures::executor::block_on(OpenCell::take_with(self.at(name), (capacity, cell, None), opening())).unwrap()
     }
 
     /// The path of the store `name` on the host measured.
@@ -479,7 +479,7 @@ fn based(
     futures::executor::block_on(base.commit(None)).unwrap();
     drop(base);
     let base = open(&made.join("base"));
-    let (version, asked, _) = run.asked(|| base.uploaded_version_at(made.join("copy")).unwrap());
+    let (version, asked, _) = run.asked(|| futures::executor::block_on(base.uploaded_version_at(made.join("copy"))).unwrap());
     let line = asked.line(Duration::ZERO, &run.names);
     println!("SETUP extents={extents} version of the base: {line}");
     (base.cell(), version)
@@ -492,7 +492,7 @@ fn based(
 fn host(bucket: &Arc<ObjectBucket>) {
     crate::host_cell::use_host_bucket(url_of(bucket));
     local_cell::upload::block_on(bucket.probed(rand::random())).unwrap().unwrap();
-    host_cell::new_cell(bucket, DEFAULT_TENANT).unwrap();
+    futures::executor::block_on(host_cell::new_cell(bucket, DEFAULT_TENANT)).unwrap();
 }
 
 /// A bucket's objects in memory.
@@ -536,11 +536,11 @@ fn lifecycle(extents: u64, latency: Duration) {
     // A restore on a host that never saw the version: a copy of it made, as the daemon's
     // `CreateCell` with a version does, opened, forked, the fork opened.
     let taken = run.phase("cold copy-open", || made.copied(&bucket, "copy"));
-    let unwritten = run.phase("cold fork", || taken.fork(at("cold"), DEFAULT_TENANT).unwrap());
+    let unwritten = run.phase("cold fork", || futures::executor::block_on(taken.fork(at("cold"), DEFAULT_TENANT)).unwrap());
     run.names.name(unwritten, "cold-fork");
     let cold = run.phase("cold fork-open", || open(&at("cold")));
     // And on one that has it open, as the daemon keeps a copy open for the restores after.
-    let fork = run.phase("warm fork", || taken.fork(at("vm"), DEFAULT_TENANT).unwrap());
+    let fork = run.phase("warm fork", || futures::executor::block_on(taken.fork(at("vm"), DEFAULT_TENANT)).unwrap());
     run.names.name(fork, "fork");
     let vm = run.phase("warm fork-open", || open(&at("vm")));
 
@@ -548,13 +548,13 @@ fn lifecycle(extents: u64, latency: Duration) {
     run.phase("close", || drop(vm));
     let vm = run.phase("reopen", || open(&at("vm")));
     run.phase("write-commit again", || write_and_commit(&vm));
-    let snapshot = run.phase("snapshot", || vm.make_version(None).unwrap());
-    run.phase("drop snapshot", || vm.drop_versions(&[snapshot].into()).unwrap());
+    let snapshot = run.phase("snapshot", || futures::executor::block_on(vm.make_version(None)).unwrap());
+    run.phase("drop snapshot", || futures::executor::block_on(vm.drop_versions(&[snapshot].into())).unwrap());
     run.phase("close after snapshot", || drop(vm));
-    let deleting = |name: &str| host_cell::delete(&at(name), Some(&bucket), || Ok(1)).unwrap();
+    let deleting = |name: &str| futures::executor::block_on(host_cell::delete(&at(name), Some(&bucket), || Ok(1))).unwrap();
     run.phase("delete", || deleting("vm"));
     // A sandbox that lived minutes: restored, written, closed, deleted. Its deletion.
-    let short = taken.fork(at("short"), DEFAULT_TENANT).unwrap();
+    let short = futures::executor::block_on(taken.fork(at("short"), DEFAULT_TENANT)).unwrap();
     run.names.name(short, "short");
     let lived = open(&at("short"));
     write_and_commit(&lived);
@@ -588,7 +588,7 @@ fn lifecycle(extents: u64, latency: Duration) {
     run.late(false);
     let restore = |run: &Run, name: &str| {
         let (_, asked, events) = run.asked(|| {
-            taken.fork(at(name), DEFAULT_TENANT).unwrap();
+            futures::executor::block_on(taken.fork(at(name), DEFAULT_TENANT)).unwrap();
             drop(open(&at(name)));
         });
         let checkpoints = events.iter().filter(|event| {
@@ -607,7 +607,7 @@ fn lifecycle(extents: u64, latency: Duration) {
     said(0, restore(&run, "restore-0"));
     for resumes in 1..=RESUMES {
         let name = format!("resumed-{resumes}");
-        taken.fork(at(&name), DEFAULT_TENANT).unwrap();
+        futures::executor::block_on(taken.fork(at(&name), DEFAULT_TENANT)).unwrap();
         let resumed = open(&at(&name));
         write_and_commit(&resumed);
         drop(resumed);
@@ -664,9 +664,9 @@ fn restores_ask_the_bucket_what_the_protocol_needs() {
     let at = |name: &str| made.at(name);
     run.late(true);
     let taken = run.phase("cold copy-open", || made.copied(&bucket, "copy"));
-    run.phase("cold fork", || taken.fork(at("cold"), DEFAULT_TENANT).unwrap());
+    run.phase("cold fork", || futures::executor::block_on(taken.fork(at("cold"), DEFAULT_TENANT)).unwrap());
     let cold = run.phase("cold fork-open", || open(&at("cold")));
-    run.phase("warm fork", || taken.fork(at("vm"), DEFAULT_TENANT).unwrap());
+    run.phase("warm fork", || futures::executor::block_on(taken.fork(at("vm"), DEFAULT_TENANT)).unwrap());
     let vm = run.phase("warm fork-open", || open(&at("vm")));
     let costs: Vec<_> =
         (run.phases.iter()).map(|(phase, asked, _)| (*phase, asked.cost())).collect();
@@ -698,7 +698,7 @@ fn restores_refused_to_placements_superseded_since_their_forks() {
     let bucket = Arc::new(ObjectBucket::new(objects.clone(), ""));
     host(&bucket);
     let taken = made.copied(&bucket, "copy");
-    let clone = taken.fork(made.at("vm"), DEFAULT_TENANT).unwrap();
+    let clone = futures::executor::block_on(taken.fork(made.at("vm"), DEFAULT_TENANT)).unwrap();
     // Another host, placed later, holds the clone's cell, through a bucket handle of its own.
     let elsewhere = ObjectBucket::new(objects, "");
     let later = host_cell::keeping().unwrap().token + 1;
@@ -730,14 +730,14 @@ fn uploads_after_restores() {
     let taken = made.copied(&bucket, "copy");
     for restore in 0..restores {
         let at = made.at(&format!("restore-{restore}"));
-        taken.fork(&at, DEFAULT_TENANT).unwrap();
+        futures::executor::block_on(taken.fork(&at, DEFAULT_TENANT)).unwrap();
         drop(open(&at));
     }
     let connected = server.connections();
     let extent = pattern(9, 1 << 20);
     for round in 0..3 {
         let at = made.at(&format!("writer-{round}"));
-        taken.fork(&at, DEFAULT_TENANT).unwrap();
+        futures::executor::block_on(taken.fork(&at, DEFAULT_TENANT)).unwrap();
         let writer = open(&at);
         let info = writer.info().unwrap();
         let first = info.next_sequence.max(info.sequence_floor);
@@ -781,7 +781,7 @@ fn restores_connect_to_the_bucket_no_more() {
     let taken = made.copied(&bucket, "copy");
     let restore = |name: &str| {
         let before = server.connections();
-        taken.fork(made.at(name), DEFAULT_TENANT).unwrap();
+        futures::executor::block_on(taken.fork(made.at(name), DEFAULT_TENANT)).unwrap();
         let forked = server.connections();
         drop(open(&made.at(name)));
         (forked - before, server.connections() - forked)
@@ -812,7 +812,7 @@ fn versions_forked_on_a_host_of_another_bucket_make_children_there() {
     let capacity = 1 << 30;
 
     // The base, a cell of bucket A, and its version, made on a host of A.
-    let cell = host_cell::new_cell(&bucket_a, DEFAULT_TENANT).unwrap();
+    let cell = futures::executor::block_on(host_cell::new_cell(&bucket_a, DEFAULT_TENANT)).unwrap();
     assert_eq!(cell.id >> 48, 1);
     let base_path = dir.path().join("base");
     let base = kept_in(&base_path, (capacity, Some(cell)), &bucket_a, idle()).unwrap();
@@ -822,7 +822,7 @@ fn versions_forked_on_a_host_of_another_bucket_make_children_there() {
     futures::executor::block_on(base.commit(None)).unwrap();
     drop(base);
     let base = open(&base_path);
-    let version = base.uploaded_version_at(dir.path().join("version-a")).unwrap();
+    let version = futures::executor::block_on(base.uploaded_version_at(dir.path().join("version-a"))).unwrap();
     drop(base);
 
     // On a host of B: the version opened there, then forked.
@@ -830,9 +830,9 @@ fn versions_forked_on_a_host_of_another_bucket_make_children_there() {
     let description = local_cell::Description { block_size: BLOCK as u32, capacity, cell };
     let kind = bucket_cell::cell::Kind::Fxfs;
     OpenCell::create_at_version(&at, (&url_of(&bucket_b), kind), description, version).unwrap();
-    let opened = OpenCell::take_with(&at, (capacity, cell, None), opening()).unwrap();
+    let opened = futures::executor::block_on(OpenCell::take_with(&at, (capacity, cell, None), opening())).unwrap();
     let child_path = dir.path().join("child");
-    let child = opened.fork(&child_path, DEFAULT_TENANT).unwrap();
+    let child = futures::executor::block_on(opened.fork(&child_path, DEFAULT_TENANT)).unwrap();
     assert_eq!(child.id >> 48, 2, "the child is not a cell of the host's bucket");
 
     let raw = |url: &str| ObjectBucket::from_url(url).unwrap();

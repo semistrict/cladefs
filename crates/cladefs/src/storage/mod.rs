@@ -116,10 +116,11 @@ impl Storage {
             let keeping =
                 local_cell::upload::Options { token: token.unwrap_or(keeping.token), ..keeping };
             let kept = (bucket_cell::cell::Kind::Fxfs, Some(bucket), keeping);
-            let opened = host_cell::create_unmade(path, capacity, of, kept.0, kept.1, kept.2)?;
+            let making = host_cell::create_unmade(path, capacity, of, kept.0, kept.1, kept.2);
+            let opened = futures::executor::block_on(making)?;
             opened.made().map_err(Error::new)?;
             // Closed before it is placed, as `CreateCell` places a store, and opened again.
-            drop(opened);
+            futures::executor::block_on(opened.close());
             if let Some(token) = token {
                 local_cell::place_host(path, token, false).map_err(Error::new)?;
             }

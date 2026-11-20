@@ -75,7 +75,7 @@ fn sigterm_closes_every_store_durable_and_uploaded() {
     drop(store);
 
     // Closed, durable: as of its last commit here.
-    let closed = OpenCell::open(&path).unwrap();
+    let closed = futures::executor::block_on(OpenCell::open(&path)).unwrap();
     assert_eq!(closed.root().unwrap(), b"drained");
     drop(closed);
 
@@ -91,7 +91,7 @@ fn sigterm_closes_every_store_durable_and_uploaded() {
     let full = local_cell::host_cell(&path).unwrap();
     // SAFETY: The test's own process, whose other threads read no environment meanwhile.
     unsafe { std::env::set_var("CLADEFSD_BUCKET", format!("file://{}", bucket.display())) };
-    OpenCell::take(&taken, 1 << 28, full, Some(2)).unwrap();
+    futures::executor::block_on(OpenCell::take(&taken, 1 << 28, full, Some(2))).unwrap();
     let taken = CellClient::connect(&second_socket, &taken, 1 << 28).unwrap();
     assert_eq!(taken.root().unwrap(), b"drained");
     assert_eq!(read(&taken, extent), [7; BLOCK]);
