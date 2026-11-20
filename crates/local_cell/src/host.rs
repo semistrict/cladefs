@@ -106,24 +106,35 @@ pub fn host_token(path: &Path) -> Result<Option<u64>, Error> {
 /// again, which calls `before` again unless the directory's removal had begun. A directory with no
 /// description is no store, but what a store's making left, or its removal: it goes, `before`
 /// called for nothing. It fails while another process has the store open, or this one.
-pub fn delete_host(
+pub async fn delete_host(
     path: &Path,
-    before: impl FnOnce(CellId) -> Result<(), Error>,
+    before: impl AsyncFnOnce(CellId) -> Result<(), Error>,
 ) -> Result<(), Error> {
+    // cladefs: its disk work off the runtime's threads, `before` awaited between (TASK-685.3).
+    use crate::upload::blocking;
     if !path.join(DESCRIPTION).exists() {
-        return remove_store_dir(path);
+        return blocking(|| remove_store_dir(path));
     }
-    let cell = host_cell(path)?;
-    let dir = HostDir::new(path)?;
-    dir.take().context("taking the store's directory")?;
-    let removed = dir.claim().context("taking the store's directory").and_then(|()| {
-        let removed = before(cell).and_then(|()| {
-            failpoint!("delete::cell");
-            remove_store_dir(path)
-        });
-        dir.unclaim();
-        removed
-    });
+    let (cell, dir) = blocking(|| -> Result<_, Error> {
+        let cell = host_cell(path)?;
+        let dir = HostDir::new(path)?;
+        dir.take().context("taking the store's directory")?;
+        Ok((cell, dir))
+    })?;
+    let removed = match blocking(|| dir.claim().context("taking the store's directory")) {
+        Err(err) => Err(err),
+        Ok(()) => {
+            let removed = match before(cell).await {
+                Ok(()) => blocking(|| -> Result<(), Error> {
+                    failpoint!("delete::cell");
+                    remove_store_dir(path)
+                }),
+                Err(err) => Err(err),
+            };
+            dir.unclaim();
+            removed
+        }
+    };
     dir.let_go();
     removed
 }
@@ -358,13 +369,14 @@ mod tests {
         let path = stored(temp.path());
         std::fs::rename(path.join(DESCRIPTION), path.join("store.deleted")).unwrap();
         std::fs::remove_dir_all(path.join(crate::layout::LOGS)).unwrap();
-        delete_host(&path, |_| Err(anyhow!("called"))).unwrap();
+        futures::executor::block_on(delete_host(&path, async |_| Err(anyhow!("called")))).unwrap();
         assert!(!path.exists());
 
         let unmade = temp.path().join("unmade");
         std::fs::create_dir_all(unmade.join("segments")).unwrap();
         std::fs::write(unmade.join("stray"), "").unwrap();
-        delete_host(&unmade, |_| Err(anyhow!("called"))).unwrap();
+        futures::executor::block_on(delete_host(&unmade, async |_| Err(anyhow!("called"))))
+            .unwrap();
         assert!(!unmade.exists());
     }
 
@@ -376,14 +388,18 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = stored(temp.path());
         let opened = open(&path).unwrap();
-        let refused = delete_host(&path, |_| Err(anyhow!("called")));
+        let refused =
+            futures::executor::block_on(delete_host(&path, async |_| Err(anyhow!("called"))));
         assert!(refused.is_err() && path.join(DESCRIPTION).exists(), "{refused:?}");
         drop(opened);
-        let stopped = delete_host(&path, |cell| Err(anyhow!("stopped at {cell}")));
+        let stopped = futures::executor::block_on(delete_host(&path, async |cell| {
+            Err(anyhow!("stopped at {cell}"))
+        }));
         assert_eq!(stopped.map_err(|err| err.to_string()), Err("stopped at 1/3".to_owned()));
         assert!(open(&path).is_ok(), "a store stopped opens no more");
         let called = std::cell::Cell::new(None);
-        delete_host(&path, |cell| Ok(called.set(Some(cell)))).unwrap();
+        futures::executor::block_on(delete_host(&path, async |cell| Ok(called.set(Some(cell)))))
+            .unwrap();
         assert_eq!((called.get(), path.exists()), (Some(bucket_cell::layout::test_cell(3)), false));
     }
 
@@ -398,26 +414,30 @@ mod tests {
             assert_eq!(err.root_cause().to_string(), "stopped", "stopped {at}: {err:#}");
         };
         let finished = |temp: &Path, path: &Path, at: &str| {
-            delete_host(path, |_| Ok(())).unwrap_or_else(|err| panic!("stopped {at}: {err:#}"));
+            futures::executor::block_on(delete_host(path, async |_| Ok(())))
+                .unwrap_or_else(|err| panic!("stopped {at}: {err:#}"));
             let left: Vec<_> = std::fs::read_dir(temp).unwrap().collect();
             assert_eq!(left.len(), 0, "stopped {at}: {left:?} left");
         };
         let at = "before the cell went";
         let temp = tempfile::tempdir().unwrap();
         let path = stored(temp.path());
-        stopped(delete_host(&path, |_| Err(anyhow!("stopped"))), at);
+        stopped(
+            futures::executor::block_on(delete_host(&path, async |_| Err(anyhow!("stopped")))),
+            at,
+        );
         finished(temp.path(), &path, at);
         // The removals' steps, as a deletion stopped at none takes them.
         let temp = tempfile::tempdir().unwrap();
         let path = stored(temp.path());
         taken();
-        delete_host(&path, |_| Ok(())).unwrap();
+        futures::executor::block_on(delete_host(&path, async |_| Ok(()))).unwrap();
         for (stop, (change, at)) in taken().into_iter().enumerate() {
             let at = format!("before step {stop}, {change:?} {:?}", at.file_name().unwrap());
             let temp = tempfile::tempdir().unwrap();
             let path = stored(temp.path());
             stop_after(Some(stop));
-            let deleted = delete_host(&path, |_| Ok(()));
+            let deleted = futures::executor::block_on(delete_host(&path, async |_| Ok(())));
             stop_after(None);
             stopped(deleted, &at);
             finished(temp.path(), &path, &at);
@@ -433,7 +453,7 @@ mod tests {
         let path = stored(temp.path());
         let parent = super::parent(&path).to_owned();
         taken();
-        delete_host(&path, |_| Ok(())).unwrap();
+        futures::executor::block_on(delete_host(&path, async |_| Ok(()))).unwrap();
         let steps = taken();
         let removed = |at: PathBuf| {
             steps.iter().position(|(change, step)| *change == Change::Removed && *step == at)
