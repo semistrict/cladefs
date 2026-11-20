@@ -3,9 +3,11 @@ id: TASK-705
 title: >-
   fuse_differential: unmounting at a case's end fails, fusermount3 -u 'Device or
   resource busy', now and then under load
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-20 20:33'
+updated_date: '2026-11-20 21:09'
 labels:
   - bug
   - fuse

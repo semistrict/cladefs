@@ -3,10 +3,11 @@ id: TASK-306
 title: >-
   fuse_differential: a new store's mounted root reads mode 0 instead of 0755,
   now and then, under load
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-09 13:04'
-updated_date: '2026-11-20 20:33'
+updated_date: '2026-11-20 21:09'
 labels:
   - fuse
   - flaky

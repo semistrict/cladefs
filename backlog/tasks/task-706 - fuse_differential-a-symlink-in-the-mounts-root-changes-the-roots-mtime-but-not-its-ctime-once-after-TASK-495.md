@@ -3,9 +3,11 @@ id: TASK-706
 title: >-
   fuse_differential: a symlink in the mount's root changes the root's mtime but
   not its ctime, once, after TASK-495
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-20 20:33'
+updated_date: '2026-11-20 21:09'
 labels:
   - bug
   - fuse
