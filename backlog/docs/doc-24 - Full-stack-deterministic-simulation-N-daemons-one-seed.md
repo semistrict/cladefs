@@ -3,7 +3,7 @@ id: doc-24
 title: 'Full-stack deterministic simulation: N daemons, one seed'
 type: specification
 created_date: '2026-11-20 03:31'
-updated_date: '2026-11-20 07:44'
+updated_date: '2026-11-20 08:00'
 ---
 # Full-stack deterministic simulation
 
@@ -122,7 +122,9 @@ what was Replicated; every host lost, what was Uploaded.
 - **Operations**: takes elsewhere, forced takes, `SetPeers` changes, drains, deletions, forks,
   versions, collector passes, disk and memory pressure (the governors).
 - **Rules off**: each protocol rule in `bucket_cell::Rules` and `local_cell::Rules` has a profile
-  that finds its violation, as today's simulation has (`test_needs!`): our BUGGIFY.
+  that finds its violation, as today's simulation has (`test_needs!`). This is FoundationDB's
+  negative tests and `SimBugInjector`, real bugs put in to show the checker catches them. It is not
+  their BUGGIFY, which we have no equivalent of yet (below).
 
 ## What the spike found (TASK-685.1, 2026-11-20)
 
@@ -298,6 +300,93 @@ Before the decision, the steps that served any of the three went on:
 8. **Fault profiles**, then a rule search per rule.
 9. **CI**: a few hundred seeds per profile on each push, a soak at night, failing seeds kept as
    regression seeds, as `local_cell::sim`'s are.
+
+## What FoundationDB does that we don't (2026-11-20)
+
+Read in `~/src/foundationdb` at 7e7611f82 (2026-11-06). The user asked for this to be compared
+again once the full-stack simulation runs (TASK-685.11).
+
+FoundationDB's simulation finds bugs through five things together. We have one of them, the heal
+and check phase (`World::run`'s quiesce).
+
+- **BUGGIFY at two levels** (`flow/include/flow/Buggify.h`, `buggify(p)`):
+  - Each site is switched on once per run, with probability 0.25, at its first evaluation, and the
+    run logs which sites are on.
+  - An active site then fires with probability `p` each time it is evaluated.
+  - So each run has a few sites misbehaving often, rather than every site a little.
+  - It is on in 80% of runs.
+  - Its sites inject legal but unusual behaviour: partial writes, extra yields, a disk sync slow up
+    to 1 s, writes reordered, batches of one, odd size limits, retry delays jittered, and unusual
+    paths forced.
+- **Knobs randomized per run.** About 356 `if (randomize && BUGGIFY)` sites set a knob to an
+  extreme value: a queue's bytes from 15e6 to 5000, a parallelism from 32 to 2.
+- **A random mix of fault workloads per run** (`CompoundWorkload::addFailureInjection`), each
+  with randomized parameters, besides the test's own workloads, and a random cluster configuration
+  per seed. Faults are bounded by what the system claims to survive (`canKillProcesses`
+  downgrades a kill that would exceed it). Some faults are aimed using the cluster's own state
+  (`Rollback.cpp` clogs exactly the links that force a rollback).
+- **A fault window, then heal, then check**: faults stop after 450 simulated seconds, and the
+  database must then go quiet and pass its consistency checks within a bound.
+- **Code probes** (`CODE_PROBE(cond, comment)`, 762 sites):
+  - Each probe is registered statically, so a run knows the probes it never hit (`Covered=0`).
+  - The harness counts, across an ensemble of runs, how many runs hit each probe, and reports a
+    probe not marked `rare` that too few runs hit.
+  - A probe names a situation (a take while an upload is in flight and the bucket is down), not a
+    single branch.
+- **Also:**
+  - Any `SevError` event not from an injected fault fails a run.
+  - An unseed digest (one last random draw) is compared on 5% of seeds, run twice.
+  - Sim-only asserts (`ASSERT_WE_THINK`).
+  - Tests are scheduled by runtime × priority.
+
+**What we adopt, by bug-finding value per effort:**
+
+1. **`buggify!(p)` with FoundationDB's two levels.** A site is on if `hash(seed, file, line) <
+   0.25`, so an unrelated change moves no kept seed. It fires from the world's random source, and
+   it is on in 80% of seeds. It is a constant `false` outside the simulations, compiled out, not a
+   runtime flag. Sites:
+   - the uploader's batch and segment thresholds;
+   - framing sizes;
+   - retry intervals, backoffs and timeouts;
+   - the page cache's size and the governors' limits;
+   - yields in long loops;
+   - early wakes where the caller must retry.
+2. **A mixed profile per seed** (`Profile::swarm(seed)`): which fault families are on, and their
+   parameters, drawn as `addFailureInjection` draws them. The named profiles stay for the rule
+   searches.
+3. **Knobs**: the protocol's constants in one value, extreme under `buggify!` in the simulations.
+4. **`probe!(cond, "comment")`** beside llvm-cov's branch coverage (TASK-685.10):
+   - Probes are registered statically, so the unhit ones are known.
+   - Each seed records which probes it hit.
+   - CI fails a probe not marked rare that too few seeds hit, the threshold set for our seed counts.
+5. **Faults aimed at the protocol's state**:
+   - a writer cut off from its members but not from the bucket in mid-commit;
+   - a kill between the head swap and its acknowledgement;
+   - one member clogged during a retake.
+6. **The full stack's heal phase**: faults stop, then the run must reach Uploaded, its replicas
+   converged, within a bound, and the leak check after. Kills beyond f hosts are downgraded or
+   tagged, so that each of doc-12's rows means what it says.
+7. **Every error not injected fails a seed**: a logging layer in the simulations, errors the fault
+   layers inject marked so.
+8. **A determinism digest per seed**, with `MADSIM_TEST_CHECK_DETERMINISM` (or `replays`) on about
+   5% of CI's seeds, both traces kept on a mismatch.
+9. **Timers jittered and I/O short**:
+   - under `buggify!`, heavy-tailed delays added to the daemon's sleeps (madsim's tasks are picked
+     at random, but its timers aren't jittered);
+   - `MemDir` and the simulated bucket answering short reads and writes, and slow syncs.
+10. **Reseeding from a step** for triage: a failing seed replayed to step k, then reseeded, mapping
+    how likely the failure is from each k.
+
+**What doesn't transfer:**
+
+- Upgrade tests across binaries: no existing buckets.
+- Stackful coroutines for blocking code (`CoroThreadPool`): this is the alternative to the async
+  rewrite, worth keeping in mind only for code the rewrite can't reach.
+- Real threads marked `noUnseed`: madsim panics on threads.
+- Joshua-scale thresholds.
+- Knobs randomized in the production binary: compiled out instead.
+- Whether `MemDir::crash_corrupting` covers what `AsyncFileNonDurable` models (writes reordered
+  unless they overlap, sectors torn) is not checked yet.
 
 ## Costs and risks
 
