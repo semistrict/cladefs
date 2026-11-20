@@ -913,10 +913,13 @@ impl<D: Dir> Recovering<D> {
         self.file.forced_after.filter(|_| self.forced())
     }
 
-    /// cladefs: notes, durably, in its description, that its placement's taking fenced fewer members
-    /// than a take needs, the bucket holding its commits through epoch `kept` (TASK-681): what its
-    /// status says from now on, until another placement holds it.
-    pub fn note_forced_after(&mut self, kept: u64) -> Result<(), Error> {
+    /// cladefs: notes, durably, in its description, that its taking, of the placement `placement`,
+    /// forced, fenced fewer members than a take needs, the bucket holding its commits through epoch
+    /// `kept` (TASK-681): what its status says from now on, until another placement holds it. The
+    /// placement noted too, as a store made by a forced take is placed after (`CreateCell`).
+    pub fn note_forced_after(&mut self, placement: u64, kept: u64) -> Result<(), Error> {
+        self.file.token = Some(placement);
+        self.file.forced = Some(placement);
         self.file.forced_after = Some(kept);
         self.dir.replace(DESCRIPTION, self.file.text().as_bytes())?;
         self.dir.sync_dir("")?;

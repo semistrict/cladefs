@@ -1484,7 +1484,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let forced_after = match &short {
             Some(_) => {
                 let kept = writer.taken().last_commit.map_or(0, epoch_of);
-                blocking(|| recovering.note_forced_after(kept))?;
+                blocking(|| recovering.note_forced_after(placement, kept))?;
                 Some(kept)
             }
             None => recovering.forced_after(),
