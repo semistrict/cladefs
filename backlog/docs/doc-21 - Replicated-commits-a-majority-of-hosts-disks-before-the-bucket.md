@@ -3,7 +3,7 @@ id: doc-21
 title: 'Replicated commits: a majority of hosts'' disks before the bucket'
 type: specification
 created_date: '2026-11-18T12:27:00Z'
-updated_date: '2026-11-20 03:24'
+updated_date: '2026-11-20 04:00'
 ---
 # Replicated commits: a majority of hosts' disks before the bucket
 
@@ -365,7 +365,7 @@ minutes at 11M states and more.
 | `ReplicationDeep` (deep) | 2 commits, 3 takes | 5,544,379 | 200 s |
 | `ReplicationFailuresDeep` (deep) | failures over 3 takes | 8,108,108 | 256 s |
 | `ReplicationDeferCommits` | deferred takes telling commits Replicated once the head names their configuration, members' streams starting after what the take recovered (`from`), 2 commits, 2 takes, a crash | 406,820 | 14 s on the Mac |
-| `ReplicationDeferReplaces` (deep) | a replacement after a deferred take, the replacement's streams starting where its configuration's do | over 16M | over 15 min on the Mac |
+| `ReplicationDeferReplaces` (deep) | a replacement after a deferred take, the replacement's streams starting where its configuration's do | 21,442,927 | 1,791 s on the Mac, beside other runs |
 | `ReplicationDefer` | takes deferring their activation to the acknowledgement that covers what they recovered (TASK-678): the old writer's host retaking after its daemon's crash, uploads, 3 takes | 11,656,113 | 382 s on the Mac |
 
 All on four hosts with f = 1, symmetric in hosts, under fxjob (`check-tla.sh`, 13.5 minutes for all
