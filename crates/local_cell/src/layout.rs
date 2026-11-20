@@ -73,10 +73,11 @@ pub(crate) struct CellFile {
     /// epoch of the last commit the bucket held then, past which commits told replicated may be
     /// lost (TASK-681): what the store's status says while that placement holds it.
     pub forced_after: Option<u64>,
-    /// cladefs: the epoch of the writer it took its cell as, at its last take of a replicated cell
-    /// (TASK-683): of a configuration made at that epoch, it is its writer's copy, whose
-    /// write-ahead log, empty, holds nothing that the bucket doesn't.
-    pub writer_epoch: Option<u64>,
+    /// cladefs: the epochs of the replicated cell's configurations it is its writer's copy of
+    /// (TASK-683): of each, its write-ahead log holds what the writer synced and the bucket
+    /// doesn't hold yet, all of it, or, empty, nothing the bucket doesn't. Its takes add theirs;
+    /// a write-ahead log dropped clears them.
+    pub writer_copies: Vec<u64>,
     /// cladefs: its cell's kind, if it is kept in a bucket (TASK-364, doc-20).
     pub kind: Option<Kind>,
     /// cladefs: the version of its cell it is at, if it is one: its cell's state at the
@@ -114,9 +115,12 @@ impl CellFile {
         let forced_after = (fields.contains_key("forced_after"))
             .then(|| number(&fields, "forced_after"))
             .transpose()?;
-        let writer_epoch = (fields.contains_key("writer_epoch"))
-            .then(|| number(&fields, "writer_epoch"))
-            .transpose()?;
+        let writer_copies = match fields.get("writer_copies") {
+            None => Vec::new(),
+            Some(epochs) => (epochs.split(' '))
+                .map(|epoch| epoch.parse().with_context(|| format!("bad writer_copies {epochs:?}")))
+                .collect::<Result<_, Error>>()?,
+        };
         let version = (fields.get("version"))
             .map(|id| base32_id::parse_padded(id).ok_or_else(|| anyhow!("bad version {id:?}")))
             .transpose()?;
@@ -133,7 +137,7 @@ impl CellFile {
             token,
             forced,
             forced_after,
-            writer_epoch,
+            writer_copies,
             kind,
             version,
         })
@@ -148,7 +152,7 @@ impl CellFile {
             token,
             forced,
             forced_after,
-            writer_epoch,
+            writer_copies,
             kind,
             version,
         } = self;
@@ -166,8 +170,9 @@ impl CellFile {
         if let Some(after) = forced_after {
             text += &format!("forced_after {after}\n");
         }
-        if let Some(epoch) = writer_epoch {
-            text += &format!("writer_epoch {epoch}\n");
+        if !writer_copies.is_empty() {
+            let epochs: Vec<_> = writer_copies.iter().map(u64::to_string).collect();
+            text += &format!("writer_copies {}\n", epochs.join(" "));
         }
         if let Some(kind) = kind {
             text += &format!("kind {}\n", kind.name());
@@ -587,7 +592,7 @@ mod tests {
             token: None,
             forced: None,
             forced_after: None,
-            writer_epoch: None,
+            writer_copies: Vec::new(),
             kind: None,
             version: None,
         };
@@ -600,8 +605,10 @@ mod tests {
         // cladefs: and a forced placement its token again (TASK-681).
         let forced = CellFile { forced: Some(7), forced_after: Some(12), ..kept.clone() };
         assert_eq!(CellFile::parse(&forced.text()).unwrap(), forced);
-        // cladefs: and the epoch of the writer it took its cell as (TASK-683).
-        let written = CellFile { writer_epoch: Some(9), ..kept.clone() };
+        // cladefs: and the epochs of the configurations it is its writer's copy of (TASK-683).
+        let written = CellFile { writer_copies: vec![9], ..kept.clone() };
+        assert_eq!(CellFile::parse(&written.text()).unwrap(), written);
+        let written = CellFile { writer_copies: vec![9, 12], ..kept.clone() };
         assert_eq!(CellFile::parse(&written.text()).unwrap(), written);
         // cladefs: older formats are refused, by their format (TASK-165.6), the index's last
         // (TASK-165.9).
