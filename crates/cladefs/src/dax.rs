@@ -313,6 +313,19 @@ impl DaxWindow {
         self.0.is_mapped(offset)
     }
 
+    /// cladefs: the sealed extent mapped at `offset`, and the offset in it of the page `offset` is
+    /// in, if one is mapped there: what a trace of the guest's reads names a fault by (TASK-702.1).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn extent_at(&self, offset: u64) -> Option<(ExtentId, u64)> {
+        let ps = page_size();
+        let state = self.0.state.with(Mutex::lock);
+        let (start, mapping) = state.mapping_at(offset)?;
+        match mapping.source.origin() {
+            Origin::Extent(extent) => Some((extent, (mapping.page + (offset - start) / ps) * ps)),
+            Origin::Zeros => None,
+        }
+    }
+
     /// Whether it has pages mapped in its second stage, or in host memory, which reach them.
     pub fn maps_pages(&self) -> bool {
         !self.0.state.with(Mutex::lock).ptes.is_empty()

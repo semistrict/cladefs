@@ -122,6 +122,11 @@
 //! stores cost it (`cladefs::stats::Stats`), and the VM processes' requests it served, by kind,
 //! rewritten as they change.
 //!
+//! With `CLADEFSD_READ_TRACES` naming a directory, the daemon writes there a trace of what each VM
+//! read of its cell in its first two minutes, its `READ`s and its DAX window's faults, as its VM
+//! process goes (`cladefs::cladefsd::reads`, TASK-702.1): what `scripts/read_prediction.py`
+//! compares predictions of a version's reads on.
+//!
 //! With `CLADEFSD_TRACES` set to `otlp`, the daemon exports spans of what it does, over OTLP,
 //! to the collector `OTEL_EXPORTER_OTLP_ENDPOINT` names, OpenTelemetry's variables configuring
 //! them (`cladefs::cladefsd::otel`, TASK-258; `docs/tracing.md`): off otherwise.

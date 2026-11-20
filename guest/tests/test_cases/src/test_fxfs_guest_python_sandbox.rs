@@ -28,10 +28,18 @@
 //! empty; the rounds after find each host warm. The first host is never cold: its import left the
 //! base in its memory.
 //!
+//! A sandbox runs one of two workloads (TASK-702.1), in turn as CLADEFS_PYSANDBOX_WORKLOADS lists
+//! them (default `notebook` alone): `notebook`, marimo's server and the notebook, as above; or
+//! `query`, the same trips counted with pyarrow alone (`python-sandbox/query.py`), no pandas and no
+//! marimo, which reads another part of the base. Each host's daemon traces what each VM reads of
+//! its cell (`CLADEFSD_READ_TRACES`), and each sandbox's trace is kept as
+//! `traces/NN-SANDBOX-WORKLOAD.reads`, in the order the sandboxes ran, for
+//! `scripts/read_prediction.py`.
+//!
 //! Each sandbox is timed by phase, on the host's clock from just before its fork: the fork, the VM
 //! process started, the guest's boot to its agent (the guest's own clock, from its kernel's
-//! start), marimo serving, and the answers, each as the guest says it on its console, which the
-//! host watches. And what it cost the hosts between them: their bucket GETs and the bytes those
+//! start), marimo serving (the notebook's alone), and the answers, each as the guest says it on its
+//! console, which the host watches. And what it cost the hosts between them: their bucket GETs and the bytes those
 //! downloaded, the parts asked of peers and given, the parts each served. It fails if a sandbox's
 //! answers are not [`ANSWERS`], what the notebook answered outside any VM, on the same files.
 
@@ -43,6 +51,45 @@ pub struct TestFxfsGuestPythonSandbox;
 /// on the same files, with the same lock.
 #[cfg_attr(feature = "guest", allow(dead_code))]
 const ANSWERS: &str = r#"{"busiest_borough": "Manhattan", "busiest_hour": 17, "busiest_month": 5, "card_tip_percent": 22.86, "median_miles": 1.98, "top_pickup_zone": "East Harlem North", "trips": 591375, "trips_in_2025": 591354}"#;
+
+/// What the query answers: two of the notebook's.
+#[cfg_attr(feature = "guest", allow(dead_code))]
+const QUERY_ANSWERS: &str = r#"{"trips": 591375, "trips_in_2025": 591354}"#;
+
+/// The guest agent's environment variable naming its workload.
+const WORKLOAD: &str = "PYSANDBOX_WORKLOAD";
+
+/// What a sandbox runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Workload {
+    /// marimo's server, then the notebook.
+    Notebook,
+    /// The trips counted with pyarrow alone.
+    Query,
+}
+
+impl Workload {
+    fn name(self) -> &'static str {
+        match self {
+            Workload::Notebook => "notebook",
+            Workload::Query => "query",
+        }
+    }
+
+    /// The workload named `name`, if one is.
+    fn named(name: &str) -> Option<Self> {
+        [Workload::Notebook, Workload::Query].into_iter().find(|workload| workload.name() == name)
+    }
+
+    /// What it answers, as it writes them.
+    #[cfg_attr(feature = "guest", allow(dead_code))]
+    fn answers(self) -> &'static str {
+        match self {
+            Workload::Notebook => ANSWERS,
+            Workload::Query => QUERY_ANSWERS,
+        }
+    }
+}
 
 /// What the guest says as it reaches each phase, its own clock's milliseconds since its boot after
 /// it.
@@ -98,7 +145,7 @@ mod host {
 FROM docker.io/library/python:3.14.10-slim-trixie@sha256:9aaa474097d094040649f2162a627c0049b408f52138d980916788d80f04802f
 COPY --from=ghcr.io/astral-sh/uv:0.13.9@sha256:d3b601f0c7b118bc1753febf7c41cc80981df678445e0254284eecf84db79a7d /uv /usr/local/bin/uv
 WORKDIR /app
-COPY pyproject.toml uv.lock analysis.py /app/
+COPY pyproject.toml uv.lock analysis.py query.py /app/
 RUN UV_PYTHON_DOWNLOADS=never UV_LINK_MODE=copy uv sync --frozen --no-install-project --no-dev --no-cache
 COPY green_tripdata_2025-01.parquet green_tripdata_2025-02.parquet green_tripdata_2025-03.parquet \
      green_tripdata_2025-04.parquet green_tripdata_2025-05.parquet green_tripdata_2025-06.parquet \
@@ -119,6 +166,7 @@ RUN find / -xdev -name '*.pyc' -delete
             name: "analysis.py",
             contents: include_str!("../python-sandbox/analysis.py"),
         },
+        ContextFile { name: "query.py", contents: include_str!("../python-sandbox/query.py") },
     ];
 
     /// The Taxi and Limousine Commission's green-taxi trips of a month of 2025, `MM`.
@@ -158,11 +206,17 @@ RUN find / -xdev -name '*.pyc' -delete
         },
     ];
 
-    /// A host of the run: its extent daemon, and where it is reached.
+    /// How long a VM's trace may take to be written once it exits: its daemon writes it as the
+    /// VM's connection goes.
+    const TRACE_SETTLE: Duration = Duration::from_secs(10);
+
+    /// A host of the run: its extent daemon, where it is reached, and where it writes the traces of
+    /// its VMs' reads.
     struct Host {
         name: &'static str,
         daemon: std::process::Child,
         socket: PathBuf,
+        traces: PathBuf,
     }
 
     /// What the hosts' daemons had done, as their stats files say, by host and counter.
@@ -276,19 +330,21 @@ RUN find / -xdev -name '*.pyc' -delete
     }
 
     /// A sandbox's phases: the host's milliseconds from just before its fork to the end of each,
-    /// but `boot`, the guest's own from its kernel's start to its agent's.
+    /// but `boot`, the guest's own from its kernel's start to its agent's; `serving` the
+    /// notebook's alone.
     #[derive(Debug, PartialEq)]
     struct Phases {
         fork: f64,
         vm_started: f64,
         boot: u64,
-        serving: f64,
+        serving: Option<f64>,
         answered: f64,
     }
 
     /// A sandbox that ran: when its phases ended, if it reached them, how its VM exited, and what
     /// its guest said.
     struct Ran {
+        workload: Workload,
         fork: f64,
         vm_started: f64,
         serving: Option<f64>,
@@ -307,7 +363,10 @@ RUN find / -xdev -name '*.pyc' -delete
                 fork: self.fork,
                 vm_started: self.vm_started,
                 boot: said_ms(&self.said, AGENT)?,
-                serving: self.serving?,
+                serving: match self.workload {
+                    Workload::Notebook => Some(self.serving?),
+                    Workload::Query => None,
+                },
                 answered: self.answered?,
             })
         }
@@ -346,15 +405,18 @@ RUN find / -xdev -name '*.pyc' -delete
             let mut others = addresses.clone();
             others.remove(at);
             let others = others.join(",");
-            let env: [(&str, &std::ffi::OsStr); 4] = [
+            let traces = test_setup.tmp_dir.join(format!("{name}-reads"));
+            std::fs::create_dir_all(&traces)?;
+            let env: [(&str, &std::ffi::OsStr); 5] = [
                 ("CLADEFSD_TOKEN", token.as_ref()),
                 ("AWS_ENDPOINT", endpoint.as_ref()),
                 ("CLADEFSD_PEER_ADDRESS", addresses[at].as_ref()),
                 ("CLADEFSD_PEERS", others.as_ref()),
+                ("CLADEFSD_READ_TRACES", traces.as_ref()),
             ];
             let daemon =
                 crate::common::spawn_daemon(test_setup, &socket, name, &env, Some(DAEMON_MEMORY))?;
-            hosts.push(Host { name, daemon, socket });
+            hosts.push(Host { name, daemon, socket, traces });
         }
         Ok(hosts)
     }
@@ -386,14 +448,15 @@ RUN find / -xdev -name '*.pyc' -delete
         Ok(cladefs::CellVersion { tenant: cell.tenant, cell: cell.id, version })
     }
 
-    /// Runs the sandbox `name` on `host`: forks `version` there, boots a VM on the fork, and
-    /// watches its console as its guest runs, for the moments it says it serves and has
-    /// answered.
+    /// Runs the sandbox `name` on `host`, its guest running `workload`: forks `version` there,
+    /// boots a VM on the fork, and watches its console as its guest runs, for the moments it says
+    /// it serves and has answered.
     fn sandbox(
         test_setup: &TestSetup,
         root: &Path,
         host: &Host,
         name: &str,
+        workload: Workload,
         version: cladefs::CellVersion,
     ) -> anyhow::Result<Ran> {
         let fork_path = test_setup.tmp_dir.join(format!("{name}.root"));
@@ -404,6 +467,7 @@ RUN find / -xdev -name '*.pyc' -delete
         machine.guest_kernel()?;
         machine.cell_served("root", &fork_path, ROOT_CAPACITY, WINDOW, &host.socket);
         machine.fxfs_root("root");
+        machine.env(&std::ffi::CString::new(format!("{WORKLOAD}={}", workload.name()))?);
         let api = Vm::api_socket(name);
         let mut firecracker = machine.spawn_api(root, &test_setup.test_case, name, &api)?;
         let vm_started = ms_since(began);
@@ -426,7 +490,39 @@ RUN find / -xdev -name '*.pyc' -delete
         std::fs::remove_file(&api).with_context(|| format!("removing {}", api.display()))?;
         let said =
             crate::vm::without_kernel_lines(&crate::vm::guest_stdout(&std::fs::read(&console)?));
-        Ok(Ran { fork, vm_started, serving, answered, status, said })
+        Ok(Ran { workload, fork, vm_started, serving, answered, status, said })
+    }
+
+    /// Moves the trace of the reads of the one VM that ran on `host` since its last was kept to
+    /// `to`, once its daemon has written it.
+    fn keep_trace(host: &Host, to: &Path) -> anyhow::Result<()> {
+        let deadline = Instant::now() + TRACE_SETTLE;
+        loop {
+            let written: Vec<PathBuf> = (std::fs::read_dir(&host.traces)?)
+                .map(|entry| Ok(entry?.path()))
+                .collect::<anyhow::Result<_>>()?;
+            match written[..] {
+                [] if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+                [] => anyhow::bail!("{} wrote no trace in {TRACE_SETTLE:?}", host.name),
+                [ref trace] => {
+                    std::fs::rename(trace, to).with_context(|| {
+                        format!("keeping {} as {}", trace.display(), to.display())
+                    })?;
+                    return Ok(());
+                }
+                _ => anyhow::bail!("{} wrote traces of several VMs: {written:?}", host.name),
+            }
+        }
+    }
+
+    /// The workloads CLADEFS_PYSANDBOX_WORKLOADS lists, comma-separated, which sandboxes run in
+    /// turn: `notebook` alone if unset.
+    fn workloads() -> anyhow::Result<Vec<Workload>> {
+        let listed = std::env::var("CLADEFS_PYSANDBOX_WORKLOADS").unwrap_or_default();
+        let listed = if listed.is_empty() { Workload::Notebook.name().to_owned() } else { listed };
+        (listed.split(','))
+            .map(|name| Workload::named(name).with_context(|| format!("no workload {name:?}")))
+            .collect()
     }
 
     impl TestFxfsGuestPythonSandbox {
@@ -460,14 +556,25 @@ RUN find / -xdev -name '*.pyc' -delete
             let mut hosts = start_hosts(test_setup, &bucket.endpoint(), sockets.path())?;
             let version = make_base(&hosts[0], &dir.join("python.base"), &layout, measured)?;
 
+            let workloads = workloads()?;
+            let kept = dir.join("traces");
+            std::fs::create_dir_all(&kept)?;
+            // host-a's import, which opened its base through no VM, traced nothing.
             let mut failed = Vec::new();
             let mut counts = all_counts(dir, &hosts)?;
+            let mut ran_so_far = 0;
             for round in 1..=rounds {
                 for host in &hosts {
                     // host-a's first is sandbox-a1.
                     let letter = &host.name["host-".len()..];
                     let name = format!("sandbox-{letter}{round}");
-                    let ran = sandbox(test_setup, &root, host, &name, version)?;
+                    let workload = workloads[ran_so_far % workloads.len()];
+                    ran_so_far += 1;
+                    let ran = sandbox(test_setup, &root, host, &name, workload, version)?;
+                    let trace = format!("{ran_so_far:02}-{name}-{}.reads", workload.name());
+                    if let Err(err) = keep_trace(host, &kept.join(&trace)) {
+                        failed.push(format!("{name}'s trace: {err:#}"));
+                    }
                     let after = all_counts(dir, &hosts)?;
                     let (cost, summed) = cost(&counts, &after);
                     counts = after;
@@ -476,29 +583,33 @@ RUN find / -xdev -name '*.pyc' -delete
                         failed.push(format!("{name} exited {status}, saying {said:?}"));
                         continue;
                     };
-                    let answers = ran.said(SAID_ANSWERS);
-                    if answers != Some(ANSWERS) {
-                        failed.push(format!("{name} answered {answers:?}, not {ANSWERS}"));
+                    let (answers, expected) = (ran.said(SAID_ANSWERS), workload.answers());
+                    if answers != Some(expected) {
+                        failed.push(format!("{name} answered {answers:?}, not {expected}"));
                     }
+                    let serving =
+                        phases.serving.map_or("-".to_owned(), |serving| format!("{serving:.0}ms"));
                     eprintln!(
-                        "pysandbox: {name} on {}: fork={:.0}ms vm_started={:.0}ms boot={}ms \
-                         serving={:.0}ms answered={:.0}ms compiled={} | {cost}",
+                        "pysandbox: {name} on {} running {}: fork={:.0}ms vm_started={:.0}ms \
+                         boot={}ms serving={serving} answered={:.0}ms compiled={} | {cost}",
                         host.name,
+                        workload.name(),
                         phases.fork,
                         phases.vm_started,
                         phases.boot,
-                        phases.serving,
                         phases.answered,
                         ran.said(COMPILED).unwrap_or("?"),
                     );
-                    let workload = |phase: &str| format!("pysandbox.{letter}.r{round}.{phase}");
-                    measured.lower(workload("fork"), "ms", phases.fork);
-                    measured.lower(workload("vm_started"), "ms", phases.vm_started);
-                    measured.lower(workload("boot"), "ms", phases.boot as f64);
-                    measured.lower(workload("serving"), "ms", phases.serving);
-                    measured.lower(workload("answered"), "ms", phases.answered);
+                    let metric = |phase: &str| format!("pysandbox.{letter}.r{round}.{phase}");
+                    measured.lower(metric("fork"), "ms", phases.fork);
+                    measured.lower(metric("vm_started"), "ms", phases.vm_started);
+                    measured.lower(metric("boot"), "ms", phases.boot as f64);
+                    if let Some(serving) = phases.serving {
+                        measured.lower(metric("serving"), "ms", serving);
+                    }
+                    measured.lower(metric("answered"), "ms", phases.answered);
                     let gets = summed["bucket_gets"] as f64;
-                    measured.lower(workload("bucket_gets"), "count", gets);
+                    measured.lower(metric("bucket_gets"), "count", gets);
                 }
             }
             for host in &mut hosts {
@@ -593,6 +704,22 @@ uploads: held=0 max-held=0 budget=1
                 "bucket_gets=13/2 bucket_mib=4.0/0.0 peer_asked=5/0 peer_given=4/5 peer_served=2/0"
             );
             assert_eq!(summed["bucket_gets"], 15);
+        }
+
+        /// TASK-702.1: CLADEFS_PYSANDBOX_WORKLOADS's workloads, in its order, the notebook alone
+        /// unset; one it doesn't know refused.
+        #[test]
+        fn workloads_are_listed_in_turn() {
+            // SAFETY: nextest runs each test in a process of its own, whose other threads don't
+            // read the environment.
+            let set =
+                |listed: &str| unsafe { std::env::set_var("CLADEFS_PYSANDBOX_WORKLOADS", listed) };
+            set("");
+            assert_eq!(workloads().unwrap(), [Workload::Notebook]);
+            set("notebook,query");
+            assert_eq!(workloads().unwrap(), [Workload::Notebook, Workload::Query]);
+            set("query,pandas");
+            assert_eq!(workloads().unwrap_err().to_string(), "no workload \"pandas\"");
         }
 
         /// The milliseconds a guest says of a phase read back, and a phase it hasn't said is none.
@@ -728,41 +855,76 @@ mod guest {
         found
     }
 
+    /// The query workload: pyarrow counting the trips, its answers in /tmp/answers.json.
+    fn query() {
+        let ran = Command::new("/app/.venv/bin/python")
+            .arg("/app/query.py")
+            .current_dir("/app")
+            .env("HOME", "/root")
+            .env("ANSWERS", "/tmp/answers.json")
+            .stdin(Stdio::null())
+            .output()
+            .expect("running the query");
+        assert!(
+            ran.status.success(),
+            "the query: {}: {}",
+            ran.status,
+            String::from_utf8_lossy(&ran.stderr)
+        );
+    }
+
     impl Test for TestFxfsGuestPythonSandbox {
         fn in_guest(self: Box<Self>) {
             println!("{AGENT}{}", since_boot_ms());
-            loopback();
-            let log = Path::new("/tmp/marimo-server.log");
-            let output = std::fs::File::create(log).unwrap();
-            let port = PORT.to_string();
-            let mut server = marimo(&["run", NOTEBOOK, "--headless", "--no-token"])
-                .args(["--host", "127.0.0.1", "--port", &port])
-                .stdin(Stdio::null())
-                .stdout(output.try_clone().unwrap())
-                .stderr(output)
-                .spawn()
-                .expect("starting marimo's server");
-            serve(&mut server, log);
-            println!("{SERVING}{}", since_boot_ms());
-            let exported = marimo(&["export", "html", NOTEBOOK, "-o", "/tmp/analysis.html"])
-                .env("ANSWERS", "/tmp/answers.json")
-                .stdin(Stdio::null())
-                .output()
-                .expect("running the notebook");
-            assert!(
-                exported.status.success(),
-                "marimo export: {}: {}",
-                exported.status,
-                String::from_utf8_lossy(&exported.stderr)
-            );
+            let workload = std::env::var(WORKLOAD).unwrap_or_default();
+            let server = match Workload::named(&workload) {
+                Some(Workload::Notebook) => Some(notebook()),
+                Some(Workload::Query) => {
+                    query();
+                    None
+                }
+                None => panic!("no workload {workload:?}"),
+            };
             println!("{ANSWERED}{}", since_boot_ms());
             let answers = std::fs::read_to_string("/tmp/answers.json").unwrap();
             println!("{SAID_ANSWERS}{}", answers.trim());
-            server.kill().unwrap();
-            server.wait().unwrap();
+            if let Some(mut server) = server {
+                server.kill().unwrap();
+                server.wait().unwrap();
+            }
             let compiled = bytecode(Path::new("/app")) + bytecode(Path::new("/usr/local/lib"));
             println!("{COMPILED}{compiled}");
             println!("{OK}");
         }
+    }
+
+    /// The notebook workload: marimo's server on the notebook, which once it serves, the notebook
+    /// run, its answers in /tmp/answers.json; the server returned, serving still.
+    fn notebook() -> Child {
+        loopback();
+        let log = Path::new("/tmp/marimo-server.log");
+        let output = std::fs::File::create(log).unwrap();
+        let port = PORT.to_string();
+        let mut server = marimo(&["run", NOTEBOOK, "--headless", "--no-token"])
+            .args(["--host", "127.0.0.1", "--port", &port])
+            .stdin(Stdio::null())
+            .stdout(output.try_clone().unwrap())
+            .stderr(output)
+            .spawn()
+            .expect("starting marimo's server");
+        serve(&mut server, log);
+        println!("{SERVING}{}", since_boot_ms());
+        let exported = marimo(&["export", "html", NOTEBOOK, "-o", "/tmp/analysis.html"])
+            .env("ANSWERS", "/tmp/answers.json")
+            .stdin(Stdio::null())
+            .output()
+            .expect("running the notebook");
+        assert!(
+            exported.status.success(),
+            "marimo export: {}: {}",
+            exported.status,
+            String::from_utf8_lossy(&exported.stderr)
+        );
+        server
     }
 }

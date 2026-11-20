@@ -3899,6 +3899,69 @@ fn requests_attach_nothing() {
     assert_eq!(read, Err(Errno::ENOENT));
 }
 
+/// TASK-702.1: with `CLADEFSD_READ_TRACES` naming a directory, a VM's reads are traced, and the
+/// trace written as its connection goes: its `READ`, then its window's faults, a load's and a
+/// store's, each naming the extent, its length, and the range read, in the order made.
+#[test]
+fn a_vms_reads_are_traced() {
+    host();
+    let traces = tempfile::tempdir().unwrap();
+    // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
+    // environment yet.
+    unsafe { std::env::set_var("CLADEFSD_READ_TRACES", traces.path()) };
+    super::reads::configure().unwrap();
+    let ps = page_size() as usize;
+    let dir = tempfile::tempdir().unwrap();
+    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
+    let memory = memory(2);
+    // SAFETY: The memory is the test's, and outlives the store.
+    unsafe { store.create_dax_window_in_host_memory(memory, 2 * ps as u64, None, 2) }.unwrap();
+    crate::guest_thread_started();
+    let extent = ExtentId { cell: store.cell(), sequence: 1 };
+    write(&store, extent, 0, &pattern(3, 3 * ps)).unwrap();
+    store.commit(None).unwrap();
+    // Its second and third pages, at the window's first and second.
+    store.map(extent, ps as u64, 2 * ps as u64, 0).unwrap();
+    assert_eq!(read(&store, extent, 0, 512), Ok(pattern(3, 512)));
+    let base = memory.as_ptr() as usize;
+    // SAFETY: The window's memory, whose faults the store serves.
+    assert_eq!(unsafe { memory.as_ptr().read_volatile() }, pattern(3, ps + 1)[ps]);
+    assert_eq!(kernel_store(base + ps), Ok(()));
+    let cell = store.cell();
+    drop(store);
+    served.join().unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let text = loop {
+        let written = std::fs::read_dir(traces.path()).unwrap().next();
+        if let Some(entry) = written {
+            let entry = entry.unwrap();
+            let name = entry.file_name().into_string().unwrap();
+            let prefix = format!("{}-", base32_id::Padded(cell));
+            assert!(name.starts_with(&prefix) && name.ends_with(".reads"), "{name}");
+            break std::fs::read_to_string(entry.path()).unwrap();
+        }
+        assert!(std::time::Instant::now() < deadline, "no trace was written");
+        std::thread::yield_now();
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], super::reads::HEADER);
+    assert!(lines[1].starts_with(&format!("cell {} opened ", base32_id::Short(cell))), "{text}");
+    let reads: Vec<Vec<&str>> =
+        lines[2..].iter().map(|line| line.split(' ').skip(1).take(6).collect()).collect();
+    let (id, len) = (base32_id::Short(cell).to_string(), format!("{:x}", 3 * ps));
+    let (one, two) = (format!("{ps:x}"), format!("{:x}", 2 * ps));
+    assert_eq!(
+        reads,
+        [
+            vec!["read", &id, "1", &len, "0", "200"],
+            vec!["fault", &id, "1", &len, &one, &one],
+            vec!["store", &id, "1", &len, &two, &one],
+        ],
+        "{text}"
+    );
+}
+
 /// TASK-79.17: a store the daemon opens to work on, as no VM process has it open, boots no guest:
 /// the boot profile of the base it is a fork of is not read into the extent cache, as its pages
 /// would be the default arena's, which every VM process holds, a tenant's base's too. Here the

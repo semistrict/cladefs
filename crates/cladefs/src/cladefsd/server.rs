@@ -11,6 +11,7 @@ use super::codec::{
     Told, stream_bytes,
 };
 use super::pool::Pool;
+use super::reads::Kind;
 use super::stats;
 use super::wire::*;
 use crate::cell_requests::{self, Guest, Resizes, Shrinking};
@@ -497,6 +498,7 @@ async fn run_connection(stream: super::wire::Stream, tenant: Arc<Tenant>) {
         report: stats::Report::new(&peer.sender),
         page_ins: tokio::sync::Semaphore::new(PAGE_INS),
         named: OnceLock::new(),
+        reads: OnceLock::new(),
         alive: Some(alive),
     });
     match AsyncReceiver::new(stream) {
@@ -1083,6 +1085,9 @@ pub(super) struct Connection {
     /// cladefs: its store's path, once open, which names the guest requests it serves calls for
     /// (`crate::request::RequestId::store`, TASK-260).
     named: OnceLock<Arc<str>>,
+    /// cladefs: the trace of its guest's reads, from its store's opening, if the daemon writes
+    /// traces (`CLADEFSD_READ_TRACES`, TASK-702.1): written as it goes.
+    reads: OnceLock<super::reads::Trace>,
     /// What says, as it drops, that the connection has: dropped after its store, window and open
     /// extents, and its hold of its store's path (TASK-79.34), by its teardown ([`Connection`]'s
     /// drop).
@@ -1119,6 +1124,9 @@ impl Opening<'_> {
         let key = store_key(path);
         drop(self.0.named.set(key.to_string_lossy().into()));
         self.0.report.opened(key, store.cell().id, follower);
+        if let Some(trace) = super::reads::Trace::opened(store.cell().id) {
+            drop(self.0.reads.set(trace));
+        }
         assert!(self.0.store.set(store).is_ok(), "a connection opened a second store");
         let was = std::mem::replace(&mut *self.0.phase.with(Mutex::lock), opened);
         assert!(matches!(was, Phase::Opening), "a connection opened a store not opening one");
@@ -1490,17 +1498,24 @@ impl Connection {
                 self.transfer.set(area).map_err(|_| Errno::EEXIST)
             }
             Request::Read { extent, offset, len, into: ReadInto::Transfer { at } } => {
+                let began = std::time::Instant::now();
                 let area = self.transfer.get().ok_or(Errno::EINVAL)?;
                 // cladefs: in its turn, as a fault's, as what it pages in holds memory: a read
                 // served as a future holds no thread to bound it by (TASK-149.34, doc-24 step 5).
                 let _turn = self.page_ins.acquire().await.map_err(|_| Errno::EIO)?;
-                store.read(*extent, *offset, &mut [area.slice_mut(*at, *len)?]).await
+                store.read(*extent, *offset, &mut [area.slice_mut(*at, *len)?]).await?;
+                self.traced(Kind::Read, began, store, *extent, *offset, *len);
+                Ok(())
             }
             // As much as a reply holds, the codec has it (TASK-79.16).
             Request::Read { extent, offset, len, into: ReadInto::Reply } => {
+                let began = std::time::Instant::now();
                 payload.resize(*len as usize, 0);
                 let _turn = self.page_ins.acquire().await.map_err(|_| Errno::EIO)?;
-                store.read(*extent, *offset, &mut [VolatileSliceMut::from(&mut payload[..])]).await
+                let mut into = [VolatileSliceMut::from(&mut payload[..])];
+                store.read(*extent, *offset, &mut into).await?;
+                self.traced(Kind::Read, began, store, *extent, *offset, *len);
+                Ok(())
             }
             Request::Write { extent, offset, data, barriers } => {
                 let data = match *data {
@@ -1637,13 +1652,21 @@ impl Connection {
     /// thread while it waits for the pager (TASK-92.20), served so ([`serve_future`]).
     async fn fault(self: Arc<Self>, fault: Fault, answer: Answer) {
         let Fault { offset, access, page, .. } = fault;
+        let began = std::time::Instant::now();
         let faulted = async {
             let window = self.window.with(Mutex::lock).clone().ok_or(Errno::EBADF)?;
             // cladefs: in its turn, as what it pages in holds memory (TASK-149.34).
             let _turn = self.page_ins.acquire().await.map_err(|_| Errno::EIO)?;
-            window.fault(offset, access).await
+            window.fault(offset, access).await?;
+            Ok(window)
         };
-        let faulted = faulted.await;
+        let faulted = match faulted.await {
+            Ok(window) => {
+                self.traced_fault(&window, began, offset, access);
+                Ok(())
+            }
+            Err(errno) => Err(errno),
+        };
         if !page {
             crate::stats::add(crate::stats::Counter::FaultStores, 1);
         }
@@ -1753,6 +1776,47 @@ impl Connection {
     /// process is gone to let the store go, and for a restore's version, hold no thread
     /// (TASK-92.5); its I/O blocks. A version of another tenant's than the connection's forks only
     /// if it is shared (`EACCES`, TASK-395.7).
+    /// cladefs: records in its trace of its guest's reads, if it keeps one (TASK-702.1), a read of
+    /// `kind` the guest began at `began`, of `len` bytes at `offset` in `extent`, of `store`.
+    fn traced(
+        &self,
+        kind: Kind,
+        began: std::time::Instant,
+        store: &OpenCell,
+        extent: crate::ExtentId,
+        offset: u64,
+        len: u64,
+    ) {
+        if let Some(trace) = self.reads.get() {
+            // An extent the store can't say the length of, an attached base's, is of 0.
+            let extent_len = store.stored_extent(extent).ok().flatten().map_or(0, |(len, _)| len);
+            trace.record(kind, began, extent, extent_len, offset, len);
+        }
+    }
+
+    /// cladefs: records in its trace, as [`Connection::traced`] does, the guest's fault for
+    /// `access` at `offset` in `window`, begun at `began` and resolved: the page of the sealed
+    /// extent mapped there, if one is still.
+    fn traced_fault(
+        &self,
+        window: &DaxWindow,
+        began: std::time::Instant,
+        offset: u64,
+        access: crate::Access,
+    ) {
+        if self.reads.get().is_none() {
+            return;
+        }
+        let (Some(store), Some((extent, at))) = (self.store(), window.extent_at(offset)) else {
+            return;
+        };
+        let kind = match access {
+            crate::Access::Read => Kind::Fault,
+            crate::Access::Write => Kind::Store,
+        };
+        self.traced(kind, began, store, extent, at, crate::pages::page_size());
+    }
+
     async fn open(&self, path: &Path, how: codec::Opening) -> Result<u64, Errno> {
         let opening = self.opening()?;
         let hold = cells::hold_to_write(&store_key(path), self.this.clone()).await?;

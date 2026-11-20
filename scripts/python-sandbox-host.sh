@@ -16,6 +16,9 @@
 #   scripts/python-sandbox-host.sh resume RUN RESULTS | cancel RUN
 #
 # CLADEFS_PYSANDBOX_ROUNDS is how many sandboxes each host runs (default 2: cold, then warm).
+# CLADEFS_PYSANDBOX_WORKLOADS lists, comma-separated, what the sandboxes run in turn: `notebook`
+# (the default), `query` (TASK-702.1). Each sandbox's trace of its reads is kept in the results,
+# under e2e/, as traces/NN-SANDBOX-WORKLOAD.reads, for scripts/read_prediction.py.
 # CLADEFS_BENCH_NOTE says what the run is for. Every other CLADEFS_*, CLADEFSD_* and PJDFSTEST_*
 # variable set here reaches the test host too (scripts/lib/host.sh).
 set -euo pipefail

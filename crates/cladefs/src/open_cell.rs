@@ -1406,10 +1406,10 @@ impl OpenCell {
     }
 
     /// cladefs: `extent`'s length, and whether it is open, if its store holds it, as reads ask
-    /// (`local_cell::LocalCell::extent`).
-    #[cfg(test)]
+    /// (`local_cell::LocalCell::extent`); and as traces of reads name it (TASK-702.1).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn stored_extent(&self, extent: ExtentId) -> Result<Option<(u64, bool)>> {
-        self.store.extent(extent.into()).map_err(errno)
+        self.store.extent(extent).map_err(errno)
     }
 
     /// cladefs: a read's of `extent` from the extent cache ([`OpenCell::read_cached`]).

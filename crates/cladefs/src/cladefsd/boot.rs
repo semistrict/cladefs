@@ -32,6 +32,8 @@ pub async fn boot(socket: &Path, memory: Option<u64>) -> anyhow::Result<()> {
     crate::bucket::require_kms().map_err(anyhow::Error::msg)?;
     // cladefs: its part cache's directory and budget, if it keeps one (TASK-406.1).
     super::cache_config().map_err(anyhow::Error::msg)?;
+    // cladefs: where traces of what VMs read go, if anywhere (TASK-702.1).
+    super::reads::configure().map_err(anyhow::Error::msg)?;
     // cladefs: how long its replicated cells' members are down before they are replaced (doc-21).
     super::replace_after().map_err(anyhow::Error::msg)?;
     // cladefs: its disks governed, each but a headroom of it its, or as much as CLADEFSD_DISK_BYTES
