@@ -4,7 +4,7 @@ title: 'Threads, runtimes and blocking through one seam for the simulation'
 status: In Progress
 assignee: []
 created_date: '2026-11-20 03:32'
-updated_date: '2026-11-20 15:32'
+updated_date: '2026-11-20 17:12'
 labels:
   - testing
   - simulation
@@ -41,4 +41,6 @@ doc-24 step 3: about 100 thread spawn sites, the runtimes cladefsd builds (serve
 2026-11-20 (4089f5a78): steps 9 and 5 landed on main. Step 9: open_cell::release closes a store when its last holder lets go (connections' teardown task, HeldCell/Here/kept/forks/Live); OpenCell::close releases a follower's writer and attached bases; a store dropped open panics under madsim. Step 5: READ/MAP, cache page-ins, fetch, base opens awaited; READ takes a connection page-in turn (PAGE_INS) as faults do; boot profile replay/writer are tasks. Only blocking seam left: image import (cells::outside_the_simulation). Remaining: step 10 (replication), 11 (dispatch seam: pool, flushers, spawn_blocking, cells::blocking), 12 (peers, sweep, drain, control as tasks; TASK-685.13 gRPC on madsim tonic). Also found: local_cell::dir::closed_in waits on a std Condvar (UNCLAIMED) up to 60 s for a store of the same directory closing in the process, on every open: a blocking wait the simulation would hit.
 
 Next batch plan (2026-11-20): steps 11, 12 and TASK-685.13 go together, as none is testable until cladefsd builds under madsim. (1) One seam for where a daemon service runs: production, a thread of its own driving its own runtime (control: THREADS/BLOCKING_THREADS; peers; sweep; http; governors); madsim, a task of the node's. serve_control/peers::serve become async fns the seam runs (no runtime.block_on inside them). (2) Pool::run and the flushers' pools: tasks under madsim. (3) gRPC on madsim's tonic: Drained over its Service<(PathAndQuery, Request<BoxMessageStream>)> shape, MountServer<T, F> generics, tonic_health (real tonic) reported only where it builds; control over TCP under madsim (doc-24 boundary). (4) boot under madsim: no VM socket, FUSE or metrics; control on a TCP address. Then TASK-685.9: two daemons as madsim nodes.
+
+2026-11-20 (3beb3af0c): steps 10-12 landed. Step 10: MemberLink/Members futures; members served by tasks on the bucket runtime (event, not condvar); sim drive() polls once. Steps 11/12: cladefsd::run seam (service: own thread+runtime / madsim task; every: periodic; off_the_runtime: spawn_blocking / inline), Pool::run a task under madsim; governors, peers, sweep through it; boot async. Remaining blocking under madsim found at runtime by TASK-685.9's boot test (in progress): threads the store and physmem spawn, drain's IO.block_on, stop_serving's block_on, dir::closed_in's condvar.
 <!-- SECTION:NOTES:END -->
