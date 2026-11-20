@@ -18,16 +18,16 @@ fn stores_hold_their_arenas() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
     let ps = cladefs::pages::page_size();
-    let store = OpenCell::create(&path, 1 << 24).unwrap();
+    let store = local_cell::upload::wait_on(OpenCell::create(&path, 1 << 24)).unwrap();
     let extent = ExtentId { cell: store.cell().id, sequence: 1 };
     let bytes = vec![0xa5; ps as usize];
     store.write(extent, 0, &[VolatileSlice::from(&bytes[..])]).unwrap();
-    futures::executor::block_on(store.commit(None)).unwrap();
+    local_cell::upload::wait_on(store.commit(None)).unwrap();
     drop(store);
 
     let held = Arena::new();
     let arena = held.id();
-    let store = OpenCell::open_in(&path, Some(held.clone())).unwrap();
+    let store = local_cell::upload::wait_on(OpenCell::open_in(&path, Some(held.clone()))).unwrap();
     // What made it lets go of it, as a tenant's going does.
     drop(held);
     let window = store.create_dax_window(ps, None).unwrap();

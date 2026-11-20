@@ -120,10 +120,10 @@ fn a_hosts_store_writes_what_its_design_says() {
         for at in 0..extents_per_burst {
             write(&store, next(), &data[at % data.len()]);
         }
-        futures::executor::block_on(store.commit_local(None)).unwrap();
+        local_cell::upload::wait_on(store.commit_local(None)).unwrap();
     }
     // The last commit's copies framed too, as the open segment closes for its upload.
-    futures::executor::block_on(store.frame_open_segment()).unwrap();
+    local_cell::upload::wait_on(store.frame_open_segment()).unwrap();
     let (large, large_cpu) = (delta(before, local_cell::written()), cpu() - cpu_before);
 
     // The small files: 2,000 of 8 KiB, which compress, four commits of 500.
@@ -136,10 +136,10 @@ fn a_hosts_store_writes_what_its_design_says() {
             let data: Vec<u8> = (0..SMALL_FILE).map(|i| seed ^ (i % 251) as u8).collect();
             write(&store, next(), &data);
         }
-        futures::executor::block_on(store.commit_local(None)).unwrap();
+        local_cell::upload::wait_on(store.commit_local(None)).unwrap();
     }
     // Their segment framed, as it closes for its upload.
-    futures::executor::block_on(store.frame_open_segment()).unwrap();
+    local_cell::upload::wait_on(store.frame_open_segment()).unwrap();
     let small = delta(before, local_cell::written());
 
     // The large extents: 4 of 8 MiB, which don't compress, each reaching past
@@ -157,7 +157,7 @@ fn a_hosts_store_writes_what_its_design_says() {
         tails += framing_overhead(large_extent as u64)
             + bucket_cell::layout::encode(&extent).len() as u64;
     }
-    futures::executor::block_on(store.commit_local(None)).unwrap();
+    local_cell::upload::wait_on(store.commit_local(None)).unwrap();
     let own = delta(before, local_cell::written());
 
     let guests = (BURSTS as usize * BURST) as u64;

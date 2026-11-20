@@ -2273,7 +2273,7 @@ fn page_ins_in_flight_are_bounded() {
     // alone.
     let path = dir.path().join("store");
     let cell = {
-        let store = OpenCell::create(&path, 1 << 30).unwrap();
+        let store = local_cell::upload::wait_on(OpenCell::create(&path, 1 << 30)).unwrap();
         let cell = store.cell();
         for sequence in 1..=EXTENTS {
             let data = super::pattern(sequence as u8, MIB as usize);
@@ -2281,7 +2281,7 @@ fn page_ins_in_flight_are_bounded() {
                 .write(ExtentId { cell: cell.id, sequence }, 0, &[VolatileSlice::from(&data[..])])
                 .unwrap();
         }
-        futures::executor::block_on(store.commit(None)).unwrap();
+        local_cell::upload::wait_on(store.commit(None)).unwrap();
         cell
     };
     let store = CellClient::connect(&socket, &path, 1 << 30).unwrap();

@@ -57,8 +57,10 @@ mod host {
                 return TestOutcome::Fail(format!("expected exactly \"OK\\n\", got {output:?}"));
             }
             // What the self-test committed is in the store.
-            let store = cladefs::OpenCell::open(test_setup.tmp_dir.join("extents"))
-                .expect("open the extent store");
+            let store = local_cell::upload::wait_on(cladefs::OpenCell::open(
+                test_setup.tmp_dir.join("extents"),
+            ))
+            .expect("open the extent store");
             assert_eq!(store.root().unwrap(), ROOT);
             let info = store.info().unwrap();
             // 34 extents of two blocks written, sequences 0 to 33, of which two were freed: the
