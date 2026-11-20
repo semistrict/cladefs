@@ -6186,7 +6186,11 @@ fn whatever_a_vm_process_says_harms_no_other() {
                 LastWords::MissingPayload(len) => raw(header(len, 0).as_bytes()),
                 LastWords::MissingDescriptors(fds) => raw(header(0, fds).as_bytes()),
             }
-            stream.shutdown(std::net::Shutdown::Both).unwrap();
+            // It says no more, and hears the rest: the daemon answers what it took before it
+            // hangs up, once its requests are done (`server::finish_connection`), which ends the
+            // answers. TASK-686: and so what it heard of served is all of it, however busy the
+            // host, not what came before `LAST`'s reply, which those served beside it may follow.
+            stream.shutdown(std::net::Shutdown::Write).unwrap();
             prop_assert!(within(wait, move || answering.join().unwrap()).is_ok());
 
             // Its store is let go of, and opens.
@@ -6217,9 +6221,9 @@ fn whatever_a_vm_process_says_harms_no_other() {
             Ok(())
         })
         .unwrap();
-    // What it says reaches past the checks: not every request is refused. Those it heard of
-    // served, once it hung up, are fewer the busier the host: 929 at the least of 1300 or so, with
-    // the machine's other work making everything fifty times slower.
+    // What it says reaches past the checks: not every request is refused. Those served, every
+    // one of which it hears of (TASK-686: once, only those before it hung up, fewer the busier
+    // the host: 468 in a loaded workspace run).
     let (served, restored) = (served.load(Ordering::Relaxed), restored.load(Ordering::Relaxed));
     println!("{served} requests served, {restored} of them restores");
     assert!(served > 500, "{served} requests served");
