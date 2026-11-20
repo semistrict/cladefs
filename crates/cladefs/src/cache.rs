@@ -249,9 +249,13 @@ pub(crate) fn relieve_pressure() {
         let relieved = physmem::relieve_with(|arena, bytes| {
             evict_least_used(arena, |evicted| evicted >= bytes)
         });
-        // Without its thread, an allocation that finds its arena out of memory fails.
-        if let Err(err) = relieved {
-            log::error!("cladefs: starting the thread that frees capped memory: {err}");
+        // Without its thread, an allocation that finds its arena out of memory fails. cladefs:
+        // under madsim, physical memory is the process's, which another simulated host started
+        // relief of already, and starts no thread (doc-24, TASK-685.14).
+        match relieved {
+            Err(err) if cfg!(madsim) && err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(err) => log::error!("cladefs: starting the thread that frees capped memory: {err}"),
+            Ok(()) => {}
         }
     });
 }

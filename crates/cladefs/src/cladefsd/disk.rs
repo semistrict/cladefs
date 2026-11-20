@@ -291,7 +291,10 @@ pub fn start(config: DiskConfig) -> Result<(), String> {
         return Ok(());
     }
     let mut errors = std::collections::HashSet::new();
-    let governing = move || govern_once(config, &mut errors);
+    let governing = move || {
+        govern_once(config, &mut errors);
+        true
+    };
     let (every, woken) = (super::governor::INTERVAL, host_disk::wait_for_governor);
     // cladefs: a thread of its own, or under madsim a task (`super::run`, doc-24 step 12).
     super::run::every("disk governor", every, woken, governing)

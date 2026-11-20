@@ -100,6 +100,12 @@ pub fn configure(memory_bytes: u64) -> Result<(), ConfigError> {
     MEMORY_BYTES.set(memory_bytes).map_err(|_| ConfigError::InUse)
 }
 
+/// cladefs: whether physical memory's size is fixed: configured, read or used, as [`configure`]
+/// refuses it then.
+pub fn configured() -> bool {
+    MEMORY_BYTES.get().is_some()
+}
+
 /// Physical memory's size, in bytes: as [`configure`] gave it, or [`DEFAULT_MEMORY_BYTES`]. Read,
 /// it is fixed: [`configure`] fails from then on.
 pub fn memory_bytes() -> u64 {

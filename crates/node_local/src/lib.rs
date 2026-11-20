@@ -29,8 +29,10 @@ pub mod env;
 pub struct NodeLocal<T: 'static> {
     init: fn() -> T,
     value: OnceLock<T>,
+    /// Each node's, by the simulation's thread and the node: a simulation runs on one thread,
+    /// and the next one, a check of its determinism among them, on another, which starts with none.
     #[cfg(madsim)]
-    nodes: std::sync::Mutex<Vec<(madsim::task::NodeId, &'static T)>>,
+    nodes: std::sync::Mutex<Vec<(Node, &'static T)>>,
     #[cfg(madsim)]
     registered: std::sync::Once,
 }
@@ -52,14 +54,14 @@ impl<T: Send + Sync + 'static> NodeLocal<T> {
     pub fn get(&'static self) -> &'static T {
         #[cfg(madsim)]
         if madsim::runtime::Handle::try_current().is_ok() {
-            return self.node_value(madsim::plugin::node());
+            return self.node_value((std::thread::current().id(), madsim::plugin::node()));
         }
         self.value.get_or_init(self.init)
     }
 
     /// The value of `node`'s, made if it has none.
     #[cfg(madsim)]
-    fn node_value(&'static self, node: madsim::task::NodeId) -> &'static T {
+    fn node_value(&'static self, node: Node) -> &'static T {
         self.registered.call_once(|| REGISTRY.lock().unwrap().push(self));
         let mut nodes = self.nodes.lock().unwrap();
         if let Some((_, value)) = nodes.iter().find(|(of, _)| *of == node) {
@@ -89,15 +91,20 @@ macro_rules! node_local {
     };
 }
 
+/// A simulated node, among those of every simulation the process ran: the thread its simulation
+/// runs on, and its node there.
+#[cfg(madsim)]
+type Node = (std::thread::ThreadId, madsim::task::NodeId);
+
 /// What lets a node's values go: each `NodeLocal` a node used, registered at its first use in one.
 #[cfg(madsim)]
 trait Reset: Sync {
-    fn reset(&self, node: madsim::task::NodeId);
+    fn reset(&self, node: Node);
 }
 
 #[cfg(madsim)]
 impl<T: Send + Sync + 'static> Reset for NodeLocal<T> {
-    fn reset(&self, node: madsim::task::NodeId) {
+    fn reset(&self, node: Node) {
         self.nodes.lock().unwrap().retain(|(of, _)| *of != node);
     }
 }
@@ -117,6 +124,7 @@ impl madsim::plugin::Simulator for Plugin {
     }
 
     fn reset_node(&self, node: madsim::task::NodeId) {
+        let node = (std::thread::current().id(), node);
         for local in REGISTRY.lock().unwrap().iter() {
             local.reset(node);
         }

@@ -183,9 +183,12 @@ pub fn shares(target: u64, tenants: &[(u64, u64)]) -> Vec<(u64, u64)> {
 pub fn start() -> Result<(), String> {
     let host = host_memory().map_err(|err| format!("reading the host's memory: {err}"))?;
     let headroom = headroom(host.total)?;
-    let governing = move || match host_memory() {
-        Ok(host) => memory::govern(allowance(memory::governed_bytes(), host, headroom)),
-        Err(err) => log::error!("cladefsd: reading the host's memory: {err}"),
+    let governing = move || {
+        match host_memory() {
+            Ok(host) => memory::govern(allowance(memory::governed_bytes(), host, headroom)),
+            Err(err) => log::error!("cladefsd: reading the host's memory: {err}"),
+        }
+        true
     };
     super::run::every("memory governor", INTERVAL, std::thread::sleep, governing)
         .map_err(|err| format!("starting the memory governor: {err}"))

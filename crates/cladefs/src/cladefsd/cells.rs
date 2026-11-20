@@ -1515,14 +1515,19 @@ impl FollowerStats {
 fn watch_stats(bucket: std::sync::Weak<bucket_cell::object_bucket::ObjectBucket>) {
     let file = node_local::env::var_os("CLADEFSD_STATS").filter(|file| !file.is_empty());
     let file = file.map(PathBuf::from);
-    let watching = std::thread::Builder::new().name("cladefsd stats".into()).spawn(move || {
-        let mut logged = Stats::default();
-        let mut followers = FollowerStats::default();
-        let mut written = Vec::new();
-        let (mut at, mut at_process) = (std::time::Instant::now(), std::time::Instant::now());
-        loop {
-            std::thread::sleep(STATS_POLL);
-            let Some(bucket) = bucket.upgrade() else { return };
+    let mut logged = Stats::default();
+    let mut followers = FollowerStats::default();
+    let mut written = Vec::new();
+    let (mut at, mut at_process) = (std::time::Instant::now(), std::time::Instant::now());
+    // cladefs: a thread of its own, or under madsim a task (`super::run`, doc-24); a turn every
+    // STATS_POLL, the first one poll after it starts.
+    let mut started = false;
+    let watching = super::run::every("cladefsd stats", STATS_POLL, std::thread::sleep, move || {
+        if !std::mem::replace(&mut started, true) {
+            return true;
+        }
+        {
+            let Some(bucket) = bucket.upgrade() else { return false };
             let stats = bucket.stats();
             // cladefs: what the process holds, against its budget, whether or not a file keeps it
             // (TASK-330.2).
@@ -1559,6 +1564,7 @@ fn watch_stats(bucket: std::sync::Weak<bucket_cell::object_bucket::ObjectBucket>
                 (logged, at) = (stats, std::time::Instant::now());
             }
         }
+        true
     });
     if let Err(err) = watching {
         log::warn!("cladefsd: watching object storage's stats: {err}");

@@ -67,7 +67,7 @@ fn reliever() -> Option<&'static Reliever> {
 ///
 /// Relief starts once: a later call fails with `AlreadyExists`, whether or not the first started
 /// its thread. Under Shuttle no thread starts (`crate::sync`), and starved arenas' allocations
-/// fail, as without relief.
+/// fail, as without relief; cladefs: nor under madsim.
 ///
 /// [`quarantine_with`]: crate::quarantine_with
 pub fn relieve_with(

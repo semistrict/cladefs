@@ -56,6 +56,7 @@
 
 use crate::dir::File;
 use crate::frames::{Frame, Frames};
+#[cfg(not(madsim))]
 use crate::shared::Holding;
 use crate::sync::{Condvar, Mutex, MutexGuard};
 use std::collections::{BTreeMap, VecDeque};
@@ -171,13 +172,33 @@ impl PageCache {
     /// A cache going by `options`, its flusher started. Not under Shuttle, whose schedules start
     /// no thread of their own: [`PageCache::without_flusher`].
     pub fn new(options: Options) -> Arc<Self> {
-        let cache = Self::made(options, true);
-        let flusher = Arc::downgrade(&cache);
-        std::thread::Builder::new()
-            .name("store flusher".into())
-            .spawn(move || flush_while(flusher))
-            .expect("starting the page cache's flusher");
-        cache
+        #[cfg(not(madsim))]
+        {
+            let cache = Self::made(options, true);
+            let flusher = Arc::downgrade(&cache);
+            std::thread::Builder::new()
+                .name("store flusher".into())
+                .spawn(move || flush_while(flusher))
+                .expect("starting the page cache's flusher");
+            cache
+        }
+        // cladefs: under madsim, which runs one thread, no flusher to wait for: writers past the
+        // background write back themselves, as without one; and a task, on the simulation's clock,
+        // writes back what expires, a pass at a time (`flush_pass`, doc-24).
+        #[cfg(madsim)]
+        {
+            let cache = Self::made(options, false);
+            let ticking = Arc::downgrade(&cache);
+            let interval = options.expire / 4;
+            drop(tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(interval).await;
+                    let Some(cache) = ticking.upgrade() else { return };
+                    cache.flush_pass(Instant::now());
+                }
+            }));
+            cache
+        }
     }
 
     /// A cache going by `options` with no flusher: the writer that takes it past
@@ -443,6 +464,7 @@ impl PageCache {
 /// The flusher: while the cache is there, a pass ([`PageCache::flush_pass`]) each time it is
 /// woken, or a quarter of [`Options::expire`] after the last. The process's work for its life
 /// ([`FLUSHER`]); unwound by a panic, it says so ([`Dying`]).
+#[cfg(not(madsim))]
 fn flush_while(cache: Weak<PageCache>) {
     let _work = Holding::work(FLUSHER);
     let _dying = Dying { cache: cache.clone() };
@@ -462,10 +484,12 @@ fn flush_while(cache: Weak<PageCache>) {
 /// A flusher's death, said as a panic unwinds it, where the panic did not abort the process: the
 /// cache knows it ([`PageCache::flusher_died`]), the log says it, and writers held back, woken,
 /// find it out ([`PageCache::throttle`]).
+#[cfg(not(madsim))]
 struct Dying {
     cache: Weak<PageCache>,
 }
 
+#[cfg(not(madsim))]
 impl Drop for Dying {
     fn drop(&mut self) {
         if !std::thread::panicking() {

@@ -91,7 +91,7 @@ if part madsim; then
     "${madsim[@]}" cargo check --manifest-path "$root/Cargo.toml" -p node_local -p bucket_cell \
         -p local_cell -p cladefs
     "${madsim[@]}" cargo nextest run --manifest-path "$root/Cargo.toml" -p node_local \
-        -p bucket_cell -p local_cell --test madsim "$@"
+        -p bucket_cell -p local_cell -p cladefs --test madsim "$@"
 fi
 # The concurrency tests under Shuttle, built with each crate's `shuttle` feature, which only they
 # can run (TASK-44).

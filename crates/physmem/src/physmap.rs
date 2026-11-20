@@ -358,7 +358,8 @@ impl PhysMemory {
     /// first used (TASK-26.18.3), is not on the way of whatever allocates them. Their contents
     /// stay as they are; a chunk given back meanwhile is not faulted in. For the PMM's arenas.
     pub(crate) fn populate_later(&self, chunk: usize) {
-        #[cfg(target_os = "linux")]
+        // cladefs: not under madsim, which runs one thread: they fault in as used (doc-24).
+        #[cfg(all(target_os = "linux", not(madsim)))]
         {
             let mut populating = self.populating.lock().unwrap();
             let sender = populating.get_or_insert_with(|| {
@@ -379,7 +380,7 @@ impl PhysMemory {
             });
             sender.send(self.chunk_addr(chunk) as usize).expect("the populating thread runs");
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(any(not(target_os = "linux"), madsim))]
         let _ = chunk;
     }
 

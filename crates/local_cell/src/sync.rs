@@ -34,8 +34,54 @@ pub(crate) fn salt() -> extent_keys::Salt {
 use std::sync::Arc;
 #[cfg(not(feature = "shuttle"))]
 pub(crate) use std::sync::{Condvar, Mutex, MutexGuard};
-#[cfg(not(feature = "shuttle"))]
+#[cfg(all(not(feature = "shuttle"), not(madsim)))]
 pub(crate) use std::thread;
+
+/// cladefs: std's threads, under madsim, which runs one thread: the simulated host refuses every
+/// thread the store would start (`Builder`'s return the refusal), and the store does that work on
+/// its caller's thread, as on a host short of threads, which its Shuttle tests run (TASK-79.80,
+/// doc-24).
+#[cfg(all(not(feature = "shuttle"), madsim))]
+pub(crate) mod thread {
+    pub(crate) use std::thread::*;
+
+    /// Refuses every thread, as a host short of them does.
+    pub(crate) struct Builder;
+
+    impl Builder {
+        pub(crate) fn new() -> Self {
+            Self
+        }
+
+        pub(crate) fn name(self, _name: String) -> Self {
+            self
+        }
+
+        pub(crate) fn spawn<F, T>(self, _f: F) -> std::io::Result<JoinHandle<T>>
+        where
+            F: FnOnce() -> T + Send + 'static,
+            T: Send + 'static,
+        {
+            Err(refused())
+        }
+
+        pub(crate) fn spawn_scoped<'scope, F, T>(
+            self,
+            _scope: &'scope Scope<'scope, '_>,
+            _f: F,
+        ) -> std::io::Result<ScopedJoinHandle<'scope, T>>
+        where
+            F: FnOnce() -> T + Send + 'scope,
+            T: Send + 'scope,
+        {
+            Err(refused())
+        }
+    }
+
+    fn refused() -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::WouldBlock, "a simulated host starts no threads")
+    }
+}
 
 /// Shuttle's threads, refused as a host short of them refuses std's, if a test has it refuse them
 /// (`refuse_threads`): `spawn` panics, and `Builder`'s return the refusal, so that the store starts
@@ -120,7 +166,10 @@ pub(crate) fn spawn_or_return<T: Send + 'static>(
         run(work.expect("a thread runs what its caller has not"));
     });
     let error = spawned.err()?;
-    log::warn!("extent store: running on the caller's thread, the host refusing one: {error}");
+    // cladefs: under madsim, every time, as it should (`thread`).
+    if !cfg!(madsim) {
+        log::warn!("extent store: running on the caller's thread, the host refusing one: {error}");
+    }
     Some(job.lock().unwrap().take().expect("no thread ran it"))
 }
 

@@ -68,8 +68,8 @@ pub(crate) fn set_rules(rules: Rules) {
 }
 
 /// Starts physical memory's thread `name`, running `f`: the arenas' relief, which acts as
-/// allocations ask. Under Shuttle none starts, as Shuttle's threads are its tests' alone. Fails as
-/// the host fails to start it.
+/// allocations ask. Under Shuttle none starts, as Shuttle's threads are its tests' alone; cladefs:
+/// nor under madsim, which runs one thread (doc-24). Fails as the host fails to start it.
 pub(crate) fn try_spawn<F, T>(
     name: &str,
     f: F,
@@ -78,7 +78,7 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    if cfg!(feature = "shuttle") {
+    if cfg!(feature = "shuttle") || cfg!(madsim) {
         return Ok(None);
     }
     std::thread::Builder::new().name(name.into()).spawn(f).map(Some)

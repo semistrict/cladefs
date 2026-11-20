@@ -346,6 +346,11 @@ node_local::node_local! {
 /// committed, took from the daemon's flushes (sandboxes short mode: durable lag within 50 ms down
 /// by 10-30 versions). Skipped, if too many wait already ([`WAITING_MOST`]).
 pub(crate) fn pack_ahead(part: u64, data: Buffer, pending: Pending) {
+    // cladefs: none under madsim, which runs one thread: the framing packs them (doc-24).
+    if cfg!(madsim) {
+        pending.skip();
+        return;
+    }
     let mut waiting = AHEAD.get().waiting.lock().unwrap();
     if waiting.0.len() >= WAITING_MOST {
         drop(waiting);

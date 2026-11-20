@@ -48,19 +48,18 @@ where
     Ok(())
 }
 
-/// Runs `turn` now and every `period` after, for as long as the daemon runs, named `name`: on a
+/// Runs `turn` now and every `period` after, until it says to stop (false), named `name`: on a
 /// thread of its own, which `wait` has wait `period` between turns (a sleep, or a wait something
 /// may end early); under madsim, a task that sleeps `period` on the simulation's clock.
 pub(super) fn every(
     name: &'static str,
     period: Duration,
     wait: fn(Duration),
-    mut turn: impl FnMut() + Send + 'static,
+    mut turn: impl FnMut() -> bool + Send + 'static,
 ) -> std::io::Result<()> {
     #[cfg(not(madsim))]
     std::thread::Builder::new().name(name.into()).spawn(move || {
-        loop {
-            turn();
+        while turn() {
             wait(period);
         }
     })?;
@@ -68,8 +67,7 @@ pub(super) fn every(
     {
         let _ = (name, wait);
         drop(tokio::spawn(async move {
-            loop {
-                turn();
+            while turn() {
                 tokio::time::sleep(period).await;
             }
         }));
