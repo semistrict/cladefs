@@ -528,11 +528,18 @@ async fn ephemeral_attrition() -> Result<(), String> {
             async move { connect(1).await.sync_cell(SyncCellRequest { path }).await }
         };
         calling(1, syncing).await.unwrap();
+        let stating = || {
+            let path = base.clone();
+            async move { connect(1).await.stat_cell(StatCellRequest { path }).await }
+        };
+        let stated = calling(1, stating).await.unwrap().into_inner();
+        assert_eq!(stated.cell, parent);
         calling(1, || {
             let request = ForkCellRequest {
                 to: to.clone(),
                 version,
-                cell: parent,
+                tenant: stated.tenant,
+                cell: stated.cell,
                 ephemeral: true,
                 ..ForkCellRequest::default()
             };
