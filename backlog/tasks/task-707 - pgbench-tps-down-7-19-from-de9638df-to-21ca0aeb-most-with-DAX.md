@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-20 21:24'
-updated_date: '2026-11-20 21:24'
+updated_date: '2026-11-20 21:38'
 labels:
   - perf
   - regression
@@ -33,3 +33,9 @@ Reported by the sandbox team (GCE 16 vCPU, Firecracker nested, 4-vCPU VM, pgbenc
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Read the range's hot-path changes (no bisect, user 2026-11-20). 2. Hypothesis: 9a04595e7 (TASK-672.1) makes every span real: otel::install always builds a provider with Sampler::AlwaysOn and the tracez Processor, so trace::enabled() is true and each request, page-in, commit phase and bucket request pays SDK span creation, attributes, random IDs, two shard locks and a Named lookup; before, spans were off (2 ns) unless CLADEFSD_TRACES=otlp, then 1% sampled. Fits the pattern: DAX makes the most requests (first-store CoW faults), a smaller window more; no-DAX fewest. 3. Test: 21ca0aeb with an experiment-only env switch skipping install, same binary on/off, fxfs-guest-pgbench-dax on ubu1 under fxjob --bench.
+<!-- SECTION:PLAN:END -->
