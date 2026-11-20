@@ -55,7 +55,8 @@ fn main() {
 fn bench(dir: &std::path::Path, tenant: u64, name: &str, forks: usize) {
     std::fs::create_dir(dir).unwrap();
     let capacity = 2 * EXTENTS * EXTENT as u64;
-    let store = OpenCell::create_in(dir.join("parent"), capacity, tenant);
+    let store =
+        futures::executor::block_on(OpenCell::create_in(dir.join("parent"), capacity, tenant));
     let store = store.unwrap();
     let data = vec![0x5a; EXTENT];
     for sequence in 1..=EXTENTS {
@@ -69,7 +70,7 @@ fn bench(dir: &std::path::Path, tenant: u64, name: &str, forks: usize) {
     let before = store.bucket().stats();
     for n in 0..forks {
         let started = Instant::now();
-        store.fork(dir.join(format!("fork-{n}")), tenant).unwrap();
+        futures::executor::block_on(store.fork(dir.join(format!("fork-{n}")), tenant)).unwrap();
         took.push(started.elapsed());
     }
     let after = store.bucket().stats();
@@ -77,7 +78,7 @@ fn bench(dir: &std::path::Path, tenant: u64, name: &str, forks: usize) {
     let mut opened = Vec::with_capacity(OPENED);
     for n in 0..OPENED.min(forks) {
         let started = Instant::now();
-        drop(OpenCell::open(dir.join(format!("fork-{n}"))).unwrap());
+        drop(futures::executor::block_on(OpenCell::open(dir.join(format!("fork-{n}")))).unwrap());
         opened.push(started.elapsed());
     }
     took.sort();

@@ -2273,7 +2273,7 @@ fn page_ins_in_flight_are_bounded() {
     // alone.
     let path = dir.path().join("store");
     let cell = {
-        let store = OpenCell::create(&path, 1 << 30).unwrap();
+        let store = futures::executor::block_on(OpenCell::create(&path, 1 << 30)).unwrap();
         let cell = store.cell();
         for sequence in 1..=EXTENTS {
             let data = super::pattern(sequence as u8, MIB as usize);
