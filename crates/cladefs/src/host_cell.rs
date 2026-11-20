@@ -378,8 +378,10 @@ async fn make_keys(bucket: &ObjectBucket, cell: CellId) -> Result<(), Failure> {
 async fn learn_taken(bucket: &ObjectBucket, cell: CellId) -> Result<bool, Failure> {
     let read = bucket_cell::head::read(bucket, cell).await;
     let found = read.head(cell)?.is_some();
-    if let (Some(known), Some(head)) = (bucket_cell::Bucket::known(bucket), read.object()) {
-        known.learn(cell, Learned { head });
+    if let Some(known) = bucket_cell::Bucket::known(bucket)
+        && found
+    {
+        known.learn(cell, Learned { head: read.slots() });
     }
     Ok(found)
 }
@@ -771,9 +773,19 @@ mod tests {
         let number = |bucket: &ObjectBucket| {
             upload::block_on(identity::get(bucket)).unwrap().unwrap().unwrap().number
         };
-        crate::bucket::format_bucket(&root, Details::default()).unwrap();
-        assert_eq!(crate::bucket::add_bucket(&root, &home, Details::default()).unwrap().number, 2);
-        assert_eq!(crate::bucket::add_bucket(&root, &other, Details::default()).unwrap().number, 3);
+        crate::bucket::format_bucket(&root, Details::default(), Default::default()).unwrap();
+        assert_eq!(
+            crate::bucket::add_bucket(&root, &home, Details::default(), Default::default())
+                .unwrap()
+                .number,
+            2
+        );
+        assert_eq!(
+            crate::bucket::add_bucket(&root, &other, Details::default(), Default::default())
+                .unwrap()
+                .number,
+            3
+        );
         assert_eq!(number(&bucket_numbered(&home, 2).unwrap()), 2);
         assert_eq!(number(&bucket_numbered(&home, 3).unwrap()), 3);
         assert_eq!(number(&bucket_numbered(&home, 1).unwrap()), 1);
@@ -786,6 +798,7 @@ mod tests {
             &Details::default(),
             &*late_bucket,
             late_details,
+            bucket_cell::identity::Asked::default(),
         ))
         .unwrap()
         .unwrap();
@@ -796,7 +809,12 @@ mod tests {
         let mut wrong = registry.clone();
         wrong.version += 1;
         let at_other = Details { url: Some(other.clone()), ..Details::default() };
-        wrong.buckets.push(Entry { number: 5, id: 99, details: at_other });
+        wrong.buckets.push(Entry {
+            number: 5,
+            id: 99,
+            details: at_other,
+            settings: Default::default(),
+        });
         upload::block_on(identity::spread(&wrong, &*bucket(&home).unwrap())).unwrap().unwrap();
         let refused = bucket_numbered(&home, 5).map(drop);
         assert_eq!(

@@ -1271,12 +1271,13 @@ async fn walk<B: Bucket>(
             Layered::of(Arc::unwrap_or_clone(state))
         }
         None => {
-            let key = layout::head(cell);
-            let inherited = match bucket::get(bucket, &key).await {
-                None => Err(Attempt::Failed(Error::Lost(key))),
-                Some(object) => {
-                    touched.insert(key);
-                    match Head::decode(cell, &object.bytes)?.origin() {
+            // cladefs: its slots, every one (TASK-691).
+            let inherited = match crate::head::get(bucket, cell).await? {
+                None => Err(Attempt::Failed(Error::Lost(layout::heads(cell)))),
+                Some(head) => {
+                    let n = bucket.head_slots(cell).await;
+                    touched.extend((0..n).map(|slot| layout::head(cell, slot)));
+                    match head.origin() {
                         None => Ok(None),
                         Some(origin) => {
                             let from = cell;
@@ -1600,7 +1601,10 @@ mod tests {
                 })
                 .collect()
         };
-        let head = vec![format!("get {}", layout::head(test_cell(1)))];
+        // cladefs: every slot of it, at once (TASK-691).
+        let head: Vec<_> = (0..crate::identity::DEFAULT_HEAD_SLOTS)
+            .map(|slot| format!("get {}", layout::head(test_cell(1), slot)))
+            .collect();
         let (recovered, rounds) = bucket.served_in_rounds(recover(&*bucket, test_cell(1), None));
         let recovered = recovered.unwrap();
         assert_eq!((recovered.end(), recovered.state.last_commit), (5, Some(5)));

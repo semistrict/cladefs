@@ -295,6 +295,12 @@ impl World {
         block_on(bucket_cell::head::get(&*self.bucket, child)).unwrap()
     }
 
+    /// cladefs: whether `cell`'s head is failed, its marks standing (TASK-691).
+    fn failed(&self, cell: crate::CellId) -> bool {
+        let read = block_on(bucket_cell::head::read(&*self.bucket, cell)).slots();
+        *read.found() == bucket_cell::head::Found::Failed
+    }
+
     /// The cells live in the bucket.
     fn live(&self) -> Vec<crate::CellId> {
         block_on(bucket_cell::testing::live(&*self.bucket)).unwrap().into_keys().collect()
@@ -386,10 +392,18 @@ impl World {
 
         // A fork to the same child, and to the same place, makes it if nothing has its ID, or fails
         // cleanly; one to a new child forks.
-        let spent = self.record(self.child).is_some() || !children.is_empty();
+        // cladefs: a failed head holds its ID too, its marks a day, and the same making, forking
+        // to it again, finds it given up on (TASK-691).
+        let failed = self.failed(self.child);
+        let spent = self.record(self.child).is_some() || !children.is_empty() || failed;
         let again = local_cell::upload::wait_on(parent.fork_to(&path, self.child))
             .map_err(|err| err.errno());
-        assert_eq!(again, if spent { Err(Some(Errno::EEXIST)) } else { Ok(()) }, "{case}: again");
+        let expected = match (failed, spent) {
+            (true, _) => Err(Some(Errno::ENOENT)),
+            (false, true) => Err(Some(Errno::EEXIST)),
+            (false, false) => Ok(()),
+        };
+        assert_eq!(again, expected, "{case}: again");
         if !spent {
             children.push(path.clone());
             unchecked.push((path.clone(), b"later"));
@@ -459,8 +473,11 @@ impl World {
                 // A deleted cell's head stays, final, fencing its writers (TASK-407), but with its
                 // dead cell, removed whole, if its ID is an allocator's (TASK-455): gone, it is not
                 // listed.
-                Kind::Head { cell } => {
-                    !kept(cell) && !self.record(cell).is_some_and(|record| record.deleted())
+                // cladefs: and a failed head's marks, a day (TASK-691).
+                Kind::Head { cell, .. } => {
+                    !kept(cell)
+                        && !self.record(cell).is_some_and(|record| record.deleted())
+                        && !self.failed(cell)
                 }
                 // References' marks stay, retired or taken back (TASK-395.13), and a tenant's KEK
                 // object, for good (TASK-411.27).

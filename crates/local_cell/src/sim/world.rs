@@ -911,9 +911,14 @@ impl World {
         let mut world = Self {
             rng: StdRng::seed_from_u64(seed),
             profile,
-            bucket: match profile.regions {
-                0 => SimBucket::new(),
-                _ => SimBucket::new().at(1),
+            bucket: {
+                let bucket = match profile.regions {
+                    0 => SimBucket::new(),
+                    _ => SimBucket::new().at(1),
+                };
+                // cladefs: heads of two slots, as many cases in fewer requests (TASK-691).
+                bucket.keep_heads_in(2);
+                bucket
             },
             pool,
             spawner,
@@ -2678,10 +2683,14 @@ impl World {
             locked: 0,
             uncompacted: 0,
             // cladefs: the cells whose heads went, as only a dead cell's removal deletes them
-            // (TASK-455).
+            // (TASK-455): every slot of each (TASK-691).
             removed: gone()
-                .filter(|key| matches!(layout::kind(key), layout::Kind::Head { .. }))
-                .count(),
+                .filter_map(|key| match layout::kind(key) {
+                    layout::Kind::Head { cell, .. } => Some(cell),
+                    _ => None,
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
         };
         match report {
             Some(Ok(report)) if report == expected(&report) => {}

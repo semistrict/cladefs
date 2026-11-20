@@ -1191,7 +1191,7 @@ mod tests {
         let tokio = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         tokio.block_on(async {
             for &cell in &cells {
-                let key = layout::head(cell);
+                let key = layout::head(cell, 0);
                 bucket.put(&key, vec![1].into(), PutMode::Create).await.unwrap();
             }
         });

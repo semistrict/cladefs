@@ -70,8 +70,16 @@ pub struct Child {
 /// it is replicated, and names its active configuration ([`Head::replication`], doc-21,
 /// TASK-537.3.1); nothing reads 20's. 22: a version forked into another bucket is mirrored there
 /// (doc-23, Mirrors; TASK-633.8): its pin, a reference of the mirror's own ([`pin`]), and its
-/// marker ([`mirror`]), under the parent's prefix in that bucket; nothing reads 21's.
-pub const FORMAT: u32 = 22;
+/// marker ([`mirror`]), under the parent's prefix in that bucket; nothing reads 21's. 23: a cell's
+/// head is in its bucket's count of objects, its slots, each written in turn ([`head`],
+/// [`Head::swaps`], TASK-691), as GCS takes about one write a second of an object, and a bucket's
+/// identity holds its settings ([`crate::identity::Settings`]); nothing reads 22's, whose head was
+/// one object.
+pub const FORMAT: u32 = 23;
+
+/// cladefs: the most slots a cell's head is kept in ([`crate::identity::Settings::head_slots`],
+/// TASK-691): keys past it are no head's.
+pub const MAX_HEAD_SLOTS: u64 = 64;
 
 /// cladefs: the prefix of every tenant's cells' objects: all the bucket's cells (TASK-364).
 pub const TENANTS: &str = "tenants/";
@@ -143,11 +151,17 @@ pub fn checkpoint(cell: CellId, segment: u64, epoch: u64) -> String {
     format!("{}{}.{}", checkpoints(cell), Padded(keyed(epoch)), Padded(segment))
 }
 
-/// The head of `cell` ([`Head`]), its one swapped object: what made it, its keys, its writer's
-/// taking, the segments it holds, its newest checkpoint and its versions, swapped with a
-/// condition (TASK-407, TASK-515).
-pub fn head(cell: CellId) -> String {
-    format!("{}head", cell.prefix())
+/// The slot `slot` of the head of `cell` ([`Head`]): what made the cell, its keys, its writer's
+/// taking, the segments it holds, its newest checkpoint and its versions, swapped with a condition
+/// (TASK-407, TASK-515), in its bucket's count of objects, written in turn (TASK-691).
+pub fn head(cell: CellId, slot: u64) -> String {
+    debug_assert!(slot < MAX_HEAD_SLOTS, "slot {slot} of {MAX_HEAD_SLOTS} at most");
+    format!("{}{}", heads(cell), Padded(slot))
+}
+
+/// cladefs: the prefix of the slots of the head of `cell` ([`head`], TASK-691).
+pub fn heads(cell: CellId) -> String {
+    format!("{}head/", cell.prefix())
 }
 
 /// cladefs: the block of object IDs `block` taken, by one allocator of one process's
@@ -409,8 +423,10 @@ pub enum Kind<'a> {
         segment: u64,
         epoch: u64,
     },
+    /// cladefs: a slot of a cell's head ([`head`], TASK-691).
     Head {
         cell: CellId,
+        slot: u64,
     },
     /// cladefs: a block of object IDs taken ([`objectid_block`]).
     ObjectIds {
@@ -514,7 +530,7 @@ pub fn owner(key: &str) -> Option<CellId> {
         Kind::Segment { cell, .. }
         | Kind::Extent { cell, .. }
         | Kind::Checkpoint { cell, .. }
-        | Kind::Head { cell }
+        | Kind::Head { cell, .. }
         | Kind::Reference { parent: cell, .. }
         | Kind::Retired { parent: cell, .. }
         | Kind::Pin { parent: cell, .. }
@@ -594,8 +610,11 @@ pub fn kind(key: &str) -> Kind<'_> {
             let (parent, at, child) = fork(rest)?;
             return Some(Kind::Retired { parent, at, child });
         }
-        if rest == "head" {
-            return Some(Kind::Head { cell });
+        if let Some(slot) = rest.strip_prefix("head/") {
+            return Some(Kind::Head {
+                cell,
+                slot: number(slot).filter(|&slot| slot < MAX_HEAD_SLOTS)?,
+            });
         }
         // A segment's or a checkpoint's key: its writer's epoch, then its number.
         let numbered = |rest: &str| -> Option<(u64, u64)> {
@@ -712,6 +731,14 @@ pub struct Head {
     pub token: u64,
     /// The number of segments the cell holds: 0 to `end`, without gaps.
     pub end: u64,
+    /// cladefs: the swaps of the head before this one (TASK-691): it is in slot `swaps % N`, N its
+    /// bucket's count of slots, each swap writing the slot after its predecessor's, conditional on
+    /// what was there. Its maker's head is version 0, then its copies, 1 to `N - 1`, its other
+    /// slots ([`crate::head`]).
+    pub swaps: u64,
+    /// cladefs: whether this is a mark of a head failed as it was made, in a slot its maker left
+    /// empty, no head ([`crate::head::fail`], TASK-691).
+    pub failed: bool,
     /// The epochs of the writers of those segments, in runs: from each run's first number on, to
     /// the next run's, the segments are of its epoch. A run a takeover, at most.
     pub runs: Vec<(u64, u64)>,
@@ -1113,7 +1140,7 @@ mod tests {
             segment(cell, 7, 2),
             extent(cell, 2, 4, ExtentId::new(3, 9)),
             checkpoint(cell, 7, 2),
-            head(cell),
+            head(cell, 3),
             moves(&segment(cell, 7, 2)),
             moves(&moves(&segment(cell, 7, 2))),
             collector_lease(cell),
@@ -1122,7 +1149,8 @@ mod tests {
         ] {
             assert!(key.starts_with(prefix) && key.starts_with(TENANTS), "{key}");
         }
-        assert_eq!(head(cell), format!("{prefix}head"));
+        assert_eq!(head(cell, 3), format!("{prefix}head/0000000000003"));
+        assert_eq!(heads(cell), format!("{prefix}head/"));
         assert_eq!(
             moves(&segment(cell, 7, 2)),
             format!("{prefix}moves/segments/0000000000002.0000000000007/0000000000001")
@@ -1230,7 +1258,10 @@ mod tests {
         let earlier = format!("{}extents/0000000000003/0000000000002.0000000000009", cell.prefix());
         assert_eq!(kind(&earlier), Kind::Unknown);
         assert_eq!(kind(&checkpoint(cell, 7, 2)), Kind::Checkpoint { cell, segment: 7, epoch: 2 });
-        assert_eq!(kind(&head(cell)), Kind::Head { cell });
+        assert_eq!(kind(&head(cell, 3)), Kind::Head { cell, slot: 3 });
+        // cladefs: a slot past the head's is no head's (TASK-691).
+        let past = format!("{}{}", heads(cell), Padded(MAX_HEAD_SLOTS));
+        assert_eq!(kind(&past), Kind::Unknown);
         assert_eq!(objectid_block(0x2a), "objectid/000000000001a");
         assert_eq!(kind(&objectid_block(0x2a)), Kind::ObjectIds { block: 0x2a });
         assert_eq!(kind("objectid/2a"), Kind::Unknown);
@@ -1292,7 +1323,7 @@ mod tests {
         assert_eq!(kind("gc/marks/000000000001a"), Kind::Unknown);
         assert_eq!(kind(&format!("moves/{from}")), Kind::Unknown);
         assert_eq!(cell_of_prefix(&cell.prefix()), Some(cell));
-        assert_eq!(cell_of_prefix(&head(cell)), None);
+        assert_eq!(cell_of_prefix(&head(cell, 0)), None);
         assert_eq!(cell_of_prefix(""), None);
     }
 
@@ -1307,7 +1338,7 @@ mod tests {
             segment(cell, 7, 2),
             extent(cell, 2, 4, ExtentId::new(3, 9)),
             checkpoint(cell, 7, 2),
-            head(cell),
+            head(cell, 0),
             moves(&segment(cell, 7, 2)),
             moves(&moves(&extent(cell, 2, 4, ExtentId::new(3, 9)))),
             collector_lease(cell),
@@ -1341,6 +1372,7 @@ mod tests {
             token: 7,
             end: 5,
             runs: vec![(0, 1), (3, 4)],
+            swaps: 41,
             checkpoint: Some((2, 1)),
             versions: vec![Version { id: 0xbe, at: 3, shared: true }],
             kind: Some(crate::cell::Kind::Sqlite),

@@ -205,6 +205,10 @@ fn one() {
     {
         match name {
             "head_swap" => rules.head_swap = false,
+            "slots_at_birth" => rules.slots_at_birth = false,
+            "whole_or_final" => rules.whole_or_final = false,
+            "marks_fail" => rules.marks_fail = false,
+            "marks_kept" => rules.marks_kept = false,
             "epoch_keys" => rules.epoch_keys = false,
             "collector_epochs" => rules.collector_epochs = false,
             "moves_by_pass" => rules.moves_by_pass = false,

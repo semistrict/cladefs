@@ -432,6 +432,10 @@ impl<B: Bucket> Bucket for Counted<B> {
         self.bucket.rewritable(key)
     }
 
+    fn head_slots(&self, cell: crate::layout::CellId) -> impl Future<Output = u64> + Send {
+        self.bucket.head_slots(cell)
+    }
+
     fn now(&self) -> u64 {
         self.bucket.now()
     }

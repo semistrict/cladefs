@@ -87,7 +87,7 @@ mod tests {
             CellId { tenant: 3, id: 1 },
         ];
         let keys = [
-            layout::head(cells[2]),
+            layout::head(cells[2], 0),
             layout::segment(cells[0], 0, 1),
             layout::collector_lease(cells[1]),
             layout::objectid_block(1),
@@ -112,7 +112,7 @@ mod tests {
         let mut cells: Vec<CellId> = (0..many).map(|id| CellId { tenant: 2, id }).collect();
         cells.extend([CellId { tenant: 1, id: 7 }, CellId { tenant: 3, id: 1 }]);
         for &cell in &cells {
-            let key = layout::head(cell);
+            let key = layout::head(cell, 0);
             block_on(bucket.put(&key, vec![1].into(), PutMode::Create)).unwrap();
         }
         cells.sort();

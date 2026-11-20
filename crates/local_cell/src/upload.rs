@@ -2429,20 +2429,19 @@ async fn first_read<B: bucket_cell::Bucket>(
     learned: Option<Learned>,
     kms: &Arc<keys::CachingKms>,
 ) -> Result<head::Read, Failure> {
-    let found = match learned {
-        Some(Learned { head }) => Some(head),
-        None => bucket_cell::bucket::get(bucket, &bucket_cell::layout::head(cell)).await,
+    let read = match learned {
+        Some(Learned { head }) => head::Read::found(head),
+        None => head::read(bucket, cell).await,
     };
-    let read = head::Read::found(found.clone());
     if !read.head(cell)?.is_some_and(|head| !head.deleted() && head.forking().is_some()) {
         return Ok(read);
     }
     // cladefs: a version's restore into another cell writes its checkpoint at the version under
     // the version's cell's keys, unwrapped by the host's KMS (TASK-476).
-    let start = lifecycle::Start::Found(found);
+    let start = lifecycle::Start::Found(read.slots());
     match lifecycle::resume_version_fork(bucket, cell, start, keys::Parents::Kms(kms, None)).await?
     {
-        Some(left) => Ok(head::Read::found(Some(left))),
+        Some(left) => Ok(head::Read::found(left)),
         None => Ok(head::read(bucket, cell).await),
     }
 }
@@ -2751,10 +2750,10 @@ mod tests {
     }
 
     /// TASK-690: a store's uploader swaps its cell's head no faster than a bucket of GCS's store
-    /// takes it, about once a second, however fast the store commits: a guest waiting for each
-    /// commit's upload, then one closing segment after segment. Each swap names all uploaded since
-    /// the last, the uploads going on as it waits; the store refuses no write of the head, and a
-    /// commit waiting for its upload waits about a second at most, the swap before its own.
+    /// takes it, however fast the store commits: a guest waiting for each commit's upload, then
+    /// one closing segment after segment. Each swap names all uploaded since the last, the uploads
+    /// going on as it waits; the store refuses no write of the head. TASK-691: each slot of the head
+    /// a second apart, the head many times a second.
     #[test]
     fn heads_are_swapped_as_fast_as_gcs_takes_them() {
         use bucket_cell::faults::{Fault, Faults, Faulty};
@@ -2813,9 +2812,13 @@ mod tests {
         let elapsed = started.elapsed();
         let stats = bucket.stats();
         assert_eq!(stats.failures(Request::Update), 0, "writes of the head refused");
-        // Each a second after the one before, the first a second after the taking.
+        // Each slot's a second after its last, of HEAD_SLOTS; more than one a second in all.
         let swaps = updates() - opened;
-        assert!(swaps <= elapsed.as_secs() + 1, "{swaps} swaps of the head in {elapsed:?}");
+        let most = bucket_cell::identity::DEFAULT_HEAD_SLOTS * (elapsed.as_secs() + 1);
+        assert!(swaps <= most, "{swaps} swaps of the head in {elapsed:?}");
+        assert!(swaps > 2 * (elapsed.as_secs() + 1), "{swaps} swaps of the head in {elapsed:?}");
+        // A commit waits for its swap's turn: a part of a second, as long as the guest syncs no
+        // faster than HEAD_SLOTS a second; up to a second for one past that, as this guest is.
         let longest = waits.iter().max().unwrap();
         assert!(*longest < second + second / 2, "a commit waited {longest:?}: {waits:?}");
         drop(uploader);

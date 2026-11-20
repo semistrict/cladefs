@@ -235,6 +235,14 @@ pub trait Bucket: Send + Sync + 'static {
         std::future::ready(())
     }
 
+    /// cladefs: how many slots the heads of `cell` are kept in (TASK-691): the setting of the
+    /// bucket `cell` is of ([`crate::identity::Settings::head_slots`]), as its identity says; the
+    /// default for a bucket never formatted, as tests' are.
+    fn head_slots(&self, cell: crate::layout::CellId) -> impl Future<Output = u64> + Send {
+        let _ = cell;
+        std::future::ready(crate::identity::DEFAULT_HEAD_SLOTS)
+    }
+
     /// The store's clock, which [`Meta::modified`] is in.
     fn now(&self) -> u64;
 

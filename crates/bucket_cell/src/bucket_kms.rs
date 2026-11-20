@@ -1050,7 +1050,9 @@ mod tests {
             let (ours, theirs) = ("11".repeat(32), "22".repeat(32));
             let parsed = |hex: &str| MasterKeys::parse(hex, "a test's").unwrap();
             let id = |hex: &str| parsed(hex).newest().id().to_string();
-            identity::format(&home, &Details::default()).await.unwrap();
+            identity::format(&home, &Details::default(), crate::identity::Asked::default())
+                .await
+                .unwrap();
             let recorded = |url: &str, kms: Option<&str>, key: Option<String>| Details {
                 url: Some(url.to_owned()),
                 kms: kms.map(str::to_owned),
@@ -1058,9 +1060,25 @@ mod tests {
                 ..Details::default()
             };
             let added = recorded(&urls[1], None, Some(id(&theirs)));
-            identity::add(&home, &Details::default(), &other, added).await.unwrap();
+            identity::add(
+                &home,
+                &Details::default(),
+                &other,
+                added,
+                crate::identity::Asked::default(),
+            )
+            .await
+            .unwrap();
             let added = recorded(&urls[2], Some(&local), None);
-            identity::add(&home, &Details::default(), &third, added).await.unwrap();
+            identity::add(
+                &home,
+                &Details::default(),
+                &third,
+                added,
+                crate::identity::Asked::default(),
+            )
+            .await
+            .unwrap();
             let by_bucket = |key: &str| {
                 let vars =
                     vec![("CLADEFSD_BUCKET_2_CLADEFS_MASTER_KEY".to_owned(), key.to_owned())];

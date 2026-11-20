@@ -154,9 +154,11 @@
 //! goes to the root of every bucket. Refused if URL is a bucket already (`EEXIST`), or ROOT is not
 //! the root (`EINVAL`). DETAILS, recorded of the bucket, are any of `--region REGION`, `--endpoint
 //! URL`, `--kms URI` (its `CLADEFS_KMS`) and `--master-key-id ID` (under the bucket KMS): never a
-//! key or a credential. Its provider and URL are recorded too. `buckets` prints the record in
-//! the root of the bucket at URL: its version, then each bucket, a line each, its number and its
-//! details, `name=value`.
+//! key or a credential. Its provider and URL are recorded too. DETAILS may set the bucket's
+//! settings too, fixed for good (TASK-691): `--head-slots N`, how many objects each cell's head is
+//! kept in, 1 to 64, 10 by default at `format-bucket`, the root's at `add-bucket`. `buckets`
+//! prints the record in the root of the bucket at URL: its version, then each bucket, a line
+//! each, its number, its details and its settings, `name=value`.
 //!
 //! `mount`, through the daemon alone, calls the Mount service of its FUSE mount of tenants' cells
 //! (`CLADEFSD_MOUNT`, TASK-475.2; `proto/cladefs/mount/v1/mount.proto`), TENANT and CELL in base 32
@@ -351,12 +353,14 @@ enum Command {
     FormatBucket {
         url: String,
         details: bucket_cell::identity::Details,
+        asked: bucket_cell::identity::Asked,
     },
     /// cladefs: a bucket added to a root bucket's (TASK-633.9).
     AddBucket {
         root: String,
         url: String,
         details: bucket_cell::identity::Details,
+        asked: bucket_cell::identity::Asked,
     },
     /// cladefs: the record of every bucket in a bucket's root (TASK-633.9).
     Buckets {
@@ -518,13 +522,13 @@ impl Command {
             ["shred-tenant", given] => Self::ShredTenant { tenant: tenant(given)? },
             ["mount", ref rest @ ..] => Self::Mount(Mount::parse(rest)?),
             ["format-bucket", url, ref rest @ ..] => {
-                Self::FormatBucket { url: url.to_owned(), details: details(rest)? }
+                let (details, asked) = details(rest)?;
+                Self::FormatBucket { url: url.to_owned(), details, asked }
             }
-            ["add-bucket", root, url, ref rest @ ..] => Self::AddBucket {
-                root: root.to_owned(),
-                url: url.to_owned(),
-                details: details(rest)?,
-            },
+            ["add-bucket", root, url, ref rest @ ..] => {
+                let (details, asked) = details(rest)?;
+                Self::AddBucket { root: root.to_owned(), url: url.to_owned(), details, asked }
+            }
             ["buckets", url] => Self::Buckets { url: url.to_owned() },
             _ => bail!(usage()),
         })
@@ -634,12 +638,14 @@ impl Command {
     fn on_buckets(self) -> anyhow::Result<()> {
         let printable = |err: cladefs::Error| anyhow::anyhow!("{err:#}");
         match self {
-            Self::FormatBucket { url, details } => {
-                let identity = cladefs::bucket::format_bucket(&url, details).map_err(printable);
+            Self::FormatBucket { url, details, asked } => {
+                let identity =
+                    cladefs::bucket::format_bucket(&url, details, asked).map_err(printable);
                 println!("{}", identity.with_context(|| format!("formatting {url}"))?.number);
             }
-            Self::AddBucket { root, url, details } => {
-                let identity = cladefs::bucket::add_bucket(&root, &url, details).map_err(printable);
+            Self::AddBucket { root, url, details, asked } => {
+                let identity =
+                    cladefs::bucket::add_bucket(&root, &url, details, asked).map_err(printable);
                 let added =
                     identity.with_context(|| format!("adding {url} to {root}'s buckets"))?;
                 println!("{}", added.number);
@@ -841,20 +847,29 @@ impl Command {
 
 /// cladefs: the details `args` say of a bucket, `--region`, `--endpoint`, `--kms` and
 /// `--master-key-id`, each with its value (TASK-633.9).
-fn details(args: &[&str]) -> anyhow::Result<bucket_cell::identity::Details> {
+/// cladefs: the details a bucket's formatting or addition records, and the settings it asks for
+/// (TASK-691).
+fn details(
+    args: &[&str],
+) -> anyhow::Result<(bucket_cell::identity::Details, bucket_cell::identity::Asked)> {
     let mut details = bucket_cell::identity::Details::default();
+    let mut asked = bucket_cell::identity::Asked::default();
     let mut args = args.iter();
     while let Some(&name) = args.next() {
-        let value = Some(args.next().with_context(|| format!("{name} takes a value"))?.to_string());
+        let given = args.next().with_context(|| format!("{name} takes a value"))?.to_string();
+        let value = Some(given.clone());
         match name {
             "--region" => details.region = value,
             "--endpoint" => details.endpoint = value,
             "--kms" => details.kms = value,
             "--master-key-id" => details.master_key_id = value,
+            "--head-slots" => {
+                asked.head_slots = Some(given.parse().with_context(|| format!("{given}: N"))?);
+            }
             _ => bail!(usage()),
         }
     }
-    Ok(details)
+    Ok((details, asked))
 }
 
 /// cladefs: what `buckets` prints of `registry`: `version VERSION`, then each bucket, a line each,
@@ -878,7 +893,8 @@ fn buckets_lines(registry: &bucket_cell::identity::Registry) -> String {
                 lines += &format!(" {name}={value}");
             }
         }
-        lines += "\n";
+        // cladefs: its settings (TASK-691).
+        lines += &format!(" head_slots={}\n", entry.settings.head_slots);
     }
     lines
 }

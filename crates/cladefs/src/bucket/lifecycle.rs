@@ -671,6 +671,12 @@ fn bucket_lifecycle_by_phase() {
 /// looks at the collector's marking for the minute after, so the version's open, at once with its
 /// record before, asks it no more: 4 in 4. And since TASK-633.5 a child's open, its head given its
 /// keys by the fork, reads no ancestor's head: its taking alone, 1 in 1, where it was 3 in 3.
+///
+/// cladefs: since TASK-691 a head is its bucket's slots, 10 by default: each read of one a GET of
+/// each, at once, and its making a create of each, the first before the rest. So the version's
+/// open, reading its head twice, 22 in 4; a fork, its child's head made whole a round later and the
+/// heads it reads read whole, 33 in 7. The child's open, its head taken from what the fork left, 1
+/// in 1 still.
 #[test]
 fn restores_ask_the_bucket_what_the_protocol_needs() {
     let (objects, mut run) = recorded(memory(), 64, Duration::from_millis(5));
@@ -694,10 +700,10 @@ fn restores_ask_the_bucket_what_the_protocol_needs() {
     assert_eq!(
         costs,
         [
-            ("cold copy-open", (4, 4)),
-            ("cold fork", (6, 6)),
+            ("cold copy-open", (22, 4)),
+            ("cold fork", (33, 7)),
             ("cold fork-open", (1, 1)),
-            ("warm fork", (6, 6)),
+            ("warm fork", (33, 7)),
             ("warm fork-open", (1, 1)),
         ]
     );
@@ -825,8 +831,13 @@ fn versions_forked_on_a_host_of_another_bucket_make_children_there() {
         format!("file://{}", dir.path().join(name).display())
     };
     let (url_a, url_b) = (url("a"), url("b"));
-    crate::bucket::format_bucket(&url_a, Details::default()).unwrap();
-    assert_eq!(crate::bucket::add_bucket(&url_a, &url_b, Details::default()).unwrap().number, 2);
+    crate::bucket::format_bucket(&url_a, Details::default(), Default::default()).unwrap();
+    assert_eq!(
+        crate::bucket::add_bucket(&url_a, &url_b, Details::default(), Default::default())
+            .unwrap()
+            .number,
+        2
+    );
     let (bucket_a, bucket_b) =
         (host_cell::bucket(&url_a).unwrap(), host_cell::bucket(&url_b).unwrap());
     let capacity = 1 << 30;

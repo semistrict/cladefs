@@ -12,8 +12,8 @@
 //!   its end, a deletion keeps what it names, and nothing renames a segment named (specs/bucket's
 //!   NamedEpochsStay). So an origin's checkpoint, at the key of that epoch, is found by its key
 //!   with no read of the origin's head, whichever host or however long after.
-//! - **What a host learned of a cell it is about to open** ([`Learned`]): its record as its own
-//!   fork or take left it, its cell's object as its fork held it, and whether it has no head. The
+//! - **What a host learned of a cell it is about to open** ([`Learned`]): its head as its own
+//!   fork or take left it, its slots (TASK-691), and whether it has no head. The
 //!   cell's store, opened next, takes it ([`Known::take`]) in place of its first reads. Each is
 //!   what a read at the moment of the write would have found: so using it is that read, made
 //!   earlier, which every step after allows for: the head's taking, and the cell's holding when it
@@ -25,16 +25,16 @@
 //!   the opening). Wrong, it costs requests, never safety; it lives in the host's memory alone,
 //!   taken by the opening it was learned for as that begins, and goes with the process.
 
-use crate::bucket::Object;
+use crate::head::Slots;
 use crate::layout::CellId;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
 /// What a host learned of a cell before it opens it ([`Known`]): its head, as this host's last
-/// write of it left it, of the version that write made: what the store's taking starts from.
+/// write of it left it, its slots' versions: what the store's taking starts from.
 #[derive(Clone, Debug)]
 pub struct Learned {
-    pub head: Object,
+    pub head: Slots,
 }
 
 /// What a host knows of its bucket ([`crate::Bucket::known`]; see the module's docs).
@@ -131,10 +131,13 @@ mod tests {
         let cell = test_cell(3);
         known.named(cell, 7, 2);
         assert_eq!((known.epoch(cell, 7), known.epoch(cell, 6)), (Some(2), None));
-        let head = crate::layout::encode(&crate::layout::Head::of(crate::record::Made::Root, 1));
-        let head = Object::written(&crate::layout::head(cell), head, Default::default(), 0);
-        known.learn(cell, Learned { head: head.clone() });
-        assert!(known.take(cell).is_some_and(|learned| learned.head.bytes == head.bytes));
+        let bucket = crate::testing::Direct(crate::testing::SimBucket::new());
+        let made = crate::layout::Head::of(crate::record::Made::Root, 1);
+        let head = futures::executor::block_on(crate::head::birth(&bucket, cell, made)).unwrap();
+        known.learn(cell, Learned { head });
+        let learned = known.take(cell).map(|learned| learned.head.head(cell).unwrap().unwrap());
+        let last = crate::identity::DEFAULT_HEAD_SLOTS - 1;
+        assert_eq!(learned.map(|head| (head.owner, head.swaps)), Some((1, last)));
         assert!(known.take(cell).is_none());
     }
 }

@@ -106,7 +106,8 @@ impl Allocator {
         if let Some(number) = *self.number.lock().unwrap() {
             return Ok(number);
         }
-        let number = identity::format(bucket, &identity::Details::default()).await?.number;
+        let details = identity::Details::default();
+        let number = identity::format(bucket, &details, identity::Asked::default()).await?.number;
         *self.number.lock().unwrap() = Some(number);
         Ok(number)
     }
@@ -190,7 +191,9 @@ mod tests {
             let details = identity::Details::default();
             let added =
                 identity::Details { url: Some("memory:///other".into()), ..details.clone() };
-            identity::add(&one, &details, &other, added).await.unwrap();
+            identity::add(&one, &details, &other, added, crate::identity::Asked::default())
+                .await
+                .unwrap();
             for _ in 0..16 {
                 let id = Allocator::new().next(&one).await.unwrap();
                 assert_eq!(id >> 48, 1, "{id:x}");
@@ -239,7 +242,12 @@ mod tests {
     fn a_bucket_of_another_format_gives_no_id() {
         futures::executor::block_on(async {
             let bucket = memory();
-            let other = identity::Identity { format: layout::FORMAT - 1, number: 3, id: 1 };
+            let other = identity::Identity {
+                format: layout::FORMAT - 1,
+                number: 3,
+                id: 1,
+                settings: Default::default(),
+            };
             bucket::create(&bucket, layout::IDENTITY, layout::encode(&other)).await;
             let refused = Allocator::new().next(&bucket).await;
             assert_eq!(refused, Err(Error::BucketFormat(layout::FORMAT - 1)));

@@ -13,7 +13,7 @@
 //! (TASK-160.14).
 
 use crate::bucket::{self, Bucket, Created, Object, Updated};
-use crate::head;
+use crate::head::{self, Slots};
 use crate::keys::Parents;
 use crate::layout::{self, CellId, Head, Origin};
 use crate::record::Made;
@@ -30,15 +30,16 @@ pub(crate) enum Step<T, R> {
     Stop(R),
 }
 
-/// What a [`transition`] starts from.
-pub enum Start {
+/// What a [`transition`] starts from: of an object, or of a cell's head, its slots
+/// ([`head::Slots`], TASK-691).
+pub enum Start<F = Option<Object>> {
     /// What a read finds.
     Read,
     /// Nothing, as a create expects: one that finds something there reads it from its answer.
     Create,
     /// What a read before found: a write after it finds the object changed, if another's write
     /// came between, and reads it again, as it does after its own read.
-    Found(Option<Object>),
+    Found(F),
 }
 
 /// Changes the object at `key`, which `decode` reads, as `step` says of what is there, if anything,
@@ -96,37 +97,40 @@ pub(crate) async fn transition_leaving<T: Serialize, R>(
     }
 }
 
-/// Changes `cell`'s head as `step` says ([`transition`]).
+/// Changes `cell`'s head as `step` says ([`head::change_leaving`]).
 pub(crate) async fn change<R>(
     bucket: &impl Bucket,
     cell: CellId,
-    start: Start,
+    start: Start<Slots>,
     step: impl FnMut(Option<Head>) -> Result<Step<Head, R>, Error>,
 ) -> Result<R, Error> {
     Ok(change_leaving(bucket, cell, start, step).await?.0)
 }
 
-/// Changes `cell`'s head as [`change`] does, with the object it left ([`transition_leaving`]).
+/// Changes `cell`'s head as [`change`] does, with the slots it left.
 async fn change_leaving<R>(
     bucket: &impl Bucket,
     cell: CellId,
-    start: Start,
+    start: Start<Slots>,
     step: impl FnMut(Option<Head>) -> Result<Step<Head, R>, Error>,
-) -> Result<(R, Option<Object>), Error> {
-    let decode = |bytes: &[u8]| Head::decode(cell, bytes);
-    transition_leaving(bucket, &layout::head(cell), start, decode, step).await
+) -> Result<(R, Slots), Error> {
+    head::change_leaving(bucket, cell, start, step).await
 }
 
 /// Creates `cell`, of no parent, of `owner`, which its maker chose at random, never taken: its
 /// first taking gives it its keys and kind ([`head::take`]). Returns whether it made it: a head
-/// there already, whoever's, is left as it is.
+/// there already, whoever's, being made or not, is left as it is.
 pub async fn create(bucket: &impl Bucket, cell: CellId, owner: u64) -> Result<bool, Error> {
     let head = Head::of(Made::Root, owner);
-    change(bucket, cell, Start::Create, |found| match found {
+    let made = change(bucket, cell, Start::Create, |found| match found {
         None => Ok(Step::Write(head.clone(), true)),
         Some(_) => Ok(Step::Stop(false)),
     })
-    .await
+    .await;
+    match made {
+        Err(Error::Unmade(_)) => Ok(false),
+        made => made,
+    }
 }
 
 /// cladefs: writes the reference of the fork of `origin` to `child`, whose owner is `owner`, under
@@ -271,7 +275,7 @@ pub async fn fork_version_keyed(
     origin: Origin,
     (owner, given): (u64, Option<head::Given>),
     keys: Parents<'_>,
-) -> Result<Option<Object>, Error> {
+) -> Result<Option<Slots>, Error> {
     failpoint!("version::record");
     let refers = rules().references && rules().clones_refer_first;
     // Without the rule, as a test shows it needed: the reference before the head.
@@ -314,7 +318,12 @@ pub async fn fork_version_keyed(
     if let Some(found) = refused.filter(|_| refers_first) {
         take_back(bucket, origin, child, &found).await;
     }
-    let (making, left) = making?;
+    // cladefs: a head another making is making, or its maker died making, the ID is taken
+    // (TASK-691).
+    let (making, left) = making.map_err(|error| match error {
+        Error::Unmade(_) => Error::IdTaken(child),
+        error => error,
+    })?;
     let mut made = None;
     if making {
         failpoint!("version::recorded");
@@ -347,9 +356,9 @@ pub async fn fork_version_keyed(
 pub async fn resume_version_fork(
     bucket: &impl Bucket,
     child: CellId,
-    start: Start,
+    start: Start<Slots>,
     keys: Parents<'_>,
-) -> Result<Option<Object>, Error> {
+) -> Result<Option<Slots>, Error> {
     let (forking, left) = change_leaving(bucket, child, start, |found| match found {
         None => Err(Error::NoCell),
         Some(found) if found.deleted() => Err(Error::Deleted),
@@ -357,9 +366,10 @@ pub async fn resume_version_fork(
         Some(found) if found.resumed => Ok(Step::Stop(Some(found))),
         Some(found) => Ok(Step::Write(Head { resumed: true, ..found.clone() }, Some(found))),
     })
-    .await?;
+    .await
+    .map_err(given_up)?;
     let Some(Head { made: Made::Forking { origin, version }, owner, .. }) = forking else {
-        return Ok(left);
+        return Ok(Some(left));
     };
     // Without the rule, as a test shows it needed: none written.
     let mut referred = None;
@@ -386,9 +396,9 @@ async fn finish_fork(
     version: u64,
     origin: Origin,
     keys: Parents<'_>,
-    start: Start,
+    start: Start<Slots>,
     referred: Option<Referred>,
-) -> Result<Option<Object>, Error> {
+) -> Result<Option<Slots>, Error> {
     let cell = origin.parent;
     // Into another tenant's cell, a version of the default tenant's, or one shared.
     let crosses = cell.tenant != child.tenant && cell.tenant != layout::DEFAULT_TENANT;
@@ -420,11 +430,22 @@ async fn finish_fork(
         }
         Some(_) => Ok(Step::Stop(false)),
     })
-    .await?;
+    .await
+    .map_err(given_up)?;
     if made {
         failpoint!("version::made");
     }
-    Ok(left.filter(|_| made))
+    Ok(made.then_some(left))
+}
+
+/// cladefs: `error`, a fork's step's, as the fork takes it: a head failed as it was made, by its
+/// deletion or by the collector, its maker slow (TASK-691), the fork given up on, as when its head
+/// says so ([`Error::Deleted`]).
+fn given_up(error: Error) -> Error {
+    match error {
+        Error::Unmade(_) => Error::Deleted,
+        error => error,
+    }
 }
 
 /// Gives up on `child`, a fork being made of a version that was deleted ([`Made::Forking`]), so
@@ -471,7 +492,10 @@ pub async fn delete(
 
 /// Deletes `cell` as [`delete`] does, if `ours` says its head is one to delete, one with none
 /// getting a head of `owner`'s: returns whether it is deleted, now or before, whoever's; `false`
-/// for a head left as it is.
+/// for a head left as it is. cladefs: a head being made, or left unmade, `ours`, it fails, gone
+/// for good, its maker's making failing with it (TASK-691, specs/head-slots); one failed before is
+/// gone too; one its maker made whole meanwhile it deletes; another's, or one being removed, it
+/// leaves.
 async fn delete_if(
     bucket: &impl Bucket,
     cell: CellId,
@@ -480,16 +504,28 @@ async fn delete_if(
     ours: impl Fn(&Head) -> bool,
 ) -> Result<bool, Error> {
     let none = ended(Head::of(Made::Own, owner), holder);
-    let deleted = change(bucket, cell, Start::Read, |found| match found {
-        None => Ok(Step::Write(none.clone(), true)),
-        Some(found) if found.deleted() => Ok(Step::Stop(true)),
-        Some(found) if !ours(&found) => Ok(Step::Stop(false)),
-        Some(found) if rules().delete_tokens && found.token > token => Err(Error::Stale),
-        Some(found) => Ok(Step::Write(ended(found, holder), true)),
-    })
-    .await?;
-    failpoint!("lifecycle::head_ended");
-    Ok(deleted)
+    loop {
+        let deleted = change(bucket, cell, Start::Read, |found| match found {
+            None => Ok(Step::Write(none.clone(), true)),
+            Some(found) if found.deleted() => Ok(Step::Stop(true)),
+            Some(found) if !ours(&found) => Ok(Step::Stop(false)),
+            Some(found) if rules().delete_tokens && found.token > token => Err(Error::Stale),
+            Some(found) => Ok(Step::Write(ended(found, holder), true)),
+        })
+        .await;
+        match deleted {
+            Err(Error::Unmade(_)) => match head::fail(bucket, cell, &ours).await? {
+                head::Failing::Failed => return Ok(true),
+                head::Failing::Whole => {}
+                head::Failing::Not => return Ok(false),
+            },
+            deleted => {
+                let deleted = deleted?;
+                failpoint!("lifecycle::head_ended");
+                return Ok(deleted);
+            }
+        }
+    }
 }
 
 /// Deletes `child`, the child of a fork of a version, as [`delete`] does, but only if its cell is
@@ -497,14 +533,15 @@ async fn delete_if(
 /// deleted from the first, for good, so that a create of its head landing late, a dead host's,
 /// finds it so. A cell of another's, whose ID the child was given, is left as it is (TASK-79.82);
 /// so is a cell deleted already, whoever's. Returns whether the fork's cell is gone, deleted now
-/// or before: `false` for another's.
+/// or before: `false` for another's. cladefs: a head its making left unmade, failed (TASK-691).
 pub async fn delete_fork(
     bucket: &impl Bucket,
     child: CellId,
     owner: u64,
     (holder, token): (u64, u64),
 ) -> Result<bool, Error> {
-    delete_if(bucket, child, (holder, token), owner, |found| found.is_child_of(owner)).await
+    let ours = |found: &Head| found.is_child_of(owner);
+    delete_if(bucket, child, (holder, token), owner, ours).await
 }
 
 #[cfg(test)]
@@ -536,7 +573,7 @@ mod tests {
         // A clone's, made.
         let origin = Origin { parent: test_cell(1), at: 7 };
         let made = Head::of(Made::Clone(origin), 0x33);
-        block_on(bucket::create(&bucket, &layout::head(test_cell(3)), layout::encode(&made)));
+        block_on(crate::testing::make_head(&bucket, test_cell(3), made)).unwrap();
         assert_eq!(unfork(test_cell(3), 0x33), Ok(true));
         assert_eq!(live(test_cell(3)), Some(false));
         assert_eq!(unfork(test_cell(3), 0x33), Ok(true), "gone already");
@@ -665,8 +702,15 @@ mod tests {
         assert_eq!((ended.epoch, ended.made, ended.owner), (Head::FINAL, Made::Root, 0x33));
         assert!(matches!(take(&bucket, test_cell(3), 3), Err(Error::Deleted)));
         block_on(delete(&bucket, test_cell(4), 2, 0)).unwrap();
-        let deleted =
-            Head { epoch: Head::FINAL, holder: 2, token: u64::MAX, ..Head::of(Made::Own, 2) };
+        // cladefs: made whole, deleted from the first: its newest the maker's last copy (TASK-691).
+        let swaps = crate::identity::DEFAULT_HEAD_SLOTS - 1;
+        let deleted = Head {
+            epoch: Head::FINAL,
+            holder: 2,
+            token: u64::MAX,
+            swaps,
+            ..Head::of(Made::Own, 2)
+        };
         assert_eq!(read(&bucket, test_cell(4)), Some(deleted));
         let taking = head::Taking { holder: 5, token: 7, ..head::Taking::default() };
         block_on(create(&bucket, test_cell(5), 0x55)).unwrap();

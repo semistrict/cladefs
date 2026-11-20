@@ -232,6 +232,10 @@ Making a bucket never formatted the root of buckets of its own, number 1 (`clade
 **Adding** (a bucket):
 Giving a bucket never formatted the next number, by a conditional write of the root bucket's registry, then copying the registry to every bucket (`cladefsctl add-bucket`).
 
+**Bucket settings**:
+What a bucket is formatted or added with, fixed for good in its identity: each per bucket (a bucket added takes the root's unless asked otherwise) or clade-wide (every bucket the root's). The head slots are one.
+_Avoid_: config, options (a process's), parameters
+
 **Cell**:
 A tenant's data of one kind (Fxfs, SQLite, or a VM's memory image), with a root and a capacity, one writer at a time, its head, its key and its versions. A tenant's unit of concurrency, placement, fencing, encryption and collection; a host holds it whole. Its ID is unique across buckets, given by its bucket and carrying its bucket number; no caller names a new one. On a host, a cell is kept in a directory: its open segment, its write-ahead log and the extents not yet uploaded, a write-back cache of the bucket's copy.
 _Avoid_: volume, disk
@@ -288,7 +292,15 @@ A base whose pages every tenant's forks share, in the default arena.
 A fork of another store attached to a cell, for an Fxfs volume over a read-only base.
 
 **Head**:
-A cell's one object that changes: what made it, its keys, who writes it, the commit it ends at, and its versions. Taking it is taking the cell.
+A cell's one record that changes: what made it, its keys, who writes it, the commit it ends at, and its versions, kept in its head slots. Taking it is taking the cell.
+
+**Head slot**:
+One of the objects a head is kept in, its bucket's setting of them, 10 by default: version k in slot k mod N, each swap conditional on its slot, so that the head is swapped as often as the store takes writes of N objects.
+_Avoid_: shard, replica, copy
+
+**Mark** (of a head):
+What fails a head left unmade, its maker dead or slow: one in each slot it left empty, so that no read finds a head there and the maker's late creates fail. The collector deletes marks a day on.
+_Avoid_: tombstone (a deletion's head is the head's final version)
 
 **Writer**:
 The one holder of a cell's head, which alone commits to it and makes and drops its versions.

@@ -1536,8 +1536,11 @@ fn shredded_cells_leave_their_cells_unreadable_and_the_tenants_others_readable()
     }
     let held: Vec<_> =
         opened.iter().map(|(store, _)| reader.memory.keys().hold(store.keys().clone())).collect();
-    let cell_key = layout::head(ours);
-    let before = world.object(&cell_key);
+    // cladefs: its head, every slot of it (TASK-691).
+    let slots: Vec<String> = (0..bucket_cell::identity::DEFAULT_HEAD_SLOTS)
+        .map(|slot| layout::head(ours, slot))
+        .collect();
+    let before: Vec<Vec<u8>> = slots.iter().map(|key| world.object(key)).collect();
 
     assert_eq!(world.runtime.block_on(keys::shred(&*world.bucket, ours)), Ok(1));
     let object = world.head(CELL);
@@ -1579,7 +1582,9 @@ fn shredded_cells_leave_their_cells_unreadable_and_the_tenants_others_readable()
     assert_eq!((report.locked, report.uncompacted, report.compacted), (1, 1, 0), "{report:?}");
 
     // Its object as it was before, put back: the store opens.
-    world.put(&cell_key, before);
+    for (key, bytes) in slots.iter().zip(before) {
+        world.put(key, bytes);
+    }
     let host = world.host(8);
     let (store, _uploader) = open_on(&world, &host, &dirs[0].crash(0)).unwrap();
     assert_eq!(read(&world, &host, &store, *ours_extent, 4096), Ok(noise(7, 4096)));

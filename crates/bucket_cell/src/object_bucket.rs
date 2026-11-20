@@ -86,6 +86,9 @@ pub struct ObjectBucket {
     /// cladefs: how far apart its store takes writes of one key, and when it last wrote each
     /// (TASK-690): shared with its own store's twin ([`ObjectBucket::own`]).
     rewrites: Arc<Rewrites>,
+    /// cladefs: its settings, as its identity says, once read, or written by its formatting
+    /// (TASK-691): the defaults' for a bucket with none; shared with its twin.
+    settings: Arc<std::sync::OnceLock<crate::identity::Settings>>,
 }
 
 /// cladefs: how long after GCS takes a write of an object it takes another: about one a second,
@@ -702,7 +705,7 @@ impl ObjectBucket {
         let (counts, honoured, decoded, known) = Default::default();
         let (marks, objectids) = (crate::marks::Watch::new(), crate::objectid::Allocator::new());
         let (route, own, mirrored) = (None, std::sync::OnceLock::new(), Default::default());
-        let (mirrors, rewrites) = Default::default();
+        let (mirrors, rewrites, settings) = Default::default();
         Self {
             store,
             pages,
@@ -718,6 +721,7 @@ impl ObjectBucket {
             mirrored,
             mirrors,
             rewrites,
+            settings,
         }
     }
 
@@ -749,7 +753,8 @@ impl ObjectBucket {
     fn twin(&self) -> &Arc<ObjectBucket> {
         let own = || {
             let twin = ObjectBucket::paged(self.store.clone(), self.pages.clone(), &self.prefix);
-            Arc::new(ObjectBucket { rewrites: self.rewrites.clone(), ..twin })
+            let (rewrites, settings) = (self.rewrites.clone(), self.settings.clone());
+            Arc::new(ObjectBucket { rewrites, settings, ..twin })
         };
         self.own.get_or_init(own)
     }
@@ -837,6 +842,33 @@ impl ObjectBucket {
     }
 
     /// cladefs: its own number, read once from its identity: none if it has none yet.
+    /// cladefs: its settings, as its identity says, read once (TASK-691): the defaults' for a
+    /// bucket not formatted, as tests' are, which a host's allocator formats before it gives any
+    /// cell an ID, its write of the identity noted ([`ObjectBucket::store_put`]).
+    async fn settings(&self) -> crate::identity::Settings {
+        if let Some(settings) = self.settings.get() {
+            return *settings;
+        }
+        let mut failures = 0;
+        let settings = loop {
+            match self.store_get(layout::IDENTITY).await {
+                Ok(object) => match crate::identity::parse(&object.bytes) {
+                    Ok(identity) => break identity.settings,
+                    Err(err) => {
+                        log::warn!("bucket: reading its identity's settings: {err}");
+                        break crate::identity::Settings::default();
+                    }
+                },
+                Err(Error::NotFound) => break crate::identity::Settings::default(),
+                Err(_) => {
+                    failures += 1;
+                    tokio::time::sleep(backoff(failures)).await;
+                }
+            }
+        };
+        *self.settings.get_or_init(|| settings)
+    }
+
     async fn own_number(&self, route: &Route) -> Result<Option<u16>, Error> {
         if let Some(number) = *route.home.lock().unwrap() {
             return Ok(Some(number));
@@ -1484,6 +1516,7 @@ impl ObjectBucket {
         mode: PutMode,
     ) -> impl Future<Output = Result<Version, Error>> + Send {
         let (store, path) = (self.store.clone(), self.path(key));
+        let identity = key == layout::IDENTITY;
         let (request, mode) = match mode {
             PutMode::Overwrite => (Request::Overwrite, object_store::PutMode::Overwrite),
             PutMode::Create => (Request::Create, object_store::PutMode::Create),
@@ -1503,8 +1536,15 @@ impl ObjectBucket {
             let timed = self.counts.request(request, Some(&path));
             let len = bytes.len() as u64;
             let options = PutOptions { mode, ..PutOptions::default() };
+            let identity = identity.then(|| bytes.clone());
             let result = store.put_opts(&path, PutPayload::from(bytes), options).await;
             self.rewrites.wrote(&path);
+            // cladefs: its formatting's, or addition's, settings, as its readers go by them.
+            if let (Ok(_), Some(bytes)) = (&result, identity)
+                && let Ok(identity) = crate::identity::parse(&bytes)
+            {
+                let _ = self.settings.set(identity.settings);
+            }
             let result = timed.answered(result, |_| len as usize)?;
             self.counts.uploaded[upload as usize].fetch_add(len, Ordering::Relaxed);
             Ok(Version { e_tag: result.e_tag, version: result.version })
@@ -1635,6 +1675,14 @@ impl Bucket for ObjectBucket {
         match self.member(key).await? {
             Some(member) => member.store_put(key, bytes, mode).await,
             None => self.store_put(key, bytes, mode).await,
+        }
+    }
+
+    /// cladefs: as the bucket `cell` is of says, its own or another it routes to (TASK-691).
+    async fn head_slots(&self, cell: layout::CellId) -> u64 {
+        match self.member(&layout::heads(cell)).await {
+            Ok(Some(member)) => member.settings().await.head_slots,
+            Ok(None) | Err(_) => self.settings().await.head_slots,
         }
     }
 
@@ -1885,6 +1933,41 @@ pub(crate) mod tests {
         other: ObjectBucket,
     }
 
+    /// cladefs: `cell`'s head in `bucket`'s own store made `head`, over what is there, as a test's
+    /// writer leaves it (TASK-691): every slot, each a copy of it newer than any there. Each slot's
+    /// key and bytes.
+    async fn put_head(bucket: &ObjectBucket, cell: layout::CellId, head: layout::Head) {
+        for (key, bytes) in head_over(bucket, cell, head).await {
+            bucket.store_put(&key, bytes.into(), PutMode::Overwrite).await.unwrap();
+        }
+    }
+
+    /// cladefs: what [`put_head`] writes: each slot's key and bytes.
+    async fn head_over(
+        bucket: &ObjectBucket,
+        cell: layout::CellId,
+        head: layout::Head,
+    ) -> Vec<(String, Vec<u8>)> {
+        let after = match crate::head::get(bucket, cell).await {
+            Ok(Some(found)) => found.swaps + 1,
+            _ => 0,
+        };
+        (after..after + crate::identity::DEFAULT_HEAD_SLOTS)
+            .map(|swaps| {
+                let key = layout::head(cell, swaps % crate::identity::DEFAULT_HEAD_SLOTS);
+                (key, layout::encode(&layout::Head { swaps, ..head.clone() }))
+            })
+            .collect()
+    }
+
+    /// cladefs: every slot's key of `cell`'s head (TASK-691).
+    fn heads_of(cell: layout::CellId) -> Vec<String> {
+        let mut keys: Vec<String> =
+            (0..crate::identity::DEFAULT_HEAD_SLOTS).map(|slot| layout::head(cell, slot)).collect();
+        keys.sort();
+        keys
+    }
+
     impl Two {
         async fn new(dir: &std::path::Path) -> Self {
             use crate::identity::{self, Details};
@@ -1897,9 +1980,19 @@ pub(crate) mod tests {
                 ObjectBucket::from_url(&home_url).unwrap(),
                 ObjectBucket::from_url(&other_url).unwrap(),
             );
-            identity::format(&home, &Details::default()).await.unwrap();
+            identity::format(&home, &Details::default(), crate::identity::Asked::default())
+                .await
+                .unwrap();
             let details = Details { url: Some(other_url), ..Details::default() };
-            identity::add(&home, &Details::default(), &other, details).await.unwrap();
+            identity::add(
+                &home,
+                &Details::default(),
+                &other,
+                details,
+                crate::identity::Asked::default(),
+            )
+            .await
+            .unwrap();
             Self { home_url, home, other }
         }
 
@@ -2284,13 +2377,16 @@ pub(crate) mod tests {
 
             // The version dropped after the fork read it named, before it read the head again: its
             // reference in the parent's bucket stays (`forksRereadBeforeLeaving`).
-            let found = two.other.store_get(&layout::head(parent)).await.unwrap();
-            let mut dropped = layout::Head::decode(parent, &found.bytes).unwrap();
-            dropped.versions.clear();
-            let (bytes, path) =
-                (layout::encode(&dropped), dir.path().join("other").join(layout::head(parent)));
+            let found = crate::head::get(&two.other, parent).await.unwrap().unwrap();
+            let dropped = layout::Head { versions: Vec::new(), ..found };
+            let other = dir.path().join("other");
+            let written: Vec<_> = (head_over(&two.other, parent, dropped).await.into_iter())
+                .map(|(key, bytes)| (other.join(key), bytes))
+                .collect();
             fail::cfg_callback("version::rechecked", move || {
-                std::fs::write(&path, &bytes).unwrap()
+                for (path, bytes) in &written {
+                    std::fs::write(path, bytes).unwrap();
+                }
             })
             .unwrap();
             two.home.store_delete(&marker).await.unwrap();
@@ -2594,10 +2690,9 @@ pub(crate) mod tests {
                 let listed = bucket.store_list(&cell.prefix()).await.unwrap();
                 listed.into_iter().map(|meta| meta.key).collect()
             }
-            let headed = |head: Head| layout::encode(&head);
             let version = Version { id: 9, at: 3, shared: false };
             let named = Head { versions: vec![version], ..Head::of(Made::Root, 4) };
-            put(other, &layout::head(parent), headed(named)).await;
+            put_head(other, parent, named).await;
             // And a version a mirror copied and never marked, its hold left.
             let copied = [
                 layout::checkpoint(parent, 3, 1),
@@ -2615,12 +2710,12 @@ pub(crate) mod tests {
             let pass = || Collector::new(Options { compact_below: 0.5, grace: 0 });
             let all = listed(home, parent).await;
 
-            put(other, &layout::head(parent), headed(Head::of(Made::Root, 4))).await;
+            put_head(other, parent, Head::of(Made::Root, 4)).await;
             let report = pass().collect_copy(&*routed, &*own, 1, parent).await.unwrap();
             assert_eq!((report.deleted, listed(home, parent).await), (0, all.clone()), "alive");
             let ended = Head { epoch: Head::FINAL, ..Head::of(Made::Root, 4) };
-            put(other, &layout::head(parent), headed(ended)).await;
-            put(home, &layout::head(child), headed(Head::of(Made::Clone(origin), 4))).await;
+            put_head(other, parent, ended).await;
+            put_head(home, child, Head::of(Made::Clone(origin), 4)).await;
             let reference = layout::reference(parent, 3, child);
             put(home, &reference, b"ref".to_vec()).await;
             let report = pass().collect_copy(&*routed, &*own, 1, parent).await.unwrap();
@@ -2628,11 +2723,13 @@ pub(crate) mod tests {
             // Deleted, its cell perhaps holding its own children's references still: the reference
             // stands, until its own pass retires it, its cell dead (`references_held`).
             let deleted = Head { epoch: Head::FINAL, ..Head::of(Made::Clone(origin), 4) };
-            put(home, &layout::head(child), headed(deleted)).await;
+            put_head(home, child, deleted).await;
             let report = pass().collect_copy(&*routed, &*own, 1, parent).await.unwrap();
             assert_eq!((report.deleted, report.retired), (0, 0), "a deleted child's");
             // Gone, its cell removed: retired here.
-            home.store_delete(&layout::head(child)).await.unwrap();
+            for key in heads_of(child) {
+                home.store_delete(&key).await.unwrap();
+            }
             put(home, &layout::pin(parent, 3), b"pin".to_vec()).await;
             let report = pass().collect_copy(&*routed, &*own, 1, parent).await.unwrap();
             assert_eq!((report.deleted, report.retired), (0, 1), "pinned");
@@ -2646,7 +2743,7 @@ pub(crate) mod tests {
             let report = pass().collect_copy(&watched, &watched_own, 1, parent).await.unwrap();
             assert_eq!(report.deleted, copied.len());
             assert_eq!(listed(home, parent).await, Vec::<String>::new(), "left here");
-            assert_eq!(listed(other, parent).await, [layout::head(parent)], "touched there");
+            assert_eq!(listed(other, parent).await, heads_of(parent), "touched there");
             let mark = layout::retired(parent, 3, child);
             let mut order = vec![hold, unmarked, marker];
             order.extend(copied);
@@ -2671,10 +2768,7 @@ pub(crate) mod tests {
             let own = routed.own();
             let parent = test_cell(2 << 48 | 1);
             let ended = Head { epoch: Head::FINAL, ..Head::of(Made::Root, 4) };
-            other
-                .store_put(&layout::head(parent), layout::encode(&ended).into(), PutMode::Overwrite)
-                .await
-                .unwrap();
+            put_head(other, parent, ended).await;
             let copy = || async {
                 for (key, bytes) in [
                     (layout::checkpoint(parent, 3, 1), b"copied".to_vec()),
@@ -2699,7 +2793,7 @@ pub(crate) mod tests {
             assert_eq!((marking.report.deleted, left().await), (0, 2), "marked");
             let there = other.store_list(&parent.prefix()).await.unwrap();
             let there: Vec<String> = there.into_iter().map(|meta| meta.key).collect();
-            assert_eq!(there, [layout::head(parent)], "marked there");
+            assert_eq!(there, heads_of(parent), "marked there");
             let swept = sweep(Mode::Delete).run_with_own(&routed, Some(&own), |_| {}).await;
             assert_eq!((swept.report.deleted, left().await), (1, 0), "swept");
             copy().await;
@@ -2727,9 +2821,19 @@ pub(crate) mod tests {
                 ObjectBucket::from_url(&home_url).unwrap(),
                 ObjectBucket::from_url(&other_url).unwrap(),
             );
-            identity::format(&home, &Details::default()).await.unwrap();
+            identity::format(&home, &Details::default(), crate::identity::Asked::default())
+                .await
+                .unwrap();
             let details = Details { url: Some(other_url.clone()), ..Details::default() };
-            identity::add(&home, &Details::default(), &other, details).await.unwrap();
+            identity::add(
+                &home,
+                &Details::default(),
+                &other,
+                details,
+                crate::identity::Asked::default(),
+            )
+            .await
+            .unwrap();
             let routed = ObjectBucket::from_url(&home_url)
                 .unwrap()
                 .routed(Arc::new(Registered::new(Vec::<(String, String)>::new())));
@@ -2738,12 +2842,12 @@ pub(crate) mod tests {
             let ours = layout::CellId { tenant: 1, id: 1 << 48 | 5 };
             let named = layout::CellId { tenant: 1, id: 7 };
             for cell in [theirs, ours, named] {
-                let key = layout::head(cell);
+                let key = layout::head(cell, 0);
                 routed.put(&key, b"head".to_vec().into(), PutMode::Create).await.unwrap();
                 assert_eq!(routed.get(&key).await.map(|object| object.bytes), Ok(b"head".to_vec()));
             }
             async fn at(bucket: &ObjectBucket, cell: layout::CellId) -> bool {
-                bucket.store_get(&layout::head(cell)).await.is_ok()
+                bucket.store_get(&layout::head(cell, 0)).await.is_ok()
             }
             assert_eq!((at(&other, theirs).await, at(&home, theirs).await), (true, false));
             assert_eq!((at(&home, ours).await, at(&other, ours).await), (true, false));
@@ -2751,7 +2855,7 @@ pub(crate) mod tests {
             let listed = routed.list(&theirs.prefix()).await.unwrap();
             assert_eq!(
                 listed.iter().map(|meta| meta.key.clone()).collect::<Vec<_>>(),
-                [layout::head(theirs)]
+                [layout::head(theirs, 0)]
             );
 
             // TASK-633.8: its own store, unrouted, takes a key of another bucket's cell here.
@@ -2763,7 +2867,7 @@ pub(crate) mod tests {
             assert_eq!((here.is_ok(), there.is_ok()), (true, false));
             assert!(Arc::ptr_eq(&own, &own.own()), "an unrouted bucket's own is itself");
 
-            let (theirs_key, ours_key) = (layout::head(theirs), layout::head(ours));
+            let (theirs_key, ours_key) = (layout::head(theirs, 0), layout::head(ours, 0));
             routed.delete_batch(&[&theirs_key, &ours_key]).await.unwrap();
             assert_eq!((at(&other, theirs).await, at(&home, ours).await), (false, false));
 
@@ -2774,7 +2878,7 @@ pub(crate) mod tests {
             assert_eq!(by_bucket[1].1.requests(Request::Get), 2, "bucket 2's reads");
             assert_eq!(by_bucket[1].1.requests(Request::Create), 1, "bucket 2's one write");
 
-            let unrecorded = layout::head(layout::CellId { tenant: 1, id: 9 << 48 | 1 });
+            let unrecorded = layout::head(layout::CellId { tenant: 1, id: 9 << 48 | 1 }, 0);
             assert_eq!(routed.get(&unrecorded).await.map(drop), Err(Error::Unavailable));
             assert_eq!(routed.numbered(9).await.map(drop), Err(crate::Error::NoBucket(9)));
         });
@@ -3125,7 +3229,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             store
-                .put(&layout::head(test_cell(1)), vec![5; 9].into(), PutMode::Overwrite)
+                .put(&layout::head(test_cell(1), 0), vec![5; 9].into(), PutMode::Overwrite)
                 .await
                 .unwrap();
             let extent =
@@ -3318,7 +3422,9 @@ pub(crate) mod tests {
                 states.push(recovery::recover(&*bucket, test_cell(1), None).await.unwrap().state);
                 read.push(gets() - before);
             }
-            assert_eq!(read, [2, 1], "the head's and the checkpoint's GETs, by recovery");
+            // cladefs: the head's, every slot (TASK-691).
+            let head = crate::identity::DEFAULT_HEAD_SLOTS;
+            assert_eq!(read, [head + 1, head], "the head's and the checkpoint's GETs, by recovery");
             assert_eq!(states[0], states[1]);
             assert_eq!(states[0].extents.keys().copied().collect::<Vec<_>>(), [extent]);
         });
@@ -3355,9 +3461,19 @@ pub(crate) mod tests {
                 ObjectBucket::from_url(&home_url).unwrap(),
                 s3(&server, "other", &Client::DEFAULT),
             );
-            identity::format(&home, &Details::default()).await.unwrap();
+            identity::format(&home, &Details::default(), crate::identity::Asked::default())
+                .await
+                .unwrap();
             let details = Details { url: Some(other_url.clone()), ..Details::default() };
-            identity::add(&home, &Details::default(), &*other, details).await.unwrap();
+            identity::add(
+                &home,
+                &Details::default(),
+                &*other,
+                details,
+                crate::identity::Asked::default(),
+            )
+            .await
+            .unwrap();
             let vars = server
                 .options()
                 .into_iter()
@@ -3390,7 +3506,7 @@ pub(crate) mod tests {
             async fn at(bucket: &ObjectBucket, key: String) -> bool {
                 bucket.store_get(&key).await.is_ok()
             }
-            let (parents, childs) = (layout::head(parent), layout::head(child));
+            let (parents, childs) = (layout::head(parent, 0), layout::head(child, 0));
             assert_eq!(
                 (at(&other, parents.clone()).await, at(&home, parents).await),
                 (true, false)

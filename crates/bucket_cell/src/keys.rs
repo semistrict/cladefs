@@ -1559,7 +1559,7 @@ pub async fn ring(
             return Err(Error::Corrupt(format!("cell {cell}'s origins go round at {parent}")));
         }
         let found = head::get(bucket, parent).await?;
-        let found = found.ok_or_else(|| Error::Lost(layout::head(parent)))?;
+        let found = found.ok_or_else(|| Error::Lost(layout::heads(parent)))?;
         origin = found.origin();
         if found.deks.is_empty() || ring.holds(parent) {
             continue;
@@ -1612,7 +1612,7 @@ impl Parents<'_> {
             Self::Kms(kms, Some(head)) => writing(bucket, kms, parent, head).await,
             Self::Kms(kms, None) => {
                 let head = head::get(bucket, parent).await?;
-                let head = head.ok_or_else(|| Error::Lost(layout::head(parent)))?;
+                let head = head.ok_or_else(|| Error::Lost(layout::heads(parent)))?;
                 writing(bucket, kms, parent, &head).await
             }
         }
@@ -1822,7 +1822,7 @@ mod tests {
         assert!(of_key(&ring, &layout::segment(test_cell(8), 3, 1)).encrypted());
         let moves = layout::moves(&layout::segment(test_cell(7), 3, 1), 1).unwrap();
         assert_eq!(cell_of(&moves), Some(7));
-        assert!(of_key(&ring, &layout::head(TEST_CELL)).encrypted());
+        assert!(of_key(&ring, &layout::head(TEST_CELL, 0)).encrypted());
 
         let host = HostRing::new();
         assert!(host.ring().is_empty());
@@ -1950,8 +1950,8 @@ mod tests {
         let child = CellId { tenant: 2, id: 10 };
         let origin = Origin { parent, at: 3 };
         // Its head as a fork that gave it no keys makes it.
-        let forked = crate::layout::encode(&Head::of(Made::Clone(origin), 4));
-        block_on(crate::bucket::create(&bucket, &layout::head(child), forked));
+        let forked = Head::of(Made::Clone(origin), 4);
+        block_on(crate::testing::make_head(&bucket, child, forked)).unwrap();
         let head = |cell| block_on(head::get(&bucket, cell)).unwrap().unwrap();
 
         // Read before its keys are given: across, the parent's cell's KEK unwrapped here.
@@ -1970,7 +1970,9 @@ mod tests {
         // The parent's tenant shredded, and its head out of reach (TASK-633.5): the child's ring,
         // on a host unwrapping anew, needs its own KEK alone, and reads no ancestor's head.
         counted.inner().destroy(TEST_CELL.tenant).unwrap();
-        block_on(crate::bucket::delete(&bucket, &layout::head(parent)));
+        for slot in 0..crate::identity::DEFAULT_HEAD_SLOTS {
+            block_on(crate::bucket::delete(&bucket, &layout::head(parent, slot)));
+        }
         counted.reset();
         let (_, fresh) = kms_over(&counted);
         let keys = CellKeys::of(child, &head(child), fresh.clone());
@@ -2342,7 +2344,8 @@ mod tests {
 
         let before = head(ours);
         assert_eq!(block_on(shred(&bucket, ours)), Ok(1));
-        let expected = Head { keks: Vec::new(), shredded: true, ..before.clone() };
+        let swaps = before.swaps + 1;
+        let expected = Head { keks: Vec::new(), shredded: true, swaps, ..before.clone() };
         assert_eq!(head(ours), expected);
         assert_eq!(block_on(shred(&bucket, ours)), Ok(0));
         assert_eq!(head(ours), expected);

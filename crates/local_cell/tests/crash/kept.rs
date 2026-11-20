@@ -286,7 +286,9 @@ fn crashed(host: &Host, round: u64, rng: &mut StdRng, interval: Duration) -> Cra
     // The commits opening it made, the cell's capacity set, hold nothing.
     let first = store.last_commit().unwrap() as usize;
     let mut epochs = vec![Model::default(); first + 1];
-    let cut = Arc::new(Cut { bucket: host.bucket(), left: rng.random_range(0..400).into() });
+    // cladefs: a pass's read of its cell's head, a GET of every slot (TASK-691), as many more.
+    let most = 400 + bucket_cell::identity::DEFAULT_HEAD_SLOTS;
+    let cut = Arc::new(Cut { bucket: host.bucket(), left: rng.random_range(0..most).into() });
     let passes = Passes::start(cut.clone(), interval);
     dir.fail_after(Some(rng.random_range(0..600)));
     let (durable, _) = workload(rng, &store, &mut epochs, Model::default(), first);

@@ -341,9 +341,9 @@ fn buckets_are_added_in_turn_and_recorded_in_every_root() {
     assert!(refused.contains("EINVAL (errno 22)"), "{refused}");
     let expected = format!(
         "version 3\n\
-         1 provider=file region=home url={root} master_key_id=mk1\n\
-         2 provider=file region=us-east-1 url={east} kms=aws-kms://us-east-1\n\
-         3 provider=file region=eu-west-1 url={west} endpoint=https://e\n"
+         1 provider=file region=home url={root} master_key_id=mk1 head_slots=10\n\
+         2 provider=file region=us-east-1 url={east} kms=aws-kms://us-east-1 head_slots=10\n\
+         3 provider=file region=eu-west-1 url={west} endpoint=https://e head_slots=10\n"
     );
     for bucket in [&root, &east, &west] {
         assert_eq!(run(&["buckets", bucket]), Ok(expected.clone()), "{bucket}");

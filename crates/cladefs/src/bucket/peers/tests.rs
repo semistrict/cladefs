@@ -316,6 +316,6 @@ fn hosts_ask_peers_only_for_framed_objects_they_dont_own() {
     peers.set([me]);
     assert!(peers.owner(&segment, 0).is_none(), "asked itself");
     assert_eq!(peers.addresses(), [me]);
-    assert!(!bucket_cell::peer::served(&layout::head(test_cell(1))), "a head served");
+    assert!(!bucket_cell::peer::served(&layout::head(test_cell(1), 0)), "a head served");
     assert!(bucket_cell::peer::served(&segment));
 }

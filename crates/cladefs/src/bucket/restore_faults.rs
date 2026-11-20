@@ -460,9 +460,12 @@ impl Hosts {
                 | Kind::Extent { .. }
                 | Kind::Moves { .. } => true,
                 // A head is left over if its cell lives (TASK-407, TASK-515).
-                Kind::Head { cell } => !block_on(bucket_cell::head::get(&*self.bucket, cell))
-                    .unwrap()
-                    .is_some_and(|head| head.deleted()),
+                // cladefs: but a failed head's marks, a day (TASK-691).
+                Kind::Head { cell, .. } => {
+                    let read = block_on(bucket_cell::head::read(&*self.bucket, cell)).slots();
+                    let failed = *read.found() == bucket_cell::head::Found::Failed;
+                    !failed && !read.head(cell).unwrap().is_some_and(|head| head.deleted())
+                }
                 // cladefs: a block of object IDs taken stays for good (TASK-364), as does the bucket's
                 // identity (TASK-633.9), a reference's
                 // mark, retired or taken back (TASK-395.13), and a tenant's KEK object

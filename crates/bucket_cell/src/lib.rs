@@ -122,6 +122,15 @@ pub enum Error {
     Stale,
     #[error("no such cell")]
     NoCell,
+    /// cladefs: a cell's head found with a slot empty and no deletion's head, its maker making it,
+    /// or dead making it, or failed, or the collector removing it (TASK-691): no one but its maker
+    /// writes it, and whoever needs it gone fails it ([`head::fail`]).
+    #[error("cell {0}'s head is being made, failed, or removed")]
+    Unmade(layout::CellId),
+    /// cladefs: a bucket's settings asked out of their ranges, or against the root's
+    /// ([`identity::Settings`], TASK-691).
+    #[error("bucket settings: {0}")]
+    Settings(String),
     /// A fork's child has a record naming another origin: another cell has the ID the fork's
     /// guest gave it, which that cell took while the fork was made (TASK-79.82). The fork failed;
     /// its parent's cell is as sound as before.
@@ -246,8 +255,29 @@ pub struct Rules {
     /// the condition that the head is its own taking still ([`head::swap`]): written whatever is
     /// there, a writer taken over writes the head over its successor's, whose acknowledged commits
     /// it then names not (TASK-407).
-    /// TLA+: `specs/bucket/mutations/NoHeadSwap.cfg`.
+    /// TLA+: `specs/bucket/mutations/NoHeadSwap.cfg`. cladefs: in a head of slots, the condition
+    /// is on the slot the swap writes (TASK-691): `specs/head-slots/mutations/NoSlotCondition.cfg`.
     pub head_swap: bool,
+    /// cladefs: a head is made with every slot ([`head::birth`], TASK-691), and no write but its
+    /// maker's creates one: without it, the first slot alone, the others created as their turns
+    /// come, a writer that held the cell, removed since, creates its next slot, a live head back.
+    /// TLA+: `specs/head-slots/mutations/NoSlotsAtBirth.cfg`.
+    pub slots_at_birth: bool,
+    /// cladefs: a read of a head finds one only if it found every slot holding one, or one a
+    /// deletion's (TASK-691): without it, the newest it found, though a slot is empty, a head its
+    /// maker is still making, or one older than the deletion's, being removed.
+    /// TLA+: `specs/head-slots/mutations/NoWholeOrFinal.cfg`.
+    pub whole_or_final: bool,
+    /// cladefs: a read finding a mark in a head's slot finds no head ([`head::fail`], TASK-691):
+    /// without it, the newest version it found, of a head failed as its maker made it, whose other
+    /// slots the maker filled.
+    /// TLA+: `specs/head-slots/mutations/NoMarksFail.cfg`.
+    pub marks_fail: bool,
+    /// cladefs: the collector deletes a failed head's marks only a day after they were made
+    /// ([`head::MARKS_KEPT`], TASK-691), its maker's creates done: without it, at once, so that the
+    /// maker's late creates fill the slots the marks held, a whole head, live.
+    /// TLA+: `specs/head-slots/mutations/NoMarksKept.cfg`.
+    pub marks_kept: bool,
     /// A segment's and a checkpoint's key names its writer's epoch ([`layout::segment`],
     /// [`layout::checkpoint`]): without it, two writers' segments of one number land at one key,
     /// the later over the earlier, which a head may name (TASK-407).
@@ -402,6 +432,10 @@ pub struct Rules {
 impl Rules {
     pub const ALL: Self = Self {
         head_swap: true,
+        slots_at_birth: true,
+        whole_or_final: true,
+        marks_fail: true,
+        marks_kept: true,
         epoch_keys: true,
         collector_epochs: true,
         moves_by_pass: true,
