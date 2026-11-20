@@ -132,6 +132,13 @@ fn in_arena(store: &OpenCell, arena: &Arc<Arena>) -> Result<(), Errno> {
 /// restored from a snapshot at once opens the store its VM had (TASK-39.1).
 pub(super) const CLOSING_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// cladefs: how long holding a version's store waits for its holder (TASK-443.6): as long as it
+/// holds it. Its holders are the daemon's own work, which ends: a restore opening it from the
+/// bucket for the restores beside it, which waited [`CLOSING_WAIT`] at most before and failed
+/// `EBUSY` (11 of 20 restores of one version, its opening taking 10.9 s from a bucket 600 ms
+/// away); a sync of it; its close, once no restore forked it for a while.
+const VERSION_WAIT: std::time::Duration = std::time::Duration::MAX;
+
 /// The path that names the store at `path` in the daemon's [`table`]: whichever way a request
 /// names it.
 pub(super) fn store_key(path: &Path) -> PathBuf {
@@ -172,7 +179,12 @@ pub(crate) struct MountHold(#[allow(dead_code, reason = "held for its drop")] Ho
 /// Holds the store at `path` for the daemon, as [`hold_blocking`] does, holding no thread while
 /// it waits.
 async fn hold(path: &Path) -> Result<Hold, Errno> {
-    let hold = hold_to_fork(path).await?;
+    hold_within(path, CLOSING_WAIT).await
+}
+
+/// cladefs: holds the store at `path` for the daemon, as [`hold`] does, waiting at most `wait`.
+async fn hold_within(path: &Path, wait: std::time::Duration) -> Result<Hold, Errno> {
+    let hold = table().hold_async(&store_key(path), wait).await?;
     close_kept(hold.take_kept()).await;
     Ok(hold)
 }
@@ -782,7 +794,7 @@ fn version_dir(cell: CellId, version: u64) -> PathBuf {
 async fn opened_version(cell: CellId, version: u64, capacity: u64) -> Result<PathBuf, Errno> {
     let capacity = capacity.max(OpenCell::BLOCK_SIZE as u64);
     let dir = version_dir(cell, version);
-    let held = hold(&dir).await?;
+    let held = hold_within(&dir, VERSION_WAIT).await?;
     if dir.exists() && !crate::host_cell::unmade(&dir) {
         return Ok(dir);
     }
@@ -964,7 +976,8 @@ async fn kept_or_open(from: &Path, capacity: u64) -> Result<(Arc<HeldCell>, Open
     if let Some(kept) = kept(&store_key(from)) {
         return Ok((kept, Opened::Before));
     }
-    let hold = hold_to_fork(from).await?;
+    // TASK-443.6: however long a restore beside it takes to open it ([`VERSION_WAIT`]).
+    let hold = table().hold_async(&store_key(from), VERSION_WAIT).await?;
     // Opened by a restore that held it before, beside this one.
     if let Some(kept) = kept(hold.key()) {
         return Ok((kept, Opened::Now));
