@@ -3,9 +3,11 @@ id: TASK-682
 title: >-
   A replica directory restored from an older image keeps its incarnation and
   forgets its promises: a fenced writer's appends are accepted again
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-20 00:59'
+updated_date: '2026-11-20 01:04'
 labels:
   - durability
   - peers
@@ -35,3 +37,9 @@ Found 2026-11-19 comparing with FoundationDB, which assumes disks never regress 
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-19: the user chose a documented rule only, no detection (explained: a per-address generation object in the bucket, bumped at each start, was offered).
+<!-- SECTION:NOTES:END -->

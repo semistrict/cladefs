@@ -4,9 +4,11 @@ title: >-
   A retake on the writer's own disk activates its configuration without the
   commits only its own log and an unreachable member hold: the next take loses
   commits told Replicated
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-20 00:42'
+updated_date: '2026-11-20 01:04'
 labels:
   - durability
   - peers

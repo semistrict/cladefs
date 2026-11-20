@@ -3,9 +3,11 @@ id: TASK-681
 title: >-
   A replicated cell whose f+1 members are lost for good can't be taken: the
   forced take from the bucket alone that doc-21 and doc-12 promise is not built
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-20 00:59'
+updated_date: '2026-11-20 01:04'
 labels:
   - durability
   - peers

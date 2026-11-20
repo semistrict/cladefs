@@ -3,9 +3,11 @@ id: TASK-680
 title: >-
   Replicated cells in the seeded simulation: members, takes and replacements
   under crashes, torn writes, delayed, duplicated and partitioned peer traffic
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-20 00:59'
+updated_date: '2026-11-20 01:04'
 labels:
   - durability
   - peers
