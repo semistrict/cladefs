@@ -3,9 +3,10 @@ id: TASK-685.13
 title: >-
   cladefsd builds under --cfg madsim on Linux: its gRPC services (control API,
   health, mount, peers) on madsim's tonic
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-20 15:20'
+updated_date: '2026-11-20 16:30'
 labels: []
 dependencies: []
 parent_task_id: TASK-685
