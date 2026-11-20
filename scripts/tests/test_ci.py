@@ -61,7 +61,7 @@ def packages():
 class Ci(unittest.TestCase):
     def test_each_part_installs_its_own_tools_alone(self):
         installed = packages()
-        self.assertEqual(sorted(installed), sorted(["workspace", "sim", "shuttle",
+        self.assertEqual(sorted(installed), sorted(["workspace", "sim", "madsim", "shuttle",
                                                     "clippy scripts", "guest", "go",
                                                     "firecracker"]))
         for package, users in OWN.items():
@@ -75,8 +75,11 @@ class Ci(unittest.TestCase):
     def test_no_build_needs_protoc_or_libclang(self):
         """What lets the job install neither but in the firecracker part: the gRPC API compiled by
         protox, not protoc, and no bindgen, which loads libclang, in cladefs's workspace or the guest
-        tests'. One that comes needs them back. The VMM's has it, its part's own libclang's why."""
-        self.assertIn("protox::compile", (ROOT / "crates/cladefs/build.rs").read_text())
+        tests'. One that comes needs them back. The VMM's has it, its part's own libclang's why.
+        cladefs: protox's descriptors generated from, its tonic-build told to run no protoc."""
+        build = (ROOT / "crates/cladefs/build.rs").read_text()
+        self.assertIn("protox::Compiler", build)
+        self.assertIn(".skip_protoc_run()", build)
         for lock in [ROOT / "Cargo.lock", ROOT / "guest/tests/Cargo.lock"]:
             self.assertNotIn('name = "bindgen"', lock.read_text(), lock)
         self.assertIn('name = "bindgen"', (ROOT / "vendor/firecracker.lock").read_text())
