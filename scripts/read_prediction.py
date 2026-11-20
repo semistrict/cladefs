@@ -29,10 +29,14 @@ Predictors:
   a file's extents are numbered in the order they were written.
 - `first`: the first boot's units, kept for good: what the sandbox team's JuiceFS working set does.
 - `union`: every unit any boot before read.
+- `window`: every unit any of the last KEEP boots read: the boots before forgotten.
 - `recent`: each unit scored by the share of the last KEEP boots that read it, each boot weighted by
-  half again for each HALF_LIFE boots of its age; the units scoring THRESHOLD or more fetched,
-  those read earliest first.
-- `recent+next`: both.
+  half again for each HALF_LIFE boots of its age; the units scoring THRESHOLD or more fetched.
+- `window+next`: both.
+
+Those from history are fetched in the order of each unit's earliest read in any boot they keep:
+one set serving two workloads, a unit one of them reads early is fetched early, though the other
+reads it late.
 - `oracle`: the boot's own units, known ahead: the bound.
 
 The prefetch model: what a predictor names before the boot is queued as it opens, in order;
@@ -241,13 +245,13 @@ class Recent(Predictor):
         boots = self.boots[-self.keep:]
         weights = [0.5 ** ((len(boots) - 1 - age) / self.half_life) for age in range(len(boots))]
         total = sum(weights)
-        scores, when = {}, {}
+        scores, earliest = {}, {}
         for weight, boot in zip(weights, boots):
             for unit, (at, _) in boot.first.items():
                 scores[unit] = scores.get(unit, 0.0) + weight / total
-                when.setdefault(unit, []).append(at)
+                earliest[unit] = min(earliest.get(unit, at), at)
         chosen = [unit for unit, score in scores.items() if score >= self.threshold - 1e-12]
-        return sorted(chosen, key=lambda unit: (sum(when[unit]) / len(when[unit]), unit))
+        return sorted(chosen, key=lambda unit: (earliest[unit], unit))
 
     def ran(self, boot):
         self.boots.append(boot)
@@ -256,6 +260,11 @@ class Recent(Predictor):
 def union():
     """Every unit any boot before read: no boot forgotten, any one read enough."""
     return Recent(keep=sys.maxsize, half_life=math.inf, threshold=0.0, name="union")
+
+
+def window(keep):
+    """Every unit any of the last `keep` boots read."""
+    return Recent(keep=keep, half_life=math.inf, threshold=0.0, name="window")
 
 
 class Both(Predictor):
@@ -328,8 +337,8 @@ def replay(boots, predictor, model, sizes):
 def predictors(params):
     def recent():
         return Recent(params.keep, params.half_life, params.threshold)
-    return [Predictor(), Next(params.next), First(), union(), recent(),
-            Both(recent(), Next(params.next)), Oracle()]
+    return [Predictor(), Next(params.next), First(), union(), window(params.keep), recent(),
+            Both(window(params.keep), Next(params.next)), Oracle()]
 
 
 @dataclass

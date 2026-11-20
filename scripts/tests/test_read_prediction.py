@@ -147,6 +147,19 @@ class Replays(unittest.TestCase):
         # Of b and c, c weighs 2/3 and b 1/3: c's alone scores half or more; a is forgotten.
         self.assertEqual(recent.ahead(), [((BASE, 3), 0)])
 
+    def test_the_window_forgets_boots_past_those_it_keeps(self):
+        kept = rp.window(2)
+        for name, extent in [("a", 1), ("b", 2), ("c", 3)]:
+            kept.ran(boot(name, line(100, extent, 0)))
+        self.assertEqual(kept.ahead(), [((BASE, 2), 0), ((BASE, 3), 0)])
+
+    def test_history_is_fetched_by_each_units_earliest_read_in_any_boot(self):
+        # Extent 2, which the notebook reads late, the query reads first: it goes first.
+        kept = rp.union()
+        kept.ran(boot("notebook", line(100, 1, 0), line(900, 2, 0)))
+        kept.ran(boot("query", line(50, 2, 0)))
+        self.assertEqual(kept.ahead(), [((BASE, 2), 0), ((BASE, 1), 0)])
+
     def test_both_fetch_what_history_predicts_and_what_the_boot_reads_next(self):
         both = rp.Both(rp.First(), rp.Next(1))
         self.assertEqual(both.name, "first+next")
@@ -160,8 +173,8 @@ class Replays(unittest.TestCase):
     def test_the_report_compares_every_predictor(self):
         boots = self.boots()
         results = rp.report(boots, self.model, rp.Sizes(self.traces), rp.Params())
-        self.assertEqual(list(results), ["none", "next", "first", "union", "recent",
-                                         "recent+next", "oracle"])
+        self.assertEqual(list(results), ["none", "next", "first", "union", "window", "recent",
+                                         "window+next", "oracle"])
         table = rp.text(results)
         self.assertIn("oracle                  1.00         0.0      0.00 (0.09)", table)
 
