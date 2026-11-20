@@ -620,31 +620,27 @@ async fn ephemeral_attrition() -> Result<(), String> {
             let guest = guest().await;
             let cell = guest.open(&reading, 64 << 20).await.unwrap();
             let inherited = cladefs::ExtentId { cell: parent, sequence: 1 };
-            let mut read = vec![(0, guest.read(inherited, 0, 4096).await)];
+            let inherited = guest.read(inherited, 0, 4096).await;
+            let mut read = Vec::new();
             for &sequence in expected.keys() {
-                read.push((
-                    sequence,
-                    guest.read(cladefs::ExtentId { cell, sequence }, 0, 4096).await,
-                ));
+                let extent = cladefs::ExtentId { cell, sequence };
+                read.push((sequence, guest.read(extent, 0, 4096).await));
             }
-            (cell, read)
+            (cell, inherited, read)
         })
         .await
         .unwrap();
-    let (cell, read) = read;
+    let (cell, inherited, read) = read;
     assert_eq!(cell, child, "the cell read is the ephemeral one");
+    if inherited.ok() != Some(block_of(99, 1)) {
+        return Err("the block the cell inherits read otherwise".to_owned());
+    }
     let told = told.lock().unwrap().clone();
     assert!(!told.is_empty(), "no write was told committed");
-    let mut lost = Vec::new();
-    for (sequence, block) in read {
-        let expected = match sequence {
-            0 => Some(block_of(99, 1)),
-            sequence => told.get(&sequence).cloned(),
-        };
-        if block.ok() != expected {
-            lost.push(sequence);
-        }
-    }
+    let lost: Vec<u64> = (read.into_iter())
+        .filter(|(sequence, block)| block.as_ref().ok() != told.get(sequence))
+        .map(|(sequence, _)| sequence)
+        .collect();
     // One journal entry of the cell's, its holder's.
     let noted: Vec<usize> = (0..3)
         .filter(|&each| {
