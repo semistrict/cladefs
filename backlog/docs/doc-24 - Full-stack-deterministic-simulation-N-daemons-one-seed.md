@@ -3,7 +3,7 @@ id: doc-24
 title: 'Full-stack deterministic simulation: N daemons, one seed'
 type: specification
 created_date: '2026-11-20 03:31'
-updated_date: '2026-11-20 04:01'
+updated_date: '2026-11-20 05:02'
 ---
 # Full-stack deterministic simulation
 
@@ -149,6 +149,61 @@ what was Replicated; every host lost, what was Uploaded.
 - **Decision: go on with madsim.** The madsim build's target is `target/madsim`
   (`CARGO_TARGET_DIR`), as `--cfg madsim` rebuilds everything.
 
+## What the thread inventory found (TASK-685.4, 2026-11-20)
+
+cladefsd starts its threads at 41 sites outside tests. They fall into four groups:
+
+- **12 become tasks**: the control, peers, VM-receive (`server::IO`), pager and bucket runtimes;
+  the request pool and the flushers; the HTTP server; the sweep and stats loops.
+- **5 already run inline** on a serial `Dir` (`Dir::concurrent()`); only `framing::on_threads`
+  is not gated yet.
+- **4 have step functions**, which the simulation drives itself:
+  - the memory governor (it needs a step taking the host's memory);
+  - the disk governor (`govern_once`);
+  - the page cache's flusher (`flush_pass`);
+  - the replicators (`Replicator::idle`/`drive`).
+- **16 are outside** the simulation: the VM socket, FUSE, userfaultfd, signals and Fxfs, plus 3
+  sites in other binaries.
+
+**The hard part is blocking, not threads.** A request job is synchronous. On its pool thread it
+waits on:
+
+- condvars, for durability and upload waits;
+- a guest's acknowledgements;
+- the pager, through `futures::executor::block_on`.
+
+There are also about 105 `block_on` calls outside tests:
+
+- `upload::block_on`, and the bucket runtime's;
+- `delete_cell`, and the region lookup in `peers::start`;
+- the replicator's gRPC member;
+- the control API's `spawn_blocking` work: OpenCell create, open, take and fork, which wait on
+  uploads.
+
+madsim runs one thread. A task that blocks on a condvar stops the whole simulation, because the
+task that would wake it never runs. And madsim has no `block_on` at all. So turning threads into
+tasks is not enough: every wait on these paths has to become an `.await`, which means the request
+path becomes async from the pool down to the store's durability and upload waits. That is a
+larger change than step 4 assumed. The ways forward:
+
+1. **Make the daemon async down to its waits** (madsim as planned). This is the biggest change.
+   The request path is `local_cell`'s synchronous API (durability, uploads), which the in-process
+   device and the CLI share.
+2. **A scheduler of our own over real threads**, as `local_cell::sim` and Shuttle are. Shuttle
+   (Apache-2.0, already used here) schedules threads, mutexes and condvars deterministically, but
+   has no network or time. This needs a simulated network, clock and runtime of our own (the
+   in-house fallback above).
+3. **Simulate the async layers alone**: control, peers, the bucket protocol, replication through
+   `Replicator::drive`, and `local_cell::sim` below them, without the request pool. Most of what
+   the replicated simulation does already, at the daemon's level, and no more.
+
+Until this is decided, the steps that serve any of the three go on:
+
+- per-node statics (done);
+- a per-node environment and the daemon core (step 2);
+- disk through `Dir`;
+- the in-process bucket.
+
 ## Steps
 
 1. **Spike** (a day): cladefs builds under `RUSTFLAGS="--cfg madsim"` with the renamed packages,
@@ -157,7 +212,12 @@ what was Replicated; every host lost, what was Uploaded.
    is rewritten for the in-house fallback.
 2. **A daemon core that boots from a configuration value**, as an async task: cladefsd's `main`
    reads the environment and calls it; the simulation calls it once per node. Its sockets
-   (control, peers, metrics) given to it, TCP under madsim. (Added by the spike.)
+   (control, peers, metrics) given to it, TCP under madsim. (Added by the spike.) As built
+   (TASK-685.9), the configuration value is the node's environment
+   (`node_local::env`, which `node_local::env::set_vars` gives a simulated node). The daemon's
+   modules read it as they read the process's, so production and the simulation configure a
+   daemon with the same code. The core, `cladefsd::boot`, binds its own sockets in the order
+   `main` did.
 3. **Per-node statics** (`node_local!`), crate by crate.
 4. **Threads and runtimes** through one seam (tasks under madsim), `blocking()` inline.
 5. **Disk through `Dir`** everywhere cladefsd writes (its stores, replica directories, the part
