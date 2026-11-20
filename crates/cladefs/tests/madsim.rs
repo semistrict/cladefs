@@ -41,22 +41,24 @@ async fn boot(host: u8, root: &Path, bucket: Arc<ObjectBucket>, ephemeral: Optio
     // As a host's process boots: its statics anew, its node started again after a kill too.
     node_local::starting();
     let tenants = root.join("tenants").display().to_string();
-    node_local::env::set_vars([
+    // One call: it sets the node's whole environment.
+    let mut vars = vec![
         ("CLADEFSD_BUCKET", "memory:///cells".to_owned()),
         ("CLADEFSD_TOKEN", host.to_string()),
         ("CLADEFSD_GRPC", control(host).to_string()),
         ("CLADEFSD_TENANTS", tenants),
-    ]);
+    ];
     if let Some(hosts) = ephemeral {
         let others =
             (1..=hosts).filter(|&other| other != host).map(|other| peer(other).to_string());
         let peers: Vec<String> = std::iter::once(peer(host).to_string()).chain(others).collect();
-        node_local::env::set_vars([
+        vars.extend([
             ("CLADEFSD_EPHEMERAL", root.join("ephemeral").display().to_string()),
             ("CLADEFSD_PEER_ADDRESS", peer(host).to_string()),
             ("CLADEFSD_PEERS", peers.join(",")),
         ]);
     }
+    node_local::env::set_vars(vars);
     cladefs::cladefsd::use_bucket(bucket);
     cladefs::cladefsd::boot(&root.join("vms.sock"), Some(256 << 20)).await.unwrap();
     // As cladefsd's main parks once it booted: a node whose init returns exits, its tasks with it.
