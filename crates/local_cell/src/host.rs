@@ -83,9 +83,12 @@ pub fn place<D: Dir>(dir: &D, token: u64, force: bool) -> Result<(), Error> {
     let mut text = vec![0; file.size()? as usize];
     file.read_at(&mut text, 0).context("reading the description")?;
     let mut described = CellFile::parse(std::str::from_utf8(&text)?)?;
+    // A forced taking's report stays its placement's, which placing again at its token is.
+    if described.token != Some(token) {
+        described.forced_after = None;
+    }
     described.token = Some(token);
     described.forced = force.then_some(token);
-    described.forced_after = None;
     dir.replace(DESCRIPTION, described.text().as_bytes())?;
     dir.sync_dir("")?;
     Ok(())
