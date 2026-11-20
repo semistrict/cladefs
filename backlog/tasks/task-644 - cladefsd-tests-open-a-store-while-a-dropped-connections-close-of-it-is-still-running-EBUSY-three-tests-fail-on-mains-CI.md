@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 20:37'
-updated_date: '2026-11-20 00:01'
+updated_date: '2026-11-20 06:03'
 labels:
   - testing
 dependencies: []
@@ -59,4 +59,6 @@ Related, not the same: TASK-443.6 (restores of a point still being opened fail E
 ubu1 (fxjob, 4 threads): with the fix, forks_of_a_version_wait_for_the_close_of_the_store_that_made_it, forks_of_a_version_right_after_its_writer_went_sync_the_store_still_closing, restores_over_what_a_failed_cleanup_left_fork_anew, hostile::page_ins_in_flight_are_bounded pass. Mutant (the wait removed): the new test fails left (Err(()), Err(ENOENT)): the fork never waited and failed as CI did. AC#1 settled: the daemon's fault (a fork reading the bucket before a close it can't see uploads), not the tests'.
 
 AC#2: ubu1, one fxjob (8 CPUs): nextest --test-threads 4 --stress-count 50 of the five tests and the new one, beside a release build of cladefs: 50/50 iterations, 300/300 passed. Waiting on main's CI test (workspace) for the rest of AC#2.
+
+Seen 2026-11-20 on ubu1 (load ~15 on 16 cores) running cladefsd::tests at --test-threads 32 under fxjob, at main 05299a254 plus a test-only change (t3/task-677): stores_open_once_their_vm_process_goes failed once at tests.rs:2362 (opening the store again: EBUSY).
 <!-- SECTION:NOTES:END -->

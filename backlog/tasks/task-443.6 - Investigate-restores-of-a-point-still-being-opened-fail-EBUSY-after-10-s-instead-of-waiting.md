@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 12:25'
-updated_date: '2026-11-16 22:53'
+updated_date: '2026-11-20 06:03'
 labels:
   - perf
   - review-2026-11-15
@@ -36,3 +36,9 @@ crates/cladefs/src/cladefsd/stores.rs: the first restore of a point holds its ke
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Seen 2026-11-20 on ubu1 (load ~15 on 16 cores) running cladefsd::tests at --test-threads 32 under fxjob, at main 05299a254 plus a test-only change (t3/task-677): a_zygotes_restores_open_its_copy_once failed 3 times in 4 such runs: restore 0/4/8 Err(EBUSY) at tests.rs:5247 (the restore of a version another restore is still opening gives up with EBUSY). Passes alone (5-7 s).
+<!-- SECTION:NOTES:END -->
