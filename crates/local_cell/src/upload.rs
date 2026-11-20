@@ -1196,6 +1196,11 @@ impl<D: Dir> Uploader<D> {
 impl<D: Dir> Drop for Uploader<D> {
     fn drop(&mut self) {
         self.shared.stop();
+        // cladefs: its host dying, killed, as a simulated host is, nothing waits: its task went with
+        // it (doc-24).
+        if node_local::dying() {
+            return;
+        }
         if let Some(stopped) = self.stopped.take() {
             crate::blocks!(
                 "an uploader dropped unclosed, waiting for it to stop (Uploader::close)"

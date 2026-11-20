@@ -112,6 +112,27 @@ impl<T: Send + Sync + 'static> Reset for NodeLocal<T> {
 #[cfg(madsim)]
 static REGISTRY: std::sync::Mutex<Vec<&'static dyn Reset>> = std::sync::Mutex::new(Vec::new());
 
+/// Whether the simulated node this runs in is dying: killed, its tasks dropped, as a host's process
+/// dies, closing nothing, waiting for nothing. Never, built normally, nor outside a node.
+pub fn dying() -> bool {
+    #[cfg(madsim)]
+    if let Ok(handle) = madsim::runtime::Handle::try_current() {
+        return handle.is_exit(madsim::plugin::node());
+    }
+    false
+}
+
+/// Lets the values of the simulated node this runs in go, as it starts: what a node's `init` calls
+/// first, so that a node started again, killed before, makes its values anew, as a process does at
+/// its boot, where a simulation's runtime has no [`Plugin`] to (a `#[madsim::test]`'s).
+#[cfg(madsim)]
+pub fn starting() {
+    let node = (std::thread::current().id(), madsim::plugin::node());
+    for local in REGISTRY.lock().unwrap().iter() {
+        local.reset(node);
+    }
+}
+
 /// madsim's simulator plugin that lets a killed node's values go, so that it starts again with
 /// none: a simulation's runtime adds it (`Runtime::add_simulator::<node_local::Plugin>()`).
 #[cfg(madsim)]

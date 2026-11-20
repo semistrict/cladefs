@@ -398,7 +398,10 @@ pub(crate) fn at_once<T: Sync>(
             .map_while(|_| match thread::Builder::new().spawn_scoped(scope, syncing) {
                 Ok(other) => Some(other),
                 Err(error) => {
-                    log::warn!("extent store: syncing on fewer threads: {error}");
+                    // cladefs: under madsim, every time, as it should (`crate::sync::thread`).
+                    if !cfg!(madsim) {
+                        log::warn!("extent store: syncing on fewer threads: {error}");
+                    }
                     None
                 }
             })

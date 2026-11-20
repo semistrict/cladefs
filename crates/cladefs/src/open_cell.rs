@@ -549,7 +549,11 @@ impl Drop for OpenCell {
             return;
         }
         // cladefs: the daemon closes every store it has, awaited ([`release`]): under madsim, a store
-        // dropped open is one it let go of where it couldn't wait (doc-24, step 9).
+        // dropped open is one it let go of where it couldn't wait (doc-24, step 9); but for its
+        // host's dying, killed, which closes nothing, as a process killed doesn't.
+        if cfg!(madsim) && node_local::dying() {
+            return;
+        }
         if cfg!(madsim) && !std::thread::panicking() {
             panic!(
                 "a store dropped open, {}: the daemon closes its stores (open_cell::release)",

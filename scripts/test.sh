@@ -90,10 +90,20 @@ if part madsim; then
     madsim=(env RUSTFLAGS="--cfg madsim" CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}/madsim")
     "${madsim[@]}" cargo check --manifest-path "$root/Cargo.toml" -p node_local -p bucket_cell \
         -p local_cell -p cladefs
-    # Each test over MADSIM_TEST_NUM seeds, 20 unless said, from MADSIM_TEST_SEED's, if given.
-    "${madsim[@]}" MADSIM_TEST_NUM="${MADSIM_TEST_NUM:-20}" cargo nextest run \
-        --manifest-path "$root/Cargo.toml" -p node_local -p bucket_cell -p local_cell -p cladefs \
-        --test madsim "$@"
+    # Each test over CLADEFS_MADSIM_SEEDS seeds, 20 unless said, from MADSIM_TEST_SEED's, 1 unless
+    # said: each seed a process of its own, as what a simulation's hosts held, leaked as their
+    # node-local values are, stays in its process for the next to find (TASK-685.15).
+    # A rule search, `*_needs_*`, runs its own seeds, once.
+    simulated=(-p node_local -p bucket_cell -p local_cell -p cladefs --test madsim)
+    first=${MADSIM_TEST_SEED:-1}
+    for seed in $(seq "$first" $((first + ${CLADEFS_MADSIM_SEEDS:-20} - 1))); do
+        "${madsim[@]}" MADSIM_TEST_SEED="$seed" cargo nextest run --manifest-path "$root/Cargo.toml" \
+            "${simulated[@]}" -E 'not test(/_needs_/)' "$@" \
+            || { echo "madsim: seed $seed failed: MADSIM_TEST_SEED=$seed replays it" >&2; exit 1; }
+    done
+    # cladefs's are Linux's alone, as its daemon is: none to run on macOS.
+    "${madsim[@]}" cargo nextest run --manifest-path "$root/Cargo.toml" "${simulated[@]}" \
+        -E 'test(/_needs_/)' --no-tests=pass "$@"
 fi
 # The concurrency tests under Shuttle, built with each crate's `shuttle` feature, which only they
 # can run (TASK-44).

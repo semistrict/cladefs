@@ -97,6 +97,13 @@ impl Guest {
         Ok(self.call(&read).await?.payload)
     }
 
+    /// The sequence its store gives the next extent minted: as a guest that took the cell over
+    /// mints from.
+    pub async fn next_sequence(&self) -> Result<u64, Errno> {
+        let reply = self.call(&Request::Info).await?;
+        Ok(super::codec::Info::from_args(reply.header.args).0.next_sequence)
+    }
+
     /// Frees `extent`.
     pub async fn free(&self, extent: ExtentId) -> Result<(), Errno> {
         self.call(&Request::Free(extent)).await.map(drop)
