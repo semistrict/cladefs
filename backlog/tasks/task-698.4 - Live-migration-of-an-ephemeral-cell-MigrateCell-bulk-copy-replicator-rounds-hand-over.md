@@ -3,10 +3,11 @@ id: TASK-698.4
 title: >-
   Live migration of an ephemeral cell: MigrateCell, bulk copy, replicator
   rounds, hand-over
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-20 16:21'
-updated_date: '2026-11-20 16:22'
+updated_date: '2026-11-20 19:01'
 labels: []
 dependencies:
   - TASK-698.1
