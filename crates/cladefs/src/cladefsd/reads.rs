@@ -5,10 +5,12 @@
 //! cladefs: traces of what VMs read of their cells (TASK-702.1), the evidence a prediction of a
 //! version's reads is to be chosen from. With `CLADEFSD_READ_TRACES` naming a directory, each VM
 //! process's connection records, from its store's opening and for [`WINDOW`], every `READ` its guest
-//! makes and every fault of its DAX window the daemon resolves: when, since the opening, what of
-//! which extent, and how long the guest waited for it. A fault is a VM's first touch of a page its
-//! window maps, whether or not the extent cache holds the page already, so a trace says what a VM
-//! read on a warm host as on a cold one; a page-in would say neither what a warm host's VM read nor
+//! makes, every `MAP` of an extent into its DAX window, and every fault of the window the daemon
+//! resolves: when, since the opening, what of which extent, and how long the guest waited for it.
+//! A `MAP` is the guest's mapping of a file's range it touches; a fault, a VM's first touch of a page
+//! mapped that is not in memory. A warm host installs a `MAP`'s pages in memory already, and its VM
+//! faults on none of them, so the `MAP`s say what a VM read on a warm host, and the faults which of
+//! the pages it touched on a cold one; a page-in would say neither what a warm host's VM read nor
 //! which reads were read-ahead's.
 //!
 //! A trace is written once, as its connection goes, to `<cell>-<opened>.reads` in the directory,
@@ -16,8 +18,8 @@
 //! line [`HEADER`], the second `cell CELL opened MS`, then a line a read,
 //! `AT_US KIND EXTENT_CELL EXTENT_SEQUENCE EXTENT_LEN OFFSET LEN WAITED_US`: times in decimal
 //! microseconds, the extent's ID in base 32, its length (0 where the store can't say, as for an
-//! attached base's) and the range read in hexadecimal, and the kind `read` (a `READ`), `fault` (a
-//! load's fault) or `store` (a store's fault, which makes the page private). `scripts/read_prediction.py`
+//! attached base's) and the range read in hexadecimal, and the kind `read` (a `READ`), `map` (a
+//! `MAP`), `fault` (a load's fault) or `store` (a store's fault, which makes the page private). `scripts/read_prediction.py`
 //! reads them.
 
 use crate::ExtentId;
@@ -64,6 +66,9 @@ pub(super) enum Kind {
     Fault,
     /// A store's fault on its window, which made the page private.
     Store,
+    /// A `MAP` of an extent's bytes into its window: the guest's mapping of a file's range it
+    /// touches, whose pages a warm host installs without a fault.
+    Map,
 }
 
 impl Kind {
@@ -72,6 +77,7 @@ impl Kind {
             Kind::Read => "read",
             Kind::Fault => "fault",
             Kind::Store => "store",
+            Kind::Map => "map",
         }
     }
 }

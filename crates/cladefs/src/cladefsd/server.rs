@@ -1533,14 +1533,24 @@ impl Connection {
                 let mut extents = std::iter::once(first).chain(rest.iter());
                 extents.try_for_each(|extent| store.free(*extent))
             }
-            Request::Map(WindowMapping { window_offset, len, contents }) => match *contents {
-                MappingContents::Zeros => store.map_zeros_at(*window_offset, *len),
-                MappingContents::Extent { extent, offset } => {
-                    store.map(extent, offset, *len, *window_offset).await
+            Request::Map(mapping @ WindowMapping { window_offset, len, contents }) => {
+                let began = std::time::Instant::now();
+                match *contents {
+                    MappingContents::Zeros => store.map_zeros_at(*window_offset, *len)?,
+                    MappingContents::Extent { extent, offset } => {
+                        store.map(extent, offset, *len, *window_offset).await?
+                    }
                 }
-            },
+                self.traced_maps(began, store, std::slice::from_ref(mapping));
+                Ok(())
+            }
             // cladefs: in one change of the window (TASK-92.14).
-            Request::MapMany(mappings) => store.map_many(mappings).await,
+            Request::MapMany(mappings) => {
+                let began = std::time::Instant::now();
+                store.map_many(mappings).await?;
+                self.traced_maps(began, store, mappings);
+                Ok(())
+            }
             Request::Mappings => {
                 *payload = codec::mappings_payload(&store.window_mappings()?);
                 Ok(())
@@ -1791,6 +1801,20 @@ impl Connection {
             // An extent the store can't say the length of, an attached base's, is of 0.
             let extent_len = store.stored_extent(extent).ok().flatten().map_or(0, |(len, _)| len);
             trace.record(kind, began, extent, extent_len, offset, len);
+        }
+    }
+
+    /// cladefs: records in its trace, as [`Connection::traced`] does, the guest's `MAP`s of
+    /// `mappings`, begun at `began` and made: each of a sealed extent's bytes, as the guest maps a
+    /// file's range it touches, whose pages a warm host installs without a fault.
+    fn traced_maps(&self, began: std::time::Instant, store: &OpenCell, mappings: &[WindowMapping]) {
+        if self.reads.get().is_none() {
+            return;
+        }
+        for mapping in mappings {
+            if let MappingContents::Extent { extent, offset } = mapping.contents {
+                self.traced(Kind::Map, began, store, extent, offset, mapping.len);
+            }
         }
     }
 

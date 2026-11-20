@@ -3900,8 +3900,8 @@ fn requests_attach_nothing() {
 }
 
 /// TASK-702.1: with `CLADEFSD_READ_TRACES` naming a directory, a VM's reads are traced, and the
-/// trace written as its connection goes: its `READ`, then its window's faults, a load's and a
-/// store's, each naming the extent, its length, and the range read, in the order made.
+/// trace written as its connection goes: its `MAP`, its `READ`, then its window's faults, a load's
+/// and a store's, each naming the extent, its length, and the range read, in the order made.
 #[test]
 fn a_vms_reads_are_traced() {
     host();
@@ -3954,6 +3954,7 @@ fn a_vms_reads_are_traced() {
     assert_eq!(
         reads,
         [
+            vec!["map", &id, "1", &len, &one, &two],
             vec!["read", &id, "1", &len, "0", "200"],
             vec!["fault", &id, "1", &len, &one, &one],
             vec!["store", &id, "1", &len, &two, &one],
