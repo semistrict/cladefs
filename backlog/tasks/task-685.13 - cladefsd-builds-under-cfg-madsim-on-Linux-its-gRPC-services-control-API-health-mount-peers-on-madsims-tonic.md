@@ -31,4 +31,6 @@ Found 2026-11-20 adding the madsim part (TASK-685.12): on Linux, RUSTFLAGS='--cf
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-20 (3beb3af0c): cladefsd builds under --cfg madsim on Linux: control API's Drained serves both tonic shapes (Refusal), served at a simulated TCP address under madsim (no health service, its status still reported); FUSE Mount service out of the simulation; peers' server at a simulated address; boot async with no VM socket/FUSE/metrics under madsim. test.sh's madsim part checks cladefs on Linux too. Verified: ubu1 clippy + unit 3031/3031 + VMM + guest harness; Mac clippy + unit 2688/2688 + madsim.
+
+Correction: the commit landed on main as 53e702ce9 (3beb3af0c was its local hash before its message was amended).
 <!-- SECTION:NOTES:END -->
