@@ -520,7 +520,14 @@ async fn ephemeral_attrition() -> Result<(), String> {
     let path = |host: usize, round: u64| roots[host].join(format!("ephemeral{round}"));
     let (mut host, mut at) = (0usize, path(0, 0));
     let to = at.display().to_string();
+    let base = roots[0].join("base").display().to_string();
     let forked = manager.spawn(async move {
+        // The version uploaded first, which a fork of it reads in the bucket.
+        let syncing = || {
+            let path = base.clone();
+            async move { connect(1).await.sync_cell(SyncCellRequest { path }).await }
+        };
+        calling(1, syncing).await.unwrap();
         calling(1, || {
             let request = ForkCellRequest {
                 to: to.clone(),
