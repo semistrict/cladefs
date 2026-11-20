@@ -751,9 +751,16 @@ pub(super) async fn import(
     .await?;
     // As the daemon's stores keep their cells: with the host's cache, which what the bucket
     // acknowledged of the image goes into and the import's check reads (TASK-237).
-    let imported = (image.as_path(), reference.as_deref());
-    let made = crate::import::store_keeping(&path, (capacity, tenant), imported, keeping()?);
-    made.await.map_err(|err| errno_of(format_args!("importing {}", image.display()), err))?;
+    // cladefs: on a blocking thread of its own, as before: its walk of a layer's tar entries, which
+    // are not `Send`, spans its awaits (doc-24: image import stays outside the simulation).
+    let (at, keeping) = (path.clone(), keeping()?);
+    blocking(move || {
+        let imported = (image.as_path(), reference.as_deref());
+        let made = crate::import::store_keeping(&at, (capacity, tenant), imported, keeping);
+        crate::open_cell::not_yet_async(made)
+            .map_err(|err| errno_of(format_args!("importing {}", image.display()), err))
+    })
+    .await?;
     let store = open_here(&path).await?;
     let cell = store.cell();
     store.close().await;
