@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-20 00:27'
+updated_date: '2026-11-20 04:41'
 labels:
   - bug
 dependencies: []
@@ -29,3 +30,9 @@ Seen 2026-11-19 in a full `cargo nextest run -p cladefs -p bucket_cell --test-th
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Seen again 2026-11-20 in two full ubu1 workspace runs under fxjob (--test-threads 4, scripts/test.sh clippy+workspace): on t3/replication-protocol-prior-art at 7153707a and on t3/sim-spike at 0ee8c498, both tests.rs:4119 'the daemon holds what the VM process leaves unread' (left 0, right 1), 17.7-17.9 s; passed alone right after (16.0 s). Both branches leave the hostile tests' code unchanged.
+<!-- SECTION:NOTES:END -->
