@@ -927,24 +927,32 @@ impl<D: Dir> Recovering<D> {
     }
 
     /// cladefs: whether it is its writer's copy of what a replicated cell's configuration made at
-    /// `epoch` holds (TASK-683): its write-ahead log holds records; or, holding none, it took its
-    /// cell as the writer of `epoch` ([`Recovering::note_writer_epoch`]), so that what of its
-    /// records it synced, every one a member's end counted, the bucket holds. A store made anew,
-    /// whose log holds none either, took no cell, and isn't: nor is one taken by another writer
-    /// since.
+    /// `epoch` holds (TASK-683): its description names `epoch` among its copies
+    /// ([`Recovering::note_writer_copies`]), so that its write-ahead log holds what that writer
+    /// synced and the bucket doesn't, all of it, or, empty, nothing the bucket doesn't, the
+    /// writer's end counting toward Replicated only once synced (doc-21). Not from its log's
+    /// holding records alone: a log dropped and then restored only in part, or a later writer's,
+    /// holds records too. A store made anew names none.
     pub fn holds_own_copy(&self, epoch: u64) -> bool {
-        self.has_wal() || self.file.writer_epoch == Some(epoch)
+        self.file.writer_copies.contains(&epoch)
     }
 
-    /// cladefs: notes, durably, in its description, that it takes its cell as the writer of `epoch`
-    /// (TASK-683), before the configurations it makes at that epoch are named or replicate
-    /// anything: so that its next take counts its log, empty, as its copy of them
-    /// ([`Recovering::holds_own_copy`]).
-    pub fn note_writer_epoch(&mut self, epoch: u64) -> Result<(), Error> {
-        if self.file.writer_epoch == Some(epoch) {
+    /// cladefs: notes, durably, in its description, that it is its writer's copy of the
+    /// configurations made at `epochs` (TASK-683), keeping those it was of at `named` or after,
+    /// the epoch of the configuration its cell's head names as it is taken, whose copy, and its
+    /// later ones', a take may look for still: before the configurations of the epoch it takes
+    /// its cell as are named or replicate anything.
+    pub fn note_writer_copies(&mut self, epochs: &[u64], named: Option<u64>) -> Result<(), Error> {
+        let mut copies: Vec<u64> = (self.file.writer_copies.iter().copied())
+            .filter(|&epoch| named.is_some_and(|named| epoch >= named))
+            .chain(epochs.iter().copied())
+            .collect();
+        copies.sort_unstable();
+        copies.dedup();
+        if copies == self.file.writer_copies {
             return Ok(());
         }
-        self.file.writer_epoch = Some(epoch);
+        self.file.writer_copies = copies;
         self.dir.replace(DESCRIPTION, self.file.text().as_bytes())?;
         self.dir.sync_dir("")?;
         Ok(())
@@ -1016,6 +1024,14 @@ impl<D: Dir> Recovering<D> {
     /// brings none of it back, whose commits the cell moved on from, to upload after the store's
     /// own since (TASK-295).
     pub fn drop_wal(&mut self) -> Result<(), Error> {
+        // cladefs: its writer's copies, which it holds no more, said so first, durably: a crash
+        // while the log goes, or while members' logs are restored into it, must not leave a log
+        // that counts as one (TASK-683's review).
+        if !self.file.writer_copies.is_empty() {
+            self.file.writer_copies.clear();
+            self.dir.replace(DESCRIPTION, self.file.text().as_bytes())?;
+            self.dir.sync_dir("")?;
+        }
         let dir = &*self.dir;
         let cell = self.file.cell;
         // cladefs: those closed again, not framed, their raw files and logs going (TASK-411.9).
@@ -1370,7 +1386,7 @@ impl<D: Dir> LocalCell<D> {
                 token: None,
                 forced: None,
                 forced_after: None,
-                writer_epoch: None,
+                writer_copies: Vec::new(),
                 kind,
                 version,
             };

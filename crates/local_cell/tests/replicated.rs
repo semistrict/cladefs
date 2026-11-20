@@ -984,6 +984,40 @@ fn retakes_on_the_writers_disk_count_its_empty_log() {
     drop(uploader);
 }
 
+/// TASK-683's review: a writer's store whose write-ahead log is dropped, as a take recovering from
+/// members ahead of it drops it before restoring theirs, is its writer's copy no more, from before
+/// the log goes, whatever a crash keeps of what follows: else a take after a crash, or a failure,
+/// in the restore, counted its log, empty, as the copy that held commits told replicated.
+#[test]
+fn dropped_logs_are_no_writers_copy() {
+    let host = replicated_host();
+    let all = directories(&["a", "b", "c"]);
+    let peers = Peers { me: "a".into(), all, lost: Lost::default() };
+    let dir = MemDir::new();
+    LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
+    let wish = bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated);
+    let recovering = LocalCell::recover_unmade(dir.clone()).unwrap();
+    let writer = Host { runtime: runtime_of_its_own(), bucket: host.bucket.clone() };
+    let (store, uploader) = writer.open_replicated(recovering, 1, wish, peers).unwrap();
+    store.made().unwrap();
+    let last = commit(&store, 0, 4);
+    uploader.wait_replicated(last).unwrap();
+    let configuration = configuration_named(&host);
+    let replicator = store.replicator().unwrap();
+    lose(writer, (uploader, store, replicator));
+    let restarted = dir.crash(1);
+    let mut recovering = LocalCell::recover(restarted.clone()).unwrap();
+    assert!(recovering.has_wal(), "its log holds commits the bucket does not");
+    assert!(recovering.holds_own_copy(configuration.epoch));
+    recovering.drop_wal().unwrap();
+    assert!(!recovering.holds_own_copy(configuration.epoch));
+    drop(recovering);
+    for seed in 0..8 {
+        let recovering = LocalCell::recover(restarted.crash(seed)).unwrap();
+        assert!(!recovering.holds_own_copy(configuration.epoch), "crash {seed}");
+    }
+}
+
 /// A store in memory taking `cell` on `host` as a replicated cell's, its bucket's writes failing
 /// as `faults` say.
 fn faulty_host(faults: &Arc<bucket_cell::faults::Faults>) -> Host {

@@ -1408,9 +1408,11 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // cladefs: a replicated cell whose head names a configuration of f >= 1: its members
         // fenced at this taking's epoch, once it is taken, before anything of theirs is read
         // (doc-21, TASK-537.3.4): no writer of an earlier epoch has a commit replicated after.
-        let old = (held.head.replication.as_ref())
-            .and_then(|replication| replication.configuration.clone())
-            .filter(|configuration| configuration.f >= 1);
+        let named = (held.head.replication.as_ref())
+            .and_then(|replication| replication.configuration.clone());
+        // cladefs: a replicated cell's, whose writer's copies its store notes (TASK-683).
+        let replicated = held.head.replication.is_some() || self.options.replication.is_some();
+        let old = named.clone().filter(|configuration| configuration.f >= 1);
         // cladefs: or, its placement's takings forced, those of them that answer, however few
         // (TASK-681).
         // Its own copy counted if it is its writer's, its log holding records, or, holding none,
@@ -1433,7 +1435,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // cladefs: what the fenced members hold, the longest copy of each log, after the head's
         // last commit: the store's write-ahead log, if it holds none, and what the new
         // configuration's members are given before it is active (TASK-537.3.4).
-        let (seed, recovering, short) = match (&old, fenced) {
+        let (seed, recovering, short, restored) = match (&old, fenced) {
             (Some(old), Some(Fenced { members: fenced, short })) => {
                 let logs = self.read_longest(cell, old, &fenced, &keys).await?;
                 let last = writer.taken().last_commit;
@@ -1484,19 +1486,26 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                         Ok(recovering.restored(&seed, last)?)
                     })?,
                 };
-                (seed, recovering, short)
+                (seed, recovering, short, ahead)
             }
-            _ => (Vec::new(), recovering, None),
+            _ => (Vec::new(), recovering, None, false),
         };
         // cladefs: taken by force from too few members: what may be lost noted in the store's
         // description, which its status says from now on, while this placement holds it; or, of an
         // earlier taking of this forced placement, what that one noted (TASK-681).
         let mut recovering = recovering;
-        // cladefs: the epoch it takes its cell as noted, before a configuration of it is named or
-        // replicates: its log, empty, then counts as its copy at its next take (TASK-683).
-        if self.options.replication.is_some() || old.is_some() {
-            let epoch = writer.epoch();
-            blocking(|| recovering.note_writer_epoch(epoch))?;
+        // cladefs: the copies it is noted, before a configuration of its writer's is named or
+        // replicates (TASK-683): that writer's; and, its log restored from members of the
+        // configuration named, the longest copies of every log a quorum fenced, that one's, all
+        // of it but taken by force. Those it was before of the one named or later kept, unless its
+        // log was dropped, which let them go.
+        if replicated {
+            let mut copies = vec![writer.epoch()];
+            if let (true, None, Some(old)) = (restored, &short, &old) {
+                copies.push(old.epoch);
+            }
+            let named = named.as_ref().map(|configuration| configuration.epoch);
+            blocking(|| recovering.note_writer_copies(&copies, named))?;
         }
         let forced_after = match &short {
             Some(_) => {
@@ -1963,8 +1972,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// cladefs: fences `cell` at `epoch` on the members of `old`, the configuration its head named
     /// as it was taken (doc-21, TASK-537.3.4): f+1 members other than its writer must answer, so
     /// that no ack quorum of `old` is left unfenced, the writer's own copy, which nothing fences,
-    /// counting only if this host is the writer and holds it (`own`: its write-ahead log, or, empty,
-    /// its store the writer's of `old`'s epoch, TASK-683). Each
+    /// counting only if this host is the writer and holds it (`own`: its store noted as the
+    /// writer's copy of `old`, TASK-683). Each
     /// that answered, with the ends of the logs it holds. `forced` (TASK-681), fewer may: why they
     /// are too few, then.
     async fn fence(
