@@ -239,13 +239,16 @@ async fn bucket(
             | layout::Kind::Extent { .. }
             | layout::Kind::Checkpoint { .. }
             | layout::Kind::Moves { .. } => true,
-            layout::Kind::Head { cell } => {
-                report.cells += 1;
+            layout::Kind::Head { cell, slot } => {
+                // Each of a head's slots holds a whole head; the cell counts once.
+                report.cells += usize::from(slot == 0);
                 let head = layout::Head::decode(cell, &object.bytes).with_context(at)?;
-                if head.keks.is_empty() && !head.shredded {
+                // A mark failing a half-made head holds no keys and no data.
+                let keyed = !head.failed;
+                if keyed && head.keks.is_empty() && !head.shredded {
                     report.clear.push(format!("{}: cell {cell}: no KEK, in the clear", at()));
                 }
-                if head.deks.is_empty() && !head.deleted() && written.contains(&cell) {
+                if keyed && head.deks.is_empty() && !head.deleted() && written.contains(&cell) {
                     report
                         .clear
                         .push(format!("{}: cell {cell} wrote objects, its head has no DEK", at()));
