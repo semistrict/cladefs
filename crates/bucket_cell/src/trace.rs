@@ -192,6 +192,18 @@ impl Span {
         result
     }
 
+    /// cladefs: awaits `operation`, of which it is the span, its context current as each poll of it
+    /// runs ([`Span::around`]), saying whether it failed ([`Span::result`]): [`Span::run`]'s async
+    /// form (TASK-685.3).
+    pub async fn run_async<T, E: std::fmt::Display>(
+        &self,
+        operation: impl Future<Output = Result<T, E>>,
+    ) -> Result<T, E> {
+        let result = self.around(operation).await;
+        self.result(&result);
+        result
+    }
+
     /// Makes it the context current on this thread until the guard returned drops: the parent of
     /// the spans started meanwhile ([`Span::start`]). Nothing while it is nothing.
     pub fn enter(&self) -> Option<opentelemetry::ContextGuard> {
