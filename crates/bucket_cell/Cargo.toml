@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+node_local.workspace = true
 base32_id.workspace = true
 async-trait.workspace = true
 # cladefs: the frames of where a read missed every cache, resolved only when shown (TASK-672.2).

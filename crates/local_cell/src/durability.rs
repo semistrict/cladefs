@@ -82,13 +82,19 @@ impl Lags {
     }
 }
 
-/// [`Lags`] of this process's stores.
-static LAGS: std::sync::Mutex<Lags> =
-    std::sync::Mutex::new(Lags { count: 0, max_us: 0, within_turn: 0, buckets: [0; LAG_BUCKETS] });
+node_local::node_local! {
+    /// [`Lags`] of this process's stores.
+    static LAGS: std::sync::Mutex<Lags> = std::sync::Mutex::new(Lags {
+        count: 0,
+        max_us: 0,
+        within_turn: 0,
+        buckets: [0; LAG_BUCKETS],
+    });
+}
 
 /// cladefs: how long this process's stores' commits waited to be made durable ([`Lags`]).
 pub fn durability_lags() -> Lags {
-    *LAGS.lock().unwrap()
+    *LAGS.get().lock().unwrap()
 }
 
 /// The commits due to be made durable, which a flush takes, oldest first, and the epoch of the
@@ -124,7 +130,7 @@ impl<T> Durability<T> {
     pub fn finish(&mut self, last: u64) {
         debug_assert!(last > self.durable && last <= self.ordered, "flushes finish in order");
         let now = std::time::Instant::now();
-        let mut lags = LAGS.lock().unwrap();
+        let mut lags = LAGS.get().lock().unwrap();
         for _ in self.durable..last {
             let ordered = self.ordered_at.pop_front().expect("a commit ordered is timed");
             lags.record(now - ordered);

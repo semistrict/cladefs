@@ -160,9 +160,11 @@ pub struct PageCache {
 
 /// The process's page cache, which every store's files share ([`crate::HostDir`]).
 pub fn shared() -> &'static Arc<PageCache> {
-    static SHARED: std::sync::LazyLock<Arc<PageCache>> =
-        std::sync::LazyLock::new(|| PageCache::new(Options::default()));
-    &SHARED
+    node_local::node_local! {
+        /// The daemon's, each simulated node's its own (doc-24).
+        static SHARED: Arc<PageCache> = PageCache::new(Options::default());
+    }
+    SHARED.get()
 }
 
 impl PageCache {

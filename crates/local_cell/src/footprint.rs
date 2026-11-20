@@ -130,7 +130,7 @@ impl Footprint {
         change(&self.tally);
         if let Some(allotment) = &*allotment {
             change(&allotment.tally);
-            change(&TOTAL.tally);
+            change(&TOTAL.get().tally);
         }
         if let Some(disk) = &self.disk {
             change(&disk.stores);
@@ -164,10 +164,10 @@ impl Footprint {
         let mut allotted = self.allotment.lock().unwrap();
         if let Some(was) = allotted.take() {
             moved(&self.tally, &was.tally, false);
-            moved(&self.tally, &TOTAL.tally, false);
+            moved(&self.tally, &TOTAL.get().tally, false);
         }
         moved(&self.tally, &allotment.tally, true);
-        moved(&self.tally, &TOTAL.tally, true);
+        moved(&self.tally, &TOTAL.get().tally, true);
         *allotted = Some(allotment.clone());
     }
 
@@ -206,7 +206,7 @@ impl Footprint {
             Some(allotment) if over(&allotment.tally, &allotment.limit) => {
                 Some(DiskFull::Allotment)
             }
-            Some(_) if over(&TOTAL.tally, &TOTAL.limit) => Some(DiskFull::Total),
+            Some(_) if over(&TOTAL.get().tally, &TOTAL.get().limit) => Some(DiskFull::Total),
             Some(allotment) if over(&allotment.tally, &allotment.share) => Some(DiskFull::Share),
             _ => self.disk.as_ref().and_then(|disk| disk_full(disk)),
         };
@@ -473,12 +473,16 @@ struct Total {
     limit: AtomicU64,
 }
 
-/// Every allotment's, together.
-static TOTAL: Total = Total { tally: Tally::new(), limit: AtomicU64::new(NONE) };
+node_local::node_local! {
+    /// Every allotment's, together.
+    static TOTAL: Total = Total { tally: Tally::new(), limit: AtomicU64::new(NONE) };
+}
 
-/// Every allotment made: kept for the process's life, as their stores' files are on its disk,
-/// granted or not.
-static ALLOTMENTS: std::sync::Mutex<Vec<Arc<Allotment>>> = std::sync::Mutex::new(Vec::new());
+node_local::node_local! {
+    /// Every allotment made: kept for the process's life, as their stores' files are on its disk,
+    /// granted or not.
+    static ALLOTMENTS: std::sync::Mutex<Vec<Arc<Allotment>>> = std::sync::Mutex::new(Vec::new());
+}
 
 /// The allotment of the directory `dir`, a tenant's: the one made already, or one made now,
 /// counting the stores in it as they were counted, and those not counted yet, closed, as one
@@ -486,7 +490,7 @@ static ALLOTMENTS: std::sync::Mutex<Vec<Arc<Allotment>>> = std::sync::Mutex::new
 pub fn allotment(dir: &Path) -> io::Result<Arc<Allotment>> {
     let dir = std::fs::canonicalize(dir)?;
     let made = {
-        let mut allotments = ALLOTMENTS.lock().unwrap();
+        let mut allotments = ALLOTMENTS.get().lock().unwrap();
         if let Some(made) = allotments.iter().find(|allotment| allotment.dir == dir) {
             return Ok(made.clone());
         }
@@ -504,7 +508,7 @@ pub fn allotment(dir: &Path) -> io::Result<Arc<Allotment>> {
         made
     };
     let counted: Vec<_> = {
-        let ledger = LEDGER.lock().unwrap();
+        let ledger = LEDGER.get().lock().unwrap();
         ledger.iter().flat_map(|ledger| ledger.values()).cloned().collect()
     };
     for footprint in counted.iter().filter(|footprint| made.holds(footprint)) {
@@ -531,7 +535,7 @@ fn count_stores_in(dir: &Path) -> io::Result<()> {
         }
         let id = dir_id(&path)?;
         let counted =
-            LEDGER.lock().unwrap().as_ref().is_some_and(|ledger| ledger.contains_key(&id));
+            LEDGER.get().lock().unwrap().as_ref().is_some_and(|ledger| ledger.contains_key(&id));
         if !counted {
             drop(crate::HostDir::new(&path)?);
         }
@@ -542,7 +546,7 @@ fn count_stores_in(dir: &Path) -> io::Result<()> {
 /// Counts `footprint` in the allotment whose directory holds it, the nearest, if any does.
 fn allot_nearest(footprint: &Footprint) {
     let nearest = {
-        let allotments = ALLOTMENTS.lock().unwrap();
+        let allotments = ALLOTMENTS.get().lock().unwrap();
         let holding = allotments.iter().filter(|allotment| allotment.holds(footprint));
         holding.max_by_key(|allotment| allotment.dir.as_os_str().len()).cloned()
     };
@@ -681,22 +685,22 @@ impl Drop for Pledge {
 
 /// Every allotment made.
 pub fn allotments() -> Vec<Arc<Allotment>> {
-    ALLOTMENTS.lock().unwrap().clone()
+    ALLOTMENTS.get().lock().unwrap().clone()
 }
 
 /// What every allotment's stores' files take together.
 pub fn total() -> &'static Tally {
-    &TOTAL.tally
+    &TOTAL.get().tally
 }
 
 /// Every tenant's limit, if set.
 pub fn total_limit() -> Option<u64> {
-    Some(TOTAL.limit.load(Ordering::Relaxed)).filter(|limit| *limit != NONE)
+    Some(TOTAL.get().limit.load(Ordering::Relaxed)).filter(|limit| *limit != NONE)
 }
 
 /// Limits every allotment together to `bytes`, or lifts the limit, without.
 pub fn set_total_limit(bytes: Option<u64>) {
-    TOTAL.limit.store(bytes.unwrap_or(NONE), Ordering::Relaxed);
+    TOTAL.get().limit.store(bytes.unwrap_or(NONE), Ordering::Relaxed);
 }
 
 /// `own`, a footprint's tally, counted in `tally`, or no longer, if not `more`.
@@ -792,10 +796,12 @@ impl FileLen {
 /// A store directory of the host's, by its device and inode.
 type DirId = (u64, u64);
 
-/// The footprints of the stores of the host's this process has opened, by their directories:
-/// kept while their stores are closed, until their directories are removed.
-static LEDGER: std::sync::Mutex<Option<HashMap<DirId, Arc<Footprint>>>> =
-    std::sync::Mutex::new(None);
+node_local::node_local! {
+    /// The footprints of the stores of the host's this process has opened, by their directories:
+    /// kept while their stores are closed, until their directories are removed.
+    static LEDGER: std::sync::Mutex<Option<HashMap<DirId, Arc<Footprint>>>> =
+        std::sync::Mutex::new(None);
+}
 
 /// The directory at `path`'s device and inode.
 fn dir_id(path: &Path) -> io::Result<DirId> {
@@ -808,7 +814,7 @@ fn dir_id(path: &Path) -> io::Result<DirId> {
 /// if it was opened in this process before.
 pub(crate) fn of_host(path: &Path, disk: &Arc<HostDisk>) -> io::Result<Arc<Footprint>> {
     let id = dir_id(path)?;
-    let mut ledger = LEDGER.lock().unwrap();
+    let mut ledger = LEDGER.get().lock().unwrap();
     let footprints = ledger.get_or_insert_with(HashMap::new);
     if let Some(footprint) = footprints.get(&id) {
         return Ok(footprint.clone());
@@ -828,7 +834,7 @@ pub(crate) fn removing<T>(
 ) -> anyhow::Result<T> {
     let id = dir_id(path).ok();
     let removed = forgotten()?;
-    let mut ledger = LEDGER.lock().unwrap();
+    let mut ledger = LEDGER.get().lock().unwrap();
     let footprint = id.and_then(|id| ledger.as_mut().and_then(|ledger| ledger.remove(&id)));
     if let Some(footprint) = footprint {
         footprint.forget();

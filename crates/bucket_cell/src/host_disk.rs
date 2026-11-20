@@ -228,15 +228,18 @@ pub struct HostDisk {
     urged: Mutex<Vec<Weak<dyn Urge>>>,
 }
 
-/// The host's filesystems' disks alive, so that two directories of one filesystem share one.
-static DISKS: Mutex<Vec<Weak<HostDisk>>> = Mutex::new(Vec::new());
+node_local::node_local! {
+    /// The host's filesystems' disks alive, so that two directories of one filesystem share one: a
+    /// daemon's, each simulated node's its own (doc-24).
+    static DISKS: Mutex<Vec<Weak<HostDisk>>> = Mutex::new(Vec::new());
+}
 
 impl HostDisk {
     /// The disk of the filesystem `path` is on: the one alive already, if any is.
     pub fn of(path: &Path) -> io::Result<Arc<Self>> {
         use std::os::unix::fs::MetadataExt as _;
         let dev = std::fs::metadata(path)?.dev();
-        let mut disks = DISKS.lock().unwrap();
+        let mut disks = DISKS.get().lock().unwrap();
         disks.retain(|disk| disk.strong_count() > 0);
         let found = disks.iter().filter_map(Weak::upgrade).find(|disk| disk.dev() == Some(dev));
         if let Some(disk) = found {
@@ -270,7 +273,7 @@ impl HostDisk {
 
     /// The host's filesystems' disks alive.
     pub fn all() -> Vec<Arc<Self>> {
-        DISKS.lock().unwrap().iter().filter_map(Weak::upgrade).collect()
+        DISKS.get().lock().unwrap().iter().filter_map(Weak::upgrade).collect()
     }
 
     /// The filesystem's device, if it is a host's.
@@ -369,20 +372,22 @@ fn fs_sample(dir: &std::fs::File) -> io::Result<Sample> {
     Ok(Sample { size: blocks * size, free: available * size, used: (blocks - free) * size })
 }
 
-/// Whether the governor is to look again at once, and what tells it so.
-static WOKEN: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+node_local::node_local! {
+    /// Whether the governor is to look again at once, and what tells it so: a daemon's.
+    static WOKEN: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+}
 
 /// Has the governor look at the disks again at once: a write refused, or the part cache past what
 /// the stores leave it.
 pub fn wake_governor() {
-    let (woken, wake) = &WOKEN;
+    let (woken, wake) = WOKEN.get();
     *woken.lock().unwrap() = true;
     wake.notify_all();
 }
 
 /// Waits, the governor, until it is woken ([`wake_governor`]) or `most` has passed.
 pub fn wait_for_governor(most: Duration) {
-    let (woken, wake) = &WOKEN;
+    let (woken, wake) = WOKEN.get();
     let waited = wake.wait_timeout_while(woken.lock().unwrap(), most, |woken| !*woken);
     *waited.unwrap().0 = false;
 }

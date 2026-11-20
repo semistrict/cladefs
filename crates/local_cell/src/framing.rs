@@ -332,8 +332,10 @@ struct Ahead {
 /// packing takes (`PartPacker::pack`, TASK-411.2), its bytes, and where it is to be held.
 type Waiting = (u64, Buffer, Pending);
 
-static AHEAD: Ahead =
-    Ahead { waiting: Mutex::new((std::collections::VecDeque::new(), 0)), ready: Condvar::new() };
+node_local::node_local! {
+    static AHEAD: Ahead =
+        Ahead { waiting: Mutex::new((std::collections::VecDeque::new(), 0)), ready: Condvar::new() };
+}
 
 /// cladefs: packs `data`, part `part` of a segment's data a look ahead took ([`look_ahead`]), on a thread
 /// of [`PACKING_AHEAD`], at the host's lowest priority, and holds it as `pending` says, if it is
@@ -344,7 +346,7 @@ static AHEAD: Ahead =
 /// committed, took from the daemon's flushes (sandboxes short mode: durable lag within 50 ms down
 /// by 10-30 versions). Skipped, if too many wait already ([`WAITING_MOST`]).
 pub(crate) fn pack_ahead(part: u64, data: Buffer, pending: Pending) {
-    let mut waiting = AHEAD.waiting.lock().unwrap();
+    let mut waiting = AHEAD.get().waiting.lock().unwrap();
     if waiting.0.len() >= WAITING_MOST {
         drop(waiting);
         pending.skip();
@@ -365,7 +367,7 @@ pub(crate) fn pack_ahead(part: u64, data: Buffer, pending: Pending) {
             Err(_) => {}
         }
     }
-    AHEAD.ready.notify_one();
+    AHEAD.get().ready.notify_one();
 }
 
 /// cladefs: a thread packing parts ahead ([`pack_ahead`]), as they wait, for the process's life.
@@ -374,12 +376,12 @@ fn packing() {
     let mut packer = PartPacker::new();
     loop {
         let (part, data, pending) = {
-            let mut waiting = AHEAD.waiting.lock().unwrap();
+            let mut waiting = AHEAD.get().waiting.lock().unwrap();
             loop {
                 if let Some(next) = waiting.0.pop_front() {
                     break next;
                 }
-                waiting = AHEAD.ready.wait(waiting).unwrap();
+                waiting = AHEAD.get().ready.wait(waiting).unwrap();
             }
         };
         if pending.wanted() {

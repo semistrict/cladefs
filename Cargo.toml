@@ -158,6 +158,7 @@ extent_frame = { path = "crates/extent_frame" }
 extent_keys = { path = "crates/extent_keys" }
 bucket_cell = { path = "crates/bucket_cell" }
 base32_id = { path = "crates/base32_id" }
+node_local = { path = "crates/node_local" }
 bssl-crypto = { path = "crates/bssl-crypto" }
 mundane = { path = "crates/mundane" }
 fidl-fuchsia-io = { path = "crates/fidl-fuchsia-io" }

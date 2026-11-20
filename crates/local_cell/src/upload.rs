@@ -139,15 +139,16 @@ pub struct Runtime {
     pub keys: keys::Host,
 }
 
-/// How many stores' uploaders run in this process ([`open`]): until each, its store dropped, has
-/// uploaded what its store made durable, and stopped.
-static UPLOADERS: std::sync::LazyLock<tokio::sync::watch::Sender<usize>> =
-    std::sync::LazyLock::new(|| tokio::sync::watch::channel(0).0);
+node_local::node_local! {
+    /// How many stores' uploaders run in this process ([`open`]): until each, its store dropped, has
+    /// uploaded what its store made durable, and stopped.
+    static UPLOADERS: tokio::sync::watch::Sender<usize> = tokio::sync::watch::channel(0).0;
+}
 
 /// How many stores' uploaders run in this process, as it changes: what an extent daemon's drain
 /// waits to see none of (cladefs TASK-141.4).
 pub fn uploaders() -> tokio::sync::watch::Receiver<usize> {
-    UPLOADERS.subscribe()
+    UPLOADERS.get().subscribe()
 }
 
 /// Runs `future` to its end, on the calling thread, as what is called from no runtime's task does:
@@ -173,8 +174,10 @@ pub fn block_on<F: std::future::Future>(future: F) -> Result<F::Output, Failure>
 /// ([`crate::shared`]). Made at its first need; a making that fails, a thread not spawned, is
 /// made anew at the next, not kept failed for the process's life.
 pub fn bucket_runtime() -> Result<&'static tokio::runtime::Runtime, Failure> {
-    static BUCKET_RUNTIME: Retried<tokio::runtime::Runtime> = Retried::new();
-    BUCKET_RUNTIME.get_or_make(|| {
+    node_local::node_local! {
+        static BUCKET_RUNTIME: Retried<tokio::runtime::Runtime> = Retried::new();
+    }
+    BUCKET_RUNTIME.get().get_or_make(|| {
         failing!("upload::bucket_runtime");
         let threads = std::thread::available_parallelism().map_or(2, |cpus| cpus.get().clamp(2, 8));
         let mut building = tokio::runtime::Builder::new_multi_thread();
@@ -454,7 +457,7 @@ pub fn open<D: Dir>(
     // What the host learned for this opening, taken as it begins (TASK-449's review).
     let learned = learned(&*bucket, &recovering);
     let cell = recovering.cell();
-    UPLOADERS.send_modify(|running| *running += 1);
+    UPLOADERS.get().send_modify(|running| *running += 1);
     // A task, not a thread of its own (TASK-34).
     runtime.handle.spawn(async move {
         // Its conditional writes checked before any is relied on (doc-7, The head).
@@ -470,7 +473,7 @@ pub fn open<D: Dir>(
         // at once (`Dir::claim` refusing a second opening), as cladefsd does a store an image it
         // imported made (TASK-165.6).
         drop(uploader);
-        UPLOADERS.send_modify(|running| *running -= 1);
+        UPLOADERS.get().send_modify(|running| *running -= 1);
         let _ = stop.send(());
         fail::fail_point!("upload::stopped");
     });

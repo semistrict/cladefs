@@ -417,7 +417,7 @@ impl Dir for DiskDir {
     /// which store is open here, its claim says ([`Dir::claim`], TASK-165.7).
     fn take(&self) -> io::Result<()> {
         let id = self.id()?;
-        let mut taken = TAKEN.lock().unwrap();
+        let mut taken = TAKEN.get().lock().unwrap();
         if let Some((count, _)) = taken.get_mut(&id) {
             *count += 1;
             return Ok(());
@@ -435,7 +435,7 @@ impl Dir for DiskDir {
                 return log::warn!("extent store: letting {} go: {err}", self.path.display());
             }
         };
-        let mut taken = TAKEN.lock().unwrap();
+        let mut taken = TAKEN.get().lock().unwrap();
         let Some((count, _)) = taken.get_mut(&id) else { return };
         *count -= 1;
         if *count > 0 {
@@ -451,7 +451,7 @@ impl Dir for DiskDir {
 
     fn claim(&self) -> io::Result<()> {
         let id = self.id()?;
-        let mut claimed = closed_in(CLAIMED.lock().unwrap(), id)?;
+        let mut claimed = closed_in(CLAIMED.get().lock().unwrap(), id)?;
         if claimed.contains_key(&id) {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -464,7 +464,7 @@ impl Dir for DiskDir {
 
     fn closing(&self) {
         if let Ok(id) = self.id()
-            && let Some(closing) = CLAIMED.lock().unwrap().get_mut(&id)
+            && let Some(closing) = CLAIMED.get().lock().unwrap().get_mut(&id)
         {
             *closing = true;
         }
@@ -473,8 +473,8 @@ impl Dir for DiskDir {
     fn unclaim(&self) {
         match self.id() {
             Ok(id) => {
-                CLAIMED.lock().unwrap().remove(&id);
-                UNCLAIMED.notify_all();
+                CLAIMED.get().lock().unwrap().remove(&id);
+                UNCLAIMED.get().notify_all();
             }
             Err(err) => log::warn!("extent store: unclaiming {}: {err}", self.path.display()),
         }
@@ -497,16 +497,22 @@ impl Dir for DiskDir {
     }
 }
 
-/// cladefs: the directories this process has taken ([`Dir::take`]), by their devices and inodes:
-/// how many takings of each, and the descriptor holding the `flock`.
-static TAKEN: Mutex<BTreeMap<DirId, (usize, Arc<std::fs::File>)>> = Mutex::new(BTreeMap::new());
+node_local::node_local! {
+    /// cladefs: the directories this process has taken ([`Dir::take`]), by their devices and inodes:
+    /// how many takings of each, and the descriptor holding the `flock`.
+    static TAKEN: Mutex<BTreeMap<DirId, (usize, Arc<std::fs::File>)>> = Mutex::new(BTreeMap::new());
+}
 
-/// cladefs: the directories whose stores this process has open ([`Dir::claim`]), and whether each
-/// is closing ([`Dir::closing`]).
-static CLAIMED: Mutex<BTreeMap<DirId, bool>> = Mutex::new(BTreeMap::new());
+node_local::node_local! {
+    /// cladefs: the directories whose stores this process has open ([`Dir::claim`]), and whether each
+    /// is closing ([`Dir::closing`]).
+    static CLAIMED: Mutex<BTreeMap<DirId, bool>> = Mutex::new(BTreeMap::new());
+}
 
-/// cladefs: woken as a claim goes ([`Dir::unclaim`]), for openings waiting for a store closing.
-static UNCLAIMED: std::sync::Condvar = std::sync::Condvar::new();
+node_local::node_local! {
+    /// cladefs: woken as a claim goes ([`Dir::unclaim`]), for openings waiting for a store closing.
+    static UNCLAIMED: std::sync::Condvar = std::sync::Condvar::new();
+}
 
 /// cladefs: `claimed`, [`CLAIMED`] locked, once no store of the directory `id` is closing in this
 /// process, which it waits for a while ([`CLOSING_WAIT`]): `WouldBlock` if one still is.
@@ -524,7 +530,7 @@ fn closed_in(
             ));
         }
         fail::fail_point!("dir::claim_waits");
-        claimed = UNCLAIMED.wait_timeout(claimed, left).unwrap().0;
+        claimed = UNCLAIMED.get().wait_timeout(claimed, left).unwrap().0;
     }
     Ok(claimed)
 }
@@ -540,7 +546,7 @@ pub fn closed(path: &Path) -> io::Result<()> {
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(err) => return Err(err),
     };
-    closed_in(CLAIMED.lock().unwrap(), (metadata.dev(), metadata.ino())).map(drop)
+    closed_in(CLAIMED.get().lock().unwrap(), (metadata.dev(), metadata.ino())).map(drop)
 }
 
 /// cladefs: how long an opening waits for a store of its directory closing in this process
