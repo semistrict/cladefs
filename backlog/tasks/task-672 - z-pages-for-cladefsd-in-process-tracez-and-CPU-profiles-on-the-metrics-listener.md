@@ -3,11 +3,11 @@ id: TASK-672
 title: >-
   z-pages for cladefsd under /z/: in-process tracez and CPU profiles on the
   metrics listener
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-19 22:22'
-updated_date: '2026-11-19 23:35'
+updated_date: '2026-11-20 00:30'
 labels: []
 dependencies: []
 ordinal: 1044000
@@ -21,10 +21,10 @@ The user (ex-Google) wants Census-style z-pages: to look at a running daemon and
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 GET /z/tracez on the CLADEFSD_METRICS listener shows, per span name, counts in Census latency buckets and kept sample spans with their attributes, without CLADEFSD_TRACES
-- [ ] #2 GET /z/pprof/profile?seconds=N returns a CPU profile
-- [ ] #3 GET /z/ lists every z-page
-- [ ] #4 docs/tracing.md documents the pages
+- [x] #1 GET /z/tracez on the CLADEFSD_METRICS listener shows, per span name, counts in Census latency buckets and kept sample spans with their attributes, without CLADEFSD_TRACES
+- [x] #2 GET /z/pprof/profile?seconds=N returns a CPU profile
+- [x] #3 GET /z/ lists every z-page
+- [x] #4 docs/tracing.md documents the pages
 <!-- AC:END -->
 
 ## Definition of Done
@@ -33,3 +33,9 @@ The user (ex-Google) wants Census-style z-pages: to look at a running daemon and
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+z-pages under /z/ on the CLADEFSD_METRICS listener: /z/ index, /z/tracez (TASK-672.1, .2), /z/pprof/profile and /flamegraph (TASK-672.3); documented in docs/tracing.md. See the subtasks for verification.
+<!-- SECTION:FINAL_SUMMARY:END -->
