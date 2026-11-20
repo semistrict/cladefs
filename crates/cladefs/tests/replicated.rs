@@ -13,6 +13,8 @@
 //!   while the bucket was out of reach is there after a take on another host.
 //! - The writer's daemon killed and started again on the same directory, every such commit is
 //!   there after its VM opens the store again.
+//! - The writer's daemon and both its members' killed, their directories gone, a take on the spare
+//!   host is refused, and, forced (TASK-681), recovers from the bucket alone.
 //! - A member's daemon killed, its writer replaces it, the head naming a configuration of the
 //!   survivor and the spare, and its commits are replicated again with the bucket out of reach;
 //!   both its members killed, it is degraded, its commits released by the bucket, and it drops to
@@ -267,7 +269,7 @@ fn replicated_commits_survive_their_writer_and_its_disk() {
     assert_eq!(head(&bucket, cell).end, before, "commits after 2 uploaded: nothing to recover");
 
     let taken = daemons[1].dir.join("taken");
-    daemons[1].control.create_cell(&taken, CAPACITY, cell, Some(2)).unwrap();
+    daemons[1].control.create_cell(&taken, CAPACITY, cell, (Some(2), false)).unwrap();
     let client = connect(&daemons[1], &taken);
     check(&client, 1..=acked);
     // One host of three lost, no configuration of f = 1 is to be had: the taker serves degraded,
@@ -427,4 +429,51 @@ fn lost_members_are_replaced_then_the_bucket_releases_commits() {
     until("f = 0 said", || daemons[0].control.stat_cell(&store).unwrap().active_replicas == 0);
     write(&client, 13..=14);
     check(&client, 1..=14);
+}
+
+/// TASK-681 (doc-21's row "Writer's host and a peer lost", past it): a replicated cell's writer's
+/// host and both its members' lost, their disks with them, the commits told durable since the
+/// bucket was last reachable on them alone; the spare host's take is refused, no member answering
+/// its fence; forced (`CreateCell`'s `force`), it takes the cell from the bucket, and says past
+/// which commit what was told replicated may be lost.
+#[test]
+fn takes_of_cells_whose_members_are_lost_go_on_by_force() {
+    let root = tempfile::tempdir().unwrap();
+    let bucket = root.path().join("bucket");
+    std::fs::create_dir(&bucket).unwrap();
+    let (addresses, mut daemons) = hosts(root.path(), &bucket, 4);
+    let store = daemons[0].dir.join("store");
+    let cell = create_replicated(&daemons[0], &store);
+    let client = connect(&daemons[0], &store);
+    write(&client, 1..=2);
+    daemons[0].control.sync_cell(&store).unwrap();
+    let uploaded = daemons[0].control.stat_cell(&store).unwrap().uploaded;
+    reachable(&bucket, false);
+    write(&client, 3..=4);
+    drop(client);
+
+    // The writer's host and its members' lost, their disks with them.
+    let (_, _, members) = configuration(&bucket, cell);
+    let lost: Vec<usize> =
+        members.iter().map(|member| addresses.iter().position(|a| a == member).unwrap()).collect();
+    for &host in &lost {
+        daemons[host].kill();
+        std::fs::remove_dir_all(&daemons[host].dir).unwrap();
+    }
+    reachable(&bucket, true);
+    let spare = (0..4).find(|host| !lost.contains(host)).unwrap();
+
+    let refused = daemons[spare].dir.join("refused");
+    let failure = daemons[spare].control.create_cell(&refused, CAPACITY, cell, (Some(2), false));
+    let failure = failure.err().unwrap().to_string();
+    assert!(failure.contains("0 of the 2 members of configuration 1 a take must fence"), "{failure}");
+
+    let taken = daemons[spare].dir.join("taken");
+    daemons[spare].control.create_cell(&taken, CAPACITY, cell, (Some(3), true)).unwrap();
+    let client = connect(&daemons[spare], &taken);
+    check(&client, 1..=2);
+    let stat = daemons[spare].control.stat_cell(&taken).unwrap();
+    assert_eq!(stat.forced_after, uploaded, "{stat:?}");
+    write(&client, 5..=6);
+    check(&client, 5..=6);
 }

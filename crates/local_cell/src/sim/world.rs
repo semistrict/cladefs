@@ -1322,6 +1322,7 @@ impl World {
             replication: self.cells.get(&cell).and_then(|found| found.replicated),
             members,
             replace_after,
+            force: false,
             // The interval closes a segment filled at once, as the first full one closed between
             // commits, its commits uploading, is what the world's clock can't wait for
             // (TASK-92.41).

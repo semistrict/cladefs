@@ -1160,13 +1160,17 @@ impl OpenCell {
     ) -> Result<host_cell::Opened, Error> {
         let keeping =
             local_cell::upload::Options { token: token.unwrap_or(keeping.token), ..keeping };
+        let force = keeping.force;
         let opened = Self::creating(path, |span| {
             let opened = host_cell::create(path, capacity, of, kind, keeping)?;
             span.set_cell(opened.store.description().cell);
             Ok(opened)
         })?;
-        if let Some(token) = token {
-            Self::place(path, token)?;
+        // cladefs: a forced taking's placement forced from then on (TASK-681).
+        match (token, force) {
+            (Some(token), true) => Self::place_forced(path, token)?,
+            (Some(token), false) => Self::place(path, token)?,
+            (None, _) => {}
         }
         Ok(opened)
     }

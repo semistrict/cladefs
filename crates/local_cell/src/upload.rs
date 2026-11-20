@@ -343,6 +343,10 @@ pub struct Options {
     /// one member down of f = 1 leaves the cell's commits replicated on the other, and a cell with
     /// no quorum its commits uploaded at once (the user's word, 2026-11-19: 1 s was far too short).
     pub replace_after: Duration,
+    /// cladefs: whether this opening's taking of a replicated cell is forced, as a store placed
+    /// forced is (TASK-681, `CreateCell`'s `force`): it goes on with the members of the
+    /// configuration the cell's head names that answer, however few.
+    pub force: bool,
 }
 
 /// cladefs: what a host knows of the hosts its replicated cells' configurations are made of
@@ -423,6 +427,7 @@ impl Default for Options {
             replication: None,
             members: None,
             replace_after: Duration::from_secs(30),
+            force: false,
         }
     }
 }
@@ -1402,7 +1407,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             .filter(|configuration| configuration.f >= 1);
         // cladefs: or, its placement's takings forced, those of them that answer, however few
         // (TASK-681).
-        let (own, forced) = (recovering.has_wal(), recovering.forced());
+        let (own, forced) = (recovering.has_wal(), recovering.forced() || self.options.force);
         let fenced = match &old {
             Some(old) => Some(self.fence(cell, old, held.head.epoch, own, forced).await?),
             None => None,

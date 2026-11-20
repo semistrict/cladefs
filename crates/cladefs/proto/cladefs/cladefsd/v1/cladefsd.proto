@@ -256,6 +256,12 @@ message CreateCellRequest {
   // What its guest's fsync waits for (doc-12, doc-21), given with `replicas` alone (INVALID_ARGUMENT
   // otherwise): FSYNC_LEVEL_REPLICATED needs replicas of 1 or more.
   FsyncLevel fsync = 10;
+  // Whether its taking of a replicated cell is forced (doc-21, TASK-681), as PlaceCell's `force`
+  // places a store: it goes on with the members of the configuration the cell's head names that
+  // answer, fewer than a take needs, as when f+1 of them are gone for good; commits told replicated
+  // that only the others held are lost, and StatCell's forced_after says past which commit. With
+  // `token`, the placement it is placed at is forced from then on.
+  bool force = 11;
 }
 
 // What a guest's fsync, fdatasync, msync and O_SYNC wait for in a cell (doc-12, doc-21). Its sync,

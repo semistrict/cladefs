@@ -358,8 +358,17 @@ impl Cladefsd for Control {
         &self,
         request: Request<CreateCellRequest>,
     ) -> Result<Response<CreateCellResponse>, Status> {
-        let CreateCellRequest { path: store, capacity, token, tenant, cell, kind, replicas, fsync } =
-            request.into_inner();
+        let CreateCellRequest {
+            path: store,
+            capacity,
+            token,
+            tenant,
+            cell,
+            kind,
+            replicas,
+            fsync,
+            force,
+        } = request.into_inner();
         let store = path(store)?;
         let replication = wish(replicas, fsync)?;
         // cladefs: a replicated cell's members are the daemon's peers, in their replica
@@ -383,7 +392,7 @@ impl Cladefsd for Control {
             _ => tenant,
         };
         let cell = crate::CellId { tenant, id: cell };
-        let made = cells::create(store, capacity, cell, (token, kind, replication)).await;
+        let made = cells::create(store, capacity, cell, (token, kind, replication, force)).await;
         reply(made.map(|made| CreateCellResponse { tenant: made.tenant, cell: made.id }))
     }
 
@@ -835,13 +844,14 @@ impl Client {
 
     /// Makes an empty store at `path` of `capacity` bytes, of `cell`, an Fxfs cell:
     /// of a new cell if its cell's ID is 0, and a new cell there if its ID is; placed at `token`
-    /// if given; and returns its cell (`CreateCell`, TASK-364).
+    /// if given, its taking forced if `force` (TASK-681); and returns its cell (`CreateCell`,
+    /// TASK-364).
     pub fn create_cell(
         &self,
         path: &Path,
         capacity: u64,
         cell: crate::CellId,
-        token: Option<u64>,
+        (token, force): (Option<u64>, bool),
     ) -> Result<crate::CellId, crate::Error> {
         let request = CreateCellRequest {
             path: name(path)?,
@@ -850,6 +860,7 @@ impl Client {
             tenant: cell.tenant,
             cell: cell.id,
             kind: CellKind::Fxfs.into(),
+            force,
             ..CreateCellRequest::default()
         };
         let response = self

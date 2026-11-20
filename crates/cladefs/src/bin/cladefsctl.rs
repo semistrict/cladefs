@@ -7,7 +7,7 @@
 //! them, makes them public bases, and waits for their uploads:
 //!
 //! ```sh
-//! cladefsctl take DIR CAPACITY CELL [TOKEN]
+//! cladefsctl take [--force] DIR CAPACITY CELL [TOKEN]
 //! cladefsctl create DIR CAPACITY
 //! cladefsctl place [--force] DIR TOKEN
 //! cladefsctl sync DIR
@@ -53,7 +53,8 @@
 //! `create` makes an empty store at DIR, of CAPACITY bytes, of a new cell, a new cell's of the
 //! default tenant's (doc-20), its ID its bucket's to give (TASK-364), and prints the cell.
 //! `take` makes an empty store at DIR, of CAPACITY bytes, of CELL (`TENANT/CELL`, each in base 32,
-//! its cell's, TASK-364), which its bucket has (`ENOENT` otherwise): once
+//! its cell's, TASK-364), which its bucket has (`ENOENT` otherwise), its taking of a replicated
+//! cell forced with `--force`, as `place --force` places a store (TASK-681): once
 //! cladefsd opens it,
 //! with `CLADEFSD_BUCKET` naming the cell's bucket, it takes what the cell holds there,
 //! whose data it fetches as it is read; placed at TOKEN, if given, as `place` places it. A
@@ -197,7 +198,7 @@ fn print_versions(versions: &[cladefs::VersionInfo]) {
 
 fn usage() -> anyhow::Error {
     anyhow::anyhow!(
-        "usage: cladefsctl take DIR CAPACITY CELL [TOKEN] | cladefsctl create DIR CAPACITY | \
+        "usage: cladefsctl take [--force] DIR CAPACITY CELL [TOKEN] | cladefsctl create DIR CAPACITY | \
          cladefsctl place [--force] DIR TOKEN | \
          cladefsctl sync DIR | cladefsctl import DIR CAPACITY IMAGE [REF] | cladefsctl fork SRC DST | \
          cladefsctl version DIR | cladefsctl versions DIR | \
@@ -240,6 +241,7 @@ enum Command {
         capacity: u64,
         cell: cladefs::CellId,
         token: Option<u64>,
+        force: bool,
     },
     Place {
         dir: PathBuf,
@@ -436,11 +438,19 @@ impl Command {
         let id = |id: &str, what| id.parse().with_context(|| format!("{what} must be a number"));
         let tenant = |tenant: &str| self::id("TENANT", tenant);
         Ok(match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+            ["take", "--force", dir, size, cell, ref rest @ ..] if rest.len() <= 1 => Self::Take {
+                dir: dir.into(),
+                capacity: capacity(size)?,
+                cell: cell.parse().map_err(anyhow::Error::msg).context("CELL")?,
+                token: rest.first().map(|rest| token(rest)).transpose()?,
+                force: true,
+            },
             ["take", dir, size, cell, ref rest @ ..] if rest.len() <= 1 => Self::Take {
                 dir: dir.into(),
                 capacity: capacity(size)?,
                 cell: cell.parse().map_err(anyhow::Error::msg).context("CELL")?,
                 token: rest.first().map(|rest| token(rest)).transpose()?,
+                force: false,
             },
             ["create", dir, size] => Self::Create { dir: dir.into(), capacity: capacity(size)? },
             ["place", dir, given] => {
@@ -531,10 +541,10 @@ impl Command {
         match self {
             Self::Create { dir, capacity } => {
                 let new = cladefs::CellId { tenant: 0, id: 0 };
-                println!("{}", daemon.create_cell(&dir, capacity, new, None)?);
+                println!("{}", daemon.create_cell(&dir, capacity, new, (None, false))?);
             }
-            Self::Take { dir, capacity, cell, token } => {
-                daemon.create_cell(&dir, capacity, cell, token)?;
+            Self::Take { dir, capacity, cell, token, force } => {
+                daemon.create_cell(&dir, capacity, cell, (token, force))?;
             }
             Self::Place { dir, token, force } => daemon.place_cell(&dir, token, force)?,
             Self::Sync { dir } => daemon.sync_cell(&dir)?,
@@ -683,8 +693,10 @@ impl Command {
             Self::Create { dir, capacity } => {
                 println!("{}", OpenCell::create(&dir, capacity)?.cell());
             }
-            Self::Take { dir, capacity, cell, token } => {
-                OpenCell::take(&dir, capacity, cell, token)?;
+            Self::Take { dir, capacity, cell, token, force } => {
+                let mut opening = cladefs::Opening::here()?;
+                opening.keeping.force = force;
+                drop(OpenCell::take_with(&dir, (capacity, cell, token), opening)?);
             }
             Self::Place { dir, token, force: false } => OpenCell::place(&dir, token)?,
             Self::Place { dir, token, force: true } => OpenCell::place_forced(&dir, token)?,
