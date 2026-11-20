@@ -380,6 +380,7 @@ fn close_kept_blocking(kept: Option<Kept>) {
     let Some(Kept { store, closed, .. }) = kept else { return };
     drop(release_held_behind(store));
     local_cell::blocks!("a kept store's close, waiting for the forks forking it");
+    // cladefs: outside the simulation: the FUSE mount's hold, and its blocking thread.
     let _ = futures::executor::block_on(closed);
 }
 

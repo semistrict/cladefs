@@ -122,6 +122,7 @@ pub(super) fn left() -> bool {
 pub(super) async fn close() -> Result<(), Error> {
     let Some((mount, _)) = MOUNT.lock().unwrap().take() else { return Ok(()) };
     let mountpoint = mount.mountpoint().to_owned();
+    // cladefs: outside the simulation: FUSE (doc-24).
     let closed = tokio::task::spawn_blocking(move || {
         mount.unmount(true)?;
         mount.join()

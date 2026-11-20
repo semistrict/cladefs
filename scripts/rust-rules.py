@@ -107,8 +107,43 @@ def pattern_rule(name, pattern, why):
     return rule
 
 
+# cladefs: what of the daemon's code starts a thread, builds a runtime or blocks a thread on a
+# future: the daemon's seam's alone (doc-24, TASK-685.3).
+UNSEAMED = re.compile(r"\bthread::spawn\b|\bthread::Builder::new\(\)|\bruntime::Builder::new_\w+_thread\b|"
+                      r"\bblock_in_place\b|\bspawn_blocking\b|\.block_on\(|\bexecutor::block_on\b")
+# How far above such a line a comment may say why it is outside the simulation.
+UNSEAMED_REASON_LINES = 3
+
+
+def outside_the_seam(path, text):
+    """A thread started, a runtime built or a thread blocked on a future in cladefsd's code, other
+    than through its seam (cladefsd::run), which stops the simulation's one thread under madsim
+    (doc-24, TASK-685.3): each goes through the seam, or a comment on it or the few lines above says
+    why it is outside the simulation (the VM socket, FUSE, metrics, signals, clients). Its tests
+    aside, a file's test module and what follows it among them."""
+    posix = path.as_posix()
+    if "crates/cladefs/src/cladefsd/" not in posix or posix.endswith(("/run.rs", "/tests.rs")) \
+            or "/tests/" in posix:
+        return
+    lines = text.splitlines()
+    for number, line in enumerate(lines, 1):
+        if line.startswith("#[cfg(test)]") and number < len(lines) and \
+                lines[number].startswith("mod "):
+            return
+        if not UNSEAMED.search(line.split("//", 1)[0]):
+            continue
+        above = lines[max(0, number - 1 - UNSEAMED_REASON_LINES):number]
+        if any("outside the simulation" in near or "the daemon's seam" in near for near in above):
+            continue
+        yield Match(path, number, "outside-the-seam",
+                    "a thread, a runtime or a blocking wait of the daemon's outside its seam "
+                    "(cladefsd::run), which under madsim stops the simulation: go through the seam, "
+                    "or say why it is outside the simulation (doc-24, TASK-685.3)")
+
+
 # Each rule, and the mutants of the bugs it is from.
 RULES = [
+    (outside_the_seam, []),
     (mixed_orderings, [
         "latest-listens-relaxed", "latest-rises-relaxed", "occurrence-happens-relaxed",
         "occurrence-listens-relaxed", "answers-release-no-capacity", "capacities-read-relaxed",

@@ -68,6 +68,7 @@ impl Grants {
         let listener = super::bind_given(&socket, MODE, uid, gid).map_err(errno)?;
         let served = listener.try_clone().map_err(errno).and_then(|accepting| {
             let serving = tenant.clone();
+            // cladefs: outside the simulation: a tenant's VM socket (doc-24).
             std::thread::Builder::new()
                 .name("cladefsd tenant".into())
                 .spawn(move || serve_tenant(accepting, serving))

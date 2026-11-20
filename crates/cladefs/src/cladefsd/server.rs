@@ -49,6 +49,7 @@ pub(super) const PAGE_INS: usize = 64;
 /// takes over meanwhile ([`receive`]); what else blocks runs on its blocking threads.
 pub(super) static IO: std::sync::LazyLock<tokio::runtime::Runtime> =
     std::sync::LazyLock::new(|| {
+        // cladefs: the daemon's seam: its runtime, madsim's under madsim (doc-24).
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("cladefsd io")

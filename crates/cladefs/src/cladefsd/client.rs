@@ -840,6 +840,7 @@ fn blocking<T, E: From<Errno>>(
         );
         return Err(Errno::EIO.into());
     }
+    // cladefs: outside the simulation: a VM process's client, which blocks at its entry.
     futures::executor::block_on(future)
 }
 
@@ -904,6 +905,7 @@ impl Client {
             lost: Occurrence::new(),
         });
         let receiving = client.clone();
+        // cladefs: outside the simulation: a VM process's client's receiving thread.
         crate::thread::spawn("cladefsd client", move || receiving.receive(Receiver::new(stream)))?;
         Ok(client)
     }

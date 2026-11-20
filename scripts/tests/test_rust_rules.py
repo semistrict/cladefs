@@ -36,6 +36,43 @@ class TheCrates(unittest.TestCase):
         self.assertEqual(self.run_rules("--mutants"), (0, ""))
 
 
+class OutsideTheSeam(unittest.TestCase):
+    """cladefs: the daemon's threads, runtimes and blocking waits go through its seam (TASK-685.3)."""
+
+    def matches(self, source, path="crates/cladefs/src/cladefsd/x.rs"):
+        return [(match.line, match.rule)
+                for match in rules.outside_the_seam(Path(path), textwrap.dedent(source))]
+
+    def test_a_thread_of_the_daemons_is_flagged(self):
+        self.assertEqual(self.matches("""\
+            fn start() {
+                std::thread::Builder::new().name("x".into()).spawn(work).unwrap();
+                futures::executor::block_on(waiting);
+            }
+            """), [(2, "outside-the-seam"), (3, "outside-the-seam")])
+
+    def test_one_saying_why_it_is_outside_the_simulation_passes(self):
+        self.assertEqual(self.matches("""\
+            fn start() {
+                // cladefs: outside the simulation: the VM socket.
+                std::thread::Builder::new().name("x".into()).spawn(work).unwrap();
+            }
+            """), [])
+
+    def test_the_seam_its_tests_and_other_crates_pass(self):
+        source = "fn f() { tokio::task::spawn_blocking(work); }\n"
+        self.assertEqual(self.matches(source, "crates/cladefs/src/cladefsd/run.rs"), [])
+        self.assertEqual(self.matches(source, "crates/cladefs/src/cladefsd/tests.rs"), [])
+        self.assertEqual(self.matches(source, "crates/cladefs/src/fuse/x.rs"), [])
+        self.assertEqual(self.matches("""\
+            fn f() {}
+            #[cfg(test)]
+            mod tests {
+                fn t() { std::thread::spawn(work); }
+            }
+            """), [])
+
+
 class MixedOrderings(unittest.TestCase):
     def test_a_counter_all_relaxed_passes(self):
         self.assertEqual(matches(rules.mixed_orderings, """\

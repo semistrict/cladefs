@@ -92,6 +92,7 @@ pub fn serve_http(listener: TcpListener) -> std::io::Result<()> {
         };
         failing = false;
         let served = serving.clone();
+        // cladefs: outside the simulation: metrics and z-pages over HTTP (doc-24).
         let spawned = std::thread::Builder::new().name("cladefsd http".into()).spawn(move || {
             if let Err(err) = answer(stream) {
                 log::warn!("cladefsd: serving HTTP: {err}");

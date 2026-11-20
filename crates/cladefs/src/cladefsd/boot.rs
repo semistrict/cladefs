@@ -92,13 +92,15 @@ pub async fn boot(socket: &Path, memory: Option<u64>) -> anyhow::Result<()> {
         let address = address.to_str().context("CLADEFSD_METRICS must be an address")?;
         let metrics = std::net::TcpListener::bind(address)
             .with_context(|| format!("serving metrics and z-pages at {address}"))?;
+        // cladefs: outside the simulation: metrics and z-pages over HTTP (doc-24).
         std::thread::Builder::new().name("cladefsd http".into()).spawn(move || {
             if let Err(err) = super::serve_http(metrics) {
                 log::error!("cladefsd: serving HTTP: {err}");
             }
         })?;
     }
-    // Its VM processes, on a thread of their own, until it drains.
+    // Its VM processes, on a thread of their own, until it drains. cladefs: outside the simulation:
+    // the VM socket, the simulation's guests calling the requests' handling in the process (doc-24).
     #[cfg(not(madsim))]
     std::thread::Builder::new()
         .name("cladefsd vms".into())
@@ -126,6 +128,7 @@ fn serve_control(control: &std::ffi::OsStr, tenants: std::path::PathBuf) -> anyh
         // It can do everything: its user's alone, as the VM socket (TASK-159).
         let control = super::bind_owner_only(control)
             .with_context(|| format!("listening at {}", control.display()))?;
+        // cladefs: outside the simulation: the control API on its Unix socket; a task under madsim.
         std::thread::Builder::new().name("cladefsd ctl".into()).spawn(move || {
             if let Err(err) = super::serve_control(control, tenants) {
                 log::error!("cladefsd: serving the control API: {err}");

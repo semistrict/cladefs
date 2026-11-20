@@ -60,12 +60,15 @@ pub fn serve_control(
     let control = Control { grants: Arc::new(Grants::new(tenants.into())) };
     let (reporter, health) = tonic_health::server::health_reporter();
     listener.set_nonblocking(true)?;
+    // cladefs: outside the simulation: the control API on its Unix socket, on its thread's own
+    // runtime; under madsim the async serve_control below, a task (doc-24).
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(THREADS)
         .max_blocking_threads(BLOCKING_THREADS)
         .thread_name("cladefsd ctl")
         .enable_all()
         .build()?;
+    // cladefs: outside the simulation, as above.
     runtime.block_on(async {
         let incoming = tokio_stream::wrappers::UnixListenerStream::new(
             tokio::net::UnixListener::from_std(listener)?,
@@ -921,10 +924,12 @@ impl Client {
     /// A client of the daemon whose control socket is at `socket`.
     pub fn connect(socket: impl AsRef<Path>) -> Result<Self, crate::Error> {
         let socket = socket.as_ref();
+        // cladefs: outside the simulation: a blocking client, cladefsctl's, at its entry.
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(crate::Error::new)?;
+        // cladefs: outside the simulation, as above.
         let client = runtime.block_on(connect_socket(socket)).map_err(|err| {
             crate::Error::new(anyhow::Error::new(err).context(format!(
                 "connecting to the extent daemon's control socket at {}",
@@ -1325,6 +1330,7 @@ impl Client {
     where
         F: Future<Output = Result<Response<T>, Status>>,
     {
+        // cladefs: outside the simulation: the blocking client's call.
         match self.runtime.block_on(call(self.client.clone())) {
             Ok(response) => Ok(response.into_inner()),
             Err(status) => Err(crate::Error::new(match errno(&status) {

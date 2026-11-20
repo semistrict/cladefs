@@ -74,6 +74,7 @@ impl Pool {
     fn run_on_threads(&'static self, job: Job) -> bool {
         let mut state = self.state.lock().unwrap();
         if state.idle <= state.jobs.len() && state.threads < self.max {
+            // cladefs: the daemon's seam: a pool's threads, its jobs tasks under madsim (doc-24).
             match std::thread::Builder::new().name(self.name.into()).spawn(move || self.work_on()) {
                 Ok(_) => state.threads += 1,
                 Err(err) => {
