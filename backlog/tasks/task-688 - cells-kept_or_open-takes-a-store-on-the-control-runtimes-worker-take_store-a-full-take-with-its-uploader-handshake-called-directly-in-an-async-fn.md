@@ -3,9 +3,10 @@ id: TASK-688
 title: >-
   cells::kept_or_open takes a store on the control runtime's worker: take_store,
   a full take with its uploader handshake, called directly in an async fn
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-20 07:39'
+updated_date: '2026-11-20 11:43'
 labels:
   - bug
   - cladefsd
@@ -30,3 +31,9 @@ Found 2026-11-20 by the async-rewrite inventory (doc-24). crates/cladefs/src/cla
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Fixed on PR #2 (semistrict/cladefs#2, 983bbb209): kept_or_open awaits take_store, async end to end, holding no control-runtime worker. Closed when the PR merges.
+<!-- SECTION:NOTES:END -->
