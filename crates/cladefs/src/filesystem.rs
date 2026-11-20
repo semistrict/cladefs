@@ -706,14 +706,14 @@ impl Node {
     /// Renames `name` in this directory to `new_name` in directory `new_dir`, replacing what is
     /// there unless `flags` say not to, as rename(2) does: a directory only with an empty
     /// directory, and anything else only with something else, but a directory into itself never.
-    /// A directory of another filesystem fails with `EXDEV`.
+    /// A directory of another filesystem fails with `EXDEV`. Returns the node renamed's inode.
     pub async fn rename(
         &self,
         name: &[u8],
         new_dir: &Node,
         new_name: &[u8],
         flags: RenameFlags,
-    ) -> Result<()> {
+    ) -> Result<Inode> {
         if flags.contains(RenameFlags::EXCHANGE) || !RenameFlags::all().contains(flags) {
             return Err(Errno::EINVAL);
         }
@@ -744,7 +744,7 @@ impl Node {
                     }
                     // Names of the same node: nothing to do.
                     if replaced.ino == moved.ino {
-                        return Ok(());
+                        return Ok(Inode(moved.ino));
                     }
                 }
                 if moves_directory && held.is_within(new_dir_ino, moved.ino)? {
@@ -765,10 +765,10 @@ impl Node {
                 if moves_directory {
                     held.moved(moved.ino, new_dir_ino)?;
                 }
-                match replaced_ino {
-                    Some(replaced) => held.unlinked(&fxfs, replaced, replaced_kind).await,
-                    None => Ok(()),
+                if let Some(replaced) = replaced_ino {
+                    held.unlinked(&fxfs, replaced, replaced_kind).await?;
                 }
+                Ok(Inode(moved.ino))
             })
             .await
     }

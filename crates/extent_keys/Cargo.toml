@@ -13,6 +13,8 @@ base32_id.workspace = true
 # (BSD-3-Clause) over RustCrypto's aes (MIT OR Apache-2.0), its key schedules zeroed on drop.
 aes = { workspace = true, features = ["zeroize"] }
 aws-lc-rs.workspace = true
+# cladefs: atexit(3), which stops random draws as the process exits (src/random.rs, TASK-650).
+libc.workspace = true
 # cladefs: AWS KMS (kms/aws.rs, TASK-411.17), its calls on a runtime of its own.
 aws-config.workspace = true
 aws-sdk-kms.workspace = true

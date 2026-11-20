@@ -14,12 +14,17 @@ use std::sync::mpsc;
 const STORAGE_SIZE: u64 = 16 << 20;
 const OWNER: Owner = Owner { uid: 1000, gid: 100 };
 
-/// A server of many stores, none attached, and the notifications it sends.
+/// A server of many stores, none attached, and the names it tells the kernel to drop
+/// (`INVAL_ENTRY`), as detaches do: not the nodes changes tell it of (`INVAL_INODE`, TASK-495),
+/// which `tests/fuse.rs` checks.
 fn stores() -> (Server, mpsc::Receiver<Vec<u8>>) {
     let (sent, notified) = mpsc::channel();
     let sent = Mutex::new(sent);
     let notify = move |message: &[u8]| {
-        sent.lock().unwrap().send(message.to_vec()).unwrap();
+        let (header, _) = OutHeader::read_from_prefix(message).unwrap();
+        if header.error == notify::INVAL_ENTRY {
+            sent.lock().unwrap().send(message.to_vec()).unwrap();
+        }
         Ok(())
     };
     (Server::stores(OWNER, Box::new(notify)), notified)
@@ -320,7 +325,7 @@ fn attaching_and_detaching_refuse_what_they_cant_do() {
     // The stores are unmounted.
     assert_eq!(lookup(&server, ROOT_ID, "a").unwrap_err(), Errno::ENOTCONN);
 
-    let one = Server::new(block_on(filesystem()).unwrap());
+    let one = Server::new(block_on(filesystem()).unwrap(), Box::new(|_| Ok(())));
     assert_eq!(errno(block_on(one.attach("a", filesystem()))), Some(Errno::ENOTSUP));
     assert_eq!(errno(block_on(one.detach("a", false))), Some(Errno::ENOTSUP));
     block_on(one.into_filesystem().close()).unwrap();

@@ -95,6 +95,10 @@ pub mod opcode {
 /// The notifications the server sends the kernel unasked: an [`OutHeader`] whose `unique` is 0 and
 /// whose `error` is the notification's code.
 pub mod notify {
+    /// Mark a node's attributes stale, and its cached pages within a range, if the offset isn't
+    /// negative: [`super::NotifyInvalInodeOut`]. The kernel takes no reply of the node's attributes
+    /// asked before it as fresh (`fuse_reverse_inval_inode` moves the node's `attr_version` on).
+    pub const INVAL_INODE: i32 = 2;
     /// Drop a directory's entry of a name, and the dentries under it the kernel holds unused,
     /// which it then forgets: [`super::NotifyInvalEntryOut`], then the name and a NUL.
     pub const INVAL_ENTRY: i32 = 3;
@@ -352,6 +356,14 @@ messages! {
         pub off: u64,
         pub namelen: u32,
         pub type_: u32,
+    }
+
+    /// The body of a [`notify::INVAL_INODE`]: the node, and the range of its pages to drop from the
+    /// kernel's cache, none if `off` is negative.
+    pub struct NotifyInvalInodeOut {
+        pub ino: u64,
+        pub off: i64,
+        pub len: i64,
     }
 
     /// The body of a [`notify::INVAL_ENTRY`]: the directory, and the length of the name that

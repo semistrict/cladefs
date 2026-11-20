@@ -16,11 +16,12 @@
 
 use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
 use aws_lc_rs::key_wrap::{AES_256, KeyEncryptionKey, KeyWrap};
-use aws_lc_rs::{hkdf, hmac, rand};
+use aws_lc_rs::{hkdf, hmac};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
 pub mod kms;
+pub mod random;
 pub mod xts;
 
 #[cfg(any(test, feature = "testing"))]
@@ -56,7 +57,7 @@ impl Secret {
     /// A new key, from the system's random generator.
     pub fn random() -> Self {
         let mut key = Box::new([0; KEY_LEN]);
-        rand::fill(&mut key[..]).expect("the system's random generator fills a key");
+        random::fill(&mut key[..]);
         Self(key)
     }
 
@@ -155,7 +156,7 @@ impl Salt {
     /// A new salt, from the system's random generator.
     pub fn random() -> Self {
         let mut salt = [0; SALT_LEN];
-        rand::fill(&mut salt).expect("the system's random generator fills a salt");
+        random::fill(&mut salt);
         Self(salt)
     }
 }

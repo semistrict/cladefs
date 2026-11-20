@@ -910,7 +910,7 @@ fn check_tables(server: &Server, model: &Model) -> Result<(), String> {
 fn fuzz(sent: &[Sent]) -> Result<(), String> {
     block_on(async {
         let fs = Filesystem::format(crate::Storage::memory(STORAGE_SIZE)).await.unwrap();
-        let server = Server::new(fs);
+        let server = Server::new(fs, Box::new(|_| Ok(())));
         let mut model = Model { root: server.root(), ..Model::default() };
         let mut history = Vec::new();
         for (index, sent) in sent.iter().enumerate() {

@@ -1658,6 +1658,7 @@ dependencies = [
  "bytes",
  "crc-fast",
  "futures",
+ "libc",
  "object_store",
  "reqwest",
  "serde",

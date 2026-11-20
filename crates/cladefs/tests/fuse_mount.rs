@@ -374,6 +374,101 @@ fn a_store_mounted_is_not_mounted_again() {
     block_on(mount.join().unwrap().check()).unwrap();
 }
 
+/// TASK-495: the times a change gives a node are the ones the kernel shows next, though others stat
+/// it all the while. The kernel marks a directory's attributes stale as its entries change, but
+/// takes a stat's reply sent before the change as fresh, and keeps it as long as the mount says
+/// (`fuse_dir_changed`, which leaves the inode's `attr_version` alone): unless the server tells the
+/// kernel the node changed (`FUSE_NOTIFY_INVAL_INODE`), a stat crossing a mkdir leaves the
+/// directory's old times for the day the mount keeps them. As a renamed node's ctime is.
+/// Others list and stat the nodes as `ls -l` does.
+#[test]
+fn changes_show_their_times_though_others_stat_the_nodes_meanwhile() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, m) = paths(dir.path());
+    let mount = MountOptions::new().mount(format(&store), &m).unwrap();
+    let (a, b) = (m.join("a"), m.join("b"));
+    std::fs::create_dir(&a).unwrap();
+    std::fs::create_dir(&b).unwrap();
+    type Times = ((i64, i64), (i64, i64));
+    let times = |path: &Path| -> Times {
+        let meta = std::fs::symlink_metadata(path).unwrap();
+        ((meta.mtime(), meta.mtime_nsec()), (meta.ctime(), meta.ctime_nsec()))
+    };
+    let done = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        // Threads spinning beside them, more than the CPUs, so that the server's threads are
+        // put off between reading a node's attributes and replying with them, as under load.
+        let cpus = std::thread::available_parallelism().map_or(4, |cpus| cpus.get());
+        for _ in 0..cpus {
+            scope.spawn(|| {
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::hint::spin_loop();
+                }
+            });
+        }
+        for _ in 0..8 {
+            scope.spawn(|| {
+                // Each directory listed, then statted: the listing marks its atime stale, so
+                // that the stat asks the server, as `ls -l`'s do.
+                let list_and_stat = |path: &Path| {
+                    let listed = std::fs::read_dir(path).into_iter().flatten().flatten();
+                    let _ = (listed.count(), std::fs::symlink_metadata(path));
+                };
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    list_and_stat(&m);
+                    for dir in [&a, &b] {
+                        list_and_stat(dir);
+                        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                            list_and_stat(&entry.path());
+                        }
+                    }
+                }
+            });
+        }
+        // Whether both a node's mtime and its ctime changed.
+        let both = |before: Times, after: Times| after.0 != before.0 && after.1 != before.1;
+        let mut stale = Vec::new();
+        let began = std::time::Instant::now();
+        let mut round = 0;
+        while began.elapsed() < std::time::Duration::from_secs(20) {
+            round += 1;
+            let (made, moved) = (a.join(format!("{round}")), b.join(format!("{round}")));
+            let before = times(&a);
+            std::fs::create_dir(&made).unwrap();
+            if !both(before, times(&a)) {
+                stale.push(format!("{round}: mkdir left a's times {before:?}"));
+            }
+            let before = [times(&a), times(&b), times(&made)];
+            std::fs::rename(&made, &moved).unwrap();
+            let after = [times(&a), times(&b), times(&moved)];
+            if !both(before[0], after[0]) || !both(before[1], after[1]) {
+                stale.push(format!("{round}: rename left a's or b's times {before:?}"));
+            }
+            if after[2].1 == before[2].1 {
+                stale.push(format!("{round}: rename left the moved node's ctime {:?}", before[2]));
+            }
+            // The mount's root, which the server numbers apart: its status changed, then its
+            // entries.
+            let before = times(&m);
+            let perm = std::fs::Permissions::from_mode(if round % 2 == 0 { 0o750 } else { 0o755 });
+            std::fs::set_permissions(&m, perm).unwrap();
+            let after = times(&m);
+            if after.1 == before.1 {
+                stale.push(format!("{round}: chmod left the root's ctime {before:?}"));
+            }
+            let before = after;
+            std::os::unix::fs::symlink("x", m.join(format!("s{round}"))).unwrap();
+            if !both(before, times(&m)) {
+                stale.push(format!("{round}: symlink left the root's times {before:?}"));
+            }
+        }
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(stale, Vec::<String>::new(), "of {round} rounds");
+    });
+    mount.unmount(false).unwrap();
+    block_on(mount.join().unwrap().check()).unwrap();
+}
+
 /// cladefsd serving at `vm`, its VM socket, of placement `token`, its bucket the directory `bucket`,
 /// mounting cells at `dir`/mnt, their stores in `dir`/stores, its control socket `dir`/control
 /// (TASK-475.2), once its control socket is there, which it makes once its mount is: its child,

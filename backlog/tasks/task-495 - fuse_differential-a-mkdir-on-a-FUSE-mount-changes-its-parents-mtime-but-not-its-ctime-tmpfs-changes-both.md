@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-16 11:47'
-updated_date: '2026-11-20 18:50'
+updated_date: '2026-11-20 20:42'
 labels:
   - bug
   - fuse
@@ -35,10 +35,21 @@ Found 2026-11-16 on ubu1 (Linux workspace run of t493-int = main 4a3283a59 + TAS
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Reproduce through the kernel: a mount test whose threads list and stat nodes while the main thread changes them (fuse_mount.rs).
+2. Name the cause in the kernel's FUSE client.
+3. Have the server tell the kernel (FUSE_NOTIFY_INVAL_INODE, attributes only) which nodes a request changed, before its reply.
+4. Check the notifications without a kernel (tests/fuse.rs) and on ubu1 through it.
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-18 (TASK-539's pre-push runs on ubu1): seen again as a symlink: 'call 6: Symlink { target: x, path: c }: of ., on the reference it mtime changed, ctime changed; on the mount, mtime changed, ctime stayed', once in 6 runs of the branch; and once as fusermount3 -u 'Device or resource busy' under the full suite's load. origin/main passed 3 of 3 and the branch 4 of 4 after, alone.
 
 2026-11-20 (TASK-691 Linux run, ubu1, f4f4f4c78, fxjob 4 threads): seen again — random_calls_on_a_mount_come_to_what_they_do_on_tmpfs call 43 Mkdir { path: c, mode: 1032 }: of ., reference mtime and ctime changed, mount both stayed.
+
+Cause (2026-11-20): Linux's FUSE client marks a directory stale as its entries change (fuse_dir_changed), a renamed node's or an xattr-changed node's ctime (fuse_update_ctime), but leaves the inode's attr_version alone: a GETATTR reply the server sent before the change, arriving after, passes fuse_change_attributes_i's attr_version check, clears inval_mask and is cached for the mount's attr_valid (24 h). The mount; not the comparison. Server granularity is not it: Fxfs and the server stamp times with SystemTime::now(). Fix: Server::changed sends FUSE_NOTIFY_INVAL_INODE (off -1) for each node a request changed (setattr; symlink, mknod, mkdir, create, unlink, rmdir, link's directory; rename's two directories and the moved node; setxattr, removexattr), after it and before its reply; fuse_reverse_inval_inode moves attr_version on, so no reply asked before is taken as fresh. ENOENT (node not held) ignored, other errors logged. Both shapes now have a notifier (Server::new takes one; mount.rs's notifier()). Filesystem::rename returns the moved node's inode. Kernel locking checked (7.1): fc->killsb is held only briefly, so notifying from a handler cannot deadlock. Reproduced: fuse_mount changes_show_their_times_though_others_stat_the_nodes_meanwhile (8 listing/statting threads, CPUs oversubscribed by spinners), 4 stale renames in 350 rounds / 20 s on ubu1 before; after, passes with root chmod and symlink checks added. tests/fuse.rs changes_tell_the_kernel_the_nodes_they_changed checks which nodes each request reports. ubu1: fuse + fuse_mount 30/30; fuse_differential 10/10 stress rounds. Remaining, filed: TASK-706 (a root symlink's mixed mtime/ctime, seen once after the fix, not reproduced), TASK-705 (fusermount3 -u busy), TASK-306 (root mode 0, seen once).
 <!-- SECTION:NOTES:END -->

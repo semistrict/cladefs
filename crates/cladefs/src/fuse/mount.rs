@@ -14,7 +14,7 @@
 //! write its reply, until the filesystem is unmounted, which ends the connection: reads then fail
 //! with `ENODEV`.
 
-use super::server::{MAX_WRITE, Server};
+use super::server::{MAX_WRITE, Notifier, Server};
 use crate::error::Error;
 use crate::filesystem::Filesystem;
 use crate::node::Owner;
@@ -74,7 +74,7 @@ impl MountOptions {
     /// The filesystem is its store's only writer, as the store's directory is its process's
     /// alone, which the kernel's caches count on: they are kept as long as it likes.
     pub fn mount(&self, fs: Filesystem, mountpoint: impl AsRef<Path>) -> Result<Mount, Error> {
-        let served = self.serve(mountpoint.as_ref(), |_| Server::new(fs))?;
+        let served = self.serve(mountpoint.as_ref(), |device| Server::new(fs, notifier(device)))?;
         Ok(Mount { served })
     }
 
@@ -85,17 +85,8 @@ impl MountOptions {
     pub fn mount_stores(&self, mountpoint: impl AsRef<Path>) -> Result<StoresMount, Error> {
         // SAFETY: Plain calls returning the process's IDs.
         let owner = unsafe { Owner { uid: libc::getuid(), gid: libc::getgid() } };
-        let served = self.serve(mountpoint.as_ref(), |device| {
-            // Notifications are written whole, as replies are, by whatever thread sends them.
-            let notify = move |message: &[u8]| match (&*device).write(message)? {
-                written if written == message.len() => Ok(()),
-                written => Err(io::Error::other(format!(
-                    "{written} bytes of a {}-byte notification",
-                    message.len()
-                ))),
-            };
-            Server::stores(owner, Box::new(notify))
-        })?;
+        let served =
+            self.serve(mountpoint.as_ref(), |device| Server::stores(owner, notifier(device)))?;
         Ok(StoresMount { served })
     }
 
@@ -209,6 +200,18 @@ impl StoresMount {
         let server = self.served.join_shared();
         futures::executor::block_on(server.unmount())
     }
+}
+
+/// What sends the kernel a server's notifications through `device`: written whole, as replies
+/// are, by whatever thread sends them.
+fn notifier(device: Arc<File>) -> Notifier {
+    Box::new(move |message: &[u8]| match (&*device).write(message)? {
+        written if written == message.len() => Ok(()),
+        written => Err(io::Error::other(format!(
+            "{written} bytes of a {}-byte notification",
+            message.len()
+        ))),
+    })
 }
 
 /// A FUSE filesystem served by threads of its own until it is unmounted.

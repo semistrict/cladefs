@@ -11,6 +11,7 @@
 use cladefs::fuse::Server;
 use cladefs::{Filesystem, Storage, pages};
 use futures::executor::block_on;
+use std::sync::{Mutex, mpsc};
 
 const STORAGE_SIZE: u64 = 16 << 20;
 const ROOT: u64 = 1;
@@ -196,6 +197,8 @@ fn dirents(mut payload: &[u8], plus: bool) -> Vec<(Dirent, Option<u64>)> {
 /// The kernel's FUSE client of a server.
 struct Client {
     server: Server,
+    /// The notifications the server sent.
+    notified: mpsc::Receiver<Vec<u8>>,
     unique: u64,
     uid: u32,
     gid: u32,
@@ -203,8 +206,32 @@ struct Client {
 
 impl Client {
     async fn new() -> Self {
-        let fs = Filesystem::format(Storage::memory(STORAGE_SIZE)).await.unwrap();
-        Self { server: Server::new(fs), unique: 0, uid: 1000, gid: 100 }
+        Self::of(Filesystem::format(Storage::memory(STORAGE_SIZE)).await.unwrap())
+    }
+
+    /// A client of a new server of `fs`.
+    fn of(fs: Filesystem) -> Self {
+        let (sent, notified) = mpsc::channel();
+        let sent = Mutex::new(sent);
+        let notify = move |message: &[u8]| {
+            sent.lock().unwrap().send(message.to_vec()).unwrap();
+            Ok(())
+        };
+        Self { server: Server::new(fs, Box::new(notify)), notified, unique: 0, uid: 1000, gid: 100 }
+    }
+
+    /// The nodes the server told the kernel changed since it was last asked
+    /// (`FUSE_NOTIFY_INVAL_INODE`, attributes alone), in order.
+    fn changed(&self) -> Vec<u64> {
+        let changed = self.notified.try_iter().map(|message| {
+            // The header: its length, the notification's code, and no request's.
+            assert_eq!((u32_at(&message, 0), u32_at(&message, 4)), (40, 2), "{message:?}");
+            assert_eq!(u64_at(&message, 8), 0);
+            // The node, and no pages: a negative offset.
+            assert_eq!((u64_at(&message, 24) as i64, u64_at(&message, 32)), (-1, 0));
+            u64_at(&message, 16)
+        });
+        changed.collect()
     }
 
     /// A client of a new server, initialized.
@@ -657,6 +684,39 @@ fn names_are_validated() {
     })
 }
 
+/// TASK-495: each request that changes nodes tells the kernel which, before its reply, that it
+/// take no reply of their attributes asked before as fresh; requests that change nothing tell it
+/// nothing.
+#[test]
+fn changes_tell_the_kernel_the_nodes_they_changed() {
+    block_on(async {
+        let mut client = Client::init_new().await;
+        let (a, _) = client.mkdir(ROOT, b"a", 0o755).await;
+        assert_eq!(client.changed(), [ROOT]);
+        let (file, _) = client.create(a, b"file", 0o644).await;
+        assert_eq!(client.changed(), [a]);
+        let rename = Body::default().u64(ROOT).name(b"file").name(b"moved");
+        assert_eq!(client.call(RENAME, a, rename).await.ok(), b"");
+        assert_eq!(client.changed(), [a, ROOT, file]);
+        client.setattr(file, 1, SetattrFields { mode: 0o600, ..SetattrFields::default() }).await;
+        assert_eq!(client.changed(), [file]);
+        let set = Body::default().u32(1).u32(0).name(b"user.a").bytes(b"v");
+        assert_eq!(client.call(SETXATTR, file, set).await.ok(), b"");
+        assert_eq!(client.call(REMOVEXATTR, file, Body::default().name(b"user.a")).await.ok(), b"");
+        assert_eq!(client.changed(), [file, file]);
+        let link = Body::default().u64(file).name(b"linked");
+        client.call(LINK, a, link).await.ok();
+        assert_eq!(client.changed(), [a]);
+        assert_eq!(client.call(UNLINK, a, Body::default().name(b"linked")).await.ok(), b"");
+        assert_eq!(client.changed(), [a]);
+
+        client.getattr(file).await.ok();
+        client.lookup(ROOT, b"moved").await.ok();
+        assert_eq!(client.call(UNLINK, a, Body::default().name(b"absent")).await.error, 2);
+        assert_eq!(client.changed(), Vec::<u64>::new());
+    });
+}
+
 #[test]
 fn renames_and_links() {
     block_on(async {
@@ -905,8 +965,7 @@ fn an_encrypted_store_served_reads_back_and_holds_nothing_in_the_clear() {
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let path = dir.path().join("store");
     let data = noise(3 * pages::page_size() as usize + 5);
-    let served =
-        |fs: Filesystem| Client { server: Server::new(fs), unique: 0, uid: 1000, gid: 100 };
+    let served = Client::of;
     block_on(async {
         let fs = Filesystem::format(Storage::create(&path, 256 << 20).unwrap()).await.unwrap();
         let mut client = served(fs);

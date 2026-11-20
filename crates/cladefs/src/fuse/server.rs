@@ -69,6 +69,8 @@ pub type Notifier = Box<dyn Fn(&[u8]) -> std::io::Result<()> + Send + Sync>;
 /// whatever carries them, as `Mount` does `/dev/fuse`'s. See the module docs.
 pub struct Server {
     shape: Shape,
+    /// Tells the kernel of nodes changed ([`Server::changed`]) and names detached.
+    notify: Notifier,
     /// The filesystems served, by slot.
     stores: Mutex<Stores>,
     /// The nodes the kernel holds.
@@ -85,8 +87,8 @@ enum Shape {
     /// places as node IDs.
     One { root: Node },
     /// A directory of the server's own, of the stores attached in it, whose attributes it has
-    /// ([`Server::stores_attr`]); `notify` tells the kernel of names detached.
-    Many { owner: Owner, made: SystemTime, notify: Notifier },
+    /// ([`Server::stores_attr`]).
+    Many { owner: Owner, made: SystemTime },
 }
 
 /// The filesystems served: one's in slot 0, or many stores', by slot, from 1, and by path.
@@ -330,26 +332,28 @@ struct OpenDir {
 }
 
 impl Server {
-    /// A server of `fs`, whose root is the mount's.
-    pub fn new(fs: Filesystem) -> Self {
+    /// A server of `fs`, whose root is the mount's. `notify` sends the kernel the notifications
+    /// the server writes, as a change does ([`Server::changed`]).
+    pub fn new(fs: Filesystem, notify: Notifier) -> Self {
         let root = fs.root().clone();
         let state = State::Attached(Arc::new(fs));
         let slot = Slot { name: String::new(), dir: ROOT_ID, leaf: String::new(), state };
         let stores = Stores { slots: BTreeMap::from([(0, slot)]), ..Stores::default() };
-        Self::of(Shape::One { root }, stores)
+        Self::of(Shape::One { root }, stores, notify)
     }
 
     /// A server of many stores, attached by name in its root directory, none yet: `owner`'s,
     /// readable and searchable by all (0755). `notify` sends the kernel the notifications the
-    /// server writes, as a detach does.
+    /// server writes, as a detach and a change do.
     pub fn stores(owner: Owner, notify: Notifier) -> Self {
-        let shape = Shape::Many { owner, made: SystemTime::now(), notify };
-        Self::of(shape, Stores::many())
+        let shape = Shape::Many { owner, made: SystemTime::now() };
+        Self::of(shape, Stores::many(), notify)
     }
 
-    fn of(shape: Shape, stores: Stores) -> Self {
+    fn of(shape: Shape, stores: Stores, notify: Notifier) -> Self {
         Self {
             shape,
+            notify,
             stores: Mutex::new(stores),
             nodes: Mutex::default(),
             dirs: Mutex::default(),
@@ -447,7 +451,7 @@ impl Server {
     /// given up on before it completes leaves the store detaching for good: callers that may give
     /// up on it run it in a task of its own.
     pub async fn detach(&self, name: &str, force: bool) -> Result<(), Error> {
-        let Shape::Many { notify, .. } = &self.shape else {
+        let Shape::Many { .. } = &self.shape else {
             return Err(Errno::ENOTSUP.into());
         };
         let (slot, fs) = {
@@ -472,7 +476,7 @@ impl Server {
         };
         for (dir, given) in given {
             // `ENOENT`: the kernel dropped it already, as it dropped a directory it was in.
-            if let Err(err) = notify(&inval_entry(dir, &given))
+            if let Err(err) = (self.notify)(&inval_entry(dir, &given))
                 && err.raw_os_error() != Some(libc::ENOENT)
             {
                 log::error!("fuse: telling the kernel to drop a name of {name}'s: {err}");
@@ -749,6 +753,24 @@ impl Server {
         Ok(entry_out(nodeid, inode, valid, &attr))
     }
 
+    /// Tells the kernel that the nodes `nodeids` changed, once a request has changed them and
+    /// before its reply (TASK-495). The kernel marks the nodes a request changes stale as its reply
+    /// comes, but some of them only that, their `attr_version` left as it was: a directory whose
+    /// entries changed (`fuse_dir_changed`), a node renamed or whose extended attributes changed
+    /// (`fuse_update_ctime`), and one whose attributes were set. A stat's reply the server sent
+    /// before the change, coming after it, then reads as fresh, its old times kept as long as the
+    /// mount says, a day. Told first, the kernel moves each one's `attr_version` on, and takes no
+    /// reply asked before as fresh. A node the kernel holds no more (`ENOENT`) has none to keep.
+    fn changed(&self, nodeids: impl IntoIterator<Item = u64>) {
+        for nodeid in nodeids {
+            if let Err(err) = (self.notify)(&inval_inode(nodeid))
+                && err.raw_os_error() != Some(libc::ENOENT)
+            {
+                log::error!("fuse: telling the kernel node {nodeid} changed: {err}");
+            }
+        }
+    }
+
     /// The kernel forgets `nlookup` of its lookups of the node `nodeid`: the last lets it go.
     fn forget(&self, nodeid: u64, nlookup: u64) {
         let mut nodes = self.nodes.lock().unwrap();
@@ -896,6 +918,9 @@ impl Server {
         };
         let (slot, node) = self.node(header.nodeid, Errno::EPERM)?;
         let attr = node.setattr(&set).await?;
+        // The reply's attributes are the kernel's at once, but a stat's sent before them would
+        // be taken after them, as fresh (`fuse_do_setattr` leaves `attr_version` alone).
+        self.changed([header.nodeid]);
         Ok(attr_out(&attr, self.inode(slot, attr.inode.0)?).as_bytes().to_vec())
     }
 
@@ -928,6 +953,7 @@ impl Server {
         let (slot, dir) = self.node(header.nodeid, Errno::EPERM)?;
         let (owner, _) = self.owner(&dir, header).await?;
         let made = dir.symlink(name, target, owner).await?;
+        self.changed([header.nodeid]);
         Ok(self.entry(slot, (header.nodeid, name), made)?.as_bytes().to_vec())
     }
 
@@ -939,6 +965,7 @@ impl Server {
         let (slot, dir) = self.node(header.nodeid, Errno::EPERM)?;
         let (owner, _) = self.owner(&dir, header).await?;
         let made = dir.mknod(name, file_type, perm(mode & !umask), rdev, owner).await?;
+        self.changed([header.nodeid]);
         Ok(self.entry(slot, (header.nodeid, name), made)?.as_bytes().to_vec())
     }
 
@@ -949,6 +976,7 @@ impl Server {
         let (owner, setgid) = self.owner(&dir, header).await?;
         let perm = perm(mode & !umask) | if setgid { S_ISGID as u16 } else { 0 };
         let made = dir.mkdir(name, perm, owner).await?;
+        self.changed([header.nodeid]);
         Ok(self.entry(slot, (header.nodeid, name), made)?.as_bytes().to_vec())
     }
 
@@ -958,6 +986,7 @@ impl Server {
         let (slot, dir) = self.node(header.nodeid, Errno::EPERM)?;
         let (owner, _) = self.owner(&dir, header).await?;
         let made = dir.create(name, perm(mode & !umask), owner).await?;
+        self.changed([header.nodeid]);
         let mut reply = self.entry(slot, (header.nodeid, name), made)?.as_bytes().to_vec();
         reply.extend_from_slice(open_out().as_bytes());
         Ok(reply)
@@ -976,6 +1005,8 @@ impl Server {
             true => dir.rmdir(name).await?,
             false => dir.unlink(name).await?,
         }
+        // The node unlinked the kernel knows changed (`fuse_entry_unlinked`).
+        self.changed([header.nodeid]);
         if let Shape::Many { .. } = self.shape {
             self.nodes.lock().unwrap().unnamed(&(header.nodeid, name.into()));
         }
@@ -999,8 +1030,11 @@ impl Server {
         let flags = RenameFlags::from_bits_retain(flags);
         // Nodes of two stores are refused by their filesystem (`EXDEV`).
         match (self.target(header.nodeid)?, self.target(new_dir)?) {
-            (Target::Node(_, dir), Target::Node(_, to)) => {
-                dir.rename(name, &to, new_name, flags).await?;
+            (Target::Node(slot, dir), Target::Node(_, to)) => {
+                let moved = dir.rename(name, &to, new_name, flags).await?;
+                // Its ctime too, which the kernel marks stale as it does the directories'.
+                let moved = self.swap(self.inode(slot, moved.0)?);
+                self.changed([header.nodeid, new_dir, moved]);
                 if let Shape::Many { .. } = self.shape {
                     let (from, to) = ((header.nodeid, name.into()), (new_dir, new_name.into()));
                     let exchange = flags.contains(RenameFlags::EXCHANGE);
@@ -1020,6 +1054,8 @@ impl Server {
         // A node of another store is refused by its filesystem (`EXDEV`).
         let (slot, dir) = self.node(header.nodeid, Errno::EXDEV)?;
         let attr = node.link(&dir, new_name).await?;
+        // The node linked the kernel knows changed: the reply's attributes are its (`fuse_iget`).
+        self.changed([header.nodeid]);
         Ok(self.entry(slot, (header.nodeid, new_name), (node, attr))?.as_bytes().to_vec())
     }
 
@@ -1088,6 +1124,7 @@ impl Server {
         }
         let name = xattr_name(name)?;
         self.node(header.nodeid, Errno::EPERM)?.1.setxattr(name, value, mode).await?;
+        self.changed([header.nodeid]);
         Ok(Vec::new())
     }
 
@@ -1114,6 +1151,7 @@ impl Server {
         let [name] = strings(body.rest())?;
         let name = xattr_name(name)?;
         self.node(header.nodeid, Errno::EPERM)?.1.removexattr(name).await?;
+        self.changed([header.nodeid]);
         Ok(Vec::new())
     }
 
@@ -1284,6 +1322,14 @@ impl Drop for Reserved<'_> {
         let Some(slot) = self.slot else { return };
         self.server.stores.lock().unwrap().remove(slot);
     }
+}
+
+/// A notification that the node `ino`'s attributes are stale, its cached pages left alone.
+fn inval_inode(ino: u64) -> Vec<u8> {
+    let body = NotifyInvalInodeOut { ino, off: -1, len: 0 };
+    let len = size_of::<OutHeader>() + size_of::<NotifyInvalInodeOut>();
+    let header = OutHeader { len: len as u32, error: notify::INVAL_INODE, unique: 0 };
+    [header.as_bytes(), body.as_bytes()].concat()
 }
 
 /// A notification that the kernel drop the entry of `name` in the directory `parent`.
@@ -1480,7 +1526,7 @@ mod tests {
     #[test]
     fn the_root_and_fuses_root_id_swap_places() {
         let fs = block_on(Filesystem::format(crate::Storage::memory(8 << 20))).unwrap();
-        let server = Server::new(fs);
+        let server = Server::new(fs, Box::new(|_| Ok(())));
         let root = server.root();
         assert_eq!((server.swap(root), server.swap(ROOT_ID)), (ROOT_ID, root));
         for id in [ROOT_ID, root, root + 1, 1 << 40] {

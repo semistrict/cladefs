@@ -95,7 +95,7 @@ impl TenantKek {
     /// A new KEK, and its ID, from the system's random generator.
     pub fn random() -> Self {
         let mut id = [0; KEK_ID_LEN];
-        aws_lc_rs::rand::fill(&mut id).expect("the system's random generator fills an ID");
+        crate::random::fill(&mut id);
         Self { id: KekId(id), key: Secret::random() }
     }
 
