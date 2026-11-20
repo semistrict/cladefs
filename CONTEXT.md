@@ -259,6 +259,18 @@ _Avoid_: clone (git's alone), restore (a VM snapshot's alone)
 **Parent** / **Child**:
 The cell a fork came from, and the cell it made. Dropping a version that has children keeps its data until they go.
 
+**Ephemeral cell**:
+A child kept on one host's disk alone, never uploaded, with no versions of its own: its parent's version its lower layer, its own extents raw in its directory (doc-25). It survives what keeps the host's disk, and moves to another host only by hand-over. Its reference in the parent's bucket names its host's incarnation.
+_Avoid_: local cell (`local_cell` is the store's crate, Local a level), scratch, overlay, upper
+
+**Hand over**:
+Moving an ephemeral cell's writing from one host to another in a live migration: the source gives the cell up, then names its last commit, from which alone the target opens it.
+_Avoid_: take (a bucket cell's, by its head), failover
+
+**Decommission** (a host):
+The VM manager's saying a host is gone for good, which retires every reference naming its incarnation.
+_Avoid_: forget (a shredded tenant's or cell's keys), evict
+
 **Origin**:
 Where a child was forked from: its parent and the segment its version closed. The collector keeps an origin's state while children of other cells live on it.
 
@@ -337,7 +349,8 @@ _Avoid_: acknowledged for a VM process's taking in window changes (say **confirm
 How far a store's uploads may fall behind its commits before commits stall.
 
 **Checkpoint**:
-A cell's state as of a segment, so recovery reads from it rather than from the beginning.
+A cell's state as of a segment, so recovery reads from it rather than from the beginning. An
+ephemeral cell's is a **local checkpoint**, in its directory.
 _Avoid_: checkpoint for Fxfs's (say **journal checkpoint**)
 
 **Collector**:
@@ -382,7 +395,7 @@ A host in an incarnation, holding a configuration's log; the writer is one.
 _Avoid_: replica (alone), follower (a follower reads, doc-8)
 
 **Incarnation**:
-A random number a daemon's replica directory is made with, new when its disk is lost: a member is a host in one incarnation, so a host that lost its disk, and its promises with it, is no longer that member. Erlang's node creation; BookKeeper's cookie.
+A random number a daemon's replica directory is made with, new when its disk is lost: a member is a host in one incarnation, so a host that lost its disk, and its promises with it, is no longer that member. Erlang's node creation; BookKeeper's cookie. Ephemeral cells' references name it too (doc-25).
 _Avoid_: cookie (Erlang's is a shared secret for authentication), generation
 
 **Fence** (a member):
