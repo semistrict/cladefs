@@ -3,9 +3,11 @@ id: TASK-698.2
 title: >-
   local_cell: an ephemeral store mode with raw segments kept, frees punched,
   footprint by allocated blocks, local checkpoints
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-20 16:21'
+updated_date: '2026-11-20 16:30'
 labels: []
 dependencies: []
 documentation:

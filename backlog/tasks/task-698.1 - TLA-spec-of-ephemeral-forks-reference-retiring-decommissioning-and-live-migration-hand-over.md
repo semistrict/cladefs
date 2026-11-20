@@ -3,9 +3,11 @@ id: TASK-698.1
 title: >-
   TLA+ spec of ephemeral forks, reference retiring, decommissioning and live
   migration hand-over
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-20 16:21'
+updated_date: '2026-11-20 16:30'
 labels: []
 dependencies: []
 documentation:

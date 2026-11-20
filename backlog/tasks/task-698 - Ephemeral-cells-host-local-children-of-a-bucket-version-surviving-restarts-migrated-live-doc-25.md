@@ -3,9 +3,11 @@ id: TASK-698
 title: >-
   Ephemeral cells: host-local children of a bucket version, surviving restarts,
   migrated live (doc-25)
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-20 16:20'
+updated_date: '2026-11-20 16:30'
 labels: []
 dependencies: []
 documentation:
