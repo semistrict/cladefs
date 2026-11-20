@@ -68,16 +68,16 @@ pub(crate) fn may_fork_into(
 /// other cell of the bucket has, nor will (`bucket_cell::objectid`), so that stores made apart,
 /// and the forks of one, mint extent IDs of their own (backlog doc-4), which a host's cache of
 /// extents keys them by (TASK-364). A cell's ID is its cell's: no caller names a new one.
-pub(crate) fn new_cell(bucket: &ObjectBucket, tenant: u64) -> Result<CellId, Failure> {
-    let id = upload::block_on(bucket.new_objectid())??;
+pub(crate) async fn new_cell(bucket: &ObjectBucket, tenant: u64) -> Result<CellId, Failure> {
+    let id = bucket.new_objectid().await?;
     Ok(CellId { tenant, id })
 }
 
 /// A new cell of `tenant`'s, of the bucket at `url`, as [`new_cell`] gives it: for a cell whose
 /// object is made before its store ([`CellOf::Named`]), as the FUSE mount's are. It blocks.
 #[cfg(target_os = "linux")]
-pub(crate) fn new_cell_at(url: &str, tenant: u64) -> Result<CellId, Failure> {
-    new_cell(&*bucket(url)?, tenant)
+pub(crate) async fn new_cell_at(url: &str, tenant: u64) -> Result<CellId, Failure> {
+    new_cell(&*bucket(url)?, tenant).await
 }
 
 /// A cell of a new cell of the default tenant's, of a random ID no allocator gave: for tests
@@ -263,6 +263,14 @@ impl Opened {
     pub fn made(&self) -> anyhow::Result<()> {
         self.store.made()
     }
+
+    /// cladefs: closes it, its uploader stopped (`Uploader::close`), and returns once nothing of it
+    /// holds the store open, which may be opened again at once (TASK-685.3).
+    pub async fn close(self) {
+        let Opened { store, bucket, uploader } = self;
+        drop((store, bucket));
+        uploader.close().await;
+    }
 }
 
 /// The bucket the store at `path` names, if its description is there: as deleting it, or what of
@@ -287,15 +295,18 @@ pub(crate) fn options() -> Options {
 /// cell's, of `kind` (doc-20), and opens it, its uploader as `keeping` says ([`open`]): whole, as
 /// made. Its directory entry is as durable as
 /// it is. A store that is not made whole is removed; what is at `path` already is left as it is.
-pub(crate) fn create(
+pub(crate) async fn create(
     path: &Path,
     capacity: u64,
     of: CellOf,
     kind: cell::Kind,
     keeping: upload::Options,
 ) -> Result<Opened, Failure> {
-    let opened = create_unmade(path, capacity, of, kind, None, keeping)?;
-    opened.made()?;
+    let opened = create_unmade(path, capacity, of, kind, None, keeping).await?;
+    if let Err(err) = upload::blocking(|| opened.made()) {
+        opened.close().await;
+        return Err(err.into());
+    }
     Ok(opened)
 }
 
@@ -303,7 +314,7 @@ pub(crate) fn create(
 /// else at [`bucket_for`]'s; unmade until its maker says it is whole ([`Opened::made`]), as an
 /// import does once filled (TASK-196): opened before, it refuses (`local_cell::Unmade`), and
 /// [`unmade`] says it is no store.
-pub(crate) fn create_unmade(
+pub(crate) async fn create_unmade(
     path: &Path,
     capacity: u64,
     of: CellOf,
@@ -311,58 +322,65 @@ pub(crate) fn create_unmade(
     bucket: Option<&str>,
     keeping: upload::Options,
 ) -> Result<Opened, Failure> {
-    std::fs::create_dir(path)
+    upload::blocking(|| std::fs::create_dir(path))
         .map_err(|err| Failure::local(err, format!("creating {}", path.display())))?;
-    let made = || -> Result<Opened, Failure> {
+    let made = async {
         let url = bucket.map_or_else(|| bucket_for(path), |bucket| Ok(bucket.to_owned()))?;
         let bucket = self::bucket(&url)?;
-        // A new cell made here, a root, its KEK from the host's pool, before its store first opens
-        // (TASK-515): a tenant the KMS refuses gets nothing made (TASK-411.28); its first taking
-        // gives it its DEK and kind.
-        let made = |cell: CellId| -> Result<(), Failure> {
-            let kms = crate::bucket::kms()?;
-            upload::block_on(bucket_cell::keys::make(&*bucket, &kms, cell, rand::random()))??;
-            Ok(())
-        };
-        // Its head, read to see the bucket has it, is what the store's opening, next, would read
-        // first: learned for it, a read less (`bucket_cell::known`, TASK-449).
-        let taken = |cell: CellId| -> Result<bool, Failure> {
-            let read = upload::block_on(bucket_cell::head::read(&*bucket, cell))?;
-            let found = read.head(cell)?.is_some();
-            if let (Some(known), Some(head)) = (bucket_cell::Bucket::known(&*bucket), read.object())
-            {
-                known.learn(cell, Learned { head });
-            }
-            Ok(found)
-        };
         let cell = match of {
             CellOf::New(tenant) => {
-                let cell = new_cell(&bucket, tenant)?;
-                made(cell)?;
+                let cell = new_cell(&bucket, tenant).await?;
+                make_keys(&bucket, cell).await?;
                 cell
             }
             CellOf::Named(cell) => {
-                if !taken(cell)? {
-                    made(cell)?;
+                if !learn_taken(&bucket, cell).await? {
+                    make_keys(&bucket, cell).await?;
                 }
                 cell
             }
-            CellOf::Taken(cell) => match taken(cell)? {
+            CellOf::Taken(cell) => match learn_taken(&bucket, cell).await? {
                 true => cell,
                 false => return Err(bucket_cell::Error::NoCell.into()),
             },
         };
-        let description = Description { block_size: BLOCK_SIZE, capacity, cell };
-        local_cell::create_host(path, description, &url, kind)?;
-        let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
-        let synced = std::fs::File::open(parent.unwrap_or(Path::new(".")))
-            .and_then(|parent| parent.sync_all());
-        synced.map_err(|err| Failure::local(err, "syncing a store's parent"))?;
-        let recovering = LocalCell::recover_unmade(host_dir(path)?)?;
-        opened(recovering, keeping)
+        let recovering = upload::blocking(|| -> Result<_, Failure> {
+            let description = Description { block_size: BLOCK_SIZE, capacity, cell };
+            local_cell::create_host(path, description, &url, kind)?;
+            let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
+            let synced = std::fs::File::open(parent.unwrap_or(Path::new(".")))
+                .and_then(|parent| parent.sync_all());
+            synced.map_err(|err| Failure::local(err, "syncing a store's parent"))?;
+            Ok(LocalCell::recover_unmade(host_dir(path)?)?)
+        })?;
+        opened(recovering, keeping).await
     };
     // Leave nothing half made behind.
-    made().inspect_err(|_| discard(path))
+    let made = made.await;
+    if made.is_err() {
+        upload::blocking(|| discard(path));
+    }
+    made
+}
+
+/// A new cell made here, a root, its KEK from the host's pool, before its store first opens
+/// (TASK-515): a tenant the KMS refuses gets nothing made (TASK-411.28); its first taking gives it
+/// its DEK and kind.
+async fn make_keys(bucket: &ObjectBucket, cell: CellId) -> Result<(), Failure> {
+    let kms = crate::bucket::kms()?;
+    bucket_cell::keys::make(bucket, &kms, cell, rand::random()).await?;
+    Ok(())
+}
+
+/// Whether the bucket has `cell`: its head, read to see, is what the store's opening, next, would
+/// read first, learned for it, a read less (`bucket_cell::known`, TASK-449).
+async fn learn_taken(bucket: &ObjectBucket, cell: CellId) -> Result<bool, Failure> {
+    let read = bucket_cell::head::read(bucket, cell).await;
+    let found = read.head(cell)?.is_some();
+    if let (Some(known), Some(head)) = (bucket_cell::Bucket::known(bucket), read.object()) {
+        known.learn(cell, Learned { head });
+    }
+    Ok(found)
 }
 
 /// Opens the store at `path` as of its last commit, with the bucket it names: its uploader, as
@@ -370,9 +388,10 @@ pub(crate) fn create_unmade(
 /// and recovers it, the store's write-ahead log put after its end (`local_cell::upload::open`,
 /// TASK-165.9). Fails as that does: a log another writer's commits moved past (`ESTALE`), a cell
 /// deleted (`ENOENT`) or a later placement's (`ESTALE`); and a store never made whole (`Unmade`).
-pub(crate) fn open(path: &Path, keeping: upload::Options) -> Result<Opened, Failure> {
-    let recovering = LocalCell::recover(host_dir(path)?)?;
-    opened(recovering, keeping)
+pub(crate) async fn open(path: &Path, keeping: upload::Options) -> Result<Opened, Failure> {
+    let recovering =
+        upload::blocking(|| -> Result<_, Failure> { Ok(LocalCell::recover(host_dir(path)?)?) })?;
+    opened(recovering, keeping).await
 }
 
 /// The directory of the store at `path`.
@@ -384,31 +403,38 @@ fn host_dir(path: &Path) -> Result<HostDir, Failure> {
 /// commits moved its cell past it (`bucket_cell::Error::Diverged`): what `cladefsctl take` does
 /// of a store that refuses to open so, the commits the log held, never acknowledged, lost (doc-14,
 /// Opening a store; doc-7, Recovery on the same host).
-pub(crate) fn take(path: &Path, keeping: upload::Options) -> Result<Opened, Failure> {
-    match open(path, keeping.clone()) {
+pub(crate) async fn take(path: &Path, keeping: upload::Options) -> Result<Opened, Failure> {
+    match open(path, keeping.clone()).await {
         Err(Failure::Bucket(bucket_cell::Error::Diverged)) => {
-            let mut recovering = LocalCell::recover(host_dir(path)?)?;
-            log::warn!(
-                "cladefs: dropping {}'s write-ahead log: another writer moved cell {} past it",
-                path.display(),
-                recovering.cell()
-            );
-            recovering.drop_wal()?;
-            opened(recovering, keeping)
+            let recovering = upload::blocking(|| -> Result<_, Failure> {
+                let mut recovering = LocalCell::recover(host_dir(path)?)?;
+                log::warn!(
+                    "cladefs: dropping {}'s write-ahead log: another writer moved cell {} past it",
+                    path.display(),
+                    recovering.cell()
+                );
+                recovering.drop_wal()?;
+                Ok(recovering)
+            })?;
+            opened(recovering, keeping).await
         }
         opened => opened,
     }
 }
 
 /// The store `recovering` recovered, opened with its uploader as `keeping` says.
-fn opened(recovering: Recovering<HostDir>, keeping: upload::Options) -> Result<Opened, Failure> {
+async fn opened(
+    recovering: Recovering<HostDir>,
+    keeping: upload::Options,
+) -> Result<Opened, Failure> {
     let url = recovering.bucket().map(str::to_owned);
     let path = || recovering_path(&recovering);
     let url = url.ok_or_else(|| Failure::msg(format!("{} names no bucket", path())))?;
     let bucket = bucket(&url).with_context(|| format!("opening the bucket {url}"))?;
     let runtime = crate::bucket::runtime()?;
     let holding = (rand::random(), keeping);
-    let (store, uploader) = upload::open(recovering, options(), bucket.clone(), holding, &runtime)?;
+    let opening = upload::open(recovering, options(), bucket.clone(), holding, &runtime);
+    let (store, uploader) = opening.await?;
     Ok(Opened { store, bucket, uploader })
 }
 
@@ -457,16 +483,16 @@ pub(crate) fn discard(path: &Path) {
 /// (`Remote::inheriting`, `keys::give_inherited`, TASK-411.4): refused before anything is made,
 /// `EACCES` if the child's tenant has no KEK in the KMS (TASK-411.28), or the host heard a tenant
 /// whose keys it inherits, or the child's, revoked or destroyed.
-pub(crate) fn fork(
+pub(crate) async fn fork(
     store: &LocalCell<HostDir>,
     uploader: &Uploader<HostDir>,
     path: &Path,
     child: Child,
-    prepare: impl FnOnce(&Path) -> anyhow::Result<()>,
+    prepare: impl FnOnce(&Path) -> anyhow::Result<()> + Send,
 ) -> Result<(), Error> {
     may_fork_into(store.description().cell, uploader, child.cell.tenant)?;
-    let inheriting = uploader.inheriting(child)?;
-    std::fs::create_dir(path).map_err(|err| match err.kind() {
+    let inheriting = uploader.inheriting(child).await?;
+    upload::blocking(|| std::fs::create_dir(path)).map_err(|err| match err.kind() {
         std::io::ErrorKind::AlreadyExists => {
             Error::new(anyhow::Error::new(err).context(Errno::EEXIST))
         }
@@ -483,17 +509,20 @@ pub(crate) fn fork(
         }
         err => anyhow::anyhow!("forking to cell {cell}: {err}"),
     };
-    let made = uploader.forked(child, inheriting).map_err(failed).and_then(|()| {
-        failpoint!("fork::recorded");
-        make_child(store, path, cell, prepare)
-            .with_context(|| format!("forking to cell {cell}: making its store"))?;
-        failpoint!("fork::made");
-        Ok(())
-    });
+    let made = match uploader.forked(child, inheriting).await {
+        Err(err) => Err(failed(err)),
+        Ok(()) => upload::blocking(|| -> anyhow::Result<()> {
+            failpoint!("fork::recorded");
+            make_child(store, path, cell, prepare)
+                .with_context(|| format!("forking to cell {cell}: making its store"))?;
+            failpoint!("fork::made");
+            Ok(())
+        }),
+    };
     let Err(err) = made else { return Ok(()) };
     // Leave nothing half made behind: no store, and no fork whose store went.
-    discard(path);
-    if let Err(why) = uploader.unfork(child) {
+    upload::blocking(|| discard(path));
+    if let Err(why) = uploader.unfork(child).await {
         log::warn!("cladefs: leaving cell {cell}, whose fork failed: {why}");
     }
     Err(Error::new(err))
@@ -549,32 +578,43 @@ pub(crate) fn version_dir(cell: CellId, version: u64) -> PathBuf {
 /// from a store at the version ([`version_dir`]), made, then deleted, and the version dropped, the
 /// child keeping what it inherits by its reference. So a store with a writer forks: forks are of
 /// versions alone (TASK-508.3).
-pub(crate) fn fork_through(
+pub(crate) async fn fork_through(
     store: &LocalCell<HostDir>,
     uploader: &Uploader<HostDir>,
     version: u64,
     path: &Path,
     child: Child,
-    prepare: impl FnOnce(&Path) -> anyhow::Result<()>,
+    prepare: impl FnOnce(&Path) -> anyhow::Result<()> + Send,
 ) -> Result<(), Error> {
     let at = version_dir(store.description().cell, version);
     let (kind, url) = (store.kind().ok_or(Errno::EINVAL)?, store.bucket().ok_or(Errno::EINVAL)?);
-    let made =
-        at.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::create_dir(&at));
-    made.map_err(|err| {
-        Error::new(anyhow::Error::new(err).context(format!("making {}", at.display())))
-    })?;
-    let forked = local_cell::create_host_at_version(&at, store.description(), url, kind, version)
-        .and_then(|()| local_cell::made_host(&at))
-        .map_err(Error::new)
-        .and_then(|()| open(&at, uploader.options().clone()).map_err(Error::from))
-        .and_then(|at| fork(&at.store, &at.uploader, path, child, prepare));
-    discard(&at);
+    let made = upload::blocking(|| -> Result<(), Error> {
+        let made = at.parent().map_or(Ok(()), std::fs::create_dir_all);
+        made.and_then(|()| std::fs::create_dir(&at)).map_err(|err| {
+            Error::new(anyhow::Error::new(err).context(format!("making {}", at.display())))
+        })?;
+        local_cell::create_host_at_version(&at, store.description(), url, kind, version)
+            .and_then(|()| local_cell::made_host(&at))
+            .map_err(Error::new)
+    });
+    // The store at the version closed before it goes, as it held its directory.
+    let forked = match made {
+        Err(err) => Err(err),
+        Ok(()) => match open(&at, uploader.options().clone()).await {
+            Err(failure) => Err(Error::from(failure)),
+            Ok(opened) => {
+                let forked = fork(&opened.store, &opened.uploader, path, child, prepare).await;
+                opened.close().await;
+                forked
+            }
+        },
+    };
+    upload::blocking(|| discard(&at));
     // The version, the fork's alone, dropped whether or not it forked. The child made is the
     // fork's last step that can fail it: past it, a drop failing leaves the version named, which
     // the cell's versions list for dropping again, and a fork reported failed would leave a live
     // child, its store whole at `path`, that its caller never learns of (TASK-609).
-    let dropped = uploader.drop_versions(&std::collections::BTreeSet::from([version]));
+    let dropped = uploader.drop_versions(&std::collections::BTreeSet::from([version])).await;
     forked?;
     if let Err(failure) = dropped {
         log::error!(
@@ -625,22 +665,23 @@ fn make_child(
 ///
 /// Fails with `ENOENT` if nothing is at `path`, and with `ESTALE` if a later placement of the
 /// store holds its cell in `bucket`.
-pub(crate) fn delete(
+pub(crate) async fn delete(
     path: &Path,
     bucket: Option<&ObjectBucket>,
     token: impl Fn() -> Result<u64, Failure>,
 ) -> Result<(), Error> {
     // As this copy's placement, or this host's, deletes it: not from under a later one (`ESTALE`).
     // A store at a version deletes nothing in the bucket: the version is its cell's.
-    delete_with(path, |dir, cell| match bucket {
-        Some(_) if local_cell::host_version(dir)?.is_some() => Ok(()),
+    delete_with(path, async |dir, cell| match bucket {
+        Some(_) if upload::blocking(|| local_cell::host_version(dir))?.is_some() => Ok(()),
         Some(bucket) => {
-            let placed = local_cell::host_token(dir)?;
+            let placed = upload::blocking(|| local_cell::host_token(dir))?;
             let token = placed.map_or_else(&token, Ok)?;
-            local_cell::upload::delete_cell(bucket, cell, token)
+            local_cell::upload::delete_cell(bucket, cell, token).await
         }
         None => Ok(()),
     })
+    .await
 }
 
 /// Deletes the store at `path` as [`delete`] does, `elsewhere` deleting its cell where else it
@@ -649,18 +690,18 @@ pub(crate) fn delete(
 /// host crashing or `elsewhere` failing, leaves the store still, which deleting again finishes,
 /// never a cell kept elsewhere alone. What a store's making, or a fork's, left unmade, which is
 /// no store, goes, `elsewhere` called for nothing.
-pub(crate) fn delete_with(
+pub(crate) async fn delete_with(
     path: &Path,
-    elsewhere: impl Fn(&Path, CellId) -> Result<(), Failure>,
+    elsewhere: impl AsyncFnOnce(&Path, CellId) -> Result<(), Failure>,
 ) -> Result<(), Error> {
     if !path.exists() {
         return Err(Errno::ENOENT.into());
     }
-    let deleting = |cell| -> anyhow::Result<()> {
+    let deleting = async |cell| -> anyhow::Result<()> {
         failpoint!("delete::elsewhere");
-        Ok(elsewhere(path, cell)?)
+        Ok(elsewhere(path, cell).await?)
     };
-    local_cell::delete_host(path, deleting).map_err(|err| {
+    local_cell::delete_host(path, deleting).await.map_err(|err| {
         // Its errno, if deleting the cell elsewhere failed with one: `ESTALE` for a cell a
         // later placement holds.
         let failure = err.chain().find_map(|cause| cause.downcast_ref::<Failure>());
@@ -691,16 +732,25 @@ mod tests {
     fn stores_unmade_open_not() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
-        let made = create_unmade(&path, MIB, new(), cell::Kind::Fxfs, None, keeping().unwrap());
+        let made = local_cell::upload::wait_on(create_unmade(
+            &path,
+            MIB,
+            new(),
+            cell::Kind::Fxfs,
+            None,
+            keeping().unwrap(),
+        ));
         let cell = made.unwrap().store.description().cell;
         assert!(unmade(&path));
-        let refused = open(&path, keeping().unwrap()).err().unwrap();
+        let refused = local_cell::upload::wait_on(open(&path, keeping().unwrap())).err().unwrap();
         let Failure::Local(refused) = refused else { panic!("{refused}") };
         assert_eq!(refused.downcast_ref::<local_cell::Unmade>(), Some(&local_cell::Unmade));
         local_cell::made_host(&path).unwrap();
         assert!(!unmade(&path));
         assert_eq!(
-            open(&path, keeping().unwrap()).map(|opened| opened.store.description().cell).ok(),
+            local_cell::upload::wait_on(open(&path, keeping().unwrap()))
+                .map(|opened| opened.store.description().cell)
+                .ok(),
             Some(cell)
         );
     }
@@ -765,8 +815,14 @@ mod tests {
         let (one, two) = (dir.path().join("one"), dir.path().join("two"));
         let url = format!("memory:///new-cells-{}", std::process::id());
         let made = |path: &Path, of| {
-            let made =
-                create_unmade(path, MIB, of, cell::Kind::Fxfs, Some(&url), keeping().unwrap());
+            let made = local_cell::upload::wait_on(create_unmade(
+                path,
+                MIB,
+                of,
+                cell::Kind::Fxfs,
+                Some(&url),
+                keeping().unwrap(),
+            ));
             made.unwrap().store.description().cell
         };
         let first = made(&one, new());
@@ -780,14 +836,14 @@ mod tests {
 
         let absent = CellId { tenant: DEFAULT_TENANT, id: second.id + 1 };
         let path = dir.path().join("absent");
-        let refused = create_unmade(
+        let refused = local_cell::upload::wait_on(create_unmade(
             &path,
             MIB,
             CellOf::Taken(absent),
             cell::Kind::Fxfs,
             Some(&url),
             keeping().unwrap(),
-        );
+        ));
         let Err(Failure::Bucket(refused)) = refused.map(drop) else { panic!("made") };
         assert_eq!(refused, bucket_cell::Error::NoCell);
         assert!(!path.exists(), "a store of no cell was left");
@@ -810,16 +866,32 @@ mod tests {
 
         // Where no host's bucket is, as in this test's process.
         let (made, fork) = (dir.path().join("made"), dir.path().join("fork"));
-        let Opened { store, bucket, uploader } =
-            create(&made, MIB, new(), cell::Kind::Fxfs, keeping().unwrap()).unwrap();
-        let forked = new_cell(&bucket, store.description().cell.tenant).unwrap();
+        let Opened { store, bucket, uploader } = local_cell::upload::wait_on(create(
+            &made,
+            MIB,
+            new(),
+            cell::Kind::Fxfs,
+            keeping().unwrap(),
+        ))
+        .unwrap();
+        let forked =
+            local_cell::upload::wait_on(new_cell(&bucket, store.description().cell.tenant))
+                .unwrap();
         let child = Child { cell: forked, owner: 1 };
         let version = bucket_cell::layout::NewVersion { id: 1, keep_last: None };
-        futures::executor::block_on(
+        local_cell::upload::wait_on(
             uploader.uploaded(store.commit_version(version, false).unwrap()),
         )
         .unwrap();
-        fork_through(&store, &uploader, version.id, &fork, child, |_| Ok(())).unwrap();
+        local_cell::upload::wait_on(fork_through(
+            &store,
+            &uploader,
+            version.id,
+            &fork,
+            child,
+            |_| Ok(()),
+        ))
+        .unwrap();
         let own = dir.path().canonicalize().unwrap().join("made.bucket");
         let url = format!("file://{}/", own.display());
         for named in [&made, &fork] {
@@ -834,7 +906,7 @@ mod tests {
         // The store deleted, its fork's cell lives on in it.
         drop(uploader);
         drop(store);
-        delete(&made, Some(&bucket), || Ok(1)).unwrap();
+        local_cell::upload::wait_on(delete(&made, Some(&bucket), || Ok(1))).unwrap();
         assert!(!made.exists() && own.exists());
         let record = futures::executor::block_on(bucket_cell::head::get(&*bucket, forked));
         assert_eq!(record.unwrap().map(|record| record.deleted()), Some(false));
@@ -846,7 +918,16 @@ mod tests {
     fn older_stores_are_refused_by_their_format() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
-        drop(create(&path, MIB, new(), cell::Kind::Fxfs, keeping().unwrap()).unwrap());
+        drop(
+            local_cell::upload::wait_on(create(
+                &path,
+                MIB,
+                new(),
+                cell::Kind::Fxfs,
+                keeping().unwrap(),
+            ))
+            .unwrap(),
+        );
         let description = path.join("store");
         let text = std::fs::read_to_string(&description).unwrap();
         let older: String = std::iter::once("cladefs extent store 5")
@@ -856,7 +937,7 @@ mod tests {
         std::fs::write(&description, older).unwrap();
 
         let format = local_cell::Format { found: "cladefs extent store 5".to_owned() };
-        let refused = open(&path, keeping().unwrap()).err().unwrap();
+        let refused = local_cell::upload::wait_on(open(&path, keeping().unwrap())).err().unwrap();
         let Failure::Local(refused) = refused else { panic!("{refused}") };
         assert_eq!(refused.downcast_ref::<local_cell::Format>(), Some(&format), "{refused:#}");
         let refused = crate::Storage::open(&path).err().unwrap();
@@ -874,7 +955,7 @@ mod tests {
         let path = dir.path().join("fork");
         std::fs::create_dir(&path).unwrap();
         assert!(unmade(&path));
-        delete(&path, None, token).unwrap();
+        local_cell::upload::wait_on(delete(&path, None, token)).unwrap();
         assert!(!path.exists());
     }
 
@@ -888,7 +969,7 @@ mod tests {
         std::fs::create_dir_all(path.join("segments")).unwrap();
         std::fs::write(path.join("ancestry"), "3 /elsewhere\n").unwrap();
         assert!(unmade(&path));
-        delete(&path, None, token).unwrap();
+        local_cell::upload::wait_on(delete(&path, None, token)).unwrap();
         assert!(!path.exists());
     }
 }

@@ -123,8 +123,8 @@ mod host {
             ))?;
             // A cell of each case's own, as each fork's is, its ID its bucket's to give:
             // a new cell of the base's tenant's (TASK-364).
-            let base = cladefs::OpenCell::open(&base)?;
-            base.fork(dir.join("extents"), base.cell().tenant)?;
+            let base = local_cell::upload::wait_on(cladefs::OpenCell::open(&base))?;
+            local_cell::upload::wait_on(base.fork(dir.join("extents"), base.cell().tenant))?;
             drop(base);
 
             let mut vm = Vm::new(2, 512)?;

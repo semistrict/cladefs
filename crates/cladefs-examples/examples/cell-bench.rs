@@ -444,8 +444,14 @@ impl Host {
         let holding = (id, uploading);
         let bucket = self.bucket.clone();
         let _entered = self.runtime.enter();
-        let (store, uploader) =
-            local_cell::upload::open(recovering, options, bucket, holding, &self.upload).unwrap();
+        let (store, uploader) = local_cell::upload::wait_on(local_cell::upload::open(
+            recovering,
+            options,
+            bucket,
+            holding,
+            &self.upload,
+        ))
+        .unwrap();
         store.made().unwrap();
         assert!(store.keys().encrypts());
         (store, uploader)
