@@ -473,9 +473,10 @@ impl<B: Bucket> Writer<B> {
             return Ok(self.inner().state.through);
         }
         failpoint!("writer::acknowledge");
+        // Waited for before the head is held, which its other changes and readers wait for.
+        self.bucket.rewritable(&layout::head(self.cell)).await;
         let through = {
             let mut held = self.held.lock().await;
-            self.bucket.rewritable(&layout::head(self.cell)).await;
             let Some(Naming { through, cuts, switch }) = self.naming()? else {
                 return Ok(self.inner().state.through);
             };

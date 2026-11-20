@@ -56,7 +56,7 @@ use bucket_cell::wal::TakenCell;
 use bucket_cell::{Body, Objects, Recovered, Writer, head, lifecycle};
 use event_listener::{Event, Listener as _};
 use futures::StreamExt as _;
-use futures::future::{BoxFuture, Either, FutureExt as _};
+use futures::future::{BoxFuture, Either, FutureExt as _, TryFutureExt as _};
 use futures::stream::FuturesOrdered;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -1232,14 +1232,15 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         if let Some((wish, configuration, stale)) = keeping {
             (self.spawn)(self.clone().keep(writer.clone(), wish, (configuration, stale)).boxed());
         }
-        // The segments uploaded, and as many as were when the last checkpoint was asked for.
+        // The segments uploaded, and as many as were when the last checkpoint was begun.
         let (mut segments, mut checkpointed) = (0, 0);
         let mut in_flight = InFlight::default();
-        // cladefs: the acknowledgement under way, beside the uploads, which go on meanwhile as it
-        // waits for the bucket's store to take the head's next write, and names all they upload
-        // until then (`Writer::acknowledge`, TASK-690); and whether an upload since it began
-        // wants another.
-        let mut acking: Option<BoxFuture<'static, Result<Option<u64>, bucket_cell::Error>>> = None;
+        // cladefs: the work with the cell's head under way, an acknowledgement or a checkpoint, one
+        // at a time, beside the uploads, which go on meanwhile as it waits for the bucket's store
+        // to take the head's next write: an acknowledgement then names all they uploaded
+        // (`Writer::acknowledge`, TASK-690). And whether an upload since it began wants an
+        // acknowledgement.
+        let mut head_work: Option<BoxFuture<'static, Result<HeadWork, bucket_cell::Error>>> = None;
         let mut ack_wanted = false;
         // Whether the next gather closes the store's open segment: for a commit waiting for its
         // upload, or a fork, or as the interval is up, or the uploader stops; and whether the last
@@ -1284,7 +1285,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 if more {
                     continue;
                 }
-                if stop && in_flight.is_empty() && acking.is_none() && !ack_wanted {
+                if stop && in_flight.is_empty() && head_work.is_none() && !ack_wanted {
                     // A checkpoint on clean shutdown (doc-7, Checkpoints).
                     if let Err(err) = writer.checkpoint().await {
                         log::warn!("cladefs: checkpointing cell {}: {err}", writer.cell());
@@ -1292,21 +1293,18 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                     return self.fail(&writer, Failure::msg("the uploader stopped"));
                 }
             }
-            if ack_wanted && acking.is_none() {
+            if ack_wanted && head_work.is_none() {
                 ack_wanted = false;
-                // A checkpoint every so many segments, once they are acknowledged.
-                let checkpoint = segments - checkpointed >= self.options.checkpoint_every;
-                if checkpoint {
-                    checkpointed = segments;
-                }
-                acking = Some(Self::acknowledging(writer.clone(), checkpoint));
+                let writer = writer.clone();
+                let acknowledging = async move { writer.acknowledge().await };
+                head_work = Some(acknowledging.map_ok(HeadWork::Acknowledged).boxed());
             }
             let mut woken = std::pin::pin!(self.woken(interval));
             let happened = futures::future::poll_fn(|cx| {
-                if let Some(acked) = acking.as_mut()
-                    && let Poll::Ready(acked) = acked.poll_unpin(cx)
+                if let Some(work) = head_work.as_mut()
+                    && let Poll::Ready(done) = work.poll_unpin(cx)
                 {
-                    return Poll::Ready(Happened::Acknowledged(acked));
+                    return Poll::Ready(Happened::Headed(done));
                 }
                 if let Poll::Ready(Some(uploaded)) = in_flight.next().poll_unpin(cx) {
                     return Poll::Ready(Happened::Uploaded(uploaded));
@@ -1323,10 +1321,22 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                     segments += 1;
                     ack_wanted = true;
                 }),
-                Happened::Acknowledged(acked) => {
-                    acking = None;
-                    (acked.map_err(Failure::from))
-                        .and_then(|through| self.acknowledged(through, &mut in_flight))
+                Happened::Headed(done) => {
+                    head_work = None;
+                    match done {
+                        Ok(HeadWork::Acknowledged(through)) => {
+                            let acked = self.acknowledged(through, &mut in_flight);
+                            // A checkpoint every so many segments, after the commits it covers
+                            // returned.
+                            if segments - checkpointed >= self.options.checkpoint_every {
+                                checkpointed = segments;
+                                head_work = Some(Self::checkpointing(writer.clone()));
+                            }
+                            acked
+                        }
+                        Ok(HeadWork::Checkpointed) => Ok(()),
+                        Err(err) => Err(err.into()),
+                    }
                 }
             };
             if let Err(err) = done {
@@ -1335,24 +1345,19 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         }
     }
 
-    /// cladefs: acknowledges what `writer` has uploaded (`Writer::acknowledge`), then, if
-    /// `checkpoint`, writes a checkpoint as of it: the run's work with the cell's head, one at a
-    /// time, beside its uploads.
-    fn acknowledging(
+    /// cladefs: writes a checkpoint as of what `writer` acknowledged, as the run's work with the
+    /// cell's head: a checkpoint failing is said, and fails nothing.
+    fn checkpointing(
         writer: Arc<Writer<B>>,
-        checkpoint: bool,
-    ) -> BoxFuture<'static, Result<Option<u64>, bucket_cell::Error>> {
+    ) -> BoxFuture<'static, Result<HeadWork, bucket_cell::Error>> {
         async move {
-            let through = writer.acknowledge().await?;
-            if checkpoint {
-                // A test's: the checkpoint landing late, after the commits it covers returned, as
-                // on a loaded host, which a collector's pass then runs beside (TASK-339).
-                fail::fail_point!("upload::checkpointing");
-                if let Err(err) = writer.checkpoint().await {
-                    log::warn!("cladefs: checkpointing cell {}: {err}", writer.cell());
-                }
+            // A test's: the checkpoint landing late, after the commits it covers returned, as on
+            // a loaded host, which a collector's pass then runs beside (TASK-339).
+            fail::fail_point!("upload::checkpointing");
+            if let Err(err) = writer.checkpoint().await {
+                log::warn!("cladefs: checkpointing cell {}: {err}", writer.cell());
             }
-            Ok(through)
+            Ok(HeadWork::Checkpointed)
         }
         .boxed()
     }
@@ -2370,12 +2375,19 @@ impl Uploading {
 /// exactly the segments the writer acknowledged. Each is in the store's write-ahead log, durably,
 /// before its upload goes (TASK-79.72's rule), so that nothing lands in the writer's name that the
 /// log doesn't hold.
+/// cladefs: the uploader's run's work with its cell's head, done.
+enum HeadWork {
+    /// An acknowledgement, to the segment it returns.
+    Acknowledged(Option<u64>),
+    Checkpointed,
+}
+
 /// cladefs: what the uploader's run waits on that happened first.
 enum Happened {
     /// The next upload in order is done.
     Uploaded(Result<(), bucket_cell::Error>),
-    /// The acknowledgement under way is done, to the segment it returns.
-    Acknowledged(Result<Option<u64>, bucket_cell::Error>),
+    /// The work with the cell's head under way is done.
+    Headed(Result<HeadWork, bucket_cell::Error>),
     /// It was woken, or its interval ran out: whether it was woken.
     Woken(bool),
 }
