@@ -124,7 +124,8 @@ impl Trace {
     }
 
     /// When the store opened.
-    pub(super) fn opened_at(&self) -> Instant {
+    #[cfg(test)]
+    fn opened_at(&self) -> Instant {
         self.opened
     }
 
