@@ -145,7 +145,7 @@ impl Hosts {
         for (extent, _) in &held {
             source.free(*extent).unwrap();
         }
-        source.commit(Some(b"later")).unwrap();
+        futures::executor::block_on(source.commit(Some(b"later"))).unwrap();
         // Another fork, gone: a checkpoint past the version's, so that only the version keeps
         // that, and what it names is all gone once nothing keeps it: its state too, not just its
         // data.
@@ -153,7 +153,7 @@ impl Hosts {
         source.fork_to(&later, crate::host_cell::new_alone()).unwrap();
         OpenCell::delete(&later, Some(&bucket)).unwrap();
 
-        source.wait_uploaded().unwrap();
+        futures::executor::block_on(source.wait_uploaded()).unwrap();
         let mut copies = Vec::new();
         for (host, disk) in disks.iter().enumerate() {
             let path = copy_at(disk);
@@ -219,7 +219,7 @@ impl Hosts {
         let store = reopened(path, options()).unwrap();
         assert_eq!(store.root(), Ok(b"root".to_vec()), "{case}");
         let own = commit(&store, 5, &[fork_faults::BLOCK], b"child");
-        assert_eq!(store.wait_uploaded(), Ok(()), "{case}");
+        assert_eq!(futures::executor::block_on(store.wait_uploaded()), Ok(()), "{case}");
         assert!(fork_faults::read(&store, own[0].0, fork_faults::BLOCK) == own[0].1, "{case}");
     }
 

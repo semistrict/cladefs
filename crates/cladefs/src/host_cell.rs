@@ -815,7 +815,10 @@ mod tests {
         let forked = new_cell(&bucket, store.description().cell.tenant).unwrap();
         let child = Child { cell: forked, owner: 1 };
         let version = bucket_cell::layout::NewVersion { id: 1, keep_last: None };
-        uploader.wait_uploaded(store.commit_version(version, false).unwrap()).unwrap();
+        futures::executor::block_on(
+            uploader.uploaded(store.commit_version(version, false).unwrap()),
+        )
+        .unwrap();
         fork_through(&store, &uploader, version.id, &fork, child, |_| Ok(())).unwrap();
         let own = dir.path().canonicalize().unwrap().join("made.bucket");
         let url = format!("file://{}/", own.display());

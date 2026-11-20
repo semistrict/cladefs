@@ -135,7 +135,7 @@ pub(super) fn commit(
     for (extent, data) in &extents {
         write(store, *extent, data);
     }
-    store.commit(Some(root)).unwrap();
+    futures::executor::block_on(store.commit(Some(root))).unwrap();
     extents
 }
 
@@ -165,13 +165,13 @@ impl World {
         let parent = kept_in(&path, (1 << 30, None), &reached, options()).unwrap();
         let cell = parent.cell();
         let mut held = commit(&parent, 1, &[BLOCK], b"first");
-        parent.wait_uploaded().unwrap();
+        futures::executor::block_on(parent.wait_uploaded()).unwrap();
         let floor = parent.info().unwrap().sequence_floor;
         drop(parent);
         let parent = reopened(&path, options()).unwrap();
         assert!(parent.info().unwrap().sequence_floor > floor, "a writer's floor jumps");
         held.extend(commit(&parent, 2, &[2 * BLOCK, 4 << 20], b"root"));
-        parent.wait_uploaded().unwrap();
+        futures::executor::block_on(parent.wait_uploaded()).unwrap();
         Self {
             temp,
             host,
@@ -273,7 +273,7 @@ impl World {
             assert!(read(store, *extent, data.len()) == *data, "{case}: {extent:?} of a fork");
         }
         let own = commit(store, 5, &[BLOCK], b"child");
-        assert_eq!(store.wait_uploaded(), Ok(()), "{case}");
+        assert_eq!(futures::executor::block_on(store.wait_uploaded()), Ok(()), "{case}");
         assert!(read(store, own[0].0, BLOCK) == own[0].1, "{case}");
     }
 
@@ -357,7 +357,7 @@ impl World {
             assert!(read(&parent, *extent, data.len()) == *data, "{case}: the parent's {extent:?}");
         }
         let later = commit(&parent, 7, &[BLOCK], b"later");
-        assert_eq!(parent.wait_uploaded(), Ok(()), "{case}");
+        assert_eq!(futures::executor::block_on(parent.wait_uploaded()), Ok(()), "{case}");
         let (mut extents, root) = uploaded(&self.bucket, self.cell);
         extents.sort();
         let mut all: Vec<_> = (self.held.iter().chain(&later))
@@ -414,7 +414,11 @@ impl World {
             assert!(read(&self.other, *extent, data.len()) == *data, "{case}: another's extent");
         }
         commit(&self.other, 8, &[BLOCK], b"other, later");
-        assert_eq!(self.other.wait_uploaded(), Ok(()), "{case}: another's cell");
+        assert_eq!(
+            futures::executor::block_on(self.other.wait_uploaded()),
+            Ok(()),
+            "{case}: another's cell"
+        );
         if taken {
             let writer =
                 bucket_cell::Writer::open(self.bucket.clone(), self.child, rand::random(), TOKEN);
@@ -664,8 +668,8 @@ fn forks_orphaned_by_a_lost_host_keep_what_they_inherited_until_deleted() {
     for (extent, _) in &world.held {
         parent.free(*extent).unwrap();
     }
-    parent.commit(None).unwrap();
-    assert_eq!(parent.wait_uploaded(), Ok(()));
+    futures::executor::block_on(parent.commit(None)).unwrap();
+    assert_eq!(futures::executor::block_on(parent.wait_uploaded()), Ok(()));
     drop(parent);
     let stored = || {
         let listed = block_on(bucket_cell::Bucket::list(&*world.bucket, "")).unwrap();
