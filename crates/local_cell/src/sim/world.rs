@@ -1567,7 +1567,9 @@ impl World {
             true => LocalCell::recover(disk.dir.clone()),
             false => LocalCell::recover_unmade(disk.dir.clone()),
         };
-        let own = recovering.is_ok_and(|recovering| recovering.has_wal());
+        // As the take counts it (TASK-683).
+        let epoch = configuration.epoch;
+        let own = recovering.is_ok_and(|recovering| recovering.holds_own_copy(epoch));
         let mine = host_of(&writer.address) == host && alive(writer) && own;
         let needed = usize::from(configuration.f) + 1 - usize::from(mine);
         Ok(answering < needed)

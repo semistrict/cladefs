@@ -932,6 +932,58 @@ fn takes_of_cells_whose_members_are_lost_go_on_by_force() {
     drop(uploader);
 }
 
+/// TASK-683 (the spec's Take, its `self`): a writer whose daemon restarts with every commit
+/// uploaded, its write-ahead log empty, takes its cell again on its own disk, one member of its
+/// configuration lost: its copy, empty, counts, as its store took the cell as the configuration's
+/// writer, and one member more answering is enough for f = 1. It needed two before, the store's
+/// log holding nothing to say it was the writer's. A store made anew on its host is not its copy:
+/// refused.
+#[test]
+fn retakes_on_the_writers_disk_count_its_empty_log() {
+    let host = replicated_host();
+    let all = directories(&["a", "b", "c", "d", "e"]);
+    let lost = Lost::default();
+    let peers = |me: &str| Peers { me: me.into(), all: all.clone(), lost: lost.clone() };
+    let writer = Host { runtime: runtime_of_its_own(), bucket: host.bucket.clone() };
+    let dir = MemDir::new();
+    LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
+    let wish = bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated);
+    let recovering = LocalCell::recover_unmade(dir.clone()).unwrap();
+    let (store, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).unwrap();
+    store.made().unwrap();
+    let last = commit(&store, 0, 4);
+    uploader.wait_replicated(last).unwrap();
+    store.close_segment().unwrap();
+    uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
+    assert_eq!(addresses(&configuration_named(&host)), ["a", "b", "c"]);
+    let expected = writer.contents(&store);
+    // a's daemon restarts, every commit uploaded, its disk kept; b's disk lost meanwhile.
+    let replicator = store.replicator().unwrap();
+    lose(writer, (uploader, store, replicator));
+    lost.lock().unwrap().insert("b".into());
+    let recovering = LocalCell::recover(dir.crash(1)).unwrap();
+    assert!(!recovering.has_wal(), "its log holds what the bucket does not");
+
+    // A store made anew on a: not a's copy, and c alone answers.
+    let anew = MemDir::new();
+    LocalCell::make(&anew, DESCRIPTION, Some(URL), None).unwrap();
+    let refused = LocalCell::recover_unmade(anew).unwrap();
+    let failure = host.open_replicated(refused, 2, None, peers("a")).err().unwrap();
+    assert!(
+        failure.to_string().contains("1 of the 2 members of configuration 1 a take must fence"),
+        "{failure}"
+    );
+
+    // a's own store: its copy, and c's, enough.
+    let again = Host { runtime: runtime_of_its_own(), bucket: host.bucket.clone() };
+    let (retaken, uploader) = again.open_replicated(recovering, 3, None, peers("a")).unwrap();
+    assert!(retaken.last_commit().unwrap() >= last);
+    assert_eq!(again.contents(&retaken), expected);
+    let next = commit(&retaken, 4, 2);
+    uploader.wait_replicated(next).unwrap();
+    drop(uploader);
+}
+
 /// A store in memory taking `cell` on `host` as a replicated cell's, its bucket's writes failing
 /// as `faults` say.
 fn faulty_host(faults: &Arc<bucket_cell::faults::Faults>) -> Host {

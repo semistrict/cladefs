@@ -1413,9 +1413,14 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             .filter(|configuration| configuration.f >= 1);
         // cladefs: or, its placement's takings forced, those of them that answer, however few
         // (TASK-681).
-        let (own, forced) = (recovering.has_wal(), recovering.forced() || self.options.force);
+        // Its own copy counted if it is its writer's, its log holding records, or, holding none,
+        // its description naming the configuration's writer's epoch (TASK-683).
+        let forced = recovering.forced() || self.options.force;
         let fenced = match &old {
-            Some(old) => Some(self.fence(cell, old, held.head.epoch, own, forced).await?),
+            Some(old) => {
+                let own = recovering.holds_own_copy(old.epoch);
+                Some(self.fence(cell, old, held.head.epoch, own, forced).await?)
+            }
             None => None,
         };
         // cladefs: the host serves a cell of the tenant's: its pool of new cell KEKs, which forks of
@@ -1487,6 +1492,12 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // description, which its status says from now on, while this placement holds it; or, of an
         // earlier taking of this forced placement, what that one noted (TASK-681).
         let mut recovering = recovering;
+        // cladefs: the epoch it takes its cell as noted, before a configuration of it is named or
+        // replicates: its log, empty, then counts as its copy at its next take (TASK-683).
+        if self.options.replication.is_some() || old.is_some() {
+            let epoch = writer.epoch();
+            blocking(|| recovering.note_writer_epoch(epoch))?;
+        }
         let forced_after = match &short {
             Some(_) => {
                 let kept = writer.taken().last_commit.map_or(0, epoch_of);
@@ -1952,7 +1963,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// cladefs: fences `cell` at `epoch` on the members of `old`, the configuration its head named
     /// as it was taken (doc-21, TASK-537.3.4): f+1 members other than its writer must answer, so
     /// that no ack quorum of `old` is left unfenced, the writer's own copy, which nothing fences,
-    /// counting only if this host is the writer and holds it (`own`, its write-ahead log). Each
+    /// counting only if this host is the writer and holds it (`own`: its write-ahead log, or, empty,
+    /// its store the writer's of `old`'s epoch, TASK-683). Each
     /// that answered, with the ends of the logs it holds. `forced` (TASK-681), fewer may: why they
     /// are too few, then.
     async fn fence(

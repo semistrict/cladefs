@@ -926,6 +926,30 @@ impl<D: Dir> Recovering<D> {
         Ok(())
     }
 
+    /// cladefs: whether it is its writer's copy of what a replicated cell's configuration made at
+    /// `epoch` holds (TASK-683): its write-ahead log holds records; or, holding none, it took its
+    /// cell as the writer of `epoch` ([`Recovering::note_writer_epoch`]), so that what of its
+    /// records it synced, every one a member's end counted, the bucket holds. A store made anew,
+    /// whose log holds none either, took no cell, and isn't: nor is one taken by another writer
+    /// since.
+    pub fn holds_own_copy(&self, epoch: u64) -> bool {
+        self.has_wal() || self.file.writer_epoch == Some(epoch)
+    }
+
+    /// cladefs: notes, durably, in its description, that it takes its cell as the writer of `epoch`
+    /// (TASK-683), before the configurations it makes at that epoch are named or replicate
+    /// anything: so that its next take counts its log, empty, as its copy of them
+    /// ([`Recovering::holds_own_copy`]).
+    pub fn note_writer_epoch(&mut self, epoch: u64) -> Result<(), Error> {
+        if self.file.writer_epoch == Some(epoch) {
+            return Ok(());
+        }
+        self.file.writer_epoch = Some(epoch);
+        self.dir.replace(DESCRIPTION, self.file.text().as_bytes())?;
+        self.dir.sync_dir("")?;
+        Ok(())
+    }
+
     /// cladefs: its cell's kind, if its description names one (TASK-364, doc-20).
     pub fn kind(&self) -> Option<Kind> {
         self.file.kind
@@ -1346,6 +1370,7 @@ impl<D: Dir> LocalCell<D> {
                 token: None,
                 forced: None,
                 forced_after: None,
+                writer_epoch: None,
                 kind,
                 version,
             };
