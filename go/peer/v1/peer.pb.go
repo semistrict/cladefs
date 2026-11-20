@@ -34,19 +34,25 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// A migration of an ephemeral cell to prepare: its ID, unique to it, the source's to give; the
-// cell; its origin, the version it was forked from; the bucket its parent is kept in; and where
-// its store goes on this host.
+// A migration of an ephemeral cell to prepare.
 type MigratePrepareRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Migration     uint64                 `protobuf:"varint,1,opt,name=migration,proto3" json:"migration,omitempty"`
-	Tenant        uint64                 `protobuf:"varint,2,opt,name=tenant,proto3" json:"tenant,omitempty"`
-	Cell          uint64                 `protobuf:"varint,3,opt,name=cell,proto3" json:"cell,omitempty"`
-	ParentTenant  uint64                 `protobuf:"varint,4,opt,name=parent_tenant,json=parentTenant,proto3" json:"parent_tenant,omitempty"`
-	ParentCell    uint64                 `protobuf:"varint,5,opt,name=parent_cell,json=parentCell,proto3" json:"parent_cell,omitempty"`
-	At            uint64                 `protobuf:"varint,6,opt,name=at,proto3" json:"at,omitempty"`
-	Bucket        string                 `protobuf:"bytes,7,opt,name=bucket,proto3" json:"bucket,omitempty"`
-	To            string                 `protobuf:"bytes,8,opt,name=to,proto3" json:"to,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The migration's ID, unique to it, the source's to give.
+	Migration uint64 `protobuf:"varint,1,opt,name=migration,proto3" json:"migration,omitempty"`
+	// The cell's tenant.
+	Tenant uint64 `protobuf:"varint,2,opt,name=tenant,proto3" json:"tenant,omitempty"`
+	// The cell's ID.
+	Cell uint64 `protobuf:"varint,3,opt,name=cell,proto3" json:"cell,omitempty"`
+	// The tenant of the cell its version was forked from.
+	ParentTenant uint64 `protobuf:"varint,4,opt,name=parent_tenant,json=parentTenant,proto3" json:"parent_tenant,omitempty"`
+	// The cell its version was forked from.
+	ParentCell uint64 `protobuf:"varint,5,opt,name=parent_cell,json=parentCell,proto3" json:"parent_cell,omitempty"`
+	// The segment of the parent's its version is at: its origin.
+	At uint64 `protobuf:"varint,6,opt,name=at,proto3" json:"at,omitempty"`
+	// The URL of the bucket its parent is kept in.
+	Bucket string `protobuf:"bytes,7,opt,name=bucket,proto3" json:"bucket,omitempty"`
+	// Where its store goes on this host.
+	To            string `protobuf:"bytes,8,opt,name=to,proto3" json:"to,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -137,10 +143,11 @@ func (x *MigratePrepareRequest) GetTo() string {
 	return ""
 }
 
-// This host's incarnation, which its reference to the cell names, and the hand-over must name.
+// A migration prepared.
 type MigratePrepareResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Incarnation   uint64                 `protobuf:"varint,1,opt,name=incarnation,proto3" json:"incarnation,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// This host's incarnation, which its reference to the cell names, and the hand-over must name.
+	Incarnation   uint64 `protobuf:"varint,1,opt,name=incarnation,proto3" json:"incarnation,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -184,9 +191,11 @@ func (x *MigratePrepareResponse) GetIncarnation() uint64 {
 
 // A range of a file.
 type Range struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Offset        uint64                 `protobuf:"varint,1,opt,name=offset,proto3" json:"offset,omitempty"`
-	Len           uint64                 `protobuf:"varint,2,opt,name=len,proto3" json:"len,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Where it starts.
+	Offset uint64 `protobuf:"varint,1,opt,name=offset,proto3" json:"offset,omitempty"`
+	// Its bytes.
+	Len           uint64 `protobuf:"varint,2,opt,name=len,proto3" json:"len,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -235,16 +244,21 @@ func (x *Range) GetLen() uint64 {
 	return 0
 }
 
-// `bytes` at `offset` of the file at `path` in the store being migrated, the file `len` bytes
-// long; and the ranges of it the source gave back, holes.
+// A piece of a file of the store being migrated.
 type MigrateFileRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Migration     uint64                 `protobuf:"varint,1,opt,name=migration,proto3" json:"migration,omitempty"`
-	Path          string                 `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
-	Offset        uint64                 `protobuf:"varint,3,opt,name=offset,proto3" json:"offset,omitempty"`
-	Bytes         []byte                 `protobuf:"bytes,4,opt,name=bytes,proto3" json:"bytes,omitempty"`
-	Len           uint64                 `protobuf:"varint,5,opt,name=len,proto3" json:"len,omitempty"`
-	Holes         []*Range               `protobuf:"bytes,6,rep,name=holes,proto3" json:"holes,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The migration.
+	Migration uint64 `protobuf:"varint,1,opt,name=migration,proto3" json:"migration,omitempty"`
+	// The file's path in the store.
+	Path string `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
+	// Where `bytes` go in it.
+	Offset uint64 `protobuf:"varint,3,opt,name=offset,proto3" json:"offset,omitempty"`
+	// What goes there.
+	Bytes []byte `protobuf:"bytes,4,opt,name=bytes,proto3" json:"bytes,omitempty"`
+	// The file's length.
+	Len uint64 `protobuf:"varint,5,opt,name=len,proto3" json:"len,omitempty"`
+	// The ranges of it the source gave back: holes.
+	Holes         []*Range `protobuf:"bytes,6,rep,name=holes,proto3" json:"holes,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -321,6 +335,7 @@ func (x *MigrateFileRequest) GetHoles() []*Range {
 	return nil
 }
 
+// A piece written.
 type MigrateFileResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -357,13 +372,15 @@ func (*MigrateFileResponse) Descriptor() ([]byte, []int) {
 	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{4}
 }
 
-// A file of the store the hand-over names: its length, and the CRC32C of its bytes, but for a
-// kept segment's, whose bytes never change once kept.
+// A file of the store a hand-over names.
 type FileDigest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
-	Len           uint64                 `protobuf:"varint,2,opt,name=len,proto3" json:"len,omitempty"`
-	Crc           *uint32                `protobuf:"varint,3,opt,name=crc,proto3,oneof" json:"crc,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Its path in the store.
+	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	// Its length.
+	Len uint64 `protobuf:"varint,2,opt,name=len,proto3" json:"len,omitempty"`
+	// The CRC32C of its bytes, but for a kept segment's, whose bytes never change once kept.
+	Crc           *uint32 `protobuf:"varint,3,opt,name=crc,proto3,oneof" json:"crc,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -419,13 +436,15 @@ func (x *FileDigest) GetCrc() uint32 {
 	return 0
 }
 
-// The hand-over of a migration: the incarnation of this host's its preparation answered, and every
-// file of the store.
+// A migration's hand-over.
 type MigrateHandOverRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Migration     uint64                 `protobuf:"varint,1,opt,name=migration,proto3" json:"migration,omitempty"`
-	Incarnation   uint64                 `protobuf:"varint,2,opt,name=incarnation,proto3" json:"incarnation,omitempty"`
-	Files         []*FileDigest          `protobuf:"bytes,3,rep,name=files,proto3" json:"files,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The migration.
+	Migration uint64 `protobuf:"varint,1,opt,name=migration,proto3" json:"migration,omitempty"`
+	// The incarnation of this host's its preparation answered.
+	Incarnation uint64 `protobuf:"varint,2,opt,name=incarnation,proto3" json:"incarnation,omitempty"`
+	// Every file of the store.
+	Files         []*FileDigest `protobuf:"bytes,3,rep,name=files,proto3" json:"files,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -481,9 +500,11 @@ func (x *MigrateHandOverRequest) GetFiles() []*FileDigest {
 	return nil
 }
 
+// A hand-over's answer.
 type MigrateHandOverResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Accepted      bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Whether this host took the cell over.
+	Accepted      bool `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -525,9 +546,11 @@ func (x *MigrateHandOverResponse) GetAccepted() bool {
 	return false
 }
 
+// A migration to give up.
 type MigrateAbortRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Migration     uint64                 `protobuf:"varint,1,opt,name=migration,proto3" json:"migration,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The migration.
+	Migration     uint64 `protobuf:"varint,1,opt,name=migration,proto3" json:"migration,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -569,6 +592,7 @@ func (x *MigrateAbortRequest) GetMigration() uint64 {
 	return 0
 }
 
+// A migration given up.
 type MigrateAbortResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields

@@ -160,3 +160,133 @@ message MigrateAbortRequest {
 
 // A migration given up.
 message MigrateAbortResponse {}
+
+// A configuration of a cell: its number, and the epoch of the writer that made it.
+message Configuration {
+  // Its number, greater than every configuration's before it in the cell.
+  uint64 number = 1;
+  // The epoch of the writer that made it, the only one that appends to it.
+  uint64 epoch = 2;
+}
+
+// What a call to a member is of: the bucket, the cell, the configuration, and the member's
+// incarnation the configuration names.
+message ReplicaOf {
+  // The URL of the bucket, as the asker names it (CLADEFSD_BUCKET): this host's.
+  string bucket = 1;
+  // The cell's tenant.
+  uint64 tenant = 2;
+  // The cell.
+  uint64 cell = 3;
+  // The configuration of the cell.
+  Configuration configuration = 4;
+  // This host's incarnation, as the configuration names it.
+  uint64 incarnation = 5;
+}
+
+// Asks for this host's replica directory's incarnation.
+message IncarnationRequest {
+  // The URL of the bucket, as the asker names it: this host's.
+  string bucket = 1;
+}
+
+// This host's replica directory's incarnation.
+message IncarnationResponse {
+  // A random number, not 0, made with the directory.
+  uint64 incarnation = 1;
+}
+
+// Bytes appended at an offset of one of the writer's logs. The first of a stream names what it is
+// of; the rest are of the same.
+message AppendRequest {
+  // What it appends to: said by the first of a stream, and read of it alone.
+  ReplicaOf of = 1;
+  // The writer's log, by its number.
+  uint64 log = 2;
+  // Where in it: at its end on this member, or before it, the same bytes again.
+  uint64 offset = 3;
+  // The bytes, as the writer's log holds them.
+  bytes bytes = 4;
+}
+
+// A log's end on this member, synced.
+message AppendResponse {
+  // The log appended to.
+  uint64 log = 1;
+  // Its end on this member, synced.
+  uint64 end = 2;
+}
+
+// Fences a cell at a take's epoch.
+message FenceRequest {
+  // The cell, and the configuration whose logs to answer with.
+  ReplicaOf of = 1;
+  // The take's epoch.
+  uint64 epoch = 2;
+}
+
+// The cell fenced: the logs this member holds of the configuration named.
+message FenceResponse {
+  // Each log and its end, synced.
+  repeated LogEnd logs = 1;
+}
+
+// A log a member holds, and its end.
+message LogEnd {
+  // The writer's log, by its number.
+  uint64 log = 1;
+  // Its end on this member, synced.
+  uint64 end = 2;
+}
+
+// Reads a log a member holds.
+message ReadLogRequest {
+  // The cell and configuration.
+  ReplicaOf of = 1;
+  // The writer's log, by its number.
+  uint64 log = 2;
+  // Where to read from, to its end.
+  uint64 offset = 3;
+}
+
+// A piece of a log, in order.
+message ReadLogResponse {
+  // Its bytes.
+  bytes bytes = 1;
+}
+
+// Drops a cell's logs no take reads.
+message DropLogsRequest {
+  // The cell and configuration: without through, every configuration's before it dropped.
+  ReplicaOf of = 1;
+  // The last log of the configuration named the bucket holds: its logs to it dropped, and
+  // nothing of another configuration.
+  optional uint64 through = 2;
+}
+
+// The logs dropped.
+message DropLogsResponse {}
+
+// A part asked for.
+message GetPartRequest {
+  // The URL of the asker's bucket, as it names it (CLADEFSD_BUCKET): compared with this host's
+  // only while either has no region.
+  string bucket = 1;
+  // The object's key.
+  string key = 2;
+  // The part's number, from 0.
+  uint64 part = 3;
+  // Where, how long and how its stored bytes were, as the asker's tail said, before TASK-407.
+  reserved 4, 5, 6, 7;
+  reserved "offset", "len", "crc", "encoding";
+  // The asker's region (TASK-633.4): its home bucket's number, 0 if it has none yet.
+  uint32 home = 8;
+  // The asker's root bucket's identity's ID, naming its system of buckets: 0 if it has none yet.
+  fixed64 root = 9;
+}
+
+// A part's stored bytes, as asked for.
+message GetPartResponse {
+  // Its stored bytes.
+  bytes bytes = 1;
+}

@@ -195,11 +195,15 @@ func (CellKind) EnumDescriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{1}
 }
 
+// A live migration of an ephemeral cell to begin.
 type MigrateCellRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
-	Peer          string                 `protobuf:"bytes,2,opt,name=peer,proto3" json:"peer,omitempty"`
-	To            string                 `protobuf:"bytes,3,opt,name=to,proto3" json:"to,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The store of the ephemeral cell.
+	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	// The peer address of the daemon it goes to.
+	Peer string `protobuf:"bytes,2,opt,name=peer,proto3" json:"peer,omitempty"`
+	// Where its store goes there.
+	To            string `protobuf:"bytes,3,opt,name=to,proto3" json:"to,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -255,9 +259,11 @@ func (x *MigrateCellRequest) GetTo() string {
 	return ""
 }
 
+// A migration begun.
 type MigrateCellResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Migration     uint64                 `protobuf:"varint,1,opt,name=migration,proto3" json:"migration,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Its ID.
+	Migration     uint64 `protobuf:"varint,1,opt,name=migration,proto3" json:"migration,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -299,9 +305,11 @@ func (x *MigrateCellResponse) GetMigration() uint64 {
 	return 0
 }
 
+// A migration's hand-over.
 type HandOverCellRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The store of the ephemeral cell being migrated.
+	Path          string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -343,6 +351,7 @@ func (x *HandOverCellRequest) GetPath() string {
 	return ""
 }
 
+// A migration handed over.
 type HandOverCellResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
