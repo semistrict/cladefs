@@ -4680,7 +4680,10 @@ fn forks_of_a_version_wait_for_the_close_of_the_store_that_made_it() {
     .unwrap();
     let (waiting, waiting_seen) = std::sync::mpsc::channel();
     let waiting = std::sync::Mutex::new(waiting);
-    fail::cfg_callback("dir::claim_waits", move || drop(waiting.lock().unwrap().send(()))).unwrap();
+    fail::cfg_callback("dir::claim_waits", move || {
+        let _ = waiting.lock().unwrap().send(());
+    })
+    .unwrap();
     drop(made);
     let wait = std::time::Duration::from_secs(30);
     closing_seen.recv_timeout(wait).expect("the store never said it was closing");
