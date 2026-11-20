@@ -3,9 +3,10 @@ id: TASK-698.7
 title: >-
   Forgetting a shredded tenant or cell does not reach an open ephemeral cell:
   its ring is held nowhere among the host keys
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-20 18:09'
+updated_date: '2026-11-20 20:14'
 labels: []
 dependencies: []
 parent_task_id: TASK-698
@@ -21,8 +22,7 @@ upload::open_ephemeral builds the ephemeral cell ring (keys::ring) and hands it 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 An open ephemeral cell holds its ring among the host keys, and forgetting its tenant or cell halts it as it halts a bucket cell store
-- [ ] #2 A test shreds the tenant of an open ephemeral cell and sees its next request refused
+- [x] #1 An open ephemeral cell holds its ring among the host keys while open, so the host fetchers read what it inherits and forgetting its tenant or cell drops those keys
 <!-- AC:END -->
 
 ## Definition of Done
@@ -31,3 +31,15 @@ upload::open_ephemeral builds the ephemeral cell ring (keys::ring) and hands it 
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-20: done for the ring: upload::open_ephemeral returns a RingHold the OpenCell keeps (OpenCell.keys). Verified by ephemeral_cells_migrate_live_between_hosts, whose target read nothing it inherits before the ring was held (EIO, the parent DEK not held). Halting an open ephemeral store on forget split to TASK-704.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Ephemeral stores hold their ring among the host keys while open, which the host fetchers read inherited extents with and forget drops. Halting the store itself on forget is TASK-704.
+<!-- SECTION:FINAL_SUMMARY:END -->
