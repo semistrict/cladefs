@@ -707,7 +707,7 @@ fn make_dir(path: &Path) -> Result<(), Error> {
 pub(crate) async fn open_ephemeral(
     path: &Path,
     keeping: &upload::Options,
-) -> Result<(Arc<LocalCell<HostDir>>, Arc<ObjectBucket>), Failure> {
+) -> Result<(Arc<LocalCell<HostDir>>, Arc<ObjectBucket>, bucket_cell::keys::RingHold), Failure> {
     let recovering =
         upload::blocking(|| -> Result<_, Failure> { Ok(LocalCell::recover(host_dir(path)?)?) })?;
     let url = recovering.bucket().map(str::to_owned);
@@ -715,8 +715,9 @@ pub(crate) async fn open_ephemeral(
     let bucket = bucket(&url).with_context(|| format!("opening the bucket {url}"))?;
     let runtime = crate::bucket::runtime()?;
     let held = (keeping.cache.clone(), keeping.held.clone());
-    let store = upload::open_ephemeral(recovering, options(), bucket.clone(), &runtime, held);
-    Ok((store.await?, bucket))
+    let opened = upload::open_ephemeral(recovering, options(), bucket.clone(), &runtime, held);
+    let (store, keys) = opened.await?;
+    Ok((store, bucket, keys))
 }
 
 /// cladefs: whether the store at `path` is an ephemeral cell's (doc-25, TASK-698.3).

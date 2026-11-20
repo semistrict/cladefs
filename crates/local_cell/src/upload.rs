@@ -520,14 +520,16 @@ struct EphemeralKeys {
 /// `store_options`: its keys, as its base keeps them, unwrapped through the host's KMS as its
 /// fork's head would give them; its parent's state at its version recovered from `bucket`, its
 /// parent's, under them, which its store starts from. No uploader: nothing of it goes to a bucket.
-/// Its parent's extents are read through `cache`, the host's, if it has one.
+/// Its parent's extents are read through `cache`, the host's, if it has one. Its keys are held among
+/// the host's while what it returns with the store is, so that the host's fetchers read what it
+/// inherits, and forgetting its tenant or cell drops them (TASK-698.7).
 pub async fn open_ephemeral<D: Dir>(
     recovering: Recovering<D>,
     store_options: crate::Options,
     bucket: Arc<ObjectBucket>,
     runtime: &Runtime,
     (cache, held): (Option<Arc<Cache>>, Option<Arc<HeldParts>>),
-) -> Result<Arc<LocalCell<D>>, Failure> {
+) -> Result<(Arc<LocalCell<D>>, RingHold), Failure> {
     let base = recovering.base()?;
     let (parent, cell) = (base.parent(), recovering.cell());
     let EphemeralKeys { owner, kek, deks, inherited } =
@@ -542,9 +544,10 @@ pub async fn open_ephemeral<D: Dir>(
         bucket_cell::recovery::recover_version(&*bucket, parent.cell, parent.at, &ring);
     let recovered = recovering_parent.await?;
     let state = recovered.layer.unwrap_or_else(|| Arc::new(recovered.state));
+    let holding = runtime.keys.ring.hold(ring.clone());
     let opening = crate::EphemeralOpening { parent: state, keys: ring, cache, held };
     let store = blocking(|| recovering.open_ephemeral(store_options, opening))?;
-    Ok(Arc::new(store))
+    Ok((Arc::new(store), holding))
 }
 
 /// cladefs: what says an uploader stopped (TASK-685.3): awaited by [`Uploader::close`], waited for,

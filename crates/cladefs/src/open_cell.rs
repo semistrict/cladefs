@@ -207,6 +207,9 @@ pub struct OpenCell {
     /// head, or holds its version: what doc-4's `COMMIT_UPLOADED` commits wait for.
     /// None for a follower, whose writer's it is (TASK-165.9).
     uploader: Option<local_cell::upload::Uploader<HostDir>>,
+    /// cladefs: of an ephemeral cell's store, its keys held among the host's while it is open, as an
+    /// uploader holds a bucket cell's (doc-25, TASK-698.7).
+    keys: Option<bucket_cell::keys::RingHold>,
     /// cladefs: what records the store's page-ins for its base's boot profile, if it is a fork of a
     /// base that has none yet, and what writes it at the window's end, which closing stops early.
     profiling: Option<(Arc<Recorder>, tokio::sync::oneshot::Sender<()>)>,
@@ -774,8 +777,11 @@ impl OpenCell {
                 // cladefs: given up to a live migration, it opens here no more (TASK-698.4).
                 true if path.join("migrating").exists() => return Err(Errno::EBUSY.into()),
                 true => {
-                    let (store, bucket) = host_cell::open_ephemeral(path, &opening.keeping).await?;
-                    Self::assemble(path, (store, bucket, None), opening).await?
+                    let (store, bucket, keys) =
+                        host_cell::open_ephemeral(path, &opening.keeping).await?;
+                    let mut opened = Self::assemble(path, (store, bucket, None), opening).await?;
+                    opened.keys = Some(keys);
+                    opened
                 }
                 false => {
                     let opened = host_cell::open(path, opening.keeping.clone()).await?;
@@ -881,6 +887,7 @@ impl OpenCell {
             bases: Default::default(),
             dax: CellMutex::new("dax", None),
             uploader,
+            keys: None,
             opening: StoreRwLock::new("opening", ()),
             following: None,
             committed: event_listener::Event::new(),
@@ -910,6 +917,7 @@ impl OpenCell {
             bases: self.bases.clone(),
             dax: CellMutex::new("dax", None),
             uploader: None,
+            keys: None,
             opening: StoreRwLock::new("opening", ()),
             following: Some(following),
             committed: event_listener::Event::new(),
