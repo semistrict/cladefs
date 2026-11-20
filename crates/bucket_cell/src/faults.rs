@@ -16,6 +16,10 @@
 //! within [`READ_EVERY`] of each change, for a test to change as it runs: [`Fault::parse`]'s words,
 //! such as `latency-ms=300 failing=no-space`, none for a bucket that answers. Neither set, a bucket
 //! is the object store itself: nothing of this is in its requests' way.
+//!
+//! cladefs: a fault may also refuse a write of a key that comes too soon after the last write of it
+//! answered (`rewrite-every-ms=1000`), as GCS refuses more than about one write a second of an
+//! object, `429 Too Many Requests` (TASK-690).
 
 use futures::StreamExt as _;
 use futures::stream::BoxStream;
@@ -56,17 +60,19 @@ impl Failing {
 }
 
 /// What a degraded bucket does to each request: waits `latency` first, then fails it as `failing`
-/// says.
+/// says. cladefs: and refuses a write of a key within `rewrite_every` of the last write of it
+/// answered, if not zero, as GCS refuses one within about a second (TASK-690).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Fault {
     pub latency: Duration,
     pub failing: Failing,
+    pub rewrite_every: Duration,
 }
 
 impl Fault {
     /// The fault `words` say, words separated by white space, each `NAME=VALUE`:
-    /// `latency-ms=MILLISECONDS` and `failing=not|no-space|unavailable`, each of the default fault's
-    /// (none) unless said.
+    /// `latency-ms=MILLISECONDS`, `failing=not|no-space|unavailable` and
+    /// `rewrite-every-ms=MILLISECONDS`, each of the default fault's (none) unless said.
     pub fn parse(words: &str) -> Result<Self, String> {
         let mut fault = Self::default();
         for word in words.split_whitespace() {
@@ -75,13 +81,23 @@ impl Fault {
                     let ms = ms.parse().map_err(|_| format!("latency-ms={ms} is no count"))?;
                     fault.latency = Duration::from_millis(ms);
                 }
+                Some(("rewrite-every-ms", ms)) => {
+                    let ms =
+                        ms.parse().map_err(|_| format!("rewrite-every-ms={ms} is no count"))?;
+                    fault.rewrite_every = Duration::from_millis(ms);
+                }
                 Some(("failing", name)) => {
                     fault.failing = (Failing::NAMES.iter())
                         .find(|(_, known)| *known == name)
                         .map(|(failing, _)| *failing)
                         .ok_or_else(|| format!("failing={name}: not, no-space or unavailable"))?;
                 }
-                _ => return Err(format!("{word}: latency-ms=MILLISECONDS or failing=HOW")),
+                _ => {
+                    return Err(format!(
+                        "{word}: latency-ms=MILLISECONDS, failing=HOW or \
+                         rewrite-every-ms=MILLISECONDS"
+                    ));
+                }
             }
         }
         Ok(fault)
@@ -89,7 +105,9 @@ impl Fault {
 
     /// Its words, which [`Fault::parse`] reads.
     pub fn words(&self) -> String {
-        format!("latency-ms={} failing={}", self.latency.as_millis(), self.failing.name())
+        let (latency, failing) = (self.latency.as_millis(), self.failing.name());
+        let rewrite_every = self.rewrite_every.as_millis();
+        format!("latency-ms={latency} failing={failing} rewrite-every-ms={rewrite_every}")
     }
 
     /// What it fails a request with, a write if `write`, if it fails it.
@@ -190,20 +208,49 @@ impl Faults {
 pub struct Faulty {
     objects: Arc<dyn ObjectStore>,
     faults: Arc<Faults>,
+    /// cladefs: when the last write of each key was answered, which a write of it within
+    /// [`Fault::rewrite_every`] is refused for (TASK-690).
+    written: Mutex<std::collections::HashMap<Path, tokio::time::Instant>>,
 }
 
 impl Faulty {
     pub fn new(objects: Arc<dyn ObjectStore>, faults: Arc<Faults>) -> Self {
-        Self { objects, faults }
+        Self { objects, faults, written: Mutex::default() }
     }
 
-    /// Waits as a request, a write if `write`, does now, then fails it, or doesn't.
-    async fn request(&self, write: bool) -> object_store::Result<()> {
+    /// cladefs: a write of `location`, refused, as GCS refuses it, if the last write of it was
+    /// answered within `fault`'s [`Fault::rewrite_every`]; else made by `write`, its answer's time
+    /// noted.
+    async fn rewrite<T>(
+        &self,
+        fault: Fault,
+        location: &Path,
+        write: impl Future<Output = object_store::Result<T>>,
+    ) -> object_store::Result<T> {
+        let written = || self.written.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if fault.rewrite_every.is_zero() {
+            return write.await;
+        }
+        let last = written().get(location).copied();
+        if last.is_some_and(|last| last.elapsed() < fault.rewrite_every) {
+            let source = "HTTP status client error (429 Too Many Requests): the object's rate of \
+                          change exceeded"
+                .into();
+            return Err(object_store::Error::Generic { store: "Faulty", source });
+        }
+        let answered = write.await;
+        written().insert(location.clone(), tokio::time::Instant::now());
+        answered
+    }
+
+    /// Waits as a request, a write if `write`, does now, then fails it, or doesn't: the fault it
+    /// went as.
+    async fn request(&self, write: bool) -> object_store::Result<Fault> {
         let fault = self.faults.now();
         if !fault.latency.is_zero() {
             tokio::time::sleep(fault.latency).await;
         }
-        fault.failure(write)
+        fault.failure(write).map(|()| fault)
     }
 
     /// A stream of what `stream` yields, once a request, not a write, has waited and failed, or
@@ -240,8 +287,8 @@ impl ObjectStore for Faulty {
         payload: PutPayload,
         opts: PutOptions,
     ) -> object_store::Result<PutResult> {
-        self.request(true).await?;
-        self.objects.put_opts(location, payload, opts).await
+        let fault = self.request(true).await?;
+        self.rewrite(fault, location, self.objects.put_opts(location, payload, opts)).await
     }
 
     async fn put_multipart_opts(
@@ -297,13 +344,22 @@ mod tests {
     #[test]
     fn faults_say_their_words() {
         let fault = Fault::parse("latency-ms=300 failing=no-space").unwrap();
-        assert_eq!(fault, Fault { latency: Duration::from_millis(300), failing: Failing::NoSpace });
-        assert_eq!(fault.words(), "latency-ms=300 failing=no-space");
+        let full = Fault {
+            latency: Duration::from_millis(300),
+            failing: Failing::NoSpace,
+            ..Fault::default()
+        };
+        assert_eq!(fault, full);
+        assert_eq!(fault.words(), "latency-ms=300 failing=no-space rewrite-every-ms=0");
+        // cladefs: GCS's rate of an object's writes (TASK-690).
+        let gcs = Fault::parse("rewrite-every-ms=1000").unwrap();
+        assert_eq!(gcs, Fault { rewrite_every: Duration::from_secs(1), ..Fault::default() });
+        assert_eq!(Fault::parse(&gcs.words()), Ok(gcs));
         assert_eq!(Fault::parse(&fault.words()), Ok(fault));
         assert_eq!(Fault::parse(" \n"), Ok(Fault::default()));
         assert_eq!(
             Fault::parse("failing=unavailable"),
-            Ok(Fault { latency: Duration::ZERO, failing: Failing::Unavailable })
+            Ok(Fault { failing: Failing::Unavailable, ..Fault::default() })
         );
         assert_eq!(
             Fault::parse("failing=sometimes"),
@@ -311,8 +367,33 @@ mod tests {
         );
         assert_eq!(
             Fault::parse("latency=3"),
-            Err("latency=3: latency-ms=MILLISECONDS or failing=HOW".to_owned())
+            Err("latency=3: latency-ms=MILLISECONDS, failing=HOW or rewrite-every-ms=MILLISECONDS"
+                .to_owned())
         );
+    }
+
+    /// TASK-690: a bucket as GCS refuses a write of an object within a second of the last one
+    /// answered, `429 Too Many Requests`, and takes it after; writes of other objects meanwhile
+    /// it takes.
+    #[tokio::test(start_paused = true)]
+    async fn writes_of_an_object_too_soon_are_refused() {
+        let faults = Faults::new(Duration::ZERO, None);
+        faults.set(Fault { rewrite_every: Duration::from_secs(1), ..Fault::default() });
+        let store = Faulty::new(Arc::new(object_store::memory::InMemory::new()), faults);
+        let put = async |key: &str| {
+            let (path, payload) = (Path::from(key), PutPayload::from_static(b"1"));
+            store.put_opts(&path, payload, PutOptions::default()).await
+        };
+        put("head").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(999)).await;
+        assert_eq!(
+            put("head").await.unwrap_err().to_string(),
+            "Generic Faulty error: HTTP status client error (429 Too Many Requests): the object's \
+             rate of change exceeded"
+        );
+        put("other").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        put("head").await.unwrap();
     }
 
     /// A bucket whose disk is full fails its writes with the filesystem's ENOSPC, and answers its

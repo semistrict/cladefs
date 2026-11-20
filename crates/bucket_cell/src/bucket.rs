@@ -225,6 +225,16 @@ pub trait Bucket: Send + Sync + 'static {
             .fold(Ok(()), |result, deleted| std::future::ready(result.and(deleted)))
     }
 
+    /// cladefs: waits until the store takes another write of `key` (TASK-690): at once where it
+    /// takes a key's writes as fast as they come. GCS takes about one a second of an object and
+    /// refuses more (`429`), so its bucket waits out the second since it last wrote the key, as
+    /// each write of the key does first anyway. For a writer to gather, until then, all its next
+    /// write of the key is to say: a cell's head, its one key written again and again.
+    fn rewritable(&self, key: &str) -> impl Future<Output = ()> + Send {
+        let _ = key;
+        std::future::ready(())
+    }
+
     /// The store's clock, which [`Meta::modified`] is in.
     fn now(&self) -> u64;
 

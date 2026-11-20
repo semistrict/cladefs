@@ -81,11 +81,43 @@ const LIVE: u64 = 256;
 /// slowly as it did before it failed, as far as it was, so that what waited uploads at once, each
 /// PUT holding its object for as long as it takes.
 const PHASES: [(&str, f64, Fault); 5] = [
-    ("answering", 0.1, Fault { latency: Duration::ZERO, failing: Failing::Not }),
-    ("slow", 0.2, Fault { latency: Duration::from_millis(300), failing: Failing::Not }),
-    ("full", 0.3, Fault { latency: Duration::ZERO, failing: Failing::NoSpace }),
-    ("out of service", 0.1, Fault { latency: Duration::ZERO, failing: Failing::Unavailable }),
-    ("answering again", 0.3, Fault { latency: Duration::from_millis(300), failing: Failing::Not }),
+    (
+        "answering",
+        0.1,
+        Fault { latency: Duration::ZERO, failing: Failing::Not, rewrite_every: Duration::ZERO },
+    ),
+    (
+        "slow",
+        0.2,
+        Fault {
+            latency: Duration::from_millis(300),
+            failing: Failing::Not,
+            rewrite_every: Duration::ZERO,
+        },
+    ),
+    (
+        "full",
+        0.3,
+        Fault { latency: Duration::ZERO, failing: Failing::NoSpace, rewrite_every: Duration::ZERO },
+    ),
+    (
+        "out of service",
+        0.1,
+        Fault {
+            latency: Duration::ZERO,
+            failing: Failing::Unavailable,
+            rewrite_every: Duration::ZERO,
+        },
+    ),
+    (
+        "answering again",
+        0.3,
+        Fault {
+            latency: Duration::from_millis(300),
+            failing: Failing::Not,
+            rewrite_every: Duration::ZERO,
+        },
+    ),
 ];
 
 /// The PUTs a host's uploads make at once (`crate::bucket::UPLOADS`' requests), every one of which

@@ -60,6 +60,7 @@ use futures::future::{BoxFuture, Either, FutureExt as _};
 use futures::stream::FuturesOrdered;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 use std::time::{Duration, SystemTime};
 
 /// How many of a store's segments upload at once: as many of a segment's size as the host's
@@ -1231,8 +1232,15 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         if let Some((wish, configuration, stale)) = keeping {
             (self.spawn)(self.clone().keep(writer.clone(), wish, (configuration, stale)).boxed());
         }
-        let mut segments = 0;
+        // The segments uploaded, and as many as were when the last checkpoint was asked for.
+        let (mut segments, mut checkpointed) = (0, 0);
         let mut in_flight = InFlight::default();
+        // cladefs: the acknowledgement under way, beside the uploads, which go on meanwhile as it
+        // waits for the bucket's store to take the head's next write, and names all they upload
+        // until then (`Writer::acknowledge`, TASK-690); and whether an upload since it began
+        // wants another.
+        let mut acking: Option<BoxFuture<'static, Result<Option<u64>, bucket_cell::Error>>> = None;
+        let mut ack_wanted = false;
         // Whether the next gather closes the store's open segment: for a commit waiting for its
         // upload, or a fork, or as the interval is up, or the uploader stops; and whether the last
         // took segments, after which the store may hold more closed, which the next takes,
@@ -1276,7 +1284,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 if more {
                     continue;
                 }
-                if stop && in_flight.is_empty() {
+                if stop && in_flight.is_empty() && acking.is_none() && !ack_wanted {
                     // A checkpoint on clean shutdown (doc-7, Checkpoints).
                     if let Err(err) = writer.checkpoint().await {
                         log::warn!("cladefs: checkpointing cell {}: {err}", writer.cell());
@@ -1284,36 +1292,69 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                     return self.fail(&writer, Failure::msg("the uploader stopped"));
                 }
             }
-            let woken = self.woken(interval);
-            if in_flight.is_empty() {
-                close |= !woken.await;
-                continue;
+            if ack_wanted && acking.is_none() {
+                ack_wanted = false;
+                // A checkpoint every so many segments, once they are acknowledged.
+                let checkpoint = segments - checkpointed >= self.options.checkpoint_every;
+                if checkpoint {
+                    checkpointed = segments;
+                }
+                acking = Some(Self::acknowledging(writer.clone(), checkpoint));
             }
-            let uploaded =
-                match futures::future::select(in_flight.next(), std::pin::pin!(woken)).await {
-                    Either::Left((uploaded, _)) => uploaded.expect("an upload in flight"),
-                    Either::Right((woken, _)) => {
-                        close |= !woken;
-                        continue;
-                    }
-                };
-            let acked = match uploaded {
-                Ok(()) => self.acknowledged(&writer, &mut in_flight).await,
-                Err(err) => Err(err.into()),
+            let mut woken = std::pin::pin!(self.woken(interval));
+            let happened = futures::future::poll_fn(|cx| {
+                if let Some(acked) = acking.as_mut()
+                    && let Poll::Ready(acked) = acked.poll_unpin(cx)
+                {
+                    return Poll::Ready(Happened::Acknowledged(acked));
+                }
+                if let Poll::Ready(Some(uploaded)) = in_flight.next().poll_unpin(cx) {
+                    return Poll::Ready(Happened::Uploaded(uploaded));
+                }
+                woken.as_mut().poll(cx).map(Happened::Woken)
+            })
+            .await;
+            let done = match happened {
+                Happened::Woken(woken) => {
+                    close |= !woken;
+                    Ok(())
+                }
+                Happened::Uploaded(uploaded) => uploaded.map_err(Failure::from).map(|()| {
+                    segments += 1;
+                    ack_wanted = true;
+                }),
+                Happened::Acknowledged(acked) => {
+                    acking = None;
+                    (acked.map_err(Failure::from))
+                        .and_then(|through| self.acknowledged(through, &mut in_flight))
+                }
             };
-            if let Err(err) = acked {
+            if let Err(err) = done {
                 return self.fail(&writer, err);
             }
-            segments += 1;
-            if segments % self.options.checkpoint_every == 0 {
-                // A test's: the checkpoint landing late, after the commits it covers returned, as on
-                // a loaded host, which a collector's pass then runs beside (TASK-339).
+        }
+    }
+
+    /// cladefs: acknowledges what `writer` has uploaded (`Writer::acknowledge`), then, if
+    /// `checkpoint`, writes a checkpoint as of it: the run's work with the cell's head, one at a
+    /// time, beside its uploads.
+    fn acknowledging(
+        writer: Arc<Writer<B>>,
+        checkpoint: bool,
+    ) -> BoxFuture<'static, Result<Option<u64>, bucket_cell::Error>> {
+        async move {
+            let through = writer.acknowledge().await?;
+            if checkpoint {
+                // A test's: the checkpoint landing late, after the commits it covers returned, as
+                // on a loaded host, which a collector's pass then runs beside (TASK-339).
                 fail::fail_point!("upload::checkpointing");
                 if let Err(err) = writer.checkpoint().await {
                     log::warn!("cladefs: checkpointing cell {}: {err}", writer.cell());
                 }
             }
+            Ok(through)
         }
+        .boxed()
     }
 
     /// Stops uploading, for `err`: commits waiting for uploads, and forks, fail with it.
@@ -2203,12 +2244,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// uploaded, and the store's segments leave it, read in the bucket, into the host's cache if
     /// it has one (TASK-165.8); then the forks they name are made, with a checkpoint at them, which
     /// their children's recovery starts from.
-    async fn acknowledged(
-        &self,
-        writer: &Writer<B>,
-        in_flight: &mut InFlight,
-    ) -> Result<(), Failure> {
-        let through = writer.acknowledge().await?;
+    fn acknowledged(&self, through: Option<u64>, in_flight: &mut InFlight) -> Result<(), Failure> {
         failing!("upload::acknowledged");
         let acked = in_flight.acknowledged(through);
         in_flight.acknowledging.extend(acked);
@@ -2334,6 +2370,16 @@ impl Uploading {
 /// exactly the segments the writer acknowledged. Each is in the store's write-ahead log, durably,
 /// before its upload goes (TASK-79.72's rule), so that nothing lands in the writer's name that the
 /// log doesn't hold.
+/// cladefs: what the uploader's run waits on that happened first.
+enum Happened {
+    /// The next upload in order is done.
+    Uploaded(Result<(), bucket_cell::Error>),
+    /// The acknowledgement under way is done, to the segment it returns.
+    Acknowledged(Result<Option<u64>, bucket_cell::Error>),
+    /// It was woken, or its interval ran out: whether it was woken.
+    Woken(bool),
+}
+
 #[derive(Default)]
 struct InFlight {
     segments: VecDeque<Uploading>,
@@ -2568,6 +2614,80 @@ mod tests {
         scenario.teardown();
     }
 
+    /// TASK-690: a store's uploader swaps its cell's head no faster than a bucket of GCS's store
+    /// takes it, about once a second, however fast the store commits: a guest waiting for each
+    /// commit's upload, then one closing segment after segment. Each swap names all uploaded since
+    /// the last, the uploads going on as it waits; the store refuses no write of the head, and a
+    /// commit waiting for its upload waits about a second at most, the swap before its own.
+    #[test]
+    fn heads_are_swapped_as_fast_as_gcs_takes_them() {
+        use bucket_cell::faults::{Fault, Faults, Faulty};
+        use bucket_cell::object_bucket::Request;
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let host = Runtime {
+            handle: runtime.handle().clone(),
+            uploads: Budget::new(Limits::UNBOUNDED),
+            keys: bucket_cell::keys::testing::host(),
+        };
+        let second = Duration::from_secs(1);
+        let faults = Faults::new(Duration::ZERO, None);
+        faults.set(Fault { rewrite_every: second, ..Fault::default() });
+        let gcs = Faulty::new(Arc::new(object_store::memory::InMemory::new()), faults);
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(gcs), "").rewriting_every(second));
+        let dir = MemDir::new();
+        let description = Description { block_size: 4096, capacity: 1 << 30, cell: CELL };
+        LocalCell::make(&dir, description, Some("memory:///gcs"), None).unwrap();
+        runtime.block_on(lifecycle::create(&*bucket, CELL, 1)).unwrap();
+        let recovering = LocalCell::recover_unmade(dir).unwrap();
+        let (store, uploader) = open(
+            recovering,
+            crate::Options::default(),
+            bucket.clone(),
+            (1, Options::default()),
+            &host,
+        )
+        .unwrap();
+        store.made().unwrap();
+        // Its updates from now on: the head's swaps, the bucket's probe and the taking done.
+        let updates = || bucket.stats().requests(Request::Update);
+        let opened = updates();
+        let started = std::time::Instant::now();
+        let mut sequence = 0;
+        let mut write = |close: bool| {
+            sequence += 1;
+            store.write(ExtentId::new(CELL.id, sequence), 0, &[sequence as u8; 4096]).unwrap();
+            if close {
+                store.close_segment().unwrap();
+            }
+            store.commit(None).unwrap();
+            sequence
+        };
+        let mut waits = Vec::new();
+        while started.elapsed() < 3 * second {
+            write(false);
+            let waiting = std::time::Instant::now();
+            uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
+            waits.push(waiting.elapsed());
+        }
+        for _ in 0..3 * IN_FLIGHT {
+            write(true);
+        }
+        let last = write(false);
+        uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
+        let elapsed = started.elapsed();
+        let stats = bucket.stats();
+        assert_eq!(stats.failures(Request::Update), 0, "writes of the head refused");
+        // Each a second after the one before, the first a second after the taking.
+        let swaps = updates() - opened;
+        assert!(swaps <= elapsed.as_secs() + 1, "{swaps} swaps of the head in {elapsed:?}");
+        let longest = waits.iter().max().unwrap();
+        assert!(*longest < second + second / 2, "a commit waited {longest:?}: {waits:?}");
+        drop(uploader);
+        let state = runtime.block_on(bucket_cell::recover(&*bucket, CELL, None)).unwrap().state;
+        let sequences: Vec<u64> = state.extents.keys().map(|extent| extent.sequence).collect();
+        assert_eq!(sequences, (1..=last).collect::<Vec<_>>());
+    }
+
     /// TASK-79.19: a gather takes no more of the segments the store closed than may upload at once,
     /// with those uploading; the rest it leaves in the store, until those it took are uploaded.
     #[test]
@@ -2608,7 +2728,8 @@ mod tests {
                 while let Some(uploaded) = in_flight.next().await {
                     uploaded.unwrap();
                 }
-                shared.acknowledged(&writer, &mut in_flight).await.unwrap();
+                let through = writer.acknowledge().await.unwrap();
+                shared.acknowledged(through, &mut in_flight).unwrap();
             });
         }
         assert_eq!(taken, [IN_FLIGHT, IN_FLIGHT, 1]);

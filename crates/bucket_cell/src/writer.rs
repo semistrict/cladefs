@@ -132,6 +132,15 @@ struct Inner {
     switch: Option<(u64, layout::Configuration)>,
 }
 
+/// What an acknowledgement names ([`Writer::naming`]): the last segment, the versions cut at the
+/// ends of those it names, each with its segment, and the configuration a switch names, if it
+/// names that switch's commit.
+struct Naming {
+    through: u64,
+    cuts: Vec<(u64, layout::NewVersion)>,
+    switch: Option<layout::Configuration>,
+}
+
 struct Pending {
     footer: Footer,
     /// Its object, and those of its extents stored on their own, uploaded first, until they are
@@ -456,45 +465,20 @@ impl<B: Bucket> Writer<B> {
     /// acknowledged, the bucket has whole, and a head names no commit begun. cladefs: the swap names
     /// the versions cut at the ends of the segments it names too ([`layout::Head::naming`], doc-18,
     /// TASK-476): a version is uploaded once it does.
+    /// cladefs: one swap names all that is uploaded until the bucket's store takes the head's next
+    /// write ([`Bucket::rewritable`]): a cell's head is swapped no faster than the store takes it,
+    /// GCS about once a second, however many segments upload meanwhile (TASK-690).
     pub async fn acknowledge(&self) -> Result<Option<u64>, Error> {
-        let (through, cuts, switch) = {
-            let inner = self.inner();
-            if let Some(error) = &inner.stopped {
-                return Err(error.clone());
-            }
-            let created: Vec<_> = (inner.pending.iter())
-                .take_while(|(_, pending)| pending.objects.is_none())
-                .collect();
-            let Some(end) = created
-                .iter()
-                .rposition(|(_, pending)| pending.footer.contents.continued.is_none())
-            else {
-                return Ok(inner.state.through);
-            };
-            let through = *created[end].0;
-            // Without the rule, as a test shows it needed: every version taken, those of segments
-            // this swap doesn't name among them.
-            let cut = |(&seq, pending): (&u64, &Pending)| {
-                let cuts = pending.footer.contents.versions.iter();
-                cuts.map(move |cut| (seq, *cut)).collect::<Vec<_>>()
-            };
-            let cuts: Vec<_> = match rules().versions_acked {
-                true => inner.pending.range(..=through).flat_map(cut).collect(),
-                false => inner.pending.iter().flat_map(cut).collect(),
-            };
-            // cladefs: the configuration a switch names, if this acknowledgement names its commit.
-            let last = (inner.pending.range(..=through))
-                .flat_map(|(_, pending)| pending.footer.contents.commits.iter())
-                .map(|&commit| extent_frame::segment::epoch_of(commit))
-                .max();
-            let switch = (inner.switch.as_ref())
-                .filter(|(epoch, _)| last.is_some_and(|last| last >= *epoch))
-                .map(|(_, configuration)| configuration.clone());
-            (through, cuts, switch)
-        };
+        if self.naming()?.is_none() {
+            return Ok(self.inner().state.through);
+        }
         failpoint!("writer::acknowledge");
-        {
+        let through = {
             let mut held = self.held.lock().await;
+            self.bucket.rewritable(&layout::head(self.cell)).await;
+            let Some(Naming { through, cuts, switch }) = self.naming()? else {
+                return Ok(self.inner().state.through);
+            };
             if held.head.end <= through {
                 // cladefs: those not dropped, as of now, holding the head: a drop that took it
                 // first, between, found no version of these to unname (TASK-569).
@@ -517,7 +501,8 @@ impl<B: Bucket> Writer<B> {
                     self.inner().switch = None;
                 }
             }
-        }
+            through
+        };
         {
             let mut inner = self.inner();
             let inner = &mut *inner;
@@ -530,6 +515,42 @@ impl<B: Bucket> Writer<B> {
         }
         failpoint!("writer::acknowledged");
         Ok(self.inner().state.through)
+    }
+
+    /// What an acknowledgement now would name ([`Writer::acknowledge`]): none if no segment is
+    /// uploaded to name; the writer's failure if it stopped.
+    fn naming(&self) -> Result<Option<Naming>, Error> {
+        let inner = self.inner();
+        if let Some(error) = &inner.stopped {
+            return Err(error.clone());
+        }
+        let created: Vec<_> =
+            (inner.pending.iter()).take_while(|(_, pending)| pending.objects.is_none()).collect();
+        let Some(end) =
+            created.iter().rposition(|(_, pending)| pending.footer.contents.continued.is_none())
+        else {
+            return Ok(None);
+        };
+        let through = *created[end].0;
+        // Without the rule, as a test shows it needed: every version taken, those of segments
+        // this swap doesn't name among them.
+        let cut = |(&seq, pending): (&u64, &Pending)| {
+            let cuts = pending.footer.contents.versions.iter();
+            cuts.map(move |cut| (seq, *cut)).collect::<Vec<_>>()
+        };
+        let cuts: Vec<_> = match rules().versions_acked {
+            true => inner.pending.range(..=through).flat_map(cut).collect(),
+            false => inner.pending.iter().flat_map(cut).collect(),
+        };
+        // cladefs: the configuration a switch names, if this acknowledgement names its commit.
+        let last = (inner.pending.range(..=through))
+            .flat_map(|(_, pending)| pending.footer.contents.commits.iter())
+            .map(|&commit| extent_frame::segment::epoch_of(commit))
+            .max();
+        let switch = (inner.switch.as_ref())
+            .filter(|(epoch, _)| last.is_some_and(|last| last >= *epoch))
+            .map(|(_, configuration)| configuration.clone());
+        Ok(Some(Naming { through, cuts, switch }))
     }
 
     /// cladefs: the cell's versions, as its head names them, as this writer last swapped it
