@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-20 06:03'
+updated_date: '2026-11-20 07:09'
 labels:
   - testing
   - flaky
@@ -30,3 +31,9 @@ Seen 2026-11-20 on ubu1 (load ~15 on 16 cores) running cladefsd::tests at --test
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-20 investigation: the accept loop retries every 50 ms after EMFILE (ACCEPT_AGAIN), so it is not the wait. The opening after the stretch takes 50-120 ms on ubu1 alone, 63 ms in a loaded run (cladefsd::tests at 32 threads): the failed run's 10 s is a hang, not slowness. The failing run logged only the one EMFILE line. Not reproduced: 300 runs (--stress-count 300 --test-threads 32, RUST_LOG=debug) all passed; two more loaded runs of cladefsd::tests passed. c85b229a1: the test now logs every thread's stack (cladefs::stacks::log_stacks, eu-stack) if the opening doesn't come, checked to print on ubu1 by forcing it once. Left open until it fails again with stacks.
+<!-- SECTION:NOTES:END -->
