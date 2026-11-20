@@ -189,6 +189,12 @@ async fn hold_to_fork(path: &Path) -> Result<Hold, Errno> {
 
 /// Holds the store at `path` for the daemon, as [`hold`] does: `EBUSY` while followers have it
 /// open too.
+/// cladefs: holds the store at `path`, which no connection has open (`EBUSY` otherwise), as a live
+/// migration's hand-over does (TASK-698.4).
+pub(super) async fn hold_store_alone(path: &Path) -> Result<Hold, Errno> {
+    hold_alone(path).await
+}
+
 async fn hold_alone(path: &Path) -> Result<Hold, Errno> {
     let hold = hold(path).await?;
     if hold.instance().is_some() {

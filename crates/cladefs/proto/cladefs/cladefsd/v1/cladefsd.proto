@@ -227,7 +227,35 @@ service Cladefsd {
   // of its ephemeral cells, which no host holds any more, retired in the daemon's bucket. For an
   // incarnation no host has: a host of it still holding its cells would read what is collected.
   rpc DecommissionHost(DecommissionHostRequest) returns (DecommissionHostResponse);
+  // Begins the live migration of the ephemeral cell of the store at `path` to the daemon whose peer
+  // address is `peer`, where its store goes at `to` (backlog doc-25, TASK-698.4): that daemon
+  // refers to the cell's origin first, then takes the store's kept segments as they come, while its
+  // guest runs. Returns the migration's ID. HandOverCell ends it.
+  rpc MigrateCell(MigrateCellRequest) returns (MigrateCellResponse);
+  // Hands the ephemeral cell of the store at `path` over to the daemon its migration names, once
+  // nothing has it open (EBUSY otherwise: its guest paused, its VM process gone): this daemon gives
+  // the cell up, durably, then sends the rest of its store, then asks the other to take it over.
+  // Accepted, the store here goes, and this daemon's reference; refused, it serves the cell again
+  // (EAGAIN). Asked again after a failure or a restart, it asks the other again, which answers as
+  // it did.
+  rpc HandOverCell(HandOverCellRequest) returns (HandOverCellResponse);
 }
+
+message MigrateCellRequest {
+  string path = 1;
+  string peer = 2;
+  string to = 3;
+}
+
+message MigrateCellResponse {
+  uint64 migration = 1;
+}
+
+message HandOverCellRequest {
+  string path = 1;
+}
+
+message HandOverCellResponse {}
 
 // A host's incarnation to decommission.
 message DecommissionHostRequest {

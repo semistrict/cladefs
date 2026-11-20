@@ -117,6 +117,8 @@ const (
 	Cladefsd_ForgetTenantKeys_FullMethodName  = "/cladefs.cladefsd.v1.Cladefsd/ForgetTenantKeys"
 	Cladefsd_ShredTenant_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/ShredTenant"
 	Cladefsd_DecommissionHost_FullMethodName  = "/cladefs.cladefsd.v1.Cladefsd/DecommissionHost"
+	Cladefsd_MigrateCell_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/MigrateCell"
+	Cladefsd_HandOverCell_FullMethodName      = "/cladefs.cladefsd.v1.Cladefsd/HandOverCell"
 )
 
 // CladefsdClient is the client API for Cladefsd service.
@@ -279,6 +281,18 @@ type CladefsdClient interface {
 	// of its ephemeral cells, which no host holds any more, retired in the daemon's bucket. For an
 	// incarnation no host has: a host of it still holding its cells would read what is collected.
 	DecommissionHost(ctx context.Context, in *DecommissionHostRequest, opts ...grpc.CallOption) (*DecommissionHostResponse, error)
+	// Begins the live migration of the ephemeral cell of the store at `path` to the daemon whose peer
+	// address is `peer`, where its store goes at `to` (backlog doc-25, TASK-698.4): that daemon
+	// refers to the cell's origin first, then takes the store's kept segments as they come, while its
+	// guest runs. Returns the migration's ID. HandOverCell ends it.
+	MigrateCell(ctx context.Context, in *MigrateCellRequest, opts ...grpc.CallOption) (*MigrateCellResponse, error)
+	// Hands the ephemeral cell of the store at `path` over to the daemon its migration names, once
+	// nothing has it open (EBUSY otherwise: its guest paused, its VM process gone): this daemon gives
+	// the cell up, durably, then sends the rest of its store, then asks the other to take it over.
+	// Accepted, the store here goes, and this daemon's reference; refused, it serves the cell again
+	// (EAGAIN). Asked again after a failure or a restart, it asks the other again, which answers as
+	// it did.
+	HandOverCell(ctx context.Context, in *HandOverCellRequest, opts ...grpc.CallOption) (*HandOverCellResponse, error)
 }
 
 type cladefsdClient struct {
@@ -609,6 +623,26 @@ func (c *cladefsdClient) DecommissionHost(ctx context.Context, in *DecommissionH
 	return out, nil
 }
 
+func (c *cladefsdClient) MigrateCell(ctx context.Context, in *MigrateCellRequest, opts ...grpc.CallOption) (*MigrateCellResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MigrateCellResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_MigrateCell_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *cladefsdClient) HandOverCell(ctx context.Context, in *HandOverCellRequest, opts ...grpc.CallOption) (*HandOverCellResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(HandOverCellResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_HandOverCell_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CladefsdServer is the server API for Cladefsd service.
 // All implementations must embed UnimplementedCladefsdServer
 // for forward compatibility.
@@ -769,6 +803,18 @@ type CladefsdServer interface {
 	// of its ephemeral cells, which no host holds any more, retired in the daemon's bucket. For an
 	// incarnation no host has: a host of it still holding its cells would read what is collected.
 	DecommissionHost(context.Context, *DecommissionHostRequest) (*DecommissionHostResponse, error)
+	// Begins the live migration of the ephemeral cell of the store at `path` to the daemon whose peer
+	// address is `peer`, where its store goes at `to` (backlog doc-25, TASK-698.4): that daemon
+	// refers to the cell's origin first, then takes the store's kept segments as they come, while its
+	// guest runs. Returns the migration's ID. HandOverCell ends it.
+	MigrateCell(context.Context, *MigrateCellRequest) (*MigrateCellResponse, error)
+	// Hands the ephemeral cell of the store at `path` over to the daemon its migration names, once
+	// nothing has it open (EBUSY otherwise: its guest paused, its VM process gone): this daemon gives
+	// the cell up, durably, then sends the rest of its store, then asks the other to take it over.
+	// Accepted, the store here goes, and this daemon's reference; refused, it serves the cell again
+	// (EAGAIN). Asked again after a failure or a restart, it asks the other again, which answers as
+	// it did.
+	HandOverCell(context.Context, *HandOverCellRequest) (*HandOverCellResponse, error)
 	mustEmbedUnimplementedCladefsdServer()
 }
 
@@ -874,6 +920,12 @@ func (UnimplementedCladefsdServer) ShredTenant(context.Context, *ShredTenantRequ
 }
 func (UnimplementedCladefsdServer) DecommissionHost(context.Context, *DecommissionHostRequest) (*DecommissionHostResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DecommissionHost not implemented")
+}
+func (UnimplementedCladefsdServer) MigrateCell(context.Context, *MigrateCellRequest) (*MigrateCellResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MigrateCell not implemented")
+}
+func (UnimplementedCladefsdServer) HandOverCell(context.Context, *HandOverCellRequest) (*HandOverCellResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method HandOverCell not implemented")
 }
 func (UnimplementedCladefsdServer) mustEmbedUnimplementedCladefsdServer() {}
 func (UnimplementedCladefsdServer) testEmbeddedByValue()                  {}
@@ -1472,6 +1524,42 @@ func _Cladefsd_DecommissionHost_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Cladefsd_MigrateCell_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MigrateCellRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CladefsdServer).MigrateCell(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Cladefsd_MigrateCell_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CladefsdServer).MigrateCell(ctx, req.(*MigrateCellRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Cladefsd_HandOverCell_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HandOverCellRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CladefsdServer).HandOverCell(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Cladefsd_HandOverCell_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CladefsdServer).HandOverCell(ctx, req.(*HandOverCellRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Cladefsd_ServiceDesc is the grpc.ServiceDesc for Cladefsd service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1606,6 +1694,14 @@ var Cladefsd_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DecommissionHost",
 			Handler:    _Cladefsd_DecommissionHost_Handler,
+		},
+		{
+			MethodName: "MigrateCell",
+			Handler:    _Cladefsd_MigrateCell_Handler,
+		},
+		{
+			MethodName: "HandOverCell",
+			Handler:    _Cladefsd_HandOverCell_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

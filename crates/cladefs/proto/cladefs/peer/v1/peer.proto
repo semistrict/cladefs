@@ -53,7 +53,89 @@ service Peer {
   // Drops the logs no take reads: of the configuration named to a log the bucket holds, and of
   // every configuration before it.
   rpc DropLogs(DropLogsRequest) returns (DropLogsResponse);
+
+  // Live migration of an ephemeral cell to this host (backlog doc-25, TASK-698.4;
+  // specs/ephemeral): the source prepares it here, which writes this host's reference to the
+  // cell's origin before taking anything (targetRefersFirst); sends its store's files, kept
+  // segments first, as rounds while its guest runs, the rest once it gave the cell up; then asks
+  // this host to take it over, naming every file it sent. FAILED_PRECONDITION on a host keeping no
+  // ephemeral cells (CLADEFSD_EPHEMERAL).
+  rpc MigratePrepare(MigratePrepareRequest) returns (MigratePrepareResponse);
+  // A piece of a file of the store being migrated, or its holes.
+  rpc MigrateFile(MigrateFileRequest) returns (MigrateFileResponse);
+  // Takes the migrated cell over, if this host holds every file named whole (openAtNamed): its
+  // store put at its path, durably, and the migration remembered as accepted for good
+  // (remembersAccepted), so that this answers yes to it again, however often asked. Otherwise no,
+  // what it took dropped and its reference retired, so that it never takes that migration after
+  // (refuseFinal). No to a migration it never prepared, or of another incarnation of this host's.
+  rpc MigrateHandOver(MigrateHandOverRequest) returns (MigrateHandOverResponse);
+  // Gives a migration up before its hand-over: what it took dropped, its reference retired.
+  rpc MigrateAbort(MigrateAbortRequest) returns (MigrateAbortResponse);
 }
+
+// A migration of an ephemeral cell to prepare: its ID, unique to it, the source's to give; the
+// cell; its origin, the version it was forked from; the bucket its parent is kept in; and where
+// its store goes on this host.
+message MigratePrepareRequest {
+  uint64 migration = 1;
+  uint64 tenant = 2;
+  uint64 cell = 3;
+  uint64 parent_tenant = 4;
+  uint64 parent_cell = 5;
+  uint64 at = 6;
+  string bucket = 7;
+  string to = 8;
+}
+
+// This host's incarnation, which its reference to the cell names, and the hand-over must name.
+message MigratePrepareResponse {
+  uint64 incarnation = 1;
+}
+
+// A range of a file.
+message Range {
+  uint64 offset = 1;
+  uint64 len = 2;
+}
+
+// `bytes` at `offset` of the file at `path` in the store being migrated, the file `len` bytes
+// long; and the ranges of it the source gave back, holes.
+message MigrateFileRequest {
+  uint64 migration = 1;
+  string path = 2;
+  uint64 offset = 3;
+  bytes bytes = 4;
+  uint64 len = 5;
+  repeated Range holes = 6;
+}
+
+message MigrateFileResponse {}
+
+// A file of the store the hand-over names: its length, and the CRC32C of its bytes, but for a
+// kept segment's, whose bytes never change once kept.
+message FileDigest {
+  string path = 1;
+  uint64 len = 2;
+  optional uint32 crc = 3;
+}
+
+// The hand-over of a migration: the incarnation of this host's its preparation answered, and every
+// file of the store.
+message MigrateHandOverRequest {
+  uint64 migration = 1;
+  uint64 incarnation = 2;
+  repeated FileDigest files = 3;
+}
+
+message MigrateHandOverResponse {
+  bool accepted = 1;
+}
+
+message MigrateAbortRequest {
+  uint64 migration = 1;
+}
+
+message MigrateAbortResponse {}
 
 // A configuration of a cell: its number, and the epoch of the writer that made it.
 message Configuration {

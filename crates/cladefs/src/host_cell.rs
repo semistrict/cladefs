@@ -659,8 +659,13 @@ pub(crate) async fn fork_ephemeral(
     let inheriting = uploader.inheriting(child).await?;
     make_dir(path)?;
     let cell = child.cell;
-    let entry =
-        crate::ephemeral_host::Entry { child: cell, origin, path: path.to_owned(), bucket: url };
+    let entry = crate::ephemeral_host::Entry {
+        child: cell,
+        origin,
+        path: path.to_owned(),
+        bucket: url,
+        migration: None,
+    };
     let made = match upload::blocking(|| host.note(&entry)) {
         Err(err) => Err(err),
         Ok(()) => match uploader.forked_ephemeral(child, inheriting, host.incarnation()).await {
@@ -784,6 +789,7 @@ pub(crate) async fn delete(
                 origin,
                 path: dir.to_owned(),
                 bucket: url,
+                migration: None,
             };
             host.retire(&entry).await.map_err(|err| Failure::msg(format!("{err:#}")))
         })

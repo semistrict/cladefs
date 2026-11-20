@@ -13,7 +13,11 @@
 //!   (`DecommissionHost`) retires those references;
 //! - `cells/<TENANT>.<CELL>`, one for each ephemeral cell it may hold, written, durably, before
 //!   the cell's reference: its parent and origin, its store's path, and the bucket its parent is
-//!   kept in. Removed once the reference is.
+//!   kept in; and the migration it is being taken by from another host, if it is (TASK-698.4).
+//!   Removed once the reference is;
+//! - `accepted/<MIGRATION>`, one for each migration it accepted, kept for good, so that it answers
+//!   yes to a hand-over it accepted however late it is asked again, the cell gone on since
+//!   (specs/ephemeral, `remembersAccepted`).
 //!
 //! As the daemon starts, before it serves, each journal entry whose store is not there, an
 //! ephemeral cell's of its cell, has its reference retired and goes: a fork its host crashed in,
@@ -40,6 +44,16 @@ pub(crate) struct Entry {
     pub origin: Origin,
     pub path: PathBuf,
     pub bucket: String,
+    /// The migration it is being taken by, its files staged beside its path ([`staging`]), until
+    /// this host accepts it.
+    #[serde(default)]
+    pub migration: Option<u64>,
+}
+
+/// Where a migration `migration` to `path` stages the store's files until its hand-over.
+pub(crate) fn staging(path: &Path, migration: u64) -> PathBuf {
+    let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    path.with_file_name(format!(".{name}.migrating-{migration:x}"))
 }
 
 node_local::node_local! {
@@ -50,8 +64,10 @@ node_local::node_local! {
 /// Opens the host's ephemeral cells' directory at `dir`, made if it is not there with a new
 /// incarnation, as this process's from now on.
 pub(crate) fn open(dir: &Path) -> Result<Arc<Host>, Error> {
-    std::fs::create_dir_all(dir.join(CELLS))
-        .with_context(|| format!("making {}", dir.display()))?;
+    for made in [CELLS, ACCEPTED] {
+        let made = dir.join(made);
+        std::fs::create_dir_all(&made).with_context(|| format!("making {}", made.display()))?;
+    }
     let path = dir.join(INCARNATION);
     let incarnation = match std::fs::read_to_string(&path) {
         Ok(text) => text.trim().parse().with_context(|| format!("{}", path.display()))?,
@@ -75,6 +91,7 @@ pub(crate) fn host() -> Result<Arc<Host>, crate::Errno> {
 }
 
 const CELLS: &str = "cells";
+const ACCEPTED: &str = "accepted";
 const INCARNATION: &str = "incarnation";
 
 impl Host {
@@ -102,8 +119,22 @@ impl Host {
         }
     }
 
+    /// Remembers, durably, for good, that it accepted migration `migration`.
+    pub fn accept(&self, migration: u64) -> Result<(), Error> {
+        write_durably(&self.dir.join(ACCEPTED).join(format!("{migration:x}")), b"")
+    }
+
+    /// Whether it accepted migration `migration`.
+    pub fn accepted(&self, migration: u64) -> bool {
+        self.dir.join(ACCEPTED).join(format!("{migration:x}")).exists()
+    }
+
+    /// The entry of the cell migration `migration` is taking here, if one is.
+    pub fn receiving(&self, migration: u64) -> Result<Option<Entry>, Error> {
+        Ok(self.entries()?.into_iter().find(|entry| entry.migration == Some(migration)))
+    }
+
     /// The ephemeral cell `child`'s entry, if it has one.
-    #[cfg(test)]
     pub fn entry(&self, child: CellId) -> Option<Entry> {
         let bytes = std::fs::read(self.entry_path(child)).ok()?;
         serde_json::from_slice(&bytes).ok()
@@ -137,7 +168,13 @@ impl Host {
     pub async fn retire_stale(&self) -> Result<usize, Error> {
         let mut retired = 0;
         for entry in self.entries()? {
-            if local_cell::upload::blocking(|| held(&entry)) {
+            // A migration being taken, which the daemon's going stopped: given up (TASK-698.4).
+            if let Some(migration) = entry.migration {
+                let staged = staging(&entry.path, migration);
+                if staged.exists() {
+                    std::fs::remove_dir_all(&staged)?;
+                }
+            } else if local_cell::upload::blocking(|| held(&entry)) {
                 continue;
             }
             self.retire(&entry).await?;
@@ -191,8 +228,13 @@ mod tests {
         assert_eq!(host.incarnation(), incarnation);
         let child = CellId { tenant: 3, id: 9 };
         let origin = Origin { parent: CellId { tenant: 3, id: 1 }, at: 4 };
-        let entry =
-            Entry { child, origin, path: dir.path().join("store"), bucket: "memory:///e".into() };
+        let entry = Entry {
+            child,
+            origin,
+            path: dir.path().join("store"),
+            bucket: "memory:///e".into(),
+            migration: None,
+        };
         host.note(&entry).unwrap();
         std::fs::write(dir.path().join(CELLS).join("torn"), b"{\"child\"").unwrap();
         std::fs::write(dir.path().join(CELLS).join("staged.new"), b"{}").unwrap();
@@ -201,5 +243,8 @@ mod tests {
         assert_eq!(host.entry(child), Some(entry));
         host.forget(child);
         assert_eq!(host.entries().unwrap(), vec![]);
+        assert!(!host.accepted(0x3c));
+        host.accept(0x3c).unwrap();
+        assert!(open(dir.path()).unwrap().accepted(0x3c));
     }
 }

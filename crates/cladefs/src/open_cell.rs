@@ -771,6 +771,8 @@ impl OpenCell {
         let opened = async {
             // cladefs: an ephemeral cell's, with no uploader (doc-25, TASK-698.3).
             let store = match local_cell::upload::blocking(|| host_cell::is_ephemeral(path)) {
+                // cladefs: given up to a live migration, it opens here no more (TASK-698.4).
+                true if path.join("migrating").exists() => return Err(Errno::EBUSY.into()),
                 true => {
                     let (store, bucket) = host_cell::open_ephemeral(path, &opening.keeping).await?;
                     Self::assemble(path, (store, bucket, None), opening).await?

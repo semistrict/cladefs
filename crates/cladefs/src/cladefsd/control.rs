@@ -524,6 +524,24 @@ impl Cladefsd for Control {
         reply(forked.map(|forked| ForkCellResponse { tenant: forked.tenant, cell: forked.id }))
     }
 
+    async fn migrate_cell(
+        &self,
+        request: Request<MigrateCellRequest>,
+    ) -> Result<Response<MigrateCellResponse>, Status> {
+        let MigrateCellRequest { path: store, peer, to } = request.into_inner();
+        let store = path(store)?;
+        let migrating = super::migration::migrate(store, peer, to).await;
+        reply(migrating.map(|migration| MigrateCellResponse { migration }))
+    }
+
+    async fn hand_over_cell(
+        &self,
+        request: Request<HandOverCellRequest>,
+    ) -> Result<Response<HandOverCellResponse>, Status> {
+        let store = path(request.into_inner().path)?;
+        reply(super::migration::hand_over(store).await.map(|()| HandOverCellResponse {}))
+    }
+
     async fn decommission_host(
         &self,
         request: Request<DecommissionHostRequest>,
@@ -1047,6 +1065,25 @@ impl Client {
             format!("forking version {version} of cell {cell} ephemerally to {}", to.display());
         let response = self.call(what, |mut c| async move { c.fork_cell(request).await })?;
         Ok(crate::CellId { tenant: response.tenant, id: response.cell })
+    }
+
+    /// cladefs: begins the live migration of the ephemeral cell of the store at `path` to the daemon
+    /// whose peer address is `peer`, its store going at `to` there (`MigrateCell`): returns its ID.
+    pub fn migrate_cell(&self, path: &Path, peer: &str, to: &Path) -> Result<u64, crate::Error> {
+        let request =
+            MigrateCellRequest { path: name(path)?, peer: peer.to_owned(), to: name(to)? };
+        let what = format!("migrating the store at {} to {peer}", path.display());
+        let response = self.call(what, |mut c| async move { c.migrate_cell(request).await })?;
+        Ok(response.migration)
+    }
+
+    /// cladefs: hands the ephemeral cell of the store at `path` over to its migration's target
+    /// (`HandOverCell`).
+    pub fn hand_over_cell(&self, path: &Path) -> Result<(), crate::Error> {
+        let request = HandOverCellRequest { path: name(path)? };
+        let what = format!("handing the store at {} over", path.display());
+        self.call(what, |mut c| async move { c.hand_over_cell(request).await })?;
+        Ok(())
     }
 
     /// cladefs: decommissions the host of incarnation `incarnation`, gone for good: its ephemeral

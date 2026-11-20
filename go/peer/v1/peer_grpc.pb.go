@@ -32,12 +32,16 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Peer_GetPart_FullMethodName     = "/cladefs.peer.v1.Peer/GetPart"
-	Peer_Incarnation_FullMethodName = "/cladefs.peer.v1.Peer/Incarnation"
-	Peer_Append_FullMethodName      = "/cladefs.peer.v1.Peer/Append"
-	Peer_Fence_FullMethodName       = "/cladefs.peer.v1.Peer/Fence"
-	Peer_ReadLog_FullMethodName     = "/cladefs.peer.v1.Peer/ReadLog"
-	Peer_DropLogs_FullMethodName    = "/cladefs.peer.v1.Peer/DropLogs"
+	Peer_GetPart_FullMethodName         = "/cladefs.peer.v1.Peer/GetPart"
+	Peer_Incarnation_FullMethodName     = "/cladefs.peer.v1.Peer/Incarnation"
+	Peer_Append_FullMethodName          = "/cladefs.peer.v1.Peer/Append"
+	Peer_Fence_FullMethodName           = "/cladefs.peer.v1.Peer/Fence"
+	Peer_ReadLog_FullMethodName         = "/cladefs.peer.v1.Peer/ReadLog"
+	Peer_DropLogs_FullMethodName        = "/cladefs.peer.v1.Peer/DropLogs"
+	Peer_MigratePrepare_FullMethodName  = "/cladefs.peer.v1.Peer/MigratePrepare"
+	Peer_MigrateFile_FullMethodName     = "/cladefs.peer.v1.Peer/MigrateFile"
+	Peer_MigrateHandOver_FullMethodName = "/cladefs.peer.v1.Peer/MigrateHandOver"
+	Peer_MigrateAbort_FullMethodName    = "/cladefs.peer.v1.Peer/MigrateAbort"
 )
 
 // PeerClient is the client API for Peer service.
@@ -70,6 +74,23 @@ type PeerClient interface {
 	// Drops the logs no take reads: of the configuration named to a log the bucket holds, and of
 	// every configuration before it.
 	DropLogs(ctx context.Context, in *DropLogsRequest, opts ...grpc.CallOption) (*DropLogsResponse, error)
+	// Live migration of an ephemeral cell to this host (backlog doc-25, TASK-698.4;
+	// specs/ephemeral): the source prepares it here, which writes this host's reference to the
+	// cell's origin before taking anything (targetRefersFirst); sends its store's files, kept
+	// segments first, as rounds while its guest runs, the rest once it gave the cell up; then asks
+	// this host to take it over, naming every file it sent. FAILED_PRECONDITION on a host keeping no
+	// ephemeral cells (CLADEFSD_EPHEMERAL).
+	MigratePrepare(ctx context.Context, in *MigratePrepareRequest, opts ...grpc.CallOption) (*MigratePrepareResponse, error)
+	// A piece of a file of the store being migrated, or its holes.
+	MigrateFile(ctx context.Context, in *MigrateFileRequest, opts ...grpc.CallOption) (*MigrateFileResponse, error)
+	// Takes the migrated cell over, if this host holds every file named whole (openAtNamed): its
+	// store put at its path, durably, and the migration remembered as accepted for good
+	// (remembersAccepted), so that this answers yes to it again, however often asked. Otherwise no,
+	// what it took dropped and its reference retired, so that it never takes that migration after
+	// (refuseFinal). No to a migration it never prepared, or of another incarnation of this host's.
+	MigrateHandOver(ctx context.Context, in *MigrateHandOverRequest, opts ...grpc.CallOption) (*MigrateHandOverResponse, error)
+	// Gives a migration up before its hand-over: what it took dropped, its reference retired.
+	MigrateAbort(ctx context.Context, in *MigrateAbortRequest, opts ...grpc.CallOption) (*MigrateAbortResponse, error)
 }
 
 type peerClient struct {
@@ -152,6 +173,46 @@ func (c *peerClient) DropLogs(ctx context.Context, in *DropLogsRequest, opts ...
 	return out, nil
 }
 
+func (c *peerClient) MigratePrepare(ctx context.Context, in *MigratePrepareRequest, opts ...grpc.CallOption) (*MigratePrepareResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MigratePrepareResponse)
+	err := c.cc.Invoke(ctx, Peer_MigratePrepare_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *peerClient) MigrateFile(ctx context.Context, in *MigrateFileRequest, opts ...grpc.CallOption) (*MigrateFileResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MigrateFileResponse)
+	err := c.cc.Invoke(ctx, Peer_MigrateFile_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *peerClient) MigrateHandOver(ctx context.Context, in *MigrateHandOverRequest, opts ...grpc.CallOption) (*MigrateHandOverResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MigrateHandOverResponse)
+	err := c.cc.Invoke(ctx, Peer_MigrateHandOver_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *peerClient) MigrateAbort(ctx context.Context, in *MigrateAbortRequest, opts ...grpc.CallOption) (*MigrateAbortResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MigrateAbortResponse)
+	err := c.cc.Invoke(ctx, Peer_MigrateAbort_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PeerServer is the server API for Peer service.
 // All implementations must embed UnimplementedPeerServer
 // for forward compatibility.
@@ -182,6 +243,23 @@ type PeerServer interface {
 	// Drops the logs no take reads: of the configuration named to a log the bucket holds, and of
 	// every configuration before it.
 	DropLogs(context.Context, *DropLogsRequest) (*DropLogsResponse, error)
+	// Live migration of an ephemeral cell to this host (backlog doc-25, TASK-698.4;
+	// specs/ephemeral): the source prepares it here, which writes this host's reference to the
+	// cell's origin before taking anything (targetRefersFirst); sends its store's files, kept
+	// segments first, as rounds while its guest runs, the rest once it gave the cell up; then asks
+	// this host to take it over, naming every file it sent. FAILED_PRECONDITION on a host keeping no
+	// ephemeral cells (CLADEFSD_EPHEMERAL).
+	MigratePrepare(context.Context, *MigratePrepareRequest) (*MigratePrepareResponse, error)
+	// A piece of a file of the store being migrated, or its holes.
+	MigrateFile(context.Context, *MigrateFileRequest) (*MigrateFileResponse, error)
+	// Takes the migrated cell over, if this host holds every file named whole (openAtNamed): its
+	// store put at its path, durably, and the migration remembered as accepted for good
+	// (remembersAccepted), so that this answers yes to it again, however often asked. Otherwise no,
+	// what it took dropped and its reference retired, so that it never takes that migration after
+	// (refuseFinal). No to a migration it never prepared, or of another incarnation of this host's.
+	MigrateHandOver(context.Context, *MigrateHandOverRequest) (*MigrateHandOverResponse, error)
+	// Gives a migration up before its hand-over: what it took dropped, its reference retired.
+	MigrateAbort(context.Context, *MigrateAbortRequest) (*MigrateAbortResponse, error)
 	mustEmbedUnimplementedPeerServer()
 }
 
@@ -209,6 +287,18 @@ func (UnimplementedPeerServer) ReadLog(*ReadLogRequest, grpc.ServerStreamingServ
 }
 func (UnimplementedPeerServer) DropLogs(context.Context, *DropLogsRequest) (*DropLogsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DropLogs not implemented")
+}
+func (UnimplementedPeerServer) MigratePrepare(context.Context, *MigratePrepareRequest) (*MigratePrepareResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MigratePrepare not implemented")
+}
+func (UnimplementedPeerServer) MigrateFile(context.Context, *MigrateFileRequest) (*MigrateFileResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MigrateFile not implemented")
+}
+func (UnimplementedPeerServer) MigrateHandOver(context.Context, *MigrateHandOverRequest) (*MigrateHandOverResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MigrateHandOver not implemented")
+}
+func (UnimplementedPeerServer) MigrateAbort(context.Context, *MigrateAbortRequest) (*MigrateAbortResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MigrateAbort not implemented")
 }
 func (UnimplementedPeerServer) mustEmbedUnimplementedPeerServer() {}
 func (UnimplementedPeerServer) testEmbeddedByValue()              {}
@@ -321,6 +411,78 @@ func _Peer_DropLogs_Handler(srv interface{}, ctx context.Context, dec func(inter
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Peer_MigratePrepare_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MigratePrepareRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerServer).MigratePrepare(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Peer_MigratePrepare_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerServer).MigratePrepare(ctx, req.(*MigratePrepareRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Peer_MigrateFile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MigrateFileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerServer).MigrateFile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Peer_MigrateFile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerServer).MigrateFile(ctx, req.(*MigrateFileRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Peer_MigrateHandOver_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MigrateHandOverRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerServer).MigrateHandOver(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Peer_MigrateHandOver_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerServer).MigrateHandOver(ctx, req.(*MigrateHandOverRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Peer_MigrateAbort_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MigrateAbortRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerServer).MigrateAbort(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Peer_MigrateAbort_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerServer).MigrateAbort(ctx, req.(*MigrateAbortRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Peer_ServiceDesc is the grpc.ServiceDesc for Peer service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -343,6 +505,22 @@ var Peer_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DropLogs",
 			Handler:    _Peer_DropLogs_Handler,
+		},
+		{
+			MethodName: "MigratePrepare",
+			Handler:    _Peer_MigratePrepare_Handler,
+		},
+		{
+			MethodName: "MigrateFile",
+			Handler:    _Peer_MigrateFile_Handler,
+		},
+		{
+			MethodName: "MigrateHandOver",
+			Handler:    _Peer_MigrateHandOver_Handler,
+		},
+		{
+			MethodName: "MigrateAbort",
+			Handler:    _Peer_MigrateAbort_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -417,6 +417,40 @@ impl proto::peer_server::Peer for Server {
         Ok(Response::new(FenceResponse { logs }))
     }
 
+    async fn migrate_prepare(
+        &self,
+        request: Request<proto::MigratePrepareRequest>,
+    ) -> Result<Response<proto::MigratePrepareResponse>, Status> {
+        let incarnation = super::migration::target::prepare(request.into_inner()).await?;
+        Ok(Response::new(proto::MigratePrepareResponse { incarnation }))
+    }
+
+    async fn migrate_file(
+        &self,
+        request: Request<proto::MigrateFileRequest>,
+    ) -> Result<Response<proto::MigrateFileResponse>, Status> {
+        let request = request.into_inner();
+        let written = super::run::off_the_runtime(move || super::migration::target::file(request));
+        let written = written.await.map_err(|err| Status::internal(format!("writing: {err}")))?;
+        written.map(|()| Response::new(proto::MigrateFileResponse {}))
+    }
+
+    async fn migrate_hand_over(
+        &self,
+        request: Request<proto::MigrateHandOverRequest>,
+    ) -> Result<Response<proto::MigrateHandOverResponse>, Status> {
+        let accepted = super::migration::target::hand_over(request.into_inner()).await?;
+        Ok(Response::new(proto::MigrateHandOverResponse { accepted }))
+    }
+
+    async fn migrate_abort(
+        &self,
+        request: Request<proto::MigrateAbortRequest>,
+    ) -> Result<Response<proto::MigrateAbortResponse>, Status> {
+        super::migration::target::abort(request.into_inner()).await?;
+        Ok(Response::new(proto::MigrateAbortResponse {}))
+    }
+
     async fn read_log(
         &self,
         request: Request<ReadLogRequest>,
