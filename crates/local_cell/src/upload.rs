@@ -54,7 +54,7 @@ use bucket_cell::mirror::Mirrored;
 use bucket_cell::object_bucket::ObjectBucket;
 use bucket_cell::wal::TakenCell;
 use bucket_cell::{Body, Objects, Recovered, Writer, head, lifecycle};
-use event_listener::{Event, Listener as _};
+use event_listener::Event;
 use futures::StreamExt as _;
 use futures::future::{BoxFuture, Either, FutureExt as _};
 use futures::stream::FuturesOrdered;
@@ -755,14 +755,8 @@ impl<D: Dir> Uploader<D> {
         self.shared.store()
     }
 
-    /// Waits until the commits up to `epoch` are uploaded and acknowledged.
-    pub fn wait_uploaded(&self, epoch: u64) -> Result<(), Failure> {
-        self.wait(self.waiting_uploaded(epoch))
-    }
-
-    /// Returns once the commits up to `epoch` are uploaded and acknowledged, as
-    /// [`Uploader::wait_uploaded`] does: a future, which holds no thread while it waits, as for a
-    /// sync that object storage keeps waiting (TASK-43.6).
+    /// Returns once the commits up to `epoch` are uploaded and acknowledged: a future, which holds
+    /// no thread while it waits, as for a sync that object storage keeps waiting (TASK-43.6).
     pub fn uploaded(
         &self,
         epoch: u64,
@@ -777,16 +771,8 @@ impl<D: Dir> Uploader<D> {
         Ok((!self.shared.ask(epoch, Awaited::Uploaded)?).then_some(waiting))
     }
 
-    /// cladefs: waits, blocking, for what `waiting` says, if anything ([`Shared::wait`]).
-    fn wait(&self, waiting: Result<Option<Waiting>, Failure>) -> Result<(), Failure> {
-        match waiting? {
-            Some(waiting) => self.shared.wait(&waiting),
-            None => Ok(()),
-        }
-    }
-
     /// cladefs: returns once what `waiting` says is there, if anything, holding no thread while it
-    /// waits ([`Shared::wait_async`], TASK-685.3).
+    /// waits ([`Shared::wait`], TASK-685.3).
     fn awaiting(
         &self,
         waiting: Result<Option<Waiting>, Failure>,
@@ -794,7 +780,7 @@ impl<D: Dir> Uploader<D> {
         let shared = self.shared.clone();
         async move {
             match waiting? {
-                Some(waiting) => shared.wait_async(&waiting).await,
+                Some(waiting) => shared.wait(&waiting).await,
                 None => Ok(()),
             }
         }
@@ -815,16 +801,8 @@ impl<D: Dir> Uploader<D> {
         }
     }
 
-    /// cladefs: waits until the commits up to `epoch` are replicated or uploaded (doc-21's
-    /// disjunction): replicated as the store's replicator says, counting once the bucket holds what
-    /// no member does ([`crate::replicate::Replicator::told`]); with no replicator, or its writer
-    /// fenced, uploaded. A cell whose members hold no quorum has its upload asked for at once.
-    pub fn wait_replicated(&self, epoch: u64) -> Result<(), Failure> {
-        self.wait(self.waiting_replicated(epoch))
-    }
-
     /// cladefs: returns once the commits up to `epoch` are replicated or uploaded, as
-    /// [`Uploader::wait_replicated`] does: a future, which holds no thread while it waits
+    /// [`Uploader::replicated`] does: a future, which holds no thread while it waits
     /// (TASK-685.3).
     pub fn replicated(
         &self,
@@ -834,7 +812,7 @@ impl<D: Dir> Uploader<D> {
     }
 
     /// cladefs: what waiting for the commits up to `epoch` replicated or uploaded waits for, if they
-    /// aren't ([`Uploader::wait_replicated`]).
+    /// aren't ([`Uploader::replicated`]).
     fn waiting_replicated(&self, epoch: u64) -> Result<Option<Waiting>, Failure> {
         let shared = &self.shared;
         let Some(replicator) = self.store().replicator() else {
@@ -882,13 +860,7 @@ impl<D: Dir> Uploader<D> {
         })
     }
 
-    /// Waits, if more commits wait to be uploaded than `Options::max_lag`, with `epoch`'s, or the
-    /// write-ahead log holds more than `Options::max_lag_bytes`, until they no longer do.
-    pub fn wait_lag(&self, epoch: u64) -> Result<(), Failure> {
-        self.wait(self.waiting_lag(epoch))
-    }
-
-    /// cladefs: returns once the lag is within its bounds, as [`Uploader::wait_lag`] does: a future,
+    /// cladefs: returns once the lag is within its bounds, as [`Uploader::lag`] does: a future,
     /// which holds no thread while it waits (TASK-685.3).
     pub fn lag(
         &self,
@@ -898,7 +870,7 @@ impl<D: Dir> Uploader<D> {
     }
 
     /// cladefs: what waiting for the lag within its bounds, with `epoch`'s commit, waits for, if it
-    /// isn't, a stall counted ([`Uploader::wait_lag`]).
+    /// isn't, a stall counted ([`Uploader::lag`]).
     fn waiting_lag(&self, epoch: u64) -> Result<Option<Waiting>, Failure> {
         let epoch = epoch.saturating_sub(self.shared.options.max_lag);
         let waiting = Waiting::For(Awaited::Lag, epoch);
@@ -1238,23 +1210,9 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         }
     }
 
-    /// Waits, blocking, until the progress has what `waiting` waits for, done or failed.
-    fn wait(&self, waiting: &Waiting) -> Result<(), Failure> {
-        loop {
-            let changed = {
-                let progress = self.progress.lock().unwrap();
-                if let Some(found) = self.found(&progress, waiting) {
-                    return found;
-                }
-                self.changed.listen()
-            };
-            changed.wait();
-        }
-    }
-
-    /// cladefs: returns once the progress has what `waiting` waits for, as [`Shared::wait`] does,
-    /// holding no thread while it waits (TASK-685.3).
-    async fn wait_async(&self, waiting: &Waiting) -> Result<(), Failure> {
+    /// cladefs: returns once the progress has what `waiting` waits for, done or failed, holding no
+    /// thread while it waits (TASK-685.3).
+    async fn wait(&self, waiting: &Waiting) -> Result<(), Failure> {
         loop {
             let changed = {
                 let progress = self.progress.lock().unwrap();
