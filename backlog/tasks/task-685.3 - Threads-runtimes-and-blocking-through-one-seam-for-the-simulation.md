@@ -1,10 +1,10 @@
 ---
 id: TASK-685.3
 title: 'Threads, runtimes and blocking through one seam for the simulation'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-20 03:32'
-updated_date: '2026-11-20 17:12'
+updated_date: '2026-11-20 18:14'
 labels:
   - testing
   - simulation
@@ -21,7 +21,7 @@ doc-24 step 3: about 100 thread spawn sites, the runtimes cladefsd builds (serve
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 No std::thread::spawn, runtime build or block_in_place outside the seam in cladefsd's code; a lint refuses new ones
+- [x] #1 No std::thread::spawn, runtime build or block_in_place outside the seam in cladefsd's code; a lint refuses new ones
 <!-- AC:END -->
 
 ## Definition of Done
@@ -45,4 +45,6 @@ Next batch plan (2026-11-20): steps 11, 12 and TASK-685.13 go together, as none 
 2026-11-20 (3beb3af0c): steps 10-12 landed. Step 10: MemberLink/Members futures; members served by tasks on the bucket runtime (event, not condvar); sim drive() polls once. Steps 11/12: cladefsd::run seam (service: own thread+runtime / madsim task; every: periodic; off_the_runtime: spawn_blocking / inline), Pool::run a task under madsim; governors, peers, sweep through it; boot async. Remaining blocking under madsim found at runtime by TASK-685.9's boot test (in progress): threads the store and physmem spawn, drain's IO.block_on, stop_serving's block_on, dir::closed_in's condvar.
 
 Correction: the commit landed on main as 53e702ce9 (3beb3af0c was its local hash before its message was amended).
+
+Done (23851c495): scripts/rust-rules.py's outside-the-seam refuses threads, runtimes, block_in_place, spawn_blocking and block_on in cladefsd's code outside run.rs unless marked outside the simulation or the daemon's seam; e7cc729b1 drain async.
 <!-- SECTION:NOTES:END -->

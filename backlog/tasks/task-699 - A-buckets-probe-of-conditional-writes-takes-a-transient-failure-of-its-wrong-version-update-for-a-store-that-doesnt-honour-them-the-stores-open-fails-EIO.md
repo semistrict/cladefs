@@ -4,9 +4,10 @@ title: >-
   A bucket's probe of conditional writes takes a transient failure of its
   wrong-version update for a store that doesn't honour them: the store's open
   fails EIO
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-20 17:46'
+updated_date: '2026-11-20 18:14'
 labels:
   - bug
 dependencies: []
@@ -26,3 +27,9 @@ Found 2026-11-20 by the madsim boot test with seeded bucket faults (TASK-685.5),
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Fixed in 247571f06: the probe begins again on Unavailable at any step (a new object, backoff, leftover removed best effort); Error::Unsupported for object_store's NotImplemented/NotSupported, an answer never retried. Test: object_bucket::tests::probes_ride_out_a_bucket_out_of_reach. The madsim boot test with seeded faults: 20/20 seeds.
+<!-- SECTION:NOTES:END -->

@@ -1,9 +1,10 @@
 ---
 id: TASK-685.5
 title: 'Simulated bucket with faults, and the control API on TCP under madsim'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-20 03:33'
+updated_date: '2026-11-20 18:14'
 labels:
   - testing
   - simulation
@@ -20,7 +21,7 @@ doc-24 step 5: an in-process object store the nodes share, its requests delayed 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Two nodes' daemons serve the control API over madsim TCP and share the simulated bucket, its faults seeded
+- [x] #1 Two nodes' daemons serve the control API over madsim TCP and share the simulated bucket, its faults seeded
 <!-- AC:END -->
 
 ## Definition of Done
@@ -29,3 +30,9 @@ doc-24 step 5: an in-process object store the nodes share, its requests delayed 
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+3a72d8b09: bucket_cell::faults::Seeded (delays, fail before/after landing, out of reach for stretches, seeded); the madsim boot test's hosts share one and serve the control API over madsim TCP; test.sh runs madsim tests over 20 seeds. Found TASK-699.
+<!-- SECTION:NOTES:END -->
