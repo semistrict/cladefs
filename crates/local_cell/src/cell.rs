@@ -1502,16 +1502,22 @@ impl<D: Dir> LocalCell<D> {
         Writable::check(self.lock(), self.cell)
     }
 
+    /// cladefs: says the cell is closing, as [`LocalCell::close`] does first, or what closes it
+    /// before it, its uploader's last uploads (TASK-644): an opening of the cell in this process
+    /// meanwhile waits for it, rather than fail as at a second opening (TASK-648), as does what
+    /// waits for its close ([`crate::closed`]).
+    pub fn closing(&self) {
+        if let Some((claim, _)) = self.opened.with(Mutex::lock).as_ref() {
+            claim.0.closing();
+        }
+    }
+
     /// Closes the cell, once the commits only ordered are durable, those a flush in flight is
     /// making durable among them: another store may open it, and this one reads what it holds, as
     /// caches of its extents may still, and changes nothing.
     pub fn close(&self) -> Result<(), Error> {
-        // cladefs: an opening of the cell in this process meanwhile waits for it, rather than fail
-        // as at a second opening (TASK-648).
-        if let Some((claim, _)) = self.opened.with(Mutex::lock).as_ref() {
-            claim.0.closing();
-            fail::fail_point!("store::closing");
-        }
+        self.closing();
+        fail::fail_point!("store::closing");
         // After a flush in flight: its commits are durable, and the files they made unreferenced
         // gone, before another store may open the cell.
         let mut flushing = rules().close_waits_for_flushes.then(|| self.flushing.with(Mutex::lock));

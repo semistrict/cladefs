@@ -451,33 +451,15 @@ impl Dir for DiskDir {
 
     fn claim(&self) -> io::Result<()> {
         let id = self.id()?;
-        let deadline = std::time::Instant::now() + CLOSING_WAIT;
-        let mut claimed = CLAIMED.lock().unwrap();
-        loop {
-            match claimed.get(&id) {
-                None => {
-                    claimed.insert(id, false);
-                    return Ok(());
-                }
-                Some(false) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        "this process has the store open",
-                    ));
-                }
-                Some(true) => {
-                    let left = deadline.saturating_duration_since(std::time::Instant::now());
-                    if left.is_zero() {
-                        return Err(io::Error::new(
-                            io::ErrorKind::WouldBlock,
-                            "this process is still closing the store",
-                        ));
-                    }
-                    fail::fail_point!("dir::claim_waits");
-                    claimed = UNCLAIMED.wait_timeout(claimed, left).unwrap().0;
-                }
-            }
+        let mut claimed = closed_in(CLAIMED.lock().unwrap(), id)?;
+        if claimed.contains_key(&id) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "this process has the store open",
+            ));
         }
+        claimed.insert(id, false);
+        Ok(())
     }
 
     fn closing(&self) {
@@ -525,6 +507,41 @@ static CLAIMED: Mutex<BTreeMap<DirId, bool>> = Mutex::new(BTreeMap::new());
 
 /// cladefs: woken as a claim goes ([`Dir::unclaim`]), for openings waiting for a store closing.
 static UNCLAIMED: std::sync::Condvar = std::sync::Condvar::new();
+
+/// cladefs: `claimed`, [`CLAIMED`] locked, once no store of the directory `id` is closing in this
+/// process, which it waits for a while ([`CLOSING_WAIT`]): `WouldBlock` if one still is.
+fn closed_in(
+    mut claimed: std::sync::MutexGuard<'static, BTreeMap<DirId, bool>>,
+    id: DirId,
+) -> io::Result<std::sync::MutexGuard<'static, BTreeMap<DirId, bool>>> {
+    let deadline = std::time::Instant::now() + CLOSING_WAIT;
+    while claimed.get(&id) == Some(&true) {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "this process is still closing the store",
+            ));
+        }
+        fail::fail_point!("dir::claim_waits");
+        claimed = UNCLAIMED.wait_timeout(claimed, left).unwrap().0;
+    }
+    Ok(claimed)
+}
+
+/// cladefs: returns once no store of the directory at `path` is closing in this process, waiting
+/// for one that is a while, as an opening of it does ([`Dir::claim`]): `WouldBlock` if it still
+/// is. What reads in the bucket what a store's close uploads, a fork of a version its closing
+/// store made, say, waits for the close so (TASK-644). Nothing at `path`, nothing closes there.
+pub fn closed(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    closed_in(CLAIMED.lock().unwrap(), (metadata.dev(), metadata.ino())).map(drop)
+}
 
 /// cladefs: how long an opening waits for a store of its directory closing in this process
 /// (TASK-648): a close makes its last commits durable, seconds on a busy disk.

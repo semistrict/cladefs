@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 20:37'
-updated_date: '2026-11-19 22:30'
+updated_date: '2026-11-19 23:36'
 labels:
   - testing
   - ci
@@ -35,3 +35,9 @@ CI runs 44353952388 (8111fb784) and 44380042393 (ca72b5814) on main, 2026-11-18:
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Cause: scripts/test-rustfs.sh exported CLADEFS_MASTER_KEY (test_master_key) for cladefs-gc, which the tests' processes inherited: given a master key, the host KMS is the bucket KMS over CLADEFSD_BUCKET, which the in-process tests don't set (EACCES). Given none, they use the tests' KMS (tests-kms / cfg(test)). Fix: the master key cladefs-gc's alone (a subshell). Then cladefs-gc never finished: object_bucket::tests::rustfs named its cells by a nanosecond timestamp, whose high bits read as bucket 6377, unrecorded: every read Unavailable, retried forever (TASK-676 filed for the collector). Its cells now under identity::NAMED (objectid::named). Local run (scripts/test-rustfs.sh on macOS, RustFS release binary): 4/4 pass; cladefs-gc: over 2 cells, 0 failed, 0.005 s. AC#2: each test chooses the tests' KMS itself whenever the environment names none, which is what the job now gives them.
+<!-- SECTION:NOTES:END -->

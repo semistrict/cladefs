@@ -538,7 +538,13 @@ impl Drop for OpenCell {
             log::warn!("cladefs: writing a boot profile: {err}");
         }
         // cladefs: its uploader first, which closes its open segment, uploads what it made local
-        // and stops (TASK-192); then the store. A follower's store is its writer's.
+        // and stops (TASK-192); then the store. A follower's store is its writer's. Closing from
+        // the first: what waits for the close, as a fork of a version it made does, waits for its
+        // uploads too (TASK-644).
+        if self.following.is_none() {
+            self.store.closing();
+            fail::fail_point!("open_cell::closing");
+        }
         drop(self.uploader.take());
         if self.following.is_none()
             && let Err(err) = self.store.close()

@@ -3715,10 +3715,12 @@ pub(crate) mod tests {
         runtime.block_on(async {
             let store = Arc::new(ObjectBucket::from_url(url).unwrap());
             probe(&*store, std::process::id().into()).await.unwrap();
-            // Each run its own cells, and objects.
-            let root = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
+            // Each run its own cells, and objects: of IDs no allocator gives, so that a collector
+            // over the bucket finds them its own, not a bucket's of another number that it can't
+            // reach (TASK-645). Even, so that the child's, the next, is one too.
+            let root = (crate::objectid::named() & !1).max(2);
             crate::bucket::conformance(&*store, &format!("conformance-{root:x}")).await;
-            cell_lifecycle(store, root & !1).await;
+            cell_lifecycle(store, root).await;
         });
     }
 

@@ -4644,6 +4644,66 @@ fn forks_of_a_version_right_after_its_writer_went_sync_the_store_still_closing()
     assert_eq!(read(&ours, extent, 0, BLOCK), Ok(pattern(5, BLOCK)));
 }
 
+/// TASK-644: a fork of a version made right after its writer's connection went, its store closing
+/// on a blocking thread, its uploader uploading its last commits, the version's among them, waits
+/// for the close before it reads the bucket for the version. Before, it found no store of the cell
+/// open to sync, read the bucket at once, and failed `ENOENT` where the upload was still to come
+/// (CI's `page_ins_in_flight_are_bounded`). The close held where it says it is closing, before its
+/// uploads; the fork held where it waits; then the close let go on.
+#[test]
+fn forks_of_a_version_wait_for_the_close_of_the_store_that_made_it() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let (store, restored) = (dir.path().join("store"), dir.path().join("restored"));
+    let made = CellClient::connect(&socket, &store, 1 << 24).unwrap();
+    let extent = minted(&made);
+    write(&made, extent, 0, &pattern(6, BLOCK)).unwrap();
+    made.commit(Some(b"root")).unwrap();
+    let version = made.make_version().unwrap();
+
+    let (closing, closing_seen) = std::sync::mpsc::channel();
+    let (go, gone_on) = std::sync::mpsc::channel::<()>();
+    let gone_on = std::sync::Mutex::new(gone_on);
+    // The writer's close alone held: the version's store, opened for the fork, closes unheld.
+    let first = std::sync::atomic::AtomicBool::new(true);
+    fail::cfg_callback("open_cell::closing", move || {
+        if first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            closing.send(()).unwrap();
+            gone_on.lock().unwrap().recv().unwrap();
+        }
+    })
+    .unwrap();
+    let (waiting, waiting_seen) = std::sync::mpsc::channel();
+    let waiting = std::sync::Mutex::new(waiting);
+    fail::cfg_callback("dir::claim_waits", move || drop(waiting.lock().unwrap().send(()))).unwrap();
+    drop(made);
+    let wait = std::time::Duration::from_secs(30);
+    closing_seen.recv_timeout(wait).expect("the store never said it was closing");
+    let forking = std::thread::spawn({
+        let restored = restored.clone();
+        move || {
+            let forking = super::cells::fork_of_version(
+                version_cell(version),
+                version.version,
+                restored,
+                None,
+            );
+            control(forking).map(drop)
+        }
+    });
+    let waited = waiting_seen.recv_timeout(wait);
+    go.send(()).unwrap();
+    let forked = forking.join().unwrap();
+    fail::remove("open_cell::closing");
+    fail::remove("dir::claim_waits");
+    assert_eq!((waited.map_err(drop), forked), (Ok(()), Ok(())), "the fork waited, and forked");
+    let ours = CellClient::connect(&socket, &restored, 0).unwrap();
+    assert_eq!(read(&ours, extent, 0, BLOCK), Ok(pattern(6, BLOCK)));
+}
+
 /// TASK-44.10: a restore, a fork of a version, which commits nothing, failing once its child's record
 /// is made, its cleanup failing with it, leaves nothing at the restore's path, and in the bucket an
 /// orphan, the child's record live (doc-14): a restore there forks anew. Before, it left a handle
