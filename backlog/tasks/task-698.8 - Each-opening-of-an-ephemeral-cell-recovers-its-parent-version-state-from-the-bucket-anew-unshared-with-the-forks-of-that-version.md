@@ -1,11 +1,12 @@
 ---
 id: TASK-698.8
 title: >-
-  Each opening of an ephemeral cell recovers its parent version state from the
-  bucket anew, unshared with the forks of that version
+  Ephemeral openings replay the parent version from its nearest checkpoint each
+  time: the fork writes no checkpoint at the version
 status: To Do
 assignee: []
 created_date: '2026-11-20 18:09'
+updated_date: '2026-11-20 18:56'
 labels: []
 dependencies: []
 parent_task_id: TASK-698
@@ -16,13 +17,15 @@ ordinal: 1098000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-upload::open_ephemeral calls recovery::recover_version for every opening, so hundreds of ephemeral cells forked from one base each decode the base checkpoint and hold their own copy of its extent map, where bucket forks share one decoded layer (TASK-453, bucket_cell::Recovered::layer). The at-version store the daemon keeps open for forks holds that layer already (AtVersion.state).
+Corrected 2026-11-20 (the first description, that each opening decodes an unshared copy of the parent state, was filed unchecked and is wrong). upload::open_ephemeral recovers the parent state with recovery::recover_version, whose checkpoints are read through the bucket Decoded registry: a checkpoint decoded once is shared by every recovery while one holds it (TASK-407, TASK-453), and the extent map is persistent. What is not shared: a bucket fork writes the checkpoint at the version (recovery::checkpoint_at in lifecycle::finish_fork), but lifecycle::fork_ephemeral does not. So when no checkpoint sits at the version segment, every ephemeral opening starts from the nearest earlier checkpoint and replays the parent segments up to the version, reading their footers again and building a state of its own that shares most of its map nodes with the checkpoint but not with the other openings.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 Ephemeral cells of one version opened at once share one decoded parent state, shown by a test counting decoded checkpoints
 - [ ] #2 Memory per ephemeral cell opening measured on the test host against a bucket fork of the same version
+- [ ] #3 An ephemeral fork leaves a checkpoint at its version, as a bucket fork does, so its openings start from one shared decoded state
+- [ ] #4 A test opens several ephemeral cells of one version whose segment has no checkpoint before the fork and counts one decode and no footer replays per opening
 <!-- AC:END -->
 
 ## Definition of Done
