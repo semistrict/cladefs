@@ -1411,8 +1411,12 @@ mod tests {
         assert_eq!(framed.iter().map(|(_, number)| *number).collect::<Vec<_>>(), [0, 1]);
         // Segment 1's framed file torn, its trailer, table and footer whole but not its data; its
         // raw data and log back, the log holding no record durable.
+        // Its first byte flipped, whatever it is: a write of a fixed byte left it whole when that
+        // was the byte there, one segment in 256 (TASK-689).
         let torn = dir.open(&segment_path(segment(1)), true).unwrap();
-        torn.write_at(&[!1], 0).unwrap();
+        let mut first = [0];
+        torn.read_at(&mut first, 0).unwrap();
+        torn.write_at(&[!first[0]], 0).unwrap();
         torn.sync().unwrap();
         left_open(&dir, 1, 1, &[]);
         for kind in [SEGMENTS, OPEN_SEGMENTS, LOGS] {
