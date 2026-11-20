@@ -4,10 +4,10 @@ title: >-
   Neither CI nor scripts/test.sh builds or runs the madsim build: local_cell's
   tests/replicated.rs doesn't compile under --cfg madsim
   (Runtime::shutdown_background)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-20 14:18'
-updated_date: '2026-11-20 14:36'
+updated_date: '2026-11-20 15:31'
 labels: []
 dependencies: []
 parent_task_id: TASK-685
@@ -27,3 +27,9 @@ Found 2026-11-20 merging main into PR #2: RUSTFLAGS='--cfg madsim' cargo check -
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-20: done (2384d9c19, 79db4dfe8). scripts/test.sh part madsim (in the defaults) and CI job test (madsim): node_local, bucket_cell, local_cell (and cladefs on macOS) checked under --cfg madsim, their tests/madsim.rs run (4). cladefs's protos generated for madsim's tonic (madsim-tonic-build). cladefs's madsim build on Linux (cladefsd's gRPC services) is TASK-685.13. The crates' other tests stay tokio/std tests (bucket_cell lib tests and local_cell tests/replicated.rs don't build under madsim by design).
+<!-- SECTION:NOTES:END -->

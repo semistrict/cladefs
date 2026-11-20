@@ -4,7 +4,7 @@ title: 'Threads, runtimes and blocking through one seam for the simulation'
 status: In Progress
 assignee: []
 created_date: '2026-11-20 03:32'
-updated_date: '2026-11-20 14:36'
+updated_date: '2026-11-20 15:31'
 labels:
   - testing
   - simulation
@@ -37,4 +37,6 @@ doc-24 step 3: about 100 thread spawn sites, the runtimes cladefsd builds (serve
 2026-11-20, after the user's decision (the daemon async down to its waits): the plan is doc-24's 'The async rewrite's plan', 12 steps from the inventory of cross-task waits; each step leaves the normal build as it is. Step 1 (fail fast under madsim) and step 2 (async uploader waits) first. Found meanwhile: TASK-688 (a store taken on the control runtime's worker).
 
 2026-11-20: steps 1-4, 6, 8 landed on main by PR #2 (5f65a04ee). The rest goes to main directly (the user: no more PRs). Next batch: step 9 (explicit async close of daemon-owned stores) and step 5 (read path), with TASK-685.12 (madsim build in test.sh/CI).
+
+2026-11-20 (4089f5a78): steps 9 and 5 landed on main. Step 9: open_cell::release closes a store when its last holder lets go (connections' teardown task, HeldCell/Here/kept/forks/Live); OpenCell::close releases a follower's writer and attached bases; a store dropped open panics under madsim. Step 5: READ/MAP, cache page-ins, fetch, base opens awaited; READ takes a connection page-in turn (PAGE_INS) as faults do; boot profile replay/writer are tasks. Only blocking seam left: image import (cells::outside_the_simulation). Remaining: step 10 (replication), 11 (dispatch seam: pool, flushers, spawn_blocking, cells::blocking), 12 (peers, sweep, drain, control as tasks; TASK-685.13 gRPC on madsim tonic). Also found: local_cell::dir::closed_in waits on a std Condvar (UNCLAIMED) up to 60 s for a store of the same directory closing in the process, on every open: a blocking wait the simulation would hit.
 <!-- SECTION:NOTES:END -->
