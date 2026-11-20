@@ -103,6 +103,21 @@ struct Inode {
     writes: Vec<(usize, Vec<u8>)>,
     /// cladefs: the bytes written since the last write-back of any of its range, or sync.
     unwritten: u64,
+    /// cladefs: its blocks of [`HOLE`] bytes given back ([`File::punch`]), written since none
+    /// (doc-25, TASK-698.2).
+    holes: std::collections::BTreeSet<u64>,
+}
+
+/// cladefs: the blocks a file in memory gives back ([`File::punch`]).
+const HOLE: u64 = 4096;
+
+impl Inode {
+    /// cladefs: the bytes of its data, but for its holes.
+    fn allocated(&self) -> u64 {
+        let len = self.data.len() as u64;
+        let holes = self.holes.range(..len.div_ceil(HOLE)).count() as u64;
+        len.div_ceil(HOLE).saturating_sub(holes) * HOLE
+    }
 }
 
 #[derive(Clone)]
@@ -360,10 +375,7 @@ impl MemDisk {
                     }
                 }
             }
-            inodes.insert(
-                *inode,
-                Inode { durable: data.clone(), data, writes: Vec::new(), unwritten: 0 },
-            );
+            inodes.insert(*inode, Inode { durable: data.clone(), data, ..Inode::default() });
         }
         let crashed = Fs {
             inodes,
@@ -589,12 +601,19 @@ impl Dir for MemDisk {
         let mut found = Vec::new();
         for (dir, entries) in &fs.dirs {
             if !dir.is_empty() {
-                found.push(DirFile { path: dir.clone(), len: 0, inode: 0, dir: true });
+                found.push(DirFile {
+                    path: dir.clone(),
+                    len: 0,
+                    allocated: 0,
+                    inode: 0,
+                    dir: true,
+                });
             }
             for (name, inode) in entries {
                 let path = if dir.is_empty() { name.clone() } else { format!("{dir}/{name}") };
-                let len = fs.inodes[inode].data.len() as u64;
-                found.push(DirFile { path, len, inode: *inode, dir: false });
+                let (len, allocated) =
+                    (fs.inodes[inode].data.len() as u64, fs.inodes[inode].allocated());
+                found.push(DirFile { path, len, allocated, inode: *inode, dir: false });
             }
         }
         Ok(found)
@@ -648,6 +667,8 @@ impl File for MemDiskFile {
             inode.data.resize(offset + buf.len(), 0);
         }
         inode.data[offset..offset + buf.len()].copy_from_slice(buf);
+        let blocks = offset as u64 / HOLE..(offset + buf.len()).div_ceil(HOLE as usize) as u64;
+        inode.holes.retain(|block| !blocks.contains(block));
         inode.writes.push((offset, buf.to_vec()));
         inode.unwritten += buf.len() as u64;
         let unwritten = inode.unwritten;
@@ -680,6 +701,26 @@ impl File for MemDiskFile {
     /// As [`MemDiskFile::sync`]: it caches nothing of its own.
     fn sync_cached(&self) -> io::Result<()> {
         self.sync()
+    }
+
+    /// Written as zeros, as a crash keeps or loses a write, and its whole blocks given back.
+    fn punch(&self, offset: u64, len: u64) -> io::Result<()> {
+        let mut fs = self.fs.lock().unwrap();
+        fs.spend()?;
+        let inode = fs.inodes.get_mut(&self.inode).unwrap();
+        let end = (offset + len).min(inode.data.len() as u64);
+        if offset >= end {
+            return Ok(());
+        }
+        let (from, to) = (offset as usize, end as usize);
+        inode.data[from..to].fill(0);
+        inode.writes.push((from, vec![0; to - from]));
+        inode.holes.extend(offset.div_ceil(HOLE)..end / HOLE);
+        Ok(())
+    }
+
+    fn allocated(&self) -> io::Result<u64> {
+        Ok(self.fs.lock().unwrap().inodes[&self.inode].allocated())
     }
 }
 

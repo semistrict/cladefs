@@ -65,6 +65,20 @@ pub trait File: Send + Sync + 'static {
     /// again, as the open segment's raw file is, whose pages go with it once it is removed
     /// (TASK-92.23).
     fn sync_cached(&self) -> io::Result<()>;
+
+    /// cladefs: gives the `len` bytes at `offset`, whole blocks, back to the host's disk, keeping the
+    /// file's size: they read as zeros from now on (doc-25, TASK-698.2). An ephemeral cell's kept
+    /// segments give back so the runs of the extents freed in them, which nothing reads again. A
+    /// file that can't refuses (`Unsupported`), giving nothing back.
+    fn punch(&self, _offset: u64, _len: u64) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
+    /// cladefs: the bytes of the host's disk the file takes: its size, but for what [`File::punch`]
+    /// gave back (doc-25, TASK-698.2), as its footprint counts it.
+    fn allocated(&self) -> io::Result<u64> {
+        self.size()
+    }
 }
 
 /// cladefs: a file or directory a directory holds, as [`Dir::entries`] lists it.
@@ -74,6 +88,9 @@ pub struct DirFile {
     pub path: String,
     /// Its length, in bytes: nothing, for a directory.
     pub len: u64,
+    /// cladefs: the bytes of the host's disk it takes, but for what was given back
+    /// ([`File::punch`]): nothing, for a directory (doc-25, TASK-698.2).
+    pub allocated: u64,
     /// Its inode, which its every name shares: nothing, for a directory.
     pub inode: u64,
     /// Whether it is a directory.
@@ -355,10 +372,11 @@ impl Dir for DiskDir {
                 let metadata = entry.metadata()?;
                 if metadata.is_dir() {
                     dirs.push(path.clone());
-                    found.push(DirFile { path, len: 0, inode: 0, dir: true });
+                    found.push(DirFile { path, len: 0, allocated: 0, inode: 0, dir: true });
                 } else {
                     let (len, inode) = (metadata.len(), metadata.ino());
-                    found.push(DirFile { path, len, inode, dir: false });
+                    let allocated = metadata.blocks() * 512;
+                    found.push(DirFile { path, len, allocated, inode, dir: false });
                 }
             }
         }
@@ -635,6 +653,59 @@ impl File for DiskFile {
 
     fn sync_cached(&self) -> io::Result<()> {
         self.sync()
+    }
+
+    /// Held as no write is in flight, as [`DiskFile::size`] is: a write of part of a block writes it
+    /// whole.
+    fn punch(&self, offset: u64, len: u64) -> io::Result<()> {
+        let _writes = self.tail.lock().unwrap();
+        punch_hole(&self.file, offset, len)
+    }
+
+    fn allocated(&self) -> io::Result<u64> {
+        use std::os::unix::fs::MetadataExt as _;
+        let _writes = self.tail.lock().unwrap();
+        Ok(self.file.metadata()?.blocks() * 512)
+    }
+}
+
+/// cladefs: gives the `len` bytes at `offset` of `file` back to its disk, keeping its size
+/// ([`File::punch`]): `fallocate`'s `FALLOC_FL_PUNCH_HOLE` on Linux, `F_PUNCHHOLE` on macOS.
+fn punch_hole(file: &std::fs::File, offset: u64, len: u64) -> io::Result<()> {
+    if len == 0 {
+        return Ok(());
+    }
+    let fd = file.as_raw_fd();
+    let (offset, len) = (
+        libc::off_t::try_from(offset).map_err(|_| io::ErrorKind::InvalidInput)?,
+        libc::off_t::try_from(len).map_err(|_| io::ErrorKind::InvalidInput)?,
+    );
+    #[cfg(target_os = "linux")]
+    {
+        let mode = libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE;
+        loop {
+            // SAFETY: Changes the blocks of an open file descriptor's file alone, no memory.
+            if unsafe { libc::fallocate(fd, mode, offset, len) } == 0 {
+                return Ok(());
+            }
+            let err = io::Error::last_os_error();
+            if err.kind() != io::ErrorKind::Interrupted {
+                return Err(err);
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let hole =
+            libc::fpunchhole_t { fp_flags: 0, reserved: 0, fp_offset: offset, fp_length: len };
+        // SAFETY: Reads `hole`, which lives across the call, and changes the blocks of an open file
+        // descriptor's file alone.
+        again_if_interrupted(|| unsafe { libc::fcntl(fd, libc::F_PUNCHHOLE, &hole) })
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (fd, offset, len);
+        Err(io::ErrorKind::Unsupported.into())
     }
 }
 

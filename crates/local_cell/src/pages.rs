@@ -1031,6 +1031,33 @@ impl<F: File> File for Cached<F> {
     fn sync_cached(&self) -> io::Result<()> {
         self.sync()
     }
+
+    /// cladefs: its pages in the range written back first, then let go, clean, so that none hides the
+    /// hole (TASK-698.2).
+    fn punch(&self, offset: u64, len: u64) -> io::Result<()> {
+        let shared = &*self.shared;
+        let range = offset..offset + len;
+        shared.flush(range.clone(), None)?;
+        {
+            let mut pages = shared.lock();
+            let blocks = offset / PAGE..range.end.div_ceil(PAGE);
+            let gone: Vec<u64> = (pages.pages.range(blocks))
+                .filter(|(_, page)| page.dirty.is_none() && !page.writing)
+                .map(|(&index, _)| index)
+                .collect();
+            for index in &gone {
+                pages.pages.remove(index);
+            }
+            shared.cache.held.fetch_sub(gone.len() as u64 * PAGE, Ordering::Relaxed);
+        }
+        shared.file.punch(offset, len)
+    }
+
+    /// cladefs: its pages written back first, which the file takes once they are.
+    fn allocated(&self) -> io::Result<u64> {
+        self.shared.flush(0..u64::MAX, None)?;
+        self.shared.file.allocated()
+    }
 }
 
 #[cfg(test)]

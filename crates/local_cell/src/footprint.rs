@@ -12,7 +12,8 @@
 //!
 //! **What is counted.** Each file's length, rounded up to a granule
 //! ([`bucket_cell::host_disk::counted`]), once however many names it has, and each directory a
-//! granule; and, of that, its **unframed** bytes: files with a name under `open-segments/` or
+//! granule; cladefs: but for what an ephemeral cell's kept segments gave back of theirs
+//! ([`crate::File::punch`], doc-25, TASK-698.2), which their blocks allocated say; and, of that, its **unframed** bytes: files with a name under `open-segments/` or
 //! `open-extents/`, raw data whose framing, or sealing in place, is still to come, which the
 //! store's own work, never refused, may add to. A footprint charges its disk's counters as its own
 //! ([`HostDisk::stores`], [`HostDisk::unframed`]).
@@ -32,7 +33,7 @@
 //! counts the stores in its directory not counted yet, closed, by one listing of each.
 
 use crate::dir::{Dir, DirFile};
-use crate::layout::{OPEN_EXTENTS, OPEN_SEGMENTS};
+use crate::layout::{KEPT, OPEN_EXTENTS, OPEN_SEGMENTS};
 use crate::sync::Mutex;
 use bucket_cell::host_disk::{self, HostDisk, Tally};
 use std::collections::{BTreeSet, HashMap};
@@ -297,7 +298,13 @@ impl Footprint {
                 .or_insert_with(|| Arc::new(FileLen { state: Mutex::new(LenState::default()) }));
             {
                 let mut state = file.state.lock().unwrap();
-                state.len = state.len.max(host_disk::counted(found.len));
+                // cladefs: a kept segment's blocks allocated, its holes given back (TASK-698.2).
+                let counted = match kept_path(&found.path) {
+                    true => found.allocated.min(found.len),
+                    false => found.len,
+                };
+                state.size = state.size.max(host_disk::counted(found.len));
+                state.len = state.len.max(host_disk::counted(counted));
                 state.names += 1;
                 state.open_names += usize::from(unframed_path(&found.path));
             }
@@ -727,6 +734,12 @@ fn unframed_path(path: &str) -> bool {
     kind == OPEN_SEGMENTS || kind == OPEN_EXTENTS
 }
 
+/// cladefs: whether `path` is a kept segment's: one under `kept/`, whose holes are given back
+/// (doc-25, TASK-698.2).
+fn kept_path(path: &str) -> bool {
+    path.split('/').next().unwrap_or_default() == KEPT
+}
+
 /// A file of a store, as its footprint counts it: shared by all its names and openings.
 pub struct FileLen {
     state: Mutex<LenState>,
@@ -734,8 +747,10 @@ pub struct FileLen {
 
 #[derive(Default)]
 struct LenState {
-    /// Its length, counted.
+    /// Its length, counted: cladefs: but for the holes it gave back (TASK-698.2).
     len: u64,
+    /// cladefs: its length, holes and all, counted: what a write grows it from.
+    size: u64,
     /// Its names: counted while it has one.
     names: usize,
     /// Of those, under `open-segments/` or `open-extents/`: unframed while it has one.
@@ -756,13 +771,30 @@ impl FileLen {
     /// It goes as far as `end` at least: counted, if it has a name, as far as that.
     pub(crate) fn grow(&self, footprint: &Footprint, end: u64) {
         let mut state = self.state.lock().unwrap();
-        let len = host_disk::counted(end);
-        if len <= state.len {
+        let size = host_disk::counted(end);
+        if size <= state.size {
             return;
         }
-        let more = len - std::mem::replace(&mut state.len, len);
+        let more = size - std::mem::replace(&mut state.size, size);
+        state.len += more;
         if state.counted() {
             footprint.charge(more, state.unframed());
+        }
+    }
+
+    /// cladefs: it takes `allocated` bytes of its disk, holes given back ([`crate::File::punch`],
+    /// TASK-698.2): counted so, if it has a name, never past its length.
+    pub(crate) fn settle(&self, footprint: &Footprint, allocated: u64) {
+        let mut state = self.state.lock().unwrap();
+        let len = host_disk::counted(allocated).min(state.size);
+        let was = std::mem::replace(&mut state.len, len);
+        if !state.counted() {
+            return;
+        }
+        match len.cmp(&was) {
+            std::cmp::Ordering::Less => footprint.discharge(was - len, state.unframed()),
+            std::cmp::Ordering::Greater => footprint.charge(len - was, state.unframed()),
+            std::cmp::Ordering::Equal => {}
         }
     }
 

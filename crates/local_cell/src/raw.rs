@@ -208,6 +208,14 @@ impl<F: File> File for RawFile<F> {
     fn sync_cached(&self) -> io::Result<()> {
         self.file.sync_cached()
     }
+
+    fn punch(&self, offset: u64, len: u64) -> io::Result<()> {
+        self.file.punch(offset, len)
+    }
+
+    fn allocated(&self) -> io::Result<u64> {
+        self.file.allocated()
+    }
 }
 
 #[cfg(test)]

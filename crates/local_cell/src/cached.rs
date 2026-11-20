@@ -323,6 +323,20 @@ impl<F: File> File for CachedFile<F> {
             Self::Cached(cached) => cached.sync_cached(),
         }
     }
+
+    fn punch(&self, offset: u64, len: u64) -> io::Result<()> {
+        match self {
+            Self::Raw(file) => file.punch(offset, len),
+            Self::Cached(cached) => cached.punch(offset, len),
+        }
+    }
+
+    fn allocated(&self) -> io::Result<u64> {
+        match self {
+            Self::Raw(file) => file.allocated(),
+            Self::Cached(cached) => cached.allocated(),
+        }
+    }
 }
 
 #[cfg(test)]

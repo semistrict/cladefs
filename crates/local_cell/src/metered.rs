@@ -258,4 +258,15 @@ impl<F: File> File for MeteredFile<F> {
     fn sync_cached(&self) -> io::Result<()> {
         self.file.sync_cached()
     }
+
+    /// cladefs: counted as the blocks it takes after (TASK-698.2).
+    fn punch(&self, offset: u64, len: u64) -> io::Result<()> {
+        self.file.punch(offset, len)?;
+        self.len.settle(&self.footprint, self.file.allocated()?);
+        Ok(())
+    }
+
+    fn allocated(&self) -> io::Result<u64> {
+        self.file.allocated()
+    }
 }

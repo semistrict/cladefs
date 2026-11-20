@@ -629,6 +629,34 @@ impl Recovered {
         Ok(())
     }
 
+    /// cladefs: of an ephemeral cell, whose segments closed again stay raw (doc-25, TASK-698.2): writes
+    /// into each raw file, in `dir`, of `cell`, holding `keys`, the runs its log's records hold, which
+    /// a flush that sealed little made durable in its log alone ([`LogRecord`]), and syncs it: its
+    /// raw file holds its commits whole from then on, as a framing's file does. The records must
+    /// still be those recovery kept.
+    pub fn restore_raw<D: Dir>(
+        &self,
+        dir: &D,
+        cell: CellId,
+        keys: &bucket_cell::keys::Ring,
+    ) -> Result<(), Error> {
+        for (footer, number) in &self.segments {
+            let Some(kept) = self.closing.get(number) else { continue };
+            let segment = SegmentId { cell: cell.id, number: *number };
+            let Logged { records, data, .. } = log_records(dir, segment, Some(keys))?;
+            ensure!(
+                records.get(..kept.len()) == Some(&kept[..]),
+                "{segment:?}'s log changed since its recovery"
+            );
+            let end = footer.contents.runs().map(|&(_, offset, len)| offset + len).max();
+            let data = &data[..(end.unwrap_or(0) as usize).min(data.len())];
+            let file = dir.open(&open_segment_path(segment), true)?;
+            file.write_at(data, 0)?;
+            file.sync()?;
+        }
+        Ok(())
+    }
+
     /// cladefs: drops what it holds of the segments closed again, not yet framed: their raw files
     /// and logs, durably, so that no recovery closes them again (`Recovering::drop_wal`).
     pub fn drop_closing<D: Dir>(&mut self, dir: &D, cell: CellId) -> Result<(), Error> {
@@ -1141,6 +1169,20 @@ impl Queue {
             taken.push(&*queued);
         }
         taken
+    }
+
+    /// cladefs: the segments, from the first, whose commits are `durable` or before, ending where no
+    /// commit goes on past them, by their numbers, with their footers: what an ephemeral cell's
+    /// checkpoint covers (doc-25, TASK-698.2).
+    pub fn covering(&self, durable: u64) -> Vec<(u64, Footer)> {
+        let durable =
+            self.segments.iter().take_while(|queued| footer_last(&queued.footer) <= durable);
+        let mut covering: Vec<_> =
+            durable.map(|queued| (queued.number, queued.footer.clone())).collect();
+        while covering.last().is_some_and(|(_, footer)| footer.contents.continued.is_some()) {
+            covering.pop();
+        }
+        covering
     }
 
     /// The first segment, if any.

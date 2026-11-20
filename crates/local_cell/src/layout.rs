@@ -83,6 +83,9 @@ pub(crate) struct CellFile {
     /// cladefs: the version of its cell it is at, if it is one: its cell's state at the
     /// version, which nothing writes, as a store at a version (doc-18, TASK-476).
     pub version: Option<u64>,
+    /// cladefs: whether its cell is ephemeral (doc-25, TASK-698.2): kept on this host's disk alone,
+    /// never uploaded, its closed segments raw, recovered from its base ([`crate::ephemeral`]).
+    pub ephemeral: bool,
 }
 
 /// The fields of a text of lines of `key value`, after its first, which is `first`.
@@ -140,6 +143,7 @@ impl CellFile {
             writer_copies,
             kind,
             version,
+            ephemeral: fields.contains_key("ephemeral"),
         })
     }
 
@@ -155,6 +159,7 @@ impl CellFile {
             writer_copies,
             kind,
             version,
+            ephemeral,
         } = self;
         let mut text = format!("{FORMAT}\nblock_size {block_size}\ncell {cell}\n");
         text += &format!("capacity {capacity}\n");
@@ -180,6 +185,9 @@ impl CellFile {
         if let Some(id) = version {
             text += &format!("version {}\n", Padded(*id));
         }
+        if *ephemeral {
+            text += "ephemeral yes\n";
+        }
         text
     }
 }
@@ -193,6 +201,20 @@ pub(crate) const EXTENTS: &str = "extents";
 /// cladefs: the directory of the open segments' logs, a directory for each cell's: the commits each
 /// holds, appended and synced by the flushes that make them durable (TASK-165.9).
 pub(crate) const LOGS: &str = "logs";
+/// cladefs: the directory of an ephemeral cell's kept segments, raw, a directory for each cell's:
+/// segments its base covers, read in place, the runs of the extents freed in them given back
+/// (doc-25, TASK-698.2).
+pub(crate) const KEPT: &str = "kept";
+
+/// cladefs: an ephemeral cell's base: its state as of the last segment it covers
+/// ([`crate::ephemeral::Base`], TASK-698.2).
+pub(crate) const BASE: &str = "base";
+
+/// cladefs: the path of an ephemeral cell's kept segment ([`KEPT`]).
+pub(crate) fn kept_path(segment: SegmentId) -> String {
+    numbered_path(KEPT, segment.cell, segment.number)
+}
+
 /// The directory of open segments' files, raw, a directory for each cell's.
 pub(crate) const OPEN_SEGMENTS: &str = "open-segments";
 /// The directory of the files of open extents stored on their own, raw, a directory for each
@@ -595,6 +617,7 @@ mod tests {
             writer_copies: Vec::new(),
             kind: None,
             version: None,
+            ephemeral: false,
         };
         assert_eq!(CellFile::parse(&file.text()).unwrap(), file);
         // cladefs: a host's store names its bucket (TASK-165.6), and a placed one its placement's
@@ -641,6 +664,10 @@ mod tests {
         let copy = CellFile { version: Some(190), ..kept.clone() };
         assert!(copy.text().ends_with("version 000000000005y\n"));
         assert_eq!(CellFile::parse(&copy.text()).unwrap(), copy);
+        // cladefs: an ephemeral cell's store says so (doc-25, TASK-698.2).
+        let ephemeral = CellFile { ephemeral: true, ..named.clone() };
+        assert!(ephemeral.text().ends_with("\nkind sqlite\nephemeral yes\n"));
+        assert_eq!(CellFile::parse(&ephemeral.text()).unwrap(), ephemeral);
         let hex = format!("{}version 00000000000000be\n", kept.text());
         assert_eq!(
             CellFile::parse(&hex).unwrap_err().to_string(),

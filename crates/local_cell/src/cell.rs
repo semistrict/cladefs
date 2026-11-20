@@ -52,6 +52,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use storage_device::{ExtentId, OtherCell, SealedExtent};
 
+mod ephemeral;
+pub use ephemeral::{Base, EphemeralOpening, Parent};
+
 /// The error of a write the store has no room for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("the extent store is full")]
@@ -259,6 +262,9 @@ pub struct LocalCell<D: Dir> {
     /// cladefs: of a replicated cell's writer, what sends each flush's commits to the members of
     /// its configuration (doc-21, TASK-537.3.3), once it started.
     replicator: std::sync::Mutex<Option<Arc<Replicator>>>,
+    /// cladefs: of an ephemeral cell, its base as it stands, and what its next checkpoint covers
+    /// (doc-25, TASK-698.2): held by a checkpoint, one at a time.
+    ephemeral: Option<std::sync::Mutex<ephemeral::Ephemeral>>,
 }
 
 /// cladefs: the directory of the stores' replicators' spools ([`LocalCell::spool`]).
@@ -1069,6 +1075,7 @@ impl<D: Dir> Recovering<D> {
     /// extents there, with the log's segments' footers applied over it, their extents here; and
     /// another segment opens, past them. A version's store holds its state alone, and no log.
     pub fn open(self, options: Options, opening: Opening) -> Result<LocalCell<D>, Error> {
+        ensure!(!self.file.ephemeral, "an ephemeral cell's store opens as one (open_ephemeral)");
         let Self { dir, taken, claim, file, wal: mut recovered } = self;
         let CellFile { block_size, cell, bucket, capacity, kind, version, .. } = file;
         let Opening { state, layer, taken: found, cache, keys, held } = opening;
@@ -1196,6 +1203,96 @@ impl<D: Dir> Recovering<D> {
             })
             .flatten()
             .collect();
+        let assembled = Assembled {
+            options,
+            extents,
+            capacity,
+            restate,
+            holding,
+            epoch,
+            root,
+            next_sequence,
+            spent,
+            segments,
+            own_sizes,
+            queue: Queue::new(wal.start(), queued),
+            version: found.is_none(),
+            cuts,
+            start_file,
+            cache,
+            held,
+            keys,
+            ephemeral: None,
+        };
+        Ok(LocalCell::assemble(
+            (dir, taken, claim),
+            (block_size, cell, bucket, kind, version),
+            assembled,
+        ))
+    }
+}
+
+/// cladefs: what an opening found of a store, from which it is put together
+/// ([`LocalCell::assemble`]): a cell kept in the bucket's ([`Recovering::open`]), or an ephemeral
+/// cell's (`Recovering::open_ephemeral`, TASK-698.2).
+struct Assembled<D: Dir> {
+    options: Options,
+    extents: Extents,
+    capacity: u64,
+    /// Whether the cell said no capacity, its store's then, which its next commit sets in it.
+    restate: bool,
+    holding: Holding,
+    epoch: u64,
+    root: Vec<u8>,
+    next_sequence: u64,
+    spent: extent_frame::spent::Spent,
+    segments: Segments<D::File>,
+    own_sizes: HashMap<ExtentId, u64>,
+    queue: Queue,
+    version: bool,
+    cuts: BTreeMap<u64, NewVersion>,
+    start_file: StartFile,
+    cache: Option<Arc<Cache>>,
+    held: Option<Arc<HeldParts>>,
+    keys: Arc<Ring>,
+    ephemeral: Option<ephemeral::Ephemeral>,
+}
+
+impl<D: Dir> LocalCell<D> {
+    /// cladefs: the store `assembled` says an opening found, in `dir`, taken and claimed, of `cell`
+    /// described so (TASK-698.2's refactor of [`Recovering::open`]).
+    fn assemble(
+        (dir, taken, claim): (Arc<D>, Arc<TakenDir<D>>, Claim<D>),
+        (block_size, cell, bucket, kind, version): (
+            u32,
+            CellId,
+            Option<String>,
+            Option<Kind>,
+            Option<u64>,
+        ),
+        assembled: Assembled<D>,
+    ) -> Self {
+        let Assembled {
+            options,
+            extents,
+            capacity,
+            restate,
+            holding,
+            epoch,
+            root,
+            next_sequence,
+            spent,
+            segments,
+            own_sizes,
+            queue,
+            version: at_version,
+            cuts,
+            start_file,
+            cache,
+            held,
+            keys,
+            ephemeral,
+        } = assembled;
         let mut uncommitted = Uncommitted::default();
         // cladefs: a cell saying no capacity has the store's, which its next commit sets in it
         // (TASK-165.3).
@@ -1214,7 +1311,7 @@ impl<D: Dir> Recovering<D> {
             replay
         };
         let views = Views::new(epoch, &root);
-        let store = LocalCell {
+        LocalCell {
             dir,
             block_size,
             cell,
@@ -1242,8 +1339,8 @@ impl<D: Dir> Recovering<D> {
                         (options.open_files, keys.clone()),
                     ),
                     unreferenced: Unreferenced::default(),
-                    wal: Queue::new(wal.start(), queued),
-                    version: found.is_none(),
+                    wal: queue,
+                    version: at_version,
                     kept: KeptExtents::default(),
                     sealed: Sealed::default(),
                     standing: Standing::Open,
@@ -1271,8 +1368,8 @@ impl<D: Dir> Recovering<D> {
             views,
             keys,
             replicator: std::sync::Mutex::new(None),
-        };
-        Ok(store)
+            ephemeral: ephemeral.map(std::sync::Mutex::new),
+        }
     }
 }
 
@@ -1360,6 +1457,20 @@ impl<D: Dir> LocalCell<D> {
         kind: Option<Kind>,
         version: Option<u64>,
     ) -> Result<(), Error> {
+        Self::make_described(dir, description, bucket, kind, (version, false), |_| Ok(()))
+    }
+
+    /// cladefs: makes a new store's directory in `dir`, as [`LocalCell::make_copy`] does, its
+    /// description saying `version` and whether its cell is ephemeral, as `described` says;
+    /// `extra` writes what else it holds first, before its description (TASK-698.2).
+    fn make_described(
+        dir: &D,
+        description: Description,
+        bucket: Option<&str>,
+        kind: Option<Kind>,
+        (version, ephemeral): (Option<u64>, bool),
+        extra: impl FnOnce(&D) -> Result<(), Error>,
+    ) -> Result<(), Error> {
         let Description { block_size, capacity, cell } = description;
         ensure!(
             block_size.is_power_of_two() && block_size as usize <= crate::framed::ALIGNMENT,
@@ -1376,6 +1487,7 @@ impl<D: Dir> LocalCell<D> {
             }
             create_cell_dirs(dir, cell.id)?;
             dir.create(UNMADE, false)?.sync()?;
+            extra(dir)?;
             let file = dir.create(DESCRIPTION, false)?;
             let bucket = bucket.map(str::to_owned);
             let described = CellFile {
@@ -1389,6 +1501,7 @@ impl<D: Dir> LocalCell<D> {
                 writer_copies: Vec::new(),
                 kind,
                 version,
+                ephemeral,
             };
             let text = described.text();
             file.write_at(text.as_bytes(), 0)?;
@@ -1461,6 +1574,10 @@ impl<D: Dir> LocalCell<D> {
             let text = String::from_utf8(read_file(&file)?).context("reading the description")?;
             CellFile::parse(&text)?
         };
+        // cladefs: an ephemeral cell's checkpoint cut short finished first (TASK-698.2).
+        if file.ephemeral {
+            ephemeral::settle(&*dir, file.cell)?;
+        }
         let wal = crate::wal::recover(&*dir, file.cell)?;
         Ok(Recovering { dir, taken, claim, file, wal })
     }
@@ -1621,6 +1738,14 @@ impl<D: Dir> LocalCell<D> {
             None => self.flush(),
         };
         drop(flushing);
+        // cladefs: an ephemeral cell's closed segments covered, all of them, its base what its next
+        // opening starts from (TASK-698.2).
+        let flushed = match flushed {
+            Ok(()) if self.ephemeral.is_some() && !self.lock().standing.is_closed() => {
+                self.checkpoint(true).map(drop)
+            }
+            flushed => flushed,
+        };
         let mut state = self.lock();
         if !state.standing.is_closed() {
             // cladefs: once no segment is being framed, whatever closed it, a commit no flush took
@@ -2770,6 +2895,10 @@ impl<D: Dir> LocalCell<D> {
         state: &mut State<D::File>,
         closed: impl IntoIterator<Item = Unframed<D::File>>,
     ) {
+        // cladefs: an ephemeral cell's stay raw, never framed (TASK-698.2).
+        if state.segments.is_ephemeral() {
+            return;
+        }
         // cladefs: one framer at a time, in the order the segments closed (`wal`'s docs,
         // TASK-165.9); each segment made durable once framed, with those framed meanwhile, by
         // another thread ([`Framer`], TASK-310).
@@ -3051,10 +3180,19 @@ impl<D: Dir> LocalCell<D> {
             let mut timed = Flush::default();
             timed.phases.took(flush::WAIT, asked);
             let flushed = self.flush_locked(&mut logs, &mut timed);
+            drop(logs);
             timed.phases.runnable_us = waits.us();
             timings::flushed(self.cell.id, &timed);
             span.set_count(trace::COMMITS, timed.commits as u64);
-            flushed
+            flushed?;
+            // cladefs: an ephemeral cell's closed segments covered as they add up, and what its
+            // views let go of given back (TASK-698.2).
+            if self.ephemeral.is_some() {
+                self.checkpoint(false)?;
+                let punches = self.state()?.segments.take_punches();
+                self.give_back(punches);
+            }
+            Ok(())
         })
     }
 

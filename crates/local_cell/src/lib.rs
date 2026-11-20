@@ -210,8 +210,8 @@ pub use cached::{CachedDir, CachedFile};
 #[cfg(any(test, feature = "unkept"))]
 pub use cell::UNKEPT_DEK;
 pub use cell::{
-    BucketData, DirHold, Info, LocalCell, NoSpace, NotQuiescent, Opening, Options, Recovering,
-    SpentExtent, TooLong, TooSmall, Unaligned, Unmade, Usage, Write,
+    Base, BucketData, DirHold, EphemeralOpening, Info, LocalCell, NoSpace, NotQuiescent, Opening,
+    Options, Parent, Recovering, SpentExtent, TooLong, TooSmall, Unaligned, Unmade, Usage, Write,
 };
 pub use dir::{Dir, DirFile, DiskDir, DiskFile, File, HostDir, HostFile, closed};
 /// cladefs: where a store's cell is: its tenant's cell, and its ID there (TASK-364).

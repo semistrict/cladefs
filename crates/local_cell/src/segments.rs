@@ -17,8 +17,8 @@ use crate::framing::{self, Look, Looked, Seen};
 use crate::held::Hold;
 use crate::layout::{
     Change, Data, EXTENTS, LOGS, OPEN_SEGMENTS, Piece, SEGMENTS, SPARE, SegmentId, cell_dir,
-    extent_path, framing_path, held_frees, log_path, open_segment_path, parse_number, segment_path,
-    spare_path,
+    extent_path, framing_path, held_frees, kept_path, log_path, open_segment_path, parse_number,
+    segment_path, spare_path,
 };
 use crate::raw::{RawEncryption, RawFile};
 use crate::timings::{self, Timing, durable, framing as framing_phase};
@@ -81,6 +81,14 @@ enum Phase<F> {
     Framing { raw: Arc<RawFile<F>>, log: Log<F>, last: u64, written: Option<Arc<Framed<F>>> },
     /// cladefs: its framing failed, which failed the store: read from its raw file, which stays.
     Failed { raw: Arc<RawFile<F>>, log: Log<F>, error: String },
+    /// cladefs: an ephemeral cell's, closed, never framed (doc-25, TASK-698.2): read
+    /// from its raw file, its log beside it, until its cell's next base covers it
+    /// ([`crate::ephemeral`]), its commits recovered from its log meanwhile.
+    Raw { raw: Arc<RawFile<F>>, log: Log<F> },
+    /// cladefs: an ephemeral cell's, its base covering it (doc-25, TASK-698.2): read in place from
+    /// its raw file, in `kept/`, the runs of the extents freed in it given back, and let go of once
+    /// no extent's data is in it.
+    Kept { raw: Arc<RawFile<F>> },
     /// Closed, a segment of the write-ahead log until acknowledged in the bucket. Its framed file,
     /// if open, is among those kept open (`Segments::files`).
     Closed,
@@ -150,6 +158,13 @@ impl<F> Segment<F> {
         }
     }
 
+    /// cladefs: a new segment, open, holding nothing yet: looked at ahead for its framing unless its
+    /// cell is `ephemeral`, whose segments are never framed (TASK-698.2).
+    fn new_in(phase: Phase<F>, ephemeral: bool) -> Self {
+        let segment = Self::new(phase, 0);
+        Self { ahead: segment.ahead.filter(|_| !ephemeral), ..segment }
+    }
+
     /// A write of `len` bytes at `at` in it is done, `live` of them holding extents' data: returns
     /// whether none is in progress in it any more. cladefs: its parts it made whole wait for a look
     /// ahead, in `seeing` ([`Segments::see`]).
@@ -174,7 +189,9 @@ impl<F> Segment<F> {
     /// closed and acknowledged in the bucket: the write-ahead log holds the rest (TASK-165.9).
     fn is_empty(&self) -> bool {
         let done = matches!(self.phase, Phase::Closed) && self.acknowledged.is_some();
-        done && self.live == 0 && self.writers == 0
+        // cladefs: or kept, its base covering it, which nothing writes (TASK-698.2).
+        let kept = matches!(self.phase, Phase::Kept { .. });
+        (done || kept) && self.live == 0 && self.writers == 0
     }
 
     /// cladefs: panics unless what it counts of itself, segment `number`, is what it holds
@@ -271,6 +288,22 @@ pub(crate) struct Segments<F> {
     /// cladefs: the parts of segments written whole since the store last took them, to look at
     /// ahead of their framings ([`Segments::take_seeing`], TASK-400).
     seeing: Vec<(SegmentId, u64)>,
+    /// cladefs: whether its cell is ephemeral (doc-25, TASK-698.2): segments closed stay raw
+    /// ([`Phase::Raw`]), never framed nor looked at ahead, until its base covers them
+    /// ([`Phase::Kept`]).
+    ephemeral: bool,
+    /// cladefs: the kept segments reaping let go of, whose files go ([`Segments::take_kept_reaped`]).
+    kept_reaped: Vec<SegmentId>,
+    /// cladefs: the runs of kept segments let go of, to give back ([`Segments::take_punches`]).
+    punches: Vec<(SegmentId, u64, u64)>,
+}
+
+/// cladefs: an ephemeral cell's segment as its opening finds it (doc-25, TASK-698.2): closed raw, its
+/// log beside it; or kept, its base covering it, with its log's header, which says how its raw
+/// file is encrypted.
+pub(crate) enum EphemeralSegment {
+    Raw,
+    Kept { header: Vec<u8> },
 }
 
 /// cladefs: how many spare logs a cell keeps ([`Segments::spare`]).
@@ -308,6 +341,60 @@ impl<F: File> Segments<F> {
             };
             segments.insert(id, segment);
         }
+        Self::opened(dir, (cell, segments), (epoch, next, chain), (open_files, keys), false)
+    }
+
+    /// cladefs: the segments of `cell`, an ephemeral cell's (doc-25, TASK-698.2), opened as
+    /// [`Segments::open`] opens a cell's: those it holds, `tracked`, each with the bytes of extents'
+    /// data it holds, closed raw or kept ([`EphemeralSegment`]), whose files must be there.
+    pub fn open_ephemeral<D: Dir<File = F>>(
+        dir: &D,
+        (cell, tracked): (u64, BTreeMap<SegmentId, (u64, EphemeralSegment)>),
+        (epoch, next, chain): (u64, u64, Chain),
+        (open_files, keys): (usize, Arc<Ring>),
+    ) -> Result<Self, Error> {
+        let mut segments = BTreeMap::new();
+        for (id, (live, held)) in tracked {
+            ensure!(id.cell == cell, "{id:?} is another cell's");
+            let (path, header) = match &held {
+                EphemeralSegment::Raw => {
+                    let log =
+                        dir.open(&log_path(id), false).with_context(|| format!("{id:?}'s log"))?;
+                    let mut header = vec![0; crate::wal::LOG_HEADER];
+                    log.read_cached(&mut header, 0)?;
+                    (open_segment_path(id), (header, Some(log)))
+                }
+                EphemeralSegment::Kept { header } => (kept_path(id), (header.clone(), None)),
+            };
+            let (header, log) = header;
+            let parsed = LogHeader::of(&header, id)
+                .ok_or_else(|| anyhow!("{id:?}'s log has no header of its own"))?;
+            let encryption = parsed.encryption(id, &keys)?;
+            let file = dir.open(&path, true).with_context(|| format!("segment {path}"))?;
+            let len = file.size()?;
+            let raw = Arc::new(RawFile::new(file, encryption.clone()));
+            let phase = match (held, log) {
+                (EphemeralSegment::Raw, Some(log)) => {
+                    let log = Log { file: Arc::new(log), salt: parsed.salt, encryption };
+                    Phase::Raw { raw, log }
+                }
+                _ => Phase::Kept { raw },
+            };
+            let segment = Segment { len, size: len, ahead: None, ..Segment::new(phase, live) };
+            segments.insert(id, segment);
+        }
+        Self::opened(dir, (cell, segments), (epoch, next, chain), (open_files, keys), true)
+    }
+
+    /// cladefs: the segments `segments` of `cell`, as their opening found them, with another, open,
+    /// `next`, past them, as [`Segments::open`] says; ephemeral, if `ephemeral` (TASK-698.2).
+    fn opened<D: Dir<File = F>>(
+        dir: &D,
+        (cell, mut segments): (u64, BTreeMap<SegmentId, Segment<F>>),
+        (epoch, next, chain): (u64, u64, Chain),
+        (open_files, keys): (usize, Arc<Ring>),
+        ephemeral: bool,
+    ) -> Result<Self, Error> {
         let open = SegmentId { cell, number: next };
         let logs = dir.list(&cell_dir(LOGS, cell))?;
         let spared =
@@ -325,10 +412,13 @@ impl<F: File> Segments<F> {
         for kind in [OPEN_SEGMENTS, LOGS] {
             dir.sync_dir(&cell_dir(kind, cell))?;
         }
-        segments.insert(open, Segment::new(phase, 0));
+        segments.insert(open, Segment::new_in(phase, ephemeral));
+        // cladefs: a kept one no extent is in, reaping lets go of (TASK-698.2).
+        let empty = segments.iter().filter(|(_, segment)| segment.is_empty());
+        let empty = empty.map(|(&number, _)| number).collect();
         Ok(Self {
             tracked: segments,
-            empty: BTreeSet::new(),
+            empty,
             open,
             committed_len: 0,
             full: Vec::new(),
@@ -350,6 +440,9 @@ impl<F: File> Segments<F> {
             lifetime,
             keys,
             seeing: Vec::new(),
+            ephemeral,
+            kept_reaped: Vec::new(),
+            punches: Vec::new(),
         })
     }
 
@@ -422,9 +515,22 @@ impl<F: File> Segments<F> {
         idle
     }
 
-    /// The data of `piece` is in its segment no more: freed, or moved.
+    /// The data of `piece` is in its segment no more: freed, or moved. cladefs: of a kept segment,
+    /// nothing reads it any more, and it is given back ([`Segments::take_punches`], TASK-698.2).
     pub fn let_go(&mut self, piece: &Piece) {
-        self.change(piece.segment, |segment| segment.live -= piece.len);
+        let kept = self.change(piece.segment, |segment| {
+            segment.live -= piece.len;
+            matches!(segment.phase, Phase::Kept { .. })
+        });
+        if kept {
+            self.punches.push((piece.segment, piece.offset, piece.len));
+        }
+    }
+
+    /// cladefs: the runs of kept segments let go of since this was last asked, to give back
+    /// (doc-25, TASK-698.2).
+    pub fn take_punches(&mut self) -> Vec<(SegmentId, u64, u64)> {
+        std::mem::take(&mut self.punches)
     }
 
     /// Appends `len` bytes of an extent's data, sealed in one run, to the open segment, which
@@ -492,7 +598,7 @@ impl<F: File> Segments<F> {
             Phase::Open { raw, .. } | Phase::Full { raw, .. } | Phase::Framing { raw, .. } => {
                 Some((raw.clone(), look))
             }
-            Phase::Failed { .. } | Phase::Closed => None,
+            Phase::Failed { .. } | Phase::Raw { .. } | Phase::Kept { .. } | Phase::Closed => None,
         }
     }
 
@@ -624,7 +730,8 @@ impl<F: File> Segments<F> {
                 Phase::Open { log, .. }
                 | Phase::Full { log, .. }
                 | Phase::Framing { log, .. }
-                | Phase::Failed { log, .. },
+                | Phase::Failed { log, .. }
+                | Phase::Raw { log, .. },
             ) => Ok(log.clone()),
             _ => {
                 let file = dir.open(&log_path(number), false)?;
@@ -647,7 +754,9 @@ impl<F: File> Segments<F> {
                 Phase::Open { raw, .. }
                 | Phase::Full { raw, .. }
                 | Phase::Framing { raw, .. }
-                | Phase::Failed { raw, .. },
+                | Phase::Failed { raw, .. }
+                | Phase::Raw { raw, .. }
+                | Phase::Kept { raw },
             ) => Ok(raw.file().clone()),
             _ => Ok(Arc::new(dir.open(&open_segment_path(number), false)?)),
         }
@@ -746,7 +855,7 @@ impl<F: File> Segments<F> {
         let written = std::mem::take(&mut self.written);
         let last = Some(epoch);
         let unframed = self.seal_off(number, (window, last), epoch, next_sequence, written);
-        self.tracked.insert(next, Segment::new(phase, 0));
+        self.tracked.insert(next, Segment::new_in(phase, self.ephemeral));
         if !synced {
             self.unsynced_entries.insert(next);
         }
@@ -817,7 +926,11 @@ impl<F: File> Segments<F> {
             Phase::Open { raw, log } | Phase::Full { raw, log, .. } => (raw.clone(), log.clone()),
             _ => unreachable!("{number:?}, closing, is open or full"),
         };
-        segment.phase = Phase::Framing { raw: raw.clone(), log, last: epoch, written: None };
+        // cladefs: an ephemeral cell's stays raw, never framed (TASK-698.2).
+        segment.phase = match self.ephemeral {
+            true => Phase::Raw { raw: raw.clone(), log },
+            false => Phase::Framing { raw: raw.clone(), log, last: epoch, written: None },
+        };
         debug_assert!(
             segment.live > 0 || footer.contents.runs().next().is_none(),
             "{number:?} names runs, holding none"
@@ -853,7 +966,7 @@ impl<F: File> Segments<F> {
         };
         segment.phase = Phase::Full { raw: raw.clone(), log: log.clone(), window };
         self.full.push(number);
-        self.tracked.insert(next, Segment::new(phase, 0));
+        self.tracked.insert(next, Segment::new_in(phase, self.ephemeral));
         if !synced {
             self.unsynced_entries.insert(next);
         }
@@ -974,7 +1087,8 @@ impl<F: File> Segments<F> {
             _ if number == self.open => Standing::Open,
             Some(Phase::Full { .. }) => Standing::Full,
             Some(Phase::Framing { .. } | Phase::Failed { .. }) => Standing::Framing,
-            Some(Phase::Open { .. }) | Some(Phase::Closed) | None => Standing::Closed,
+            Some(Phase::Open { .. } | Phase::Closed | Phase::Raw { .. } | Phase::Kept { .. })
+            | None => Standing::Closed,
         }
     }
 
@@ -1020,6 +1134,7 @@ impl<F: File> Segments<F> {
                         | Phase::Full { .. }
                         | Phase::Framing { .. }
                         | Phase::Failed { .. }
+                        | Phase::Raw { .. }
                 )
             )
     }
@@ -1165,7 +1280,9 @@ impl<F: File> Segments<F> {
             Phase::Open { raw, .. }
             | Phase::Full { raw, .. }
             | Phase::Framing { raw, .. }
-            | Phase::Failed { raw, .. } => {
+            | Phase::Failed { raw, .. }
+            | Phase::Raw { raw, .. }
+            | Phase::Kept { raw } => {
                 return Ok(Source::Raw(raw.clone()));
             }
             Phase::Closed => {}
@@ -1220,10 +1337,58 @@ impl<F: File> Segments<F> {
             self.empty.remove(&number);
             let segment = self.tracked.remove(&number).unwrap();
             self.files.remove(number);
+            // cladefs: a kept one's file is in `kept/` ([`Segments::take_kept_reaped`], TASK-698.2).
+            if matches!(segment.phase, Phase::Kept { .. }) {
+                self.kept_reaped.push(number);
+                continue;
+            }
             let key = segment.acknowledged.expect("a segment reaped is acknowledged");
             reaped.push((number, key));
         }
         reaped
+    }
+
+    /// cladefs: the kept segments reaping let go of since this was last asked, whose files go
+    /// (doc-25, TASK-698.2).
+    pub fn take_kept_reaped(&mut self) -> Vec<SegmentId> {
+        std::mem::take(&mut self.kept_reaped)
+    }
+
+    /// cladefs: whether its cell is ephemeral (doc-25, TASK-698.2).
+    pub fn is_ephemeral(&self) -> bool {
+        self.ephemeral
+    }
+
+    /// cladefs: the header of the log of segment `number`, closed raw ([`Phase::Raw`]): what its base
+    /// keeps of it once it covers it, which says how its raw file is encrypted (TASK-698.2).
+    pub fn raw_header(&self, number: SegmentId) -> Option<Vec<u8>> {
+        match &self.tracked.get(&number)?.phase {
+            Phase::Raw { log, .. } => Some(log_header(log.salt, number, &log.encryption)),
+            _ => None,
+        }
+    }
+
+    /// cladefs: segment `number`, closed raw, is kept from now on, its base covering it, its raw file
+    /// moved to `kept/` (doc-25, TASK-698.2): read in place, its log gone.
+    pub fn kept(&mut self, number: SegmentId) {
+        if !self.tracked.contains_key(&number) {
+            return;
+        }
+        self.change(number, |segment| {
+            let Phase::Raw { raw, .. } = &segment.phase else {
+                unreachable!("{number:?}, kept, was closed raw")
+            };
+            segment.phase = Phase::Kept { raw: raw.clone() };
+        });
+    }
+
+    /// cladefs: the raw file of segment `number`, if it is kept ([`Phase::Kept`]): what the runs of the
+    /// extents freed in it are given back from (TASK-698.2).
+    pub fn kept_file(&self, number: SegmentId) -> Option<Arc<RawFile<F>>> {
+        match &self.tracked.get(&number)?.phase {
+            Phase::Kept { raw } => Some(raw.clone()),
+            _ => None,
+        }
     }
 
     /// What the segments take: how many there are, the bytes of their data, of extents' data, and
