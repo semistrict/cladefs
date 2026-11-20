@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-20 16:22'
-updated_date: '2026-11-20 16:23'
+updated_date: '2026-11-20 19:49'
 labels: []
 dependencies: []
 documentation:
@@ -40,4 +40,6 @@ The glossary binds code identifiers; doc-25 adds terms that must be defined befo
 
 <!-- SECTION:NOTES:BEGIN -->
 CONTEXT.md gained Ephemeral cell, Hand over, Decommission, local checkpoint and the incarnation note with doc-25 (2026-11-20); what remains is architecture.md and doc-12, and whatever terms the code adds.
+
+2026-11-20: doc-12 has an ephemeral cell table (failures, fsync/sync, tests); docs/architecture.md an Ephemeral cells section; the ephemeral local checkpoint renamed from Base to LocalCheckpoint (file local-checkpoint), base being the glossary word for a store VMs boot forks of.
 <!-- SECTION:NOTES:END -->

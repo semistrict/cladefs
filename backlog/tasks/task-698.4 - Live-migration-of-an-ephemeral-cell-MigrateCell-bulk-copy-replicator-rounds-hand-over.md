@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-20 16:21'
-updated_date: '2026-11-20 19:38'
+updated_date: '2026-11-20 19:49'
 labels: []
 dependencies:
   - TASK-698.1
@@ -56,4 +56,6 @@ Sandboxes on ephemeral cells must move between hosts while running. The user cho
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-20 Linux (ubu1): ephemeral_cells_migrate_live_between_hosts (340 MiB, writes during rounds) and hand_overs_refused_leave_the_source_serving pass; cladefs --lib + cells/control/peers/handover: 542/543, the one failure TASK-700, a control shred test passing alone, filed. Design differs from doc-25's first draft: files copied, not the log streamed (doc-25 updated). Not covered yet: a hand-over refused for a missing file, a source restart while given up, three hosts (remembersAccepted in practice); downtime not measured.
+
+2026-11-20: Linux: hand_overs_naming_files_the_target_lacks_are_refused (openAtNamed, refuseFinal) and the source restarted while given up (in hand_overs_refused_leave_the_source_serving) pass with the live migration test. Left: three hosts (remembersAccepted in practice), downtime measured on the test host.
 <!-- SECTION:NOTES:END -->
