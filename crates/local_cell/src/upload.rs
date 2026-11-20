@@ -177,13 +177,12 @@ pub fn bucket_runtime() -> Result<&'static tokio::runtime::Runtime, Failure> {
     BUCKET_RUNTIME.get_or_make(|| {
         failing!("upload::bucket_runtime");
         let threads = std::thread::available_parallelism().map_or(2, |cpus| cpus.get().clamp(2, 8));
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(threads)
-            .thread_name("cladefs bucket")
-            .on_thread_start(crate::shared::prepare_thread)
-            .enable_all()
-            .build()
-            .map_err(|err| Failure::local(err, "the bucket runtime"))
+        let mut building = tokio::runtime::Builder::new_multi_thread();
+        building.worker_threads(threads).thread_name("cladefs bucket");
+        // TASK-685.1: madsim's runtime starts no threads of its own.
+        #[cfg(not(madsim))]
+        building.on_thread_start(crate::shared::prepare_thread);
+        building.enable_all().build().map_err(|err| Failure::local(err, "the bucket runtime"))
     })
 }
 
@@ -573,6 +572,10 @@ pub(crate) type Spawn = Arc<dyn Fn(BoxFuture<'static, ()>) + Send + Sync>;
 /// simulation's (`tokio::task::block_in_place` runs it so there).
 #[allow(clippy::disallowed_methods, reason = "the work waits on the disk alone")]
 fn blocking<T>(work: impl FnOnce() -> T) -> T {
+    // TASK-685.1: madsim's one thread runs it as it is.
+    #[cfg(madsim)]
+    return work();
+    #[cfg(not(madsim))]
     tokio::task::block_in_place(work)
 }
 

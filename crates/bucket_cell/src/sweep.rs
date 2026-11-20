@@ -264,7 +264,10 @@ impl Sweep {
                     async move {
                         match task.await {
                             Ok(ran) => ran,
+                            #[cfg(not(madsim))]
                             Err(failed) => std::panic::resume_unwind(failed.into_panic()),
+                            #[cfg(madsim)]
+                            Err(failed) => panic!("a pass: {failed}"),
                         }
                     }
                     .boxed()

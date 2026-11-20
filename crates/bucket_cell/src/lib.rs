@@ -83,6 +83,7 @@ pub mod peer;
 pub mod record;
 pub mod recovery;
 #[cfg(any(test, feature = "testing"))]
+#[cfg(not(madsim))]
 pub mod s3_server;
 pub mod sweep;
 pub mod trace;

@@ -42,7 +42,8 @@ storage_xts.workspace = true
 # The `testing` feature's: an OpenBao dev server's files (TASK-411.16).
 tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "time", "net"] }
+# tokio itself, outside the madsim simulation (doc-24).
+tokio = { version = "=1.53.1", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "sync"] }
 url.workspace = true
 zerocopy.workspace = true
 zeroize = { workspace = true, features = ["serde"] }

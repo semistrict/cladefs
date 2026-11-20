@@ -336,10 +336,10 @@ impl Turns {
                 due.filter(|due| *due > now)
             };
             match due {
-                Some(due) => tokio::select! {
-                    () = tokio::time::sleep_until(due) => {}
-                    () = &mut changed => {}
-                },
+                Some(due) => {
+                    let sleeping = std::pin::pin!(tokio::time::sleep_until(due));
+                    futures::future::select(sleeping, &mut changed).await;
+                }
                 None => changed.await,
             }
         }

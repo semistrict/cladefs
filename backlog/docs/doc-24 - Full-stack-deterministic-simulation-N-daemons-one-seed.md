@@ -3,7 +3,7 @@ id: doc-24
 title: 'Full-stack deterministic simulation: N daemons, one seed'
 type: specification
 created_date: '2026-11-20 03:31'
-updated_date: '2026-11-20 03:31'
+updated_date: '2026-11-20 04:01'
 ---
 # Full-stack deterministic simulation
 
@@ -124,20 +124,48 @@ what was Replicated; every host lost, what was Uploaded.
 - **Rules off**: each protocol rule in `bucket_cell::Rules` and `local_cell::Rules` has a profile
   that finds its violation, as today's simulation has (`test_needs!`): our BUGGIFY.
 
+## What the spike found (TASK-685.1, 2026-11-20)
+
+- **Normal builds are unchanged** with tokio renamed to madsim-tokio and tonic to madsim-tonic
+  in the workspace's manifests: madsim-tokio re-exports tokio, madsim-tonic tonic.
+- **Under `--cfg madsim`**, crates outside the simulation name tokio itself: Fxfs's executor and its
+  FIDL shims (`fuchsia-async`, `fuchsia-emulated-handle`, `fidl-fuchsia-io`: `LocalSet`,
+  current-thread runtimes, UDP) and `extent_keys` (its KMS backends' own HTTP runtimes; the
+  simulation uses the tests' KMS). The simulated crates needed, to build: `bucket_cell` 4 changes
+  (`blocking()` inline, `tokio::select!` as `futures::future::select`, `JoinError::into_panic`
+  absent, the test S3 server left out), `local_cell` 2 (`blocking()` inline, the bucket runtime's
+  `on_thread_start`). **cladefs's library builds as it is**; its tests need 7 changes
+  (current-thread runtimes, the S3 server, runtime metrics).
+- **madsim runs the bucket protocol**: `bucket_cell/tests/madsim.rs`, three hosts as nodes taking a
+  cell's head at times the seed picks, one killed and started again taking it back: 20,000 seeds
+  in 3.7 s on the Mac; `MADSIM_TEST_CHECK_DETERMINISM` holds.
+- **What stops cladefsd booting as a node is at run time, not at build time**: its `main` reads
+  its configuration from the environment and the process's statics, spawns threads, parks the
+  main thread, binds Unix sockets (madsim's are `todo!()`); about 100 thread spawns, about 140
+  statics; its page store (memfds, userfaultfd) is Linux's. So a daemon core that boots from a
+  configuration value, as an async task, comes first.
+- Its dependencies are MIT, Apache-2.0, or both (madsim, madsim-macros, madsim-tokio,
+  madsim-tonic: Apache-2.0).
+- **Decision: go on with madsim.** The madsim build's target is `target/madsim`
+  (`CARGO_TARGET_DIR`), as `--cfg madsim` rebuilds everything.
+
 ## Steps
 
 1. **Spike** (a day): cladefs builds under `RUSTFLAGS="--cfg madsim"` with the renamed packages,
    two simulated daemons boot, one makes a cell and the other takes it over the in-process bucket.
    It lists what breaks; the steps after are sized by it. If madsim can't host cladefsd, this doc
    is rewritten for the in-house fallback.
-2. **Per-node statics** (`node_local!`), crate by crate.
-3. **Threads and runtimes** through one seam (tasks under madsim), `blocking()` inline.
-4. **Disk through `Dir`** everywhere cladefsd writes (its stores, replica directories, the part
+2. **A daemon core that boots from a configuration value**, as an async task: cladefsd's `main`
+   reads the environment and calls it; the simulation calls it once per node. Its sockets
+   (control, peers, metrics) given to it, TCP under madsim. (Added by the spike.)
+3. **Per-node statics** (`node_local!`), crate by crate.
+4. **Threads and runtimes** through one seam (tasks under madsim), `blocking()` inline.
+5. **Disk through `Dir`** everywhere cladefsd writes (its stores, replica directories, the part
    cache, z-pages' files, its state files).
-5. **The in-process bucket** with faults, and the control API on TCP under madsim.
-6. **The simulated guest and the checker**, one profile (attrition alone), seed replay checked.
-7. **Fault profiles**, then a rule search per rule.
-8. **CI**: a few hundred seeds per profile on each push, a soak at night, failing seeds kept as
+6. **The in-process bucket** with faults, and the control API on TCP under madsim.
+7. **The simulated guest and the checker**, one profile (attrition alone), seed replay checked.
+8. **Fault profiles**, then a rule search per rule.
+9. **CI**: a few hundred seeds per profile on each push, a soak at night, failing seeds kept as
    regression seeds, as `local_cell::sim`'s are.
 
 ## Costs and risks

@@ -958,6 +958,10 @@ impl<B: Bucket> Fetcher<B> {
 /// (TASK-92.21). On an executor of another kind, or none, it runs as it is.
 #[allow(clippy::disallowed_methods, reason = "the work waits on files alone")]
 fn blocking<T>(io: impl FnOnce() -> T) -> T {
+    // TASK-685.1: madsim's one thread runs it as it is.
+    #[cfg(madsim)]
+    return io();
+    #[cfg(not(madsim))]
     match tokio::runtime::Handle::try_current().map(|runtime| runtime.runtime_flavor()) {
         Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(io),
         _ => io(),

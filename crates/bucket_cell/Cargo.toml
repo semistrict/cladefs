@@ -50,6 +50,7 @@ tokio = { workspace = true, features = ["test-util"] }
 fail = { version = "0.5.1", features = ["failpoints"] }
 # A KMS counting its calls (TASK-411.3).
 extent_keys = { workspace = true, features = ["testing"] }
+madsim = "=0.2.34"
 
 [lints]
 workspace = true

@@ -17,7 +17,8 @@ zx.workspace = true
 
 # Synchronous proxies, which block on tokio, which the guest kernel (cladefs's TASK-26.6) has none of.
 [target.'cfg(not(target_os = "none"))'.dependencies]
-tokio.workspace = true
+# tokio itself, outside the madsim simulation (doc-24).
+tokio = { version = "=1.53.1", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "sync"] }
 
 [lints]
 workspace = true
