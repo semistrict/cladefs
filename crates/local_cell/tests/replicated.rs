@@ -809,3 +809,63 @@ fn takes_asking_for_f_zero_drop_once_the_bucket_holds_what_was_told() {
     uploader.wait_replicated(last).unwrap();
     drop(uploader);
 }
+
+/// doc-21, Take, steps 5 and 6 (the spec's installOwn, its mutation InstallMembersOnly): a writer
+/// whose daemon restarts takes its cell again on its own disk, its write-ahead log holding commits
+/// told replicated that the one member it fences lacks (the member holding them out of reach).
+/// The configuration it activates must hold them on f of its members before the head names it:
+/// else its host lost too, a take elsewhere reads that configuration, and the bucket, and loses
+/// them.
+#[test]
+fn retakes_on_the_writers_disk_install_what_its_own_log_holds() {
+    let host = replicated_host();
+    let all = directories(&["a", "b", "c", "d", "e"]);
+    let lost = Lost::default();
+    let peers = |me: &str| Peers { me: me.into(), all: all.clone(), lost: lost.clone() };
+    let writer = Host { runtime: runtime_of_its_own(), bucket: host.bucket.clone() };
+    let dir = MemDir::new();
+    LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
+    let wish = bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated);
+    let recovering = LocalCell::recover_unmade(dir.clone()).unwrap();
+    let (store, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).unwrap();
+    store.made().unwrap();
+    store.close_segment().unwrap();
+    uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
+    assert_eq!(addresses(&configuration_named(&host)), ["a", "b", "c"]);
+
+    // c out of reach: b alone holds the commits, with a's own log.
+    lost.lock().unwrap().insert("c".into());
+    let last = commit(&store, 0, 5);
+    uploader.wait_replicated(last).unwrap();
+    assert!(uploader.last_uploaded() < last, "told replicated by b, not the bucket");
+    let expected = writer.contents(&store);
+    let replicator = store.replicator().unwrap();
+    // a's daemon restarts before it replaces c, its disk kept.
+    lose(writer, (uploader, store, replicator));
+    assert_eq!(configuration_named(&host).number, 1, "c replaced before the restart");
+
+    // b out of reach now, c back: a takes the cell again on its own disk, fencing c alone.
+    lost.lock().unwrap().remove("c");
+    lost.lock().unwrap().insert("b".into());
+    let again = Host { runtime: runtime_of_its_own(), bucket: host.bucket.clone() };
+    let recovering = LocalCell::recover(dir.crash(1)).unwrap();
+    let (retaken, uploader) = again.open_replicated(recovering, 2, None, peers("a")).unwrap();
+    assert!(retaken.last_commit().unwrap() >= last);
+    assert_eq!(again.contents(&retaken), expected);
+    let configuration = configuration_named(&host);
+    assert_eq!((configuration.number, addresses(&configuration)), (2, vec!["a", "c", "d"]));
+    assert!(uploader.last_uploaded() < last, "the bucket holds them: nothing to lose");
+
+    // a lost, its disk with it: e takes the cell from c, d and the bucket.
+    let replicator = retaken.replicator().unwrap();
+    lose(again, (uploader, retaken, replicator));
+    lost.lock().unwrap().insert("a".into());
+    let elsewhere = MemDir::new();
+    LocalCell::make(&elsewhere, DESCRIPTION, Some(URL), None).unwrap();
+    let recovering = LocalCell::recover_unmade(elsewhere).unwrap();
+    let (taken, uploader) = host.open_replicated(recovering, 3, None, peers("e")).unwrap();
+    taken.made().unwrap();
+    assert!(taken.last_commit().unwrap() >= last);
+    assert_eq!(host.contents(&taken), expected);
+    drop(uploader);
+}

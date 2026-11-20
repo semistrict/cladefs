@@ -57,6 +57,10 @@
 (* - installFirst: a configuration is activated (or replaces another) only *)
 (*   once f+1 of its members hold what its writer has told                 *)
 (*   (ActivateBeforeInstall).                                              *)
+(* - installOwn: what f+1 members of a take's configuration must hold     *)
+(*   before it activates includes what the taker recovered from its own    *)
+(*   copy, the old writer's, beyond the members it read                    *)
+(*   (InstallMembersOnly).                                                 *)
 (* - activate: a taker serves only once the head names its configuration   *)
 (*   (NoActivation).                                                       *)
 (* - joint: while a replacement's swap is in flight, a commit is           *)
@@ -94,7 +98,7 @@ CONSTANTS
 
 AllRules == {"fence", "fenceOthers", "longest", "installFirst", "activate", "joint",
              "dropAcked", "promise", "incarnation", "zeroAfterUpload", "zeroNoQuorum",
-             "abandonUnissued", "aloneSwitch"}
+             "abandonUnissued", "aloneSwitch", "installOwn"}
 
 ASSUME Rules \subseteq AllRules
 ASSUME F \in Nat /\ Cardinality(Hosts) >= 2 * F + 1
@@ -128,7 +132,7 @@ NoCfg == [key |-> <<0, 0>>, f |-> 0, w |-> NoHost, members |-> {}]
 NoReply == [log |-> <<>>, drop |-> 0]
 NoSes == [st |-> "none", ep |-> 0, old |-> NoCfg, fenced |-> {},
           replies |-> [h \in Hosts |-> NoReply], cfg |-> NoCfg, pend |-> NoCfg, issued |-> FALSE,
-          cas |-> NoCfg, landed |-> 0, replaces |-> 0, alone |-> FALSE, need |-> 0]
+          cas |-> NoCfg, landed |-> 0, replaces |-> 0, alone |-> FALSE, need |-> 0, inst |-> 0]
 
 VARIABLES
     head,       \* the bucket's head: [epoch, cfg, up]
@@ -268,6 +272,17 @@ Recovered(h, r) ==
         log == ses[h].replies[r].log
     IN IF ses[h].replies[r].drop <= Len(up) /\ Len(log) > Len(up) THEN log ELSE up
 
+\* What f+1 members of h's configuration must hold before it activates: all it recovered
+\* (installOwn); without the rule, only what the members it read held, its own copy aside if it is
+\* the old writer's (a reopen on the writer's host recovering its own log).
+InstallLen(h, rec) ==
+    LET s == ses[h]
+        rs == {r \in Counted(h) : r # h \/ h # s.old.w}
+        lens == {Len(Recovered(h, r)) : r \in rs}
+    IN IF R("installOwn") \/ s.old = NoCfg \/ s.old.f = 0 THEN Len(rec)
+       ELSE IF rs = {} THEN Len(head.up)
+       ELSE CHOOSE n \in lens : \A m \in lens : m <= n
+
 Readable(h) ==
     LET s == ses[h] IN
     {r \in Counted(h) : s.replies[r].drop <= Len(head.up)}
@@ -293,7 +308,8 @@ Recover(h) ==
                 /\ sent' = [sent EXCEPT ![k] = rec]
                 \* What the take read is spent: kept, it would only tell states apart.
                 /\ ses' = [ses EXCEPT ![h].st = "installing", ![h].cfg = new, ![h].old = NoCfg,
-                                      ![h].fenced = {}, ![h].replies = NoSes.replies]
+                                      ![h].fenced = {}, ![h].replies = NoSes.replies,
+                                      ![h].inst = InstallLen(h, rec)]
     /\ UNCHANGED <<head, mlog, drop, promise, inc, told, next, losses, crashes>>
 
 \* h's take, fenced enough, recovers as Recover does, but has no members for a configuration of
@@ -318,11 +334,11 @@ RecoverAlone(h) ==
     /\ UNCHANGED <<head, mlog, drop, promise, inc, told, next, losses, crashes>>
 
 \* h activates its configuration by a CAS of the head, once f+1 of its members hold what it
-\* recovered (installFirst), and serves. Without the rule activate, it may serve without.
+\* recovered (installFirst; all of it, by installOwn), and serves. Without the rule activate, it may serve without.
 Activate(h) ==
     LET s == ses[h] IN
     /\ s.st = "installing"
-    /\ ~R("installFirst") \/ Quorum(s.cfg, Len(sent[s.cfg.key]))
+    /\ ~R("installFirst") \/ Quorum(s.cfg, s.inst)
     /\ \/ /\ head.epoch = s.ep
           /\ head' = [head EXCEPT !.cfg = s.cfg]
        \/ /\ ~R("activate")
