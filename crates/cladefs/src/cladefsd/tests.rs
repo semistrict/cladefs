@@ -5193,6 +5193,51 @@ fn faults_waiting_for_object_storage_hold_up_no_request() {
     }
 }
 
+/// TASK-443.6: restores of a version, all at once, wait for the one opening it however long its
+/// opening takes, here from object storage 600 ms away, some 11 s, and for each other: none
+/// fails. Each waited `CLOSING_WAIT` (10 s) at most before, its turn at the version's store
+/// coming after the opening and the turns of those that took it first, and failed `EBUSY`, 11 of
+/// 20 so (3 restores at once wait less: none failed).
+#[test]
+fn restores_wait_for_a_version_however_long_its_opening_takes() {
+    const RESTORES: usize = 20;
+    host();
+    // SAFETY: As in host.
+    unsafe { std::env::set_var("CLADEFS_BUCKET_LATENCY_MS", "600") };
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let store = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let extent = ExtentId { cell: store.cell(), sequence: 1 };
+    write(&store, extent, 0, &pattern(6, BLOCK)).unwrap();
+    store.commit(Some(b"snapshot")).unwrap();
+    let version = store.make_version().unwrap();
+    drop(store);
+    let restoring: Vec<_> = (0..RESTORES)
+        .map(|n| {
+            let (socket, to) = (socket.clone(), dir.path().join(format!("restore-{n}")));
+            std::thread::spawn(move || {
+                let start = std::time::Instant::now();
+                let restored = CellClient::connect_forked(&socket, to, version, 0);
+                let root = restored.map_err(|error| error.errno()).and_then(|store| {
+                    assert_eq!(read(&store, extent, 0, BLOCK), Ok(pattern(6, BLOCK)));
+                    store.root().map_err(Some)
+                });
+                (root, start.elapsed())
+            })
+        })
+        .collect();
+    let restored: Vec<_> = restoring.into_iter().map(|thread| thread.join().unwrap()).collect();
+    println!("{RESTORES} restores at once: {restored:?}");
+    // They took past what they waited for before, or this shows nothing.
+    let longest = restored.iter().map(|(_, took)| *took).max().unwrap();
+    assert!(longest > super::cells::CLOSING_WAIT, "the restores took {longest:?}");
+    for (n, (root, _)) in restored.iter().enumerate() {
+        assert_eq!(root, &Ok(b"snapshot".to_vec()), "restore {n}");
+    }
+}
+
 /// TASK-92.5: the restores of a zygote's snapshot, all at once, here with object storage as far
 /// away as another region's (50 ms), fork its version as it is, opened once for them and kept open:
 /// none fails, and nothing takes the version's cell, which has no writer (TASK-158), let alone
