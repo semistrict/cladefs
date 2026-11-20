@@ -3811,6 +3811,11 @@ fn the_daemon_accepts_on_after_failing_to() {
     let opened = within(std::time::Duration::from_secs(10), move || {
         CellClient::connect(&socket, path, 1 << 20).map(|store| store.cell())
     });
+    // TASK-687: an opening takes 50 to 120 ms here, alone or loaded; past 10 s, once, in a loaded
+    // run, and in none of 300 since: what waited, if it waits again.
+    if opened.is_err() {
+        crate::stacks::log_stacks();
+    }
     assert!(matches!(opened, Ok(Ok(_))), "the daemon accepts no more: {opened:?}");
 }
 
