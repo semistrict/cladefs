@@ -222,6 +222,13 @@ impl Span {
 pub struct Parent(Option<Context>);
 
 impl Parent {
+    /// cladefs: the context current on this thread, as the parent of what another task does for it:
+    /// the span current here, and where its reads went ([`sourced`]), which a task spawned
+    /// elsewhere would lose; nothing while spans are off.
+    pub fn current() -> Self {
+        Self(enabled().then(Context::current))
+    }
+
     /// `future`, with the span as the context current as each poll of it runs, as
     /// [`Span::around`] says.
     pub fn around<F: Future>(self, future: F) -> Either<F, WithContext<F>> {

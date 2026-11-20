@@ -601,11 +601,13 @@ impl HostFetcher {
     ) -> impl std::future::Future<Output = Result<Vec<u8>, Failure>> + Send + use<> {
         let parts = self.parts.clone();
         // cladefs: for the guest request current, if any, there too: what the object store's
-        // requests for it log (TASK-260).
-        let read =
-            self.runtime.spawn(crate::request::within(crate::request::current(), async move {
-                Ok(parts.read(extent, &location, offset, len, Priority::Demand).await?)
-            }));
+        // requests for it log (TASK-260); and in the trace context current, the parent of its
+        // bucket requests' spans, gathering where it went (TASK-672.2).
+        let parent = bucket_cell::trace::Parent::current();
+        let reading = parent.around(async move {
+            Ok(parts.read(extent, &location, offset, len, Priority::Demand).await?)
+        });
+        let read = self.runtime.spawn(crate::request::within(crate::request::current(), reading));
         async move { read.await.map_err(|err| Failure::local(err, "fetching"))? }
     }
 }
