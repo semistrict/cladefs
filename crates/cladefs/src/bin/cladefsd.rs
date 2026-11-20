@@ -157,89 +157,11 @@ fn main() -> anyhow::Result<()> {
         log::info!("cladefsd: exporting spans over OTLP");
     }
     cladefs::cladefsd::raise_open_files_limit().context("raising the limit of open files")?;
-    // A host of the multi-node system: the bucket and this host's placement token named.
-    let host = cladefs::bucket::Host::from_env().map_err(anyhow::Error::msg)?;
-    // cladefs: its KMS, which every store is encrypted under: none chosen, it refuses to start, naming
-    // CLADEFS_KMS and CLADEFS_MASTER_KEY (TASK-411.28).
-    cladefs::bucket::require_kms().map_err(anyhow::Error::msg)?;
-    // cladefs: its part cache's directory and budget, if it keeps one (TASK-406.1).
-    cladefs::cladefsd::cache_config().map_err(anyhow::Error::msg)?;
-    // cladefs: how long its replicated cells' members are down before they are replaced (doc-21).
-    cladefs::cladefsd::replace_after().map_err(anyhow::Error::msg)?;
-    // cladefs: its disks governed, each but a headroom of it its, or as much as CLADEFSD_DISK_BYTES
-    // says (doc-22, TASK-539.9).
-    let disks = cladefs::cladefsd::disk::DiskConfig::from_env().map_err(anyhow::Error::msg)?;
-    cladefs::cladefsd::disk::start(disks).map_err(anyhow::Error::msg)?;
-    // cladefs: the hosts sharing its bucket, which it serves parts and asks for theirs (TASK-406.2).
-    let set = |var| std::env::var(var).ok().filter(|value| !value.is_empty());
-    let peers = set("CLADEFSD_PEERS");
-    if let Some(address) = set("CLADEFSD_PEER_ADDRESS") {
-        let listener = std::net::TcpListener::bind(&address)
-            .with_context(|| format!("serving peers at {address}"))?;
-        let peers = peers.iter().flat_map(|peers| peers.split(',')).filter(|peer| !peer.is_empty());
-        cladefs::cladefsd::peers::start(&address, listener, peers).map_err(anyhow::Error::msg)?;
-    } else if peers.is_some() {
-        anyhow::bail!("CLADEFSD_PEERS is set, but CLADEFSD_PEER_ADDRESS names no address");
-    }
-    // cladefs: what its uploads may hold at once (TASK-317).
-    if let Some(bytes) = std::env::var_os("CLADEFSD_UPLOAD_MEMORY").filter(|b| !b.is_empty()) {
-        let bytes = bytes.to_str().and_then(|bytes| bytes.parse().ok());
-        let bytes = bytes.context("CLADEFSD_UPLOAD_MEMORY must be a number of bytes")?;
-        cladefs::bucket::set_upload_memory(bytes).map_err(anyhow::Error::msg)?;
-    }
     let mut args = std::env::args().skip(1);
     let socket = args.next().context("usage: cladefsd SOCKET [MEMORY_BYTES]")?;
-    if let Some(memory) = args.next() {
-        let memory: u64 = memory.parse().context("MEMORY_BYTES must be a number")?;
-        cladefs::pages::configure(cladefs::pages::Config::with_memory(memory))?;
-    } else {
-        // cladefs: its memory a page cache, as large as the host's, governed by what is free
-        // (TASK-358).
-        let memory = cladefs::cladefsd::governor::memory_bytes().map_err(anyhow::Error::msg)?;
-        cladefs::pages::configure(cladefs::pages::Config::with_memory(memory))?;
-        cladefs::cladefsd::governor::start().map_err(anyhow::Error::msg)?;
-    }
-    let listener = cladefs::cladefsd::bind_owner_only(&socket)
-        .with_context(|| format!("listening at {socket}"))?;
-    let control = std::env::var_os("CLADEFSD_GRPC").filter(|path| !path.is_empty());
-    // cladefs: its FUSE mount of cells, whose Mount service is on the control socket (TASK-475.2).
-    if let Some(mount) = cladefs::cladefsd::mount::Config::from_env().map_err(anyhow::Error::msg)? {
-        anyhow::ensure!(
-            control.is_some(),
-            "CLADEFSD_MOUNT is set, but CLADEFSD_GRPC names no control socket to attach cells through"
-        );
-        cladefs::cladefsd::mount::start(&mount, host.bucket)?;
-    }
-    if let Some(control) = control {
-        let tenants = match std::env::var_os("CLADEFSD_TENANTS").filter(|dir| !dir.is_empty()) {
-            Some(dir) => std::path::PathBuf::from(dir),
-            None => std::path::Path::new(&control).with_file_name("tenants"),
-        };
-        std::fs::create_dir_all(&tenants)
-            .with_context(|| format!("making {}", tenants.display()))?;
-        // It can do everything: its user's alone, as the VM socket (TASK-159).
-        let control = cladefs::cladefsd::bind_owner_only(&control)
-            .with_context(|| format!("listening at {}", control.display()))?;
-        std::thread::Builder::new().name("cladefsd ctl".into()).spawn(move || {
-            if let Err(err) = cladefs::cladefsd::serve_control(control, tenants) {
-                log::error!("cladefsd: serving the control API: {err}");
-                std::process::exit(1);
-            }
-        })?;
-    }
-    if let Some(address) =
-        std::env::var_os("CLADEFSD_METRICS").filter(|address| !address.is_empty())
-    {
-        let address = address.to_str().context("CLADEFSD_METRICS must be an address")?;
-        let metrics = std::net::TcpListener::bind(address)
-            .with_context(|| format!("serving metrics and z-pages at {address}"))?;
-        std::thread::Builder::new().name("cladefsd http".into()).spawn(move || {
-            if let Err(err) = cladefs::cladefsd::serve_http(metrics) {
-                log::error!("cladefsd: serving HTTP: {err}");
-            }
-        })?;
-    }
-    cladefs::cladefsd::serve(listener);
+    let memory = args.next().map(|memory| memory.parse::<u64>());
+    let memory = memory.transpose().context("MEMORY_BYTES must be a number")?;
+    cladefs::cladefsd::boot(std::path::Path::new(&socket), memory)?;
     // Serving stops only as the daemon drains, whose thread exits the process once it has
     // (`drain_on_sigterm`): not here, its stores still closing.
     loop {

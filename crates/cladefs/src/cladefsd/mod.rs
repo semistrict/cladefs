@@ -90,6 +90,8 @@
 //! processes name stores, whether the cell one names counts, and whether they follow public
 //! bases. What may be done to a store is the store's, fixed as it opens ([`crate::CellAccess`]).
 
+#[cfg(target_os = "linux")]
+mod boot;
 pub(crate) mod cells;
 pub(crate) mod client;
 mod codec;
@@ -116,6 +118,8 @@ pub mod zpages;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 
+#[cfg(target_os = "linux")]
+pub use boot::boot;
 pub use cells::{cache_config, replace_after};
 pub use client::{CellClient, DaemonConnection, Unmapped, spawn_on_replies};
 pub use control::serve_control;
