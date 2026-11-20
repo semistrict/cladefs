@@ -462,11 +462,13 @@ where
         match call().await {
             Ok(done) => return Ok(done),
             Err(status) => match cladefs::cladefsd::control::errno(&status) {
-                Some(errno @ (cladefs::Errno::ENOTCONN | cladefs::Errno::EIO)) | None => {
+                Some(errno) if !matches!(errno, cladefs::Errno::ENOTCONN | cladefs::Errno::EIO) => {
+                    return Err(errno);
+                }
+                errno => {
                     log::info!("host {host}: {errno:?} {}", status.message());
                     madsim::time::sleep(Duration::from_millis(200)).await;
                 }
-                Some(errno) => return Err(errno),
             },
         }
     }
