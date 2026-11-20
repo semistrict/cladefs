@@ -3,7 +3,7 @@ id: doc-24
 title: 'Full-stack deterministic simulation: N daemons, one seed'
 type: specification
 created_date: '2026-11-20 03:31'
-updated_date: '2026-11-20 07:21'
+updated_date: '2026-11-20 07:40'
 ---
 # Full-stack deterministic simulation
 
@@ -202,6 +202,66 @@ Every wait on another task's work on the request, control, peer and replication 
 `.await` (an async form beside each synchronous one that the in-process device, the CLI and FUSE
 storage keep), the request pool's jobs become tasks, and `block_on` leaves the daemon's paths. The
 plan for it is TASK-685.3's, sized by an inventory of those waits.
+
+### The async rewrite's plan (TASK-685.3, inventory 2026-11-20)
+
+The inventory found 14 kinds of cross-task wait on the request, control, peer and replication
+paths. They group by the primitive they share, so one change moves a group:
+
+- uploader progress waits, all through `upload::Shared::wait`;
+- bucket calls through `upload::block_on`, about 12 functions;
+- the store's open and close handshake with its uploader task (`start.recv()`, and
+  `Uploader::drop`'s `stopped.recv()`), which has no async form today;
+- the cell table's blocking holds;
+- the read path (the pager's `bring_in`, the fetcher);
+- request dispatch (the pool, `block_in_place`, `spawn_blocking`, `cells::blocking`);
+- replication (a thread per member, synchronous `Members` and `MemberLink` over `block_on`);
+- the peers server, sweep, drain and control threads;
+- the memory shrink's parking, which never blocks without DAX windows.
+
+Many async forms already exist beside the sync ones:
+
+- `Uploader::uploaded`;
+- `OpenCell::uploaded`;
+- `CellTable::hold_async`;
+- `cells::close_kept`;
+- `bring_in`.
+
+About 29 `block_on` calls are on the daemon's paths. The rest of the ~105 are in the CLI, the
+client and tests.
+
+`local_cell`'s own condvars (the write gate, framing, preparing, idle) can't block under a serial
+`Dir`, because the work they wait for runs inline, as long as nothing awaits between `begin_write`
+and `finish_write`. They get fail-fast asserts, not async forms.
+
+Every step leaves the normal build as it is: an async form is added beside each sync one, and the
+sync one keeps its code for the in-process device, the CLI and FUSE storage. Smallest first:
+
+1. Fail fast under `cfg(madsim)`: "would block" panics in each blocking wait above, and
+   `framing::on_threads` gated on `Dir::concurrent()`.
+2. `Shared::wait_async`, and `Uploader::lag` and `Uploader::replicated` as async forms.
+3. The bucket calls as `async fn`s, their sync forms `block_on` of them.
+4. `OpenCell::commit_async` at every level, with write barriers. COMMIT and WRITE are served as
+   futures through `serve_future`, which polls once inline, so the hot path (TASK-41) keeps
+   serving without a thread wake.
+5. The read path async: the fetch and `bring_in` awaited, READ and MAP as futures, the boot
+   profile's replay and writer as tasks.
+6. The store's open and close with its uploader: `upload::open_async`, `Uploader::stop`, and
+   `OpenCell`'s and `host_cell`'s open, create, take and close in async forms.
+7. The control handlers on the async forms: `blocking()` keeps only disk work.
+8. VM OPEN (writer and follower), bases, VERSION, DROP_VERSION and FORK as futures.
+9. An explicit async close for every store the daemon owns, and under madsim an assert in
+   `Drop` that it was closed. The ordering rules of TASK-54, TASK-79.34 and TASK-129 rest on
+   today's close in `Drop`.
+10. Replication async: `Members` and `MemberLink` returning futures, members served by tasks,
+    `local_cell::sim`'s synchronous `drive()` kept.
+11. The dispatch seam under madsim: the pool, the flushers, `block_in_place`, `spawn_blocking`
+    and `cells::blocking` as tasks, or inline.
+12. The peers server, sweep, drain and control as tasks.
+
+The hardest are 9 (a store's close can't be awaited in `Drop`, and its last reference goes
+wherever the daemon drops it), 5 (`OpenCell::read` nests the pager, the fetcher and the bases'
+open under a synchronous call that DAX faults share) and 10.
 
 Before the decision, the steps that served any of the three went on:
 
