@@ -93,10 +93,11 @@ VARIABLES
     gnamed,     \* what its pass read of the head
     grefs,      \* whether its pass listed any reference
     passes, crashes, losses, migrations,
-    handovers   \* hand-overs accepted, for the Reaches models
+    handovers,  \* hand-overs accepted, for the Reaches models
+    retired     \* references a daemon starting retired, for the Reaches models
 
 vars == <<named, data, refs, inc, phase, rlist, st, log, mig, partner, pinc, accepted, msgs, told,
-          forked, gphase, gnamed, grefs, passes, crashes, losses, migrations, handovers>>
+          forked, gphase, gnamed, grefs, passes, crashes, losses, migrations, handovers, retired>>
 
 On(r) == r \in Rules
 I(h) == <<h, inc[h]>>
@@ -126,6 +127,7 @@ Init ==
     /\ forked = [c \in Cells |-> FALSE]
     /\ gphase = "idle" /\ gnamed = TRUE /\ grefs = FALSE
     /\ passes = 0 /\ crashes = 0 /\ losses = 0 /\ migrations = 0 /\ handovers = 0
+    /\ retired = 0
 
 SetSt(h, c, s) == st' = [st EXCEPT ![h][c] = s]
 
@@ -133,10 +135,10 @@ SetSt(h, c, s) == st' = [st EXCEPT ![h][c] = s]
 
 Drop == named /\ named' = FALSE /\ UNCHANGED <<data, refs, inc, phase, rlist, st, log, mig,
     partner, pinc, accepted, msgs, told, forked, gphase, gnamed, grefs, passes, crashes, losses,
-    migrations, handovers>>
+    migrations, handovers, retired>>
 
 GcUnchanged == UNCHANGED <<named, refs, inc, phase, rlist, st, log, mig, partner, pinc, accepted,
-    msgs, told, forked, crashes, losses, migrations, handovers>>
+    msgs, told, forked, crashes, losses, migrations, handovers, retired>>
 
 GcRead ==
     /\ gphase = "idle" /\ passes < MaxPasses /\ data
@@ -157,7 +159,7 @@ GcDelete ==
 \* ---- Forks ----
 
 ForkUnchanged == UNCHANGED <<named, data, inc, phase, rlist, log, mig, partner, pinc, accepted,
-    msgs, told, gphase, gnamed, grefs, passes, crashes, losses, migrations, handovers>>
+    msgs, told, gphase, gnamed, grefs, passes, crashes, losses, migrations, handovers, retired>>
 
 \* forksReferFirst: the reference first, then the head; without it, the head first.
 ForkBegin(h, c) ==
@@ -190,7 +192,7 @@ Commit(h, c) ==
     /\ log' = [log EXCEPT ![h][c] = @ + 1]
     /\ told' = [told EXCEPT ![c] = Max(@, log[h][c] + 1)]
     /\ UNCHANGED <<named, data, refs, inc, phase, rlist, st, mig, partner, pinc, accepted, msgs,
-        forked, gphase, gnamed, grefs, passes, crashes, losses, migrations, handovers>>
+        forked, gphase, gnamed, grefs, passes, crashes, losses, migrations, handovers, retired>>
 
 \* ---- Migration ----
 
@@ -211,7 +213,7 @@ Prepare(s, t, c) ==
        /\ partner' = [partner EXCEPT ![s][c] = t, ![t][c] = s]
        /\ pinc' = [pinc EXCEPT ![s][c] = inc[t]]
        /\ refs' = IF On("targetRefersFirst") THEN refs \cup {Key(t, c)} ELSE refs
-    /\ UNCHANGED <<accepted, msgs, told, handovers>> /\ MigUnchanged
+    /\ UNCHANGED <<accepted, msgs, told, handovers, retired>> /\ MigUnchanged
 
 \* A round: the target takes the source's log as it is.
 Round(t, c) == LET s == partner[t][c] IN
@@ -219,7 +221,7 @@ Round(t, c) == LET s == partner[t][c] IN
     /\ s # NoHost /\ phase[s] = "serving" /\ st[s][c] \in {"writer", "handing"}
     /\ mig[s][c] = mig[t][c] /\ log[t][c] # log[s][c]
     /\ log' = [log EXCEPT ![t][c] = log[s][c]]
-    /\ UNCHANGED <<refs, st, mig, partner, pinc, accepted, msgs, told, migrations, handovers>>
+    /\ UNCHANGED <<refs, st, mig, partner, pinc, accepted, msgs, told, migrations, handovers, retired>>
     /\ MigUnchanged
 
 \* The target gives the migration up of its own accord, before any request.
@@ -229,7 +231,7 @@ TargetAbort(t, c) ==
     /\ mig' = [mig EXCEPT ![t][c] = 0]
     /\ partner' = [partner EXCEPT ![t][c] = NoHost]
     /\ refs' = refs \ {Key(t, c)}
-    /\ UNCHANGED <<log, pinc, accepted, msgs, told, migrations, handovers>> /\ MigUnchanged
+    /\ UNCHANGED <<log, pinc, accepted, msgs, told, migrations, handovers, retired>> /\ MigUnchanged
 
 \* The source, its guest paused, asks for the hand-over at its last commit (sourceGivesUpFirst:
 \* its commits stop here). Without sourceRetiresLast, it retires its reference now.
@@ -239,7 +241,7 @@ Hand(s, c) ==
     /\ msgs' = msgs \cup {[kind |-> "req", cell |-> c, id |-> mig[s][c], n |-> log[s][c],
                            to |-> partner[s][c], k |-> pinc[s][c]]}
     /\ refs' = IF On("sourceRetiresLast") THEN refs ELSE refs \ {Key(s, c)}
-    /\ UNCHANGED <<log, mig, partner, pinc, accepted, told, migrations, handovers>> /\ MigUnchanged
+    /\ UNCHANGED <<log, mig, partner, pinc, accepted, told, migrations, handovers, retired>> /\ MigUnchanged
 
 \* Whether a target knows it accepted a migration: from its disk (remembersAccepted), or, without
 \* the rule, only while it is still the cell's writer.
@@ -282,7 +284,7 @@ TargetAnswer(m) == LET t == m.to c == m.cell IN
           /\ ~(st[t][c] = "receiving" /\ mig[t][c] = m.id)
           /\ msgs' = msgs \cup {Answer(c, m.id, FALSE)}
           /\ UNCHANGED <<refs, st, log, mig, partner, accepted, handovers>>
-    /\ UNCHANGED <<pinc, told, migrations>> /\ MigUnchanged
+    /\ UNCHANGED <<pinc, told, migrations, retired>> /\ MigUnchanged
 
 \* The source reads an answer to its hand-over: yes, it gave the cell up; no, it serves again.
 SourceHears(s, c, a) ==
@@ -291,7 +293,7 @@ SourceHears(s, c, a) ==
     /\ SetSt(s, c, IF a.yes THEN "gaveup" ELSE "writer")
     /\ mig' = [mig EXCEPT ![s][c] = 0]
     /\ partner' = [partner EXCEPT ![s][c] = NoHost]
-    /\ UNCHANGED <<refs, log, pinc, accepted, msgs, told, migrations, handovers>> /\ MigUnchanged
+    /\ UNCHANGED <<refs, log, pinc, accepted, msgs, told, migrations, handovers, retired>> /\ MigUnchanged
 
 \* The source, having given the cell up, deletes it, then retires its reference.
 SourceGone(s, c) ==
@@ -299,7 +301,7 @@ SourceGone(s, c) ==
     /\ SetSt(s, c, "none")
     /\ log' = [log EXCEPT ![s][c] = 0]
     /\ refs' = refs \ {Key(s, c)}
-    /\ UNCHANGED <<mig, partner, pinc, accepted, msgs, told, migrations, handovers>>
+    /\ UNCHANGED <<mig, partner, pinc, accepted, msgs, told, migrations, handovers, retired>>
     /\ MigUnchanged
 
 \* ---- Hosts ----
@@ -319,19 +321,21 @@ Crash(h) ==
     /\ partner' = [partner EXCEPT ![h] =
                      [c \in Cells |-> IF st[h][c] = "handing" THEN @[c] ELSE NoHost]]
     /\ log' = [log EXCEPT ![h] = [c \in Cells |-> IF Volatile(st[h][c]) THEN 0 ELSE @[c]]]
-    /\ UNCHANGED <<refs, inc, rlist, pinc, losses>> /\ HostUnchanged
+    /\ UNCHANGED <<refs, inc, rlist, pinc, losses, retired>> /\ HostUnchanged
 
 Start(h) ==
     /\ phase[h] = "down"
     /\ phase' = [phase EXCEPT ![h] = "starting"]
     /\ rlist' = [rlist EXCEPT ![h] = {r \in refs : r[2] = I(h)}]
-    /\ UNCHANGED <<refs, inc, st, log, mig, partner, pinc, crashes, losses>> /\ HostUnchanged
+    /\ UNCHANGED <<refs, inc, st, log, mig, partner, pinc, crashes, losses, retired>> /\ HostUnchanged
 
 Held(h, r) == st[h][r[1]] \in {"writer", "handing"}
 
 Retire(h) ==
     /\ phase[h] = "starting"
-    /\ refs' = refs \ {r \in rlist[h] : ~On("retireOnlyUnheld") \/ ~Held(h, r)}
+    /\ LET gone == {r \in rlist[h] : ~On("retireOnlyUnheld") \/ ~Held(h, r)} IN
+       /\ refs' = refs \ gone
+       /\ retired' = retired + Cardinality(gone \cap refs)
     /\ phase' = [phase EXCEPT ![h] = "serving"]
     /\ rlist' = [rlist EXCEPT ![h] = {}]
     /\ UNCHANGED <<inc, st, log, mig, partner, pinc, crashes, losses>> /\ HostUnchanged
@@ -349,13 +353,13 @@ Lose(h) ==
     /\ partner' = [partner EXCEPT ![h] = [c \in Cells |-> NoHost]]
     /\ accepted' = [accepted EXCEPT ![h] = {}]
     /\ UNCHANGED <<named, data, refs, pinc, msgs, told, forked, gphase, gnamed, grefs, passes,
-        crashes, migrations, handovers>>
+        crashes, migrations, handovers, retired>>
 
 \* The VM manager decommissions an incarnation no host has any more.
 Decommission(h, k) ==
     /\ k < inc[h] /\ \E x \in refs : x[2] = <<h, k>>
     /\ refs' = {r \in refs : r[2] # <<h, k>>}
-    /\ UNCHANGED <<inc, phase, rlist, st, log, mig, partner, pinc, crashes, losses>>
+    /\ UNCHANGED <<inc, phase, rlist, st, log, mig, partner, pinc, crashes, losses, retired>>
     /\ HostUnchanged
 
 Next ==
@@ -389,4 +393,5 @@ HandOverLosesNothing == \A h \in Hosts, c \in Cells : st[h][c] = "writer" => log
 NoHandOver == handovers = 0
 NoHandOverBack == handovers < 2
 NoCollected == data
+NoRetired == retired = 0
 =============================================================================
