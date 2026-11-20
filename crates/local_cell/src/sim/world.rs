@@ -318,6 +318,10 @@ const REPLICA_MOST: u64 = 1 << 40;
 /// settling takes at most: a take waiting on members it never reaches waits for ever.
 const PUMPS: usize = 64;
 
+/// cladefs: the most requests one settling completes before the world is found livelocked: far
+/// past what a seed's steps leave waiting, so that only a world that never quiets down reaches it.
+const SETTLE_MOST: usize = 200_000;
+
 /// cladefs: a host's peer address, as configurations name their members.
 fn address(host: usize) -> String {
     format!("h{host}")
@@ -2538,7 +2542,7 @@ impl World {
     /// Requests complete, without failing, until none is left, those held too.
     fn settle(&mut self) {
         self.bucket.release();
-        let mut pumps = 0;
+        let (mut pumps, mut completed) = (0, 0);
         loop {
             self.settle_tasks();
             // cladefs: replicated cells' members sent what they lack, and takes waiting for them
@@ -2552,6 +2556,18 @@ impl World {
             }
             self.bucket.complete(0, Fault::None);
             trace!("{}", self.bucket.journal().last().unwrap());
+            // cladefs: within a bound, as FoundationDB's runs must quiet down once their faults
+            // stop: a world whose tasks ask for requests for ever, no fault answering them,
+            // livelocks, which hung the run before (doc-24).
+            completed += 1;
+            if completed > SETTLE_MOST {
+                let waiting = self.bucket.waiting();
+                self.violation(format!(
+                    "the world doesn't settle: {SETTLE_MOST} requests completed, every one \
+                     answered, and {waiting} more waiting: a livelock"
+                ));
+                return;
+            }
         }
     }
 
