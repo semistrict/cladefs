@@ -47,6 +47,10 @@ struct Daemon {
 fn daemon(dir: &Path, bucket: &Path, peers: &[String]) -> Daemon {
     let (vms, control, ephemeral) =
         (dir.join("cladefsd.sock"), dir.join("control.sock"), dir.join("ephemeral"));
+    // A daemon killed before leaves its sockets, which one started again would bind.
+    for socket in [&vms, &control] {
+        let _ = std::fs::remove_file(socket);
+    }
     let process = Command::new(env!("CARGO_BIN_EXE_cladefsd"))
         .arg(&vms)
         .env("CLADEFSD_BUCKET", format!("file://{}/", bucket.display()))
