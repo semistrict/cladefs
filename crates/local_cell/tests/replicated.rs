@@ -96,7 +96,7 @@ impl Host {
         // Nothing uploaded but what is asked for: the members hold the rest.
         let options =
             upload::Options { interval: Duration::from_secs(3600), ..upload::Options::default() };
-        upload::open(recovering, OPTIONS, self.bucket.clone(), (holder, options), &runtime).unwrap()
+        futures::executor::block_on(upload::open(recovering, OPTIONS, self.bucket.clone(), (holder, options), &runtime)).unwrap()
     }
 }
 
@@ -380,7 +380,7 @@ impl Host {
             replace_after: Duration::from_secs(1),
             ..upload::Options::default()
         };
-        upload::open(recovering, OPTIONS, self.bucket.clone(), (holder, options), &runtime)
+        futures::executor::block_on(upload::open(recovering, OPTIONS, self.bucket.clone(), (holder, options), &runtime))
     }
 }
 
@@ -1296,7 +1296,7 @@ fn takes_prefer_whole_authentic_copies_to_longer_garbled_ones() {
         replace_after: Duration::from_secs(1),
         ..upload::Options::default()
     };
-    let opened = upload::open(recovering, OPTIONS, host.bucket.clone(), (2, options), &runtime);
+    let opened = futures::executor::block_on(upload::open(recovering, OPTIONS, host.bucket.clone(), (2, options), &runtime));
     let (taken, uploader) = opened.unwrap();
     taken.made().unwrap();
     assert!(taken.last_commit().unwrap() >= last);

@@ -61,7 +61,7 @@ fn round(mib: u64, mask: u8) -> (f64, f64) {
     let extents = (mib << 20).div_ceil(PARTS * part);
     let len = PARTS * part;
     let dir = tempfile::tempdir().unwrap();
-    let store = OpenCell::create(dir.path().join("store"), 2 * extents * len).unwrap();
+    let store = futures::executor::block_on(OpenCell::create(dir.path().join("store"), 2 * extents * len)).unwrap();
     for sequence in 1..=extents {
         let extent = ExtentId { cell: store.cell().id, sequence };
         let bytes = data(sequence, len as usize, mask);

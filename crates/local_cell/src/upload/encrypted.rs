@@ -202,7 +202,7 @@ fn open_with<K: Kms>(
     let options = Options { token: host.token, ..options };
     let holding = (rand::random(), options);
     let opened =
-        open(recovering, crate::Options::default(), world.bucket.clone(), holding, &host.runtime)?;
+        futures::executor::block_on(open(recovering, crate::Options::default(), world.bucket.clone(), holding, &host.runtime))?;
     opened.0.made()?;
     Ok(opened)
 }
@@ -578,17 +578,17 @@ fn forked<K: Kms>(
     uploader: &Uploader<MemDir>,
     child: Child,
 ) -> Result<(), Failure> {
-    let inheriting = uploader.inheriting(child)?;
+    let inheriting = futures::executor::block_on(uploader.inheriting(child))?;
     if uploader.is_at_version() {
-        return uploader.forked(child, inheriting);
+        return futures::executor::block_on(uploader.forked(child, inheriting));
     }
     let id = rand::random::<u64>().max(1);
     let version = extent_frame::segment::NewVersion { id, keep_last: None };
     futures::executor::block_on(uploader.uploaded(store.commit_version(version, false).unwrap()))?;
-    uploader.share_version(id, true)?;
+    futures::executor::block_on(uploader.share_version(id, true))?;
     let dir = made_at_version(store.description().cell, id);
     let (_at, at_version) = open_on(world, host, &dir)?;
-    at_version.forked(child, inheriting)
+    futures::executor::block_on(at_version.forked(child, inheriting))
 }
 
 /// TASK-411.4 AC #2, #3, #4: a fork into a cell of another tenant's, and its fork into a third
@@ -704,7 +704,7 @@ fn versions_fork_into_other_tenants_cells_rewrapped_unless_their_keys_are_refuse
     let epoch =
         store.commit_version(extent_frame::segment::NewVersion { id, keep_last: None }, true);
     futures::executor::block_on(uploader.uploaded(epoch.unwrap())).unwrap();
-    uploader.share_version(id, true).unwrap();
+    futures::executor::block_on(uploader.share_version(id, true)).unwrap();
     drop((store, uploader));
     let point_dir = made_at_version(test_cell(7), id);
 

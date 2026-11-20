@@ -141,7 +141,7 @@ impl Hosts {
         let source = source.unwrap();
         let lens = [fork_faults::BLOCK, 4 << 20];
         let held = commit(&source, 1, &lens, b"root");
-        let version = source.make_version(None).unwrap();
+        let version = futures::executor::block_on(source.make_version(None)).unwrap();
         for (extent, _) in &held {
             source.free(*extent).unwrap();
         }
@@ -150,8 +150,8 @@ impl Hosts {
         // that, and what it names is all gone once nothing keeps it: its state too, not just its
         // data.
         let later = disks[0].join("later");
-        source.fork_to(&later, crate::host_cell::new_alone()).unwrap();
-        OpenCell::delete(&later, Some(&bucket)).unwrap();
+        futures::executor::block_on(source.fork_to(&later, crate::host_cell::new_alone())).unwrap();
+        futures::executor::block_on(OpenCell::delete(&later, Some(&bucket))).unwrap();
 
         futures::executor::block_on(source.wait_uploaded()).unwrap();
         let mut copies = Vec::new();
@@ -229,7 +229,7 @@ impl Hosts {
         let path = self.disks[host].join(name);
         let child = crate::host_cell::new_alone();
         let copy = self.copies[host].as_ref().expect("a host's copy");
-        let forked = copy.fork_to(&path, child).map_err(|err| err.errno());
+        let forked = futures::executor::block_on(copy.fork_to(&path, child)).map_err(|err| err.errno());
         if forked.is_ok() {
             self.children.lock().unwrap().push((child, path));
         }
@@ -262,7 +262,7 @@ impl Hosts {
                         for (copy, disk) in copies {
                             let child = crate::host_cell::new_alone();
                             let path = disk.join("raced");
-                            copy.fork_to(&path, child).unwrap();
+                            futures::executor::block_on(copy.fork_to(&path, child)).unwrap();
                             children.lock().unwrap().push((child, path));
                         }
                         Self::collect(&bucket, "raced");
@@ -282,7 +282,7 @@ impl Hosts {
                     let (bucket, source) = (bucket.clone(), source.clone());
                     deleted.store(true, Ordering::SeqCst);
                     let deleting = std::thread::spawn(move || {
-                        source.drop_versions(&[version].into()).unwrap();
+                        futures::executor::block_on(source.drop_versions(&[version].into())).unwrap();
                         Self::collect(&bucket, "the version dropped");
                     });
                     deleting.join().unwrap();
@@ -333,7 +333,7 @@ impl Hosts {
         let guard = fault.and_then(|fault| self.arm(host, fault));
         let handle = self.disks[host].join("child");
         let child = crate::host_cell::new_alone();
-        let forked = self.copies[host].as_ref().unwrap().fork_to(&handle, child);
+        let forked = futures::executor::block_on(self.copies[host].as_ref().unwrap().fork_to(&handle, child));
         let forked = forked.map_err(|err| err.errno());
         drop(guard);
         let dead = self.dead.load(Ordering::SeqCst);
@@ -375,7 +375,7 @@ impl Hosts {
         if told || handle.exists() && leftover == Leftover::Opened && opened().is_ok() {
             self.children.lock().unwrap().push((child, handle.clone()));
         } else if handle.exists() {
-            let deleted = OpenCell::delete(&handle, Some(&self.bucket));
+            let deleted = futures::executor::block_on(OpenCell::delete(&handle, Some(&self.bucket)));
             assert_eq!(deleted.map_err(|err| err.to_string()), Ok(()), "{case}: deleting it");
         }
         // What the dead host had going, after what was done with what it left.
@@ -418,7 +418,7 @@ impl Hosts {
         self.copies.clear();
         if !deleted {
             let source = self.source.as_ref().unwrap();
-            let dropped = source.drop_versions(&[self.version].into()).map_err(|err| err.errno());
+            let dropped = futures::executor::block_on(source.drop_versions(&[self.version].into())).map_err(|err| err.errno());
             assert_eq!(dropped, Ok(()), "{case}");
         }
         Self::collect(&self.bucket, case);
@@ -429,7 +429,7 @@ impl Hosts {
 
         // Everything deleted, nothing is left of it.
         for (_, path) in &children {
-            let deleted = OpenCell::delete(path, Some(&self.bucket));
+            let deleted = futures::executor::block_on(OpenCell::delete(path, Some(&self.bucket)));
             assert_eq!(deleted.map_err(|err| err.to_string()), Ok(()), "{case}: deleting a fork");
         }
         let source = self.source.take().unwrap();
@@ -438,7 +438,7 @@ impl Hosts {
         for disk in &self.disks {
             let copy = copy_at(disk);
             if copy.exists() {
-                OpenCell::delete(&copy, None).unwrap();
+                futures::executor::block_on(OpenCell::delete(&copy, None)).unwrap();
             }
         }
         let gone = block_on(operator_delete(&self.bucket, cell, rand::random()));
@@ -531,7 +531,7 @@ fn restores_take_their_steps_in_order() {
         })
         .collect();
     let copy = hosts.copies[1].as_ref().unwrap();
-    copy.fork_to(hosts.disks[1].join("child"), crate::host_cell::new_alone()).unwrap();
+    futures::executor::block_on(copy.fork_to(hosts.disks[1].join("child"), crate::host_cell::new_alone())).unwrap();
     drop(guards);
     assert_eq!(*steps.lock().unwrap(), RESTORE_STEPS);
 }
@@ -624,7 +624,7 @@ fn encrypted_restores_with_nothing_going_wrong() {
     let hosts = Hosts::new();
     let copy = hosts.copies[1].as_ref().unwrap();
     let child = crate::host_cell::new_alone();
-    copy.fork_to(hosts.disks[1].join("child"), child).unwrap();
+    futures::executor::block_on(copy.fork_to(hosts.disks[1].join("child"), child)).unwrap();
     let record = block_on(bucket_cell::head::get(&*hosts.bucket, child)).unwrap().unwrap();
     let source = hosts.source.as_ref().unwrap().cell();
     let inherited: Vec<_> = record.inherited.iter().map(|had| had.cell).collect();

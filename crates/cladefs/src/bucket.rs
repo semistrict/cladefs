@@ -740,7 +740,7 @@ mod tests {
         keeping: local_cell::upload::Options,
     ) -> Result<OpenCell, crate::Error> {
         let cell = cell.unwrap_or_else(crate::host_cell::new_alone);
-        OpenCell::create_kept_with(path, capacity, cell, &url_of(bucket), keeping)
+        futures::executor::block_on(OpenCell::create_kept_with(path, capacity, cell, &url_of(bucket), keeping))
     }
 
     /// Has the store at `path` name `bucket` as the bucket its cell is kept in: a host restarted
@@ -766,10 +766,10 @@ mod tests {
         path: impl AsRef<std::path::Path>,
         keeping: local_cell::upload::Options,
     ) -> Result<OpenCell, crate::Error> {
-        OpenCell::open_with(
+        futures::executor::block_on(OpenCell::open_with(
             path,
             crate::open_cell::Opening { keeping, ..crate::open_cell::Opening::here()? },
-        )
+        ))
     }
 
     /// Uploads only when a commit waits.
@@ -1057,9 +1057,9 @@ mod tests {
         let child = dir.path().join("child");
         let forked = crate::host_cell::fork_child(cell);
         assert_ne!(forked, cell, "a fork in a cell of its own");
-        parent.fork_to(&child, forked).unwrap();
+        futures::executor::block_on(parent.fork_to(&child, forked)).unwrap();
         drop(parent);
-        crate::host_cell::delete(&path, Some(&bucket), crate::host_cell::token).unwrap();
+        futures::executor::block_on(crate::host_cell::delete(&path, Some(&bucket), crate::host_cell::token)).unwrap();
         // The fork's store, open all along: the segment compacted, 1 to 3 in its moves.
         let child = reopened(&child, idle()).unwrap();
         assert_eq!(collect(1).compacted, 1);
@@ -1224,14 +1224,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let path = dir.path().join("store");
-        let opened = crate::host_cell::create_unmade(
+        let opened = futures::executor::block_on(crate::host_cell::create_unmade(
             &path,
             1 << 30,
             crate::host_cell::CellOf::Named(bucket_cell::layout::test_cell(7)),
             bucket_cell::cell::Kind::Fxfs,
             Some(&url_of(&bucket)),
             options,
-        );
+        ));
         let opened = opened.unwrap();
         let store = &opened.store;
         store.write(super::ExtentId::new(7, 1), 0, &pattern(1, EXTENT)).unwrap();
@@ -1290,13 +1290,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
         let cell = crate::host_cell::new_alone();
-        let opened = crate::host_cell::create(
+        let opened = futures::executor::block_on(crate::host_cell::create(
             &path,
             1 << 30,
             crate::host_cell::CellOf::Named(cell),
             bucket_cell::cell::Kind::Fxfs,
             idle(),
-        )
+        ))
         .unwrap();
         let crate::host_cell::Opened { store, uploader, .. } = opened;
         assert!(!free(&path), "taken while the store is open");
@@ -1443,7 +1443,7 @@ mod tests {
             false => base,
             true => {
                 let path = dir.path().join("copy");
-                base.uploaded_version_at(&path).unwrap();
+                futures::executor::block_on(base.uploaded_version_at(&path)).unwrap();
                 drop(base);
                 reopened(&path, idle()).unwrap()
             }
@@ -1452,7 +1452,7 @@ mod tests {
         let mut paths: Vec<_> = (0..forks + 2)
             .map(|n| {
                 let path = dir.path().join(format!("fork-{n}"));
-                parent.fork_to(&path, fork_child(parent.cell())).unwrap();
+                futures::executor::block_on(parent.fork_to(&path, fork_child(parent.cell()))).unwrap();
                 path
             })
             .collect();
@@ -1461,7 +1461,7 @@ mod tests {
         let open = |path: &std::path::PathBuf| {
             let opening =
                 crate::open_cell::Opening { arena: None, profiled: false, keeping: idle() };
-            OpenCell::open_with(path, opening).unwrap()
+            futures::executor::block_on(OpenCell::open_with(path, opening)).unwrap()
         };
         let name = if version { "version" } else { "live" };
         // The heap once the page cache has let go of the files closed, and of the pages it holds:
@@ -1662,13 +1662,13 @@ mod tests {
                 false => base,
                 true => {
                     let path = dir.path().join("copy");
-                    base.uploaded_version_at(&path).unwrap();
+                    futures::executor::block_on(base.uploaded_version_at(&path)).unwrap();
                     reopened(&path, idle()).unwrap()
                 }
             };
             let fork = |n: usize| {
                 let path = dir.path().join(format!("fork-{n}"));
-                parent.fork_to(&path, fork_child(parent.cell())).unwrap();
+                futures::executor::block_on(parent.fork_to(&path, fork_child(parent.cell()))).unwrap();
                 path
             };
             let paths: Vec<_> = (0..=FORKS).map(fork).collect();
@@ -1742,7 +1742,7 @@ mod tests {
         let base_cell = base.cell().id;
         let inherited = |sequence| ExtentId { cell: base_cell, sequence };
         let path = dir.path().join("fork");
-        base.fork_to(&path, fork_child(base.cell())).unwrap();
+        futures::executor::block_on(base.fork_to(&path, fork_child(base.cell()))).unwrap();
         let fork = reopened(&path, idle()).unwrap();
         let held = Ok(Some((BLOCK as u64, false)));
         let mut data = vec![0; BLOCK];
@@ -1796,7 +1796,7 @@ mod tests {
         let base_cell = base.cell().id;
         let inherited = |sequence| ExtentId { cell: base_cell, sequence };
         let path = dir.path().join("fork");
-        base.fork_to(&path, fork_child(base.cell())).unwrap();
+        futures::executor::block_on(base.fork_to(&path, fork_child(base.cell()))).unwrap();
         let fork = reopened(&path, idle()).unwrap();
         let mut read = vec![0; BLOCK];
         for sequence in 1..=extents {
@@ -2041,7 +2041,7 @@ mod tests {
             let second = dir.join("second");
             drop(kept_in(&second, (1 << 30, Some(cell)), bucket, idle()).unwrap());
             OpenCell::place(&second, 2).unwrap();
-            OpenCell::delete(&second, Some(bucket)).unwrap();
+            futures::executor::block_on(OpenCell::delete(&second, Some(bucket))).unwrap();
         });
     }
 
@@ -2072,7 +2072,7 @@ mod tests {
         assert_eq!(store.free(kept), Err(EROFS));
         assert_eq!(futures::executor::block_on(store.commit_ordered(None)), Err(EROFS));
         assert_eq!(futures::executor::block_on(store.commit_local(None)), Err(EROFS));
-        assert_eq!(store.make_version(None).err().and_then(|err| err.errno()), Some(EROFS));
+        assert_eq!(futures::executor::block_on(store.make_version(None)).err().and_then(|err| err.errno()), Some(EROFS));
         assert_eq!(store.set_capacity(2 << 30), Err(EROFS));
     }
 
@@ -2089,12 +2089,12 @@ mod tests {
         write(&store, 1, &pattern(1, BLOCK));
         futures::executor::block_on(store.commit(None)).unwrap();
         for _ in 0..most {
-            store.make_version(None).unwrap();
+            futures::executor::block_on(store.make_version(None)).unwrap();
         }
-        let refused = store.make_version(None).err().and_then(|err| err.errno());
+        let refused = futures::executor::block_on(store.make_version(None)).err().and_then(|err| err.errno());
         assert_eq!(refused, Some(crate::Errno::EMLINK));
-        assert_eq!(store.versions().len(), most);
-        store.make_version(Some(1)).unwrap();
+        assert_eq!(futures::executor::block_on(store.versions()).len(), most);
+        futures::executor::block_on(store.make_version(Some(1))).unwrap();
     }
 
     /// TASK-610: what this process made versions of it keeps for versions their cells name alone:
@@ -2109,14 +2109,14 @@ mod tests {
         write(&store, 1, &pattern(1, BLOCK));
         futures::executor::block_on(store.commit(None)).unwrap();
         for _ in 0..20 {
-            store.make_version(Some(1)).unwrap();
+            futures::executor::block_on(store.make_version(Some(1))).unwrap();
         }
         futures::executor::block_on(store.wait_uploaded()).unwrap();
-        let last = store.make_version(Some(1)).unwrap();
-        let named = store.versions().len();
+        let last = futures::executor::block_on(store.make_version(Some(1))).unwrap();
+        let named = futures::executor::block_on(store.versions()).len();
         assert!(named <= 2, "{named} versions named");
         assert_eq!(crate::host_cell::versions_made(), named);
-        store.drop_versions(&[last].into()).unwrap();
+        futures::executor::block_on(store.drop_versions(&[last].into())).unwrap();
         assert_eq!(crate::host_cell::versions_made(), named - 1);
     }
 
@@ -2139,7 +2139,7 @@ mod tests {
         OpenCell::place(&second_path, 2).unwrap();
         let second = reopened(&second_path, idle()).unwrap();
 
-        let refused = OpenCell::delete(&first_path, Some(&bucket));
+        let refused = futures::executor::block_on(OpenCell::delete(&first_path, Some(&bucket)));
         assert_eq!(refused.err().and_then(|err| err.errno()), Some(crate::Errno::ESTALE));
         write(&second, 2, &pattern(2, BLOCK));
         futures::executor::block_on(second.commit(Some(b"second"))).unwrap();
@@ -2148,7 +2148,7 @@ mod tests {
             futures::executor::block_on(bucket_cell::recover(&*bucket, cell, None)).unwrap().state;
         assert_eq!(state.root, Some(b"second".to_vec()));
 
-        OpenCell::delete(&second_path, Some(&bucket)).unwrap();
+        futures::executor::block_on(OpenCell::delete(&second_path, Some(&bucket))).unwrap();
         let deleted = futures::executor::block_on(bucket_cell::head::get(&*bucket, cell));
         assert!(deleted.unwrap().unwrap().deleted(), "the cell lives");
     }
@@ -2905,7 +2905,7 @@ mod tests {
         let cell = crate::host_cell::new_alone();
         let mut store = None;
         measure("create", &mut || {
-            let made = OpenCell::create_kept_with(&base, 1 << 30, cell, &url, idle());
+            let made = futures::executor::block_on(OpenCell::create_kept_with(&base, 1 << 30, cell, &url, idle()));
             store = Some(made.unwrap());
         });
         let store = store.unwrap();
@@ -2923,7 +2923,7 @@ mod tests {
         let forks: Vec<_> = (0..10).map(|fork| dir.path().join(format!("fork-{fork}"))).collect();
         for fork in &forks {
             let child = crate::host_cell::new_alone();
-            measure("fork", &mut || store.fork_to(fork, child).unwrap());
+            measure("fork", &mut || futures::executor::block_on(store.fork_to(fork, child)).unwrap());
         }
         drop(store);
         for fork in &forks {
@@ -3335,7 +3335,7 @@ mod tests {
             Some(crate::Errno::ESTALE)
         );
         // Taken, its log dropped: the store holds the cell as it is, its local commit lost.
-        OpenCell::take(&path, 1 << 30, cell, None).unwrap();
+        futures::executor::block_on(OpenCell::take(&path, 1 << 30, cell, None)).unwrap();
         let first = reopened(&path, idle()).unwrap();
         assert_eq!(first.root(), Ok(b"meanwhile".to_vec()));
     }
@@ -3355,7 +3355,7 @@ mod tests {
         let extent = write(&source, 1, &pattern(1, BLOCK));
         futures::executor::block_on(source.commit(Some(b"root"))).unwrap();
         let path = dir.path().join("copy");
-        source.uploaded_version_at(&path).unwrap();
+        futures::executor::block_on(source.uploaded_version_at(&path)).unwrap();
         drop(source);
 
         let version = reopened(&path, idle()).unwrap();
@@ -3375,8 +3375,7 @@ mod tests {
         }
         assert_eq!(version.info().unwrap().capacity, capacity);
         assert_eq!(version.root().unwrap(), b"root");
-        version
-            .fork_to(dir.path().join("fork"), crate::host_cell::fork_child(version.cell()))
+        futures::executor::block_on(version.fork_to(dir.path().join("fork"), crate::host_cell::fork_child(version.cell())))
             .unwrap();
         version.make_public().unwrap();
     }
@@ -3397,38 +3396,38 @@ mod tests {
         let extent = write(&source, 1, &pattern(1, BLOCK));
         futures::executor::block_on(source.commit(Some(b"base"))).unwrap();
         let path = dir.path().join("copy");
-        let version = source.uploaded_version_at(&path).unwrap();
+        let version = futures::executor::block_on(source.uploaded_version_at(&path)).unwrap();
         source.free(extent).unwrap();
         futures::executor::block_on(source.commit(Some(b"later"))).unwrap();
         // Another fork, gone: a checkpoint past the version's, so that only the version, and its
         // forks, keep what it names.
         // Deleted as this process, no host, deletes them, of the first placement.
         let delete = |path: &std::path::Path| {
-            crate::host_cell::delete(path, Some(&bucket), crate::host_cell::token).unwrap()
+            futures::executor::block_on(crate::host_cell::delete(path, Some(&bucket), crate::host_cell::token)).unwrap()
         };
         let later = dir.path().join("later");
-        source.fork_to(&later, crate::host_cell::fork_child(source.cell())).unwrap();
+        futures::executor::block_on(source.fork_to(&later, crate::host_cell::fork_child(source.cell()))).unwrap();
         delete(&later);
         let copy = reopened(&path, idle()).unwrap();
         let fork = |name: &str, tenant| {
             let to = dir.path().join(name);
-            let forked = copy.fork_to(&to, of(tenant)).map_err(|err| err.errno());
+            let forked = futures::executor::block_on(copy.fork_to(&to, of(tenant))).map_err(|err| err.errno());
             (forked, to.exists())
         };
 
         assert_eq!(fork("refused", 2), (Err(Some(crate::Errno::EACCES)), false));
         assert_eq!(fork("ours", 1), (Ok(()), true));
-        source.share_version(version, true).unwrap();
+        futures::executor::block_on(source.share_version(version, true)).unwrap();
         assert_eq!(fork("theirs", 2), (Ok(()), true));
-        source.share_version(version, false).unwrap();
+        futures::executor::block_on(source.share_version(version, false)).unwrap();
         assert_eq!(fork("unshared", 2), (Err(Some(crate::Errno::EACCES)), false));
-        let refused = source.share_version(version + 1, true);
+        let refused = futures::executor::block_on(source.share_version(version + 1, true));
         assert_eq!(refused.map_err(|err| err.errno()), Err(Some(crate::Errno::ENOENT)));
 
         drop(copy);
         delete(&dir.path().join("ours"));
         delete(&path);
-        source.drop_versions(&[version].into()).unwrap();
+        futures::executor::block_on(source.drop_versions(&[version].into())).unwrap();
         let options = bucket_cell::collector::Options { compact_below: 0.5, grace: 0 };
         for holder in 1..=2 {
             let pass = bucket_cell::collector::collect(&*bucket, holder, &options);
@@ -3465,21 +3464,21 @@ mod tests {
         let extent = write(&source, 1, &pattern(1, BLOCK));
         futures::executor::block_on(source.commit(Some(b"base"))).unwrap();
         let path = dir.path().join("copy");
-        let version = source.uploaded_version_at(&path).unwrap();
+        let version = futures::executor::block_on(source.uploaded_version_at(&path)).unwrap();
         source.free(extent).unwrap();
         futures::executor::block_on(source.commit(Some(b"later"))).unwrap();
         let delete = |path: &std::path::Path| {
-            crate::host_cell::delete(path, Some(&bucket), crate::host_cell::token).unwrap()
+            futures::executor::block_on(crate::host_cell::delete(path, Some(&bucket), crate::host_cell::token)).unwrap()
         };
         let copy = reopened(&path, idle()).unwrap();
         let fork = |name: &str, tenant| {
             let to = dir.path().join(name);
-            let forked = copy.fork_to(&to, of(tenant)).map_err(|err| err.errno());
+            let forked = futures::executor::block_on(copy.fork_to(&to, of(tenant))).map_err(|err| err.errno());
             (forked, to.exists())
         };
         assert_eq!(fork("refused", 2), (Err(Some(crate::Errno::EACCES)), false));
         assert_eq!(fork("ours", 1), (Ok(()), true));
-        source.share_version(version, true).unwrap();
+        futures::executor::block_on(source.share_version(version, true)).unwrap();
         assert_eq!(fork("theirs", 2), (Ok(()), true));
         let theirs = reopened(dir.path().join("theirs"), idle()).unwrap();
         let record = futures::executor::block_on(bucket_cell::head::get(&*bucket, theirs.cell()));
@@ -3491,7 +3490,7 @@ mod tests {
         drop(copy);
         delete(&dir.path().join("ours"));
         delete(&path);
-        source.drop_versions(&[version].into()).unwrap();
+        futures::executor::block_on(source.drop_versions(&[version].into())).unwrap();
         let options = bucket_cell::collector::Options { compact_below: 0.0, grace: 0 };
         for holder in 1..=2 {
             let pass = bucket_cell::collector::collect(&*bucket, holder, &options);
@@ -3505,7 +3504,7 @@ mod tests {
         let mut data = vec![0; BLOCK];
         theirs.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).unwrap();
         assert!(data == pattern(1, BLOCK), "the fork reads other bytes");
-        let refused = source.fork_to(dir.path().join("after"), of(1)).map_err(|err| err.errno());
+        let refused = futures::executor::block_on(source.fork_to(dir.path().join("after"), of(1))).map_err(|err| err.errno());
         assert_eq!(refused, Err(Some(crate::Errno::EACCES)));
     }
 
@@ -3600,9 +3599,9 @@ mod tests {
         // Nor what the control API changes of it: its capacity, its versions (TASK-611).
         let ours = &stores[0].0;
         assert_eq!(ours.set_capacity(2 << 30), Err(crate::Errno::EACCES));
-        let dropped = ours.drop_versions(&[1].into()).map_err(|err| err.errno());
+        let dropped = futures::executor::block_on(ours.drop_versions(&[1].into())).map_err(|err| err.errno());
         assert_eq!(dropped, Err(Some(crate::Errno::EACCES)));
-        let shared = ours.share_version(1, true).map_err(|err| err.errno());
+        let shared = futures::executor::block_on(ours.share_version(1, true)).map_err(|err| err.errno());
         assert_eq!(shared, Err(Some(crate::Errno::EACCES)));
 
         kms.destroy(1).unwrap();
@@ -3753,9 +3752,9 @@ mod tests {
         for tenant in [2, crate::host_cell::DEFAULT_TENANT] {
             let to = dir.path().join(format!("refused-{tenant}"));
             let refused = [
-                ("fork", errno(acme.fork(&to, tenant).map(drop))),
-                ("fork_quiescent", errno(acme.fork_quiescent(&to, tenant).map(drop))),
-                ("fork_to", errno(acme.fork_to(&to, of(tenant)))),
+                ("fork", errno(futures::executor::block_on(acme.fork(&to, tenant)).map(drop))),
+                ("fork_quiescent", errno(futures::executor::block_on(acme.fork_quiescent(&to, tenant)).map(drop))),
+                ("fork_to", errno(futures::executor::block_on(acme.fork_to(&to, of(tenant))))),
             ];
             for (how, refused) in refused {
                 assert_eq!(refused, Err(Some(crate::Errno::EACCES)), "{how} to tenant {tenant}");
@@ -3764,13 +3763,13 @@ mod tests {
         }
         assert_eq!(listed(), before, "a refused fork wrote to the bucket");
         let ours = dir.path().join("ours");
-        assert_eq!(acme.fork(&ours, 1).unwrap().tenant, 1);
+        assert_eq!(futures::executor::block_on(acme.fork(&ours, 1)).unwrap().tenant, 1);
         assert_eq!(reopened(&ours, idle()).unwrap().root().unwrap(), b"acme");
 
         let base = store("base", crate::host_cell::DEFAULT_TENANT);
         for tenant in [1, 2] {
             let to = dir.path().join(format!("base-{tenant}"));
-            assert_eq!(base.fork(&to, tenant).unwrap().tenant, tenant);
+            assert_eq!(futures::executor::block_on(base.fork(&to, tenant)).unwrap().tenant, tenant);
             let fork = reopened(&to, idle()).unwrap();
             assert_eq!(fork.root().unwrap(), b"base");
             let mut data = vec![0; BLOCK];
@@ -3797,7 +3796,7 @@ mod tests {
             futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, &prefix)).unwrap()
         };
         assert_eq!(checkpoints().len(), 0);
-        parent.fork_to(dir.path().join("child"), child).unwrap();
+        futures::executor::block_on(parent.fork_to(dir.path().join("child"), child)).unwrap();
         // A checkpoint at the fork, which the child recovers from.
         assert_eq!(checkpoints().len(), 1);
         write(&parent, 3, &pattern(3, BLOCK));
@@ -3870,7 +3869,7 @@ mod tests {
         let child = crate::host_cell::fork_child(cell);
         let fork = {
             let (parent, path) = (parent.clone(), dir.path().join("child"));
-            std::thread::spawn(move || parent.fork_to(path, child))
+            std::thread::spawn(move || futures::executor::block_on(parent.fork_to(path, child)))
         };
         gated.wait_held(1);
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
@@ -4049,7 +4048,7 @@ mod tests {
     ) -> bucket_cell::layout::Head {
         write(parent, 1, &pattern(1, BLOCK));
         futures::executor::block_on(parent.commit(Some(b"root"))).unwrap();
-        parent.fork_to(path, child).unwrap();
+        futures::executor::block_on(parent.fork_to(path, child)).unwrap();
         futures::executor::block_on(bucket_cell::head::get(&**bucket, child)).unwrap().unwrap()
     }
 
@@ -4066,7 +4065,7 @@ mod tests {
         let child = crate::host_cell::fork_child(parent.cell());
         forked(&parent, &bucket, &dir.path().join("child"), child);
         let again = dir.path().join("again");
-        let forked = parent.fork_to(&again, child);
+        let forked = futures::executor::block_on(parent.fork_to(&again, child));
         let errno = forked.as_ref().map(drop).map_err(crate::Error::errno);
         let forked = forked.map_err(|err| err.to_string());
         assert_eq!((forked, again.exists()), (anothers(child), false));
@@ -4169,7 +4168,7 @@ mod tests {
         write(&parent, 1, &pattern(1, BLOCK));
         futures::executor::block_on(parent.commit(Some(b"root"))).unwrap();
         let path = dir.path().join("child");
-        let forked = parent.fork_to(&path, other).map_err(|err| err.errno());
+        let forked = futures::executor::block_on(parent.fork_to(&path, other)).map_err(|err| err.errno());
         assert_eq!((forked, path.exists()), (Err(Some(crate::Errno::EEXIST)), false));
 
         // The parent commits and uploads on, its cell naming no fork.
@@ -4204,7 +4203,7 @@ mod tests {
         let child = crate::host_cell::fork_child(cell);
         let fork = {
             let path = path.to_owned();
-            std::thread::spawn(move || parent.fork_to(path, child))
+            std::thread::spawn(move || futures::executor::block_on(parent.fork_to(path, child)))
         };
         gated.wait_held(1);
         (cell, child, fork)

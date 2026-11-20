@@ -242,6 +242,7 @@ impl World {
     fn fork(&mut self, faults: &[Fault]) -> Result<(), crate::Error> {
         let guards: Vec<_> = faults.iter().filter_map(|fault| self.arm(*fault)).collect();
         let forked = self.parent.as_ref().unwrap().fork_to(self.path("child"), self.child);
+        let forked = futures::executor::block_on(forked);
         self.parent = None;
         drop(guards);
         if self.dead.load(Ordering::SeqCst) {
@@ -279,7 +280,7 @@ impl World {
 
     /// Deletes the fork at `path`, as the control API does.
     fn delete(&self, path: &Path, case: &str) {
-        let deleted = OpenCell::delete(path, Some(&self.bucket));
+        let deleted = futures::executor::block_on(OpenCell::delete(path, Some(&self.bucket)));
         assert_eq!(deleted.map_err(|err| err.to_string()), Ok(()), "{case}: deleting it");
         assert!(!path.exists(), "{case}: it is there still");
     }
@@ -381,7 +382,7 @@ impl World {
         // A fork to the same child, and to the same place, makes it if nothing has its ID, or fails
         // cleanly; one to a new child forks.
         let spent = self.record(self.child).is_some() || !children.is_empty();
-        let again = parent.fork_to(&path, self.child).map_err(|err| err.errno());
+        let again = futures::executor::block_on(parent.fork_to(&path, self.child)).map_err(|err| err.errno());
         assert_eq!(again, if spent { Err(Some(Errno::EEXIST)) } else { Ok(()) }, "{case}: again");
         if !spent {
             children.push(path.clone());
@@ -389,7 +390,7 @@ impl World {
         }
         let retried = crate::host_cell::new_alone();
         assert_eq!(
-            parent.fork_to(self.path("retried"), retried).map_err(|err| err.to_string()),
+            futures::executor::block_on(parent.fork_to(self.path("retried"), retried)).map_err(|err| err.to_string()),
             Ok(()),
             "{case}: a fork to a new child"
         );
@@ -404,7 +405,7 @@ impl World {
         let mut live = self.live();
         live.sort();
         let mut named = vec![self.cell, self.other.cell()];
-        named.extend(children.iter().map(|child| OpenCell::open(child).unwrap().cell()));
+        named.extend(children.iter().map(|child| futures::executor::block_on(OpenCell::open(child)).unwrap().cell()));
         if taken {
             named.push(self.child);
         }
@@ -687,8 +688,8 @@ fn forks_orphaned_by_a_lost_host_keep_what_they_inherited_until_deleted() {
     world.collect("deleted");
     assert!(stored(), "the origin went while the fork's version names it");
     let parent = world.open(&reopen).unwrap();
-    let versions = parent.versions().into_iter().map(|version| version.id).collect();
-    parent.drop_versions(&versions).unwrap();
+    let versions = futures::executor::block_on(parent.versions()).into_iter().map(|version| version.id).collect();
+    futures::executor::block_on(parent.drop_versions(&versions)).unwrap();
     crate::test_checkpoints::checkpointed(&parent, &world.bucket);
     drop(parent);
     world.collect("dropped");

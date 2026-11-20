@@ -102,7 +102,7 @@ fn read(store: &OpenCell, extent: ExtentId) -> Vec<u8> {
 /// (TASK-165.7). Before, the store's directory stayed, holding what the fork shared of it.
 fn stores_are_deleted_while_their_forks_live(cladefsctl: Cladefsctl, dir: &Path) {
     let (path, fork) = (dir.join("store"), dir.join("fork"));
-    let store = OpenCell::create(&path, 1 << 24).unwrap();
+    let store = futures::executor::block_on(OpenCell::create(&path, 1 << 24)).unwrap();
     let extent = ExtentId { cell: store.cell().id, sequence: 1 };
     store.write(extent, 0, &[VolatileSlice::from(&[7; BLOCK][..])]).unwrap();
     futures::executor::block_on(store.commit(None)).unwrap();
@@ -112,7 +112,7 @@ fn stores_are_deleted_while_their_forks_live(cladefsctl: Cladefsctl, dir: &Path)
 
     cladefsctl.run(&[Path::new("delete"), &path]).unwrap();
     assert!(!path.exists(), "the store's directory stayed");
-    let forked = OpenCell::open(&fork).unwrap();
+    let forked = futures::executor::block_on(OpenCell::open(&fork)).unwrap();
     assert_eq!(forked.cell(), cell);
     assert_eq!(read(&forked, extent), [7; BLOCK]);
     let own = ExtentId { cell: cell.id, sequence: 1 };
@@ -125,7 +125,7 @@ fn stores_are_deleted_while_their_forks_live(cladefsctl: Cladefsctl, dir: &Path)
     assert!(stat.contains(&format!("own {BLOCK}\ninherited {BLOCK}\n")), "{stat}");
     // Deleted again: nothing is there.
     assert!(cladefsctl.run(&[Path::new("delete"), &path]).is_err(), "deleted nothing again");
-    let forked = OpenCell::open(&fork).unwrap();
+    let forked = futures::executor::block_on(OpenCell::open(&fork)).unwrap();
     assert_eq!(read(&forked, extent), [7; BLOCK]);
     drop(forked);
 
@@ -218,7 +218,7 @@ fn stat_counts_extents(cladefsctl: Cladefsctl, dir: &Path) {
         named.map(value)
     };
     let block = BLOCK as u64;
-    let store = OpenCell::create(&path, 1 << 24).unwrap();
+    let store = futures::executor::block_on(OpenCell::create(&path, 1 << 24)).unwrap();
     let base = store.cell().id;
     let extent = |store: &OpenCell, sequence| ExtentId { cell: store.cell().id, sequence };
     let write = |store: &OpenCell, extent, offset, byte| {
@@ -226,7 +226,7 @@ fn stat_counts_extents(cladefsctl: Cladefsctl, dir: &Path) {
     };
     drop(store);
     assert_eq!(held(&path), [0, 0, 0, 0]);
-    let store = OpenCell::open(&path).unwrap();
+    let store = futures::executor::block_on(OpenCell::open(&path)).unwrap();
     for sequence in 1..=3 {
         write(&store, extent(&store, sequence), 0, sequence as u8);
     }
@@ -239,7 +239,7 @@ fn stat_counts_extents(cladefsctl: Cladefsctl, dir: &Path) {
 
     cladefsctl.run(&[Path::new("fork"), &path, &fork]).unwrap();
     assert_eq!(held(&fork), [0, 4 * block, 0, 3]);
-    let forked = OpenCell::open(&fork).unwrap();
+    let forked = futures::executor::block_on(OpenCell::open(&fork)).unwrap();
     let inherited = |sequence| ExtentId { cell: base, sequence };
     for sequence in 1..=2 {
         write(&forked, extent(&forked, sequence), 0, 7);
@@ -269,10 +269,10 @@ fn stat_counts_extents_through_the_daemon() {
 /// them does: it waits a while for them to close, then refuses, saying `refusal`.
 fn stores_open_elsewhere_are_left_alone(cladefsctl: Cladefsctl, dir: &Path, refusal: &str) {
     let path = dir.join("store");
-    let store = OpenCell::create(&path, 1 << 24).unwrap();
+    let store = futures::executor::block_on(OpenCell::create(&path, 1 << 24)).unwrap();
     let error = cladefsctl.run(&[Path::new("delete"), &path]).expect_err("deleted an open store");
     assert!(error.contains(refusal), "{error}");
-    assert!(OpenCell::open(dir.join("store")).is_err(), "opened twice");
+    assert!(futures::executor::block_on(OpenCell::open(dir.join("store"))).is_err(), "opened twice");
     drop(store);
     cladefsctl.run(&[Path::new("delete"), &path]).unwrap();
     assert!(!path.exists());
@@ -369,7 +369,7 @@ fn images_imported_where_no_daemon_is_fork_there() {
     run(&[&"import", &base, &"67108864", &image]).unwrap();
     let printed = run(&[&"fork", &base, &fork]).unwrap();
     let cell: cladefs::CellId = printed.trim().parse().unwrap();
-    assert_eq!(OpenCell::open(&fork).unwrap().cell(), cell);
+    assert_eq!(futures::executor::block_on(OpenCell::open(&fork)).unwrap().cell(), cell);
     // The file `hello` of the store at `path`, as its filesystem has it.
     let hello = |path: &Path| {
         block_on(async {
@@ -647,7 +647,7 @@ fn existing_stores_change_only_with_a_bucket_and_a_token() {
     use cladefs::import::testing::{Entry, Kind, layer};
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    drop(OpenCell::create(&path, 1 << 24).unwrap());
+    drop(futures::executor::block_on(OpenCell::create(&path, 1 << 24)).unwrap());
     let delete = [Path::new("delete"), &path];
 
     let error = Cladefsctl::with_env(&[]).run(&delete).expect_err("deleted with no bucket");
@@ -668,7 +668,7 @@ fn existing_stores_change_only_with_a_bucket_and_a_token() {
     Cladefsctl::with_env(&[]).run(&import).unwrap();
     let created = dir.path().join("created");
     Cladefsctl::with_env(&[]).run(&[Path::new("create"), &created, Path::new("67108864")]).unwrap();
-    assert!(OpenCell::open(&imported).is_ok() && created.exists());
+    assert!(futures::executor::block_on(OpenCell::open(&imported)).is_ok() && created.exists());
 
     // With both.
     Cladefsctl::local().run(&delete).unwrap();
@@ -713,13 +713,13 @@ fn the_version_is_the_build_commit() {
 fn stores_grow_here_and_shrink_only_through_the_daemon() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    drop(OpenCell::create(&path, 1 << 24).unwrap());
+    drop(futures::executor::block_on(OpenCell::create(&path, 1 << 24)).unwrap());
     let cladefsctl = Cladefsctl::local();
     let resize = |capacity: u64| {
         let capacity = capacity.to_string();
         cladefsctl.run(&[Path::new("resize"), &path, Path::new(&capacity)])
     };
-    let capacity = || OpenCell::open(&path).unwrap().info().unwrap().capacity;
+    let capacity = || futures::executor::block_on(OpenCell::open(&path)).unwrap().info().unwrap().capacity;
     resize(1 << 24).unwrap();
     assert_eq!(capacity(), 1 << 24);
     resize(1 << 25).unwrap();
