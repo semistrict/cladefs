@@ -14,4 +14,4 @@
 +            Some(allotment) if over(&allotment.tally, &AtomicU64::new(u64::MAX)) => {
                  Some(DiskFull::Allotment)
              }
-             Some(_) if over(&TOTAL.tally, &TOTAL.limit) => Some(DiskFull::Total),
+             Some(_) if over(&TOTAL.get().tally, &TOTAL.get().limit) => Some(DiskFull::Total),
