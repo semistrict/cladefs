@@ -22,8 +22,10 @@
 //!    takes it only holding them all so (`openAtNamed`), remembering the migration accepted for
 //!    good (`remembersAccepted`); refusing, it drops what it took and its reference, and never takes
 //!    that migration after (`refuseFinal`).
-//! 4. Accepted, the source removes its store, then retires its own reference (`sourceRetiresLast`);
-//!    refused, it removes its marker, durably, and serves the cell again. Not answered, the marker
+//! 4. Accepted, the source removes its store, then retires its own reference (`sourceRetiresLast`),
+//!    a note beside the store saying it handed the cell over until both are done, so that asking
+//!    again after either failed finishes them (board 5665); refused, it removes its marker,
+//!    durably, and serves the cell again. Not answered, the marker
 //!    stays, the store unopened here, and asking again, after a restart too, sends again what the
 //!    target lacks and asks it again, naming every file as before; the target answers as it did.
 
@@ -60,6 +62,21 @@ struct Marker {
     migration: u64,
     peer: String,
     incarnation: u64,
+}
+
+/// What a source notes beside a store it handed over until the store and its reference are gone
+/// ([`handed_over`]): the cell's journal entry, if it has one, whose reference goes.
+#[derive(Debug, Serialize, Deserialize)]
+struct HandedOver {
+    migration: u64,
+    entry: Option<Entry>,
+}
+
+/// Where a source notes it handed the store at `path` over ([`HandedOver`]): beside it, as a
+/// target stages a migration's files ([`staging`]).
+fn handed_over(path: &Path) -> PathBuf {
+    let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    path.with_file_name(format!(".{name}.handed-over"))
 }
 
 /// A migration from this host under way: its target, and what of each kept segment it sent, its
@@ -310,10 +327,21 @@ fn crc_of(path: &Path) -> std::io::Result<u32> {
 /// Hands the ephemeral cell of the store at `path` over to the target of its migration
 /// (`HandOverCell`), once nothing has it open here (`EBUSY` otherwise): see the module's docs.
 /// `EAGAIN` if the target refused, the store served here again; `ENOTCONN` if it did not answer,
-/// the store given up still, to be asked again.
+/// the store given up still, to be asked again; `EIO` if letting the store go failed once the target
+/// took it, which asking again finishes.
 pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
     let host = ephemeral_host::host()?;
     let _held = super::cells::hold_store_alone(&path).await?;
+    // Handed over before, and asked again: what is left of letting it go.
+    let handed = handed_over(&path);
+    if let Ok(bytes) = host_fs::read(&handed) {
+        let noted: HandedOver = serde_json::from_slice(&bytes).map_err(|err| {
+            log::error!("cladefsd: {}: {err}", handed.display());
+            Errno::EIO
+        })?;
+        log::info!("cladefsd: migration {:x} handed over: letting it go", noted.migration);
+        return let_go(&host, &path, &handed, &noted).await;
+    }
     let marker_path = path.join(MARKER);
     let marked: Option<Marker> =
         host_fs::read(&marker_path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok());
@@ -373,19 +401,39 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
         })?;
         return Err(Errno::EAGAIN);
     }
-    // Accepted: the store here goes, then this host's reference (`sourceRetiresLast`).
+    // Accepted: noted so, durably, then let go of, as asking again finds it noted (board 5665).
     let cell = local_cell::host_cell(&path).map_err(|_| Errno::EIO)?;
-    let entry = host.entry(cell);
-    local_cell::remove_store_dir(&path).map_err(|err| {
+    let noted = HandedOver { migration, entry: host.entry(cell) };
+    let bytes = serde_json::to_vec(&noted).map_err(|_| Errno::EIO)?;
+    write_durably(&handed, &bytes).map_err(|err| {
+        log::warn!("cladefsd: noting {} handed over: {err}", path.display());
+        Errno::EIO
+    })?;
+    let_go(&host, &path, &handed, &noted).await
+}
+
+/// Lets go of the store at `path`, handed over as `noted` says, noted at `handed`: the store goes,
+/// then this host's reference (`sourceRetiresLast`), then the note. `EIO` if the store or the note
+/// does not go, the note left, from which asking again goes on.
+async fn let_go(
+    host: &ephemeral_host::Host,
+    path: &Path,
+    handed: &Path,
+    noted: &HandedOver,
+) -> Result<(), Errno> {
+    local_cell::remove_store_dir(path).map_err(|err| {
         log::warn!("cladefsd: removing {}, handed over: {err:#}", path.display());
         Errno::EIO
     })?;
-    if let Some(entry) = entry
-        && let Err(err) = host.retire(&entry).await
+    if let Some(entry) = &noted.entry
+        && let Err(err) = host.retire(entry).await
     {
-        log::warn!("cladefsd: retiring {cell}'s reference, handed over: {err:#}");
+        log::warn!("cladefsd: retiring {}'s reference, handed over: {err:#}", entry.child);
     }
-    Ok(())
+    remove_durably(handed).map_err(|err| {
+        log::warn!("cladefsd: {}, let go of: {err}", handed.display());
+        Errno::EIO
+    })
 }
 
 /// Sends what `outgoing` has not sent of the store at `path`, given up: its directories; the kept
