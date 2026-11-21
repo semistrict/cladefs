@@ -132,7 +132,10 @@ mod tests {
     }
 
     /// A thread spinning for the profile's second, named, is what it sampled: pprof's protobuf,
-    /// whose functions name it; and a flamegraph, SVG.
+    /// whose functions name it; and a flamegraph, SVG. Asked for again until a profile's second
+    /// gave the thread a fifth of a CPU-second, about 20 samples, by its own CPU clock: a loaded
+    /// host gave it next to none once, and the profile was empty (board 2924). A profile that
+    /// misses a thread that ran fails.
     #[test]
     fn profiles_say_what_ran() {
         #[inline(never)]
@@ -147,7 +150,34 @@ mod tests {
             let stop = stop.clone();
             std::thread::spawn(move || spins_for_the_profile(&stop))
         };
-        let response = serve("/profile", "seconds=1");
+        // The spinning thread's CPU time, by its clock.
+        let clock = {
+            use std::os::unix::thread::JoinHandleExt as _;
+            let mut clock: libc::clockid_t = 0;
+            // SAFETY: the thread is alive until it is joined, below.
+            let got = unsafe { libc::pthread_getcpuclockid(spinning.as_pthread_t(), &mut clock) };
+            assert_eq!(got, 0, "the spinning thread's CPU clock");
+            clock
+        };
+        let ran = || {
+            let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+            // SAFETY: `now` is a timespec to write.
+            assert_eq!(unsafe { libc::clock_gettime(clock, &mut now) }, 0);
+            Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
+        };
+        // A page served while the thread had its fifth of a CPU-second: 30 tries at most.
+        let while_spinning = |page: &str| {
+            for _ in 0..30 {
+                let before = ran();
+                let response = serve(page, "seconds=1");
+                if ran() - before >= Duration::from_millis(200) {
+                    return response;
+                }
+            }
+            panic!("the spinning thread never had a fifth of a CPU-second in a second");
+        };
+
+        let response = while_spinning("/profile");
         assert_eq!(
             (response.status, response.content_type),
             ("200 OK", "application/octet-stream")
@@ -159,7 +189,7 @@ mod tests {
         assert!(names.iter().any(|name| name.contains("spins_for_the_profile")), "{names:?}");
         assert!(!profile.sample.is_empty());
 
-        let flamegraph = serve("/flamegraph", "seconds=1");
+        let flamegraph = while_spinning("/flamegraph");
         assert_eq!((flamegraph.status, flamegraph.content_type), ("200 OK", "image/svg+xml"));
         let svg = String::from_utf8(flamegraph.body).unwrap();
         assert!(svg.starts_with("<?xml"), "{svg}");
