@@ -98,10 +98,20 @@ async fn boot(host: u8, root: &Path, bucket: Arc<ObjectBucket>, kept: Kept) {
     }
     node_local::env::set_vars(vars);
     cladefs::cladefsd::use_bucket(bucket);
-    cladefs::cladefsd::boot(&root.join("vms.sock"), Some(256 << 20)).await.unwrap();
+    if let Err(err) = cladefs::cladefsd::boot(&root.join("vms.sock"), Some(256 << 20)).await {
+        // As its supervisor starts a daemon whose boot failed again: its node, started anew.
+        panic!("{BOOT_FAILED}: {err:#}");
+    }
     // As cladefsd's main parks once it booted: a node whose init returns exits, its tasks with it.
     std::future::pending::<()>().await;
 }
+
+/// What a host's daemon whose boot failed says as it exits, which has its node started again, as a
+/// host's supervisor starts its daemon (board 5654: a disk's fault may fail a boot).
+const BOOT_FAILED: &str = "the daemon's boot failed";
+
+/// The odds a call changing a host's disk fails at in the profiles with disk faults (board 5654).
+const DISK_FAULTS: host_fs::faults::Odds = host_fs::faults::Odds { fail: 0.002 };
 
 /// The daemon at `host`'s control API, once it answers.
 async fn connect(
@@ -165,6 +175,7 @@ fn hosts_keeping(
                 .create_node()
                 .name(format!("host{host}"))
                 .ip(control(host).ip())
+                .restart_on_panic_matching(BOOT_FAILED)
                 .init(move || {
                     let (root, bucket) = (root.clone(), bucket.clone());
                     async move { boot(host, &root, bucket, kept).await }
@@ -430,6 +441,26 @@ async fn versions_made_through_attrition_hold_what_came_before() {
     }
 }
 
+/// Board 5654: the attrition profile, the hosts' disks failing calls too, as the seed says, each
+/// with EIO or ENOSPC before it changes anything: every block told uploaded reads back as written
+/// once the bucket and the disks heal.
+#[madsim::test]
+async fn uploaded_commits_survive_disk_faults() {
+    if let Err(lost) = attrition(Profile { disk: true, ..Profile::PLAIN }).await {
+        panic!("{lost}");
+    }
+}
+
+/// Board 5654: the replicated attrition profile, the hosts' disks failing calls too: their
+/// replica logs, fences and promises among them.
+#[madsim::test]
+async fn replicated_commits_survive_disk_faults() {
+    let profile = Profile { kept: Kept::replicas(3), disk: true, ..Profile::PLAIN };
+    if let Err(lost) = attrition(profile).await {
+        panic!("{lost}");
+    }
+}
+
 /// TASK-685.6: the attrition profile finds the protocol's rules needed: with a writer's head swap
 /// unconditional (`bucket_cell::Rules::head_swap` off), a zombie writer writes the head over its
 /// successor's, whose blocks told uploaded the head then names not, and a seed loses one. Each seed
@@ -484,11 +515,14 @@ struct Profile {
     partitions: bool,
     /// Whether writers make versions, each forked once the bucket heals, and read there.
     versions: bool,
+    /// Whether the hosts' disks fail calls, as the seed says, once the cell is made, until the
+    /// bucket heals ([`DISK_FAULTS`], board 5654).
+    disk: bool,
 }
 
 impl Profile {
     /// Hosts keeping nothing more, never cut off, making no versions.
-    const PLAIN: Self = Self { kept: Kept::NONE, partitions: false, versions: false };
+    const PLAIN: Self = Self { kept: Kept::NONE, partitions: false, versions: false, disk: false };
 }
 
 /// Reads the blocks of `told`, `cell`'s, in the store at `path` on this host, which a guest opens:
@@ -535,7 +569,7 @@ async fn fork_version(host: u8, path: &Path, cell: u64, version: u64) {
 
 /// The attrition profile, as [`uploaded_commits_survive_attrition`] says, as `profile` says: what
 /// was lost, if anything.
-async fn attrition(Profile { kept, partitions, versions }: Profile) -> Result<(), String> {
+async fn attrition(Profile { kept, partitions, versions, disk }: Profile) -> Result<(), String> {
     use madsim::rand::Rng as _;
     const ROUNDS: u64 = 5;
     const WRITES: u64 = 6;
@@ -572,6 +606,10 @@ async fn attrition(Profile { kept, partitions, versions }: Profile) -> Result<()
     let net = madsim::net::NetSim::current();
     for round in 0..ROUNDS {
         restart(killed.take()).await;
+        // The disks failing once the cell is made: its making is not what the profile tries.
+        if disk && cell.is_some() {
+            host_fs::faults::set(DISK_FAULTS);
+        }
         // As the seed says: a host cut off the network a while, its links' packets lost.
         if partitions && madsim::rand::thread_rng().gen_bool(0.5) {
             let cut = nodes[madsim::rand::thread_rng().gen_range(0..nodes.len())].id();
@@ -614,6 +652,7 @@ async fn attrition(Profile { kept, partitions, versions }: Profile) -> Result<()
     restart(killed.take()).await;
     // Healed: the last host takes the cell, its every block told uploaded there as written.
     faults.set(bucket_cell::faults::Odds::NONE);
+    host_fs::faults::set(host_fs::faults::Odds::NONE);
     for node in &nodes {
         net.unclog_node(node.id());
     }
@@ -657,7 +696,17 @@ async fn attrition(Profile { kept, partitions, versions }: Profile) -> Result<()
 /// origin left, its host's alone (doc-12's ephemeral rows).
 #[madsim::test]
 async fn ephemeral_cells_survive_crashes_and_migrations() {
-    if let Err(lost) = ephemeral_attrition().await {
+    if let Err(lost) = ephemeral_attrition(false).await {
+        panic!("{lost}");
+    }
+}
+
+/// Board 5654: the ephemeral profile, the hosts' disks failing calls too, as the seed says, once
+/// the cell is forked: its host journal, its migrations' staging, notes and markers, its own
+/// checkpoints among them.
+#[madsim::test]
+async fn ephemeral_cells_survive_disk_faults() {
+    if let Err(lost) = ephemeral_attrition(true).await {
         panic!("{lost}");
     }
 }
@@ -685,9 +734,9 @@ where
     panic!("host {host} never answered")
 }
 
-/// The ephemeral attrition profile, as [`ephemeral_cells_survive_crashes_and_migrations`] says:
-/// what was lost, if anything.
-async fn ephemeral_attrition() -> Result<(), String> {
+/// The ephemeral attrition profile, as [`ephemeral_cells_survive_crashes_and_migrations`] says,
+/// the hosts' disks failing calls once the cell is forked if `disk`: what was lost, if anything.
+async fn ephemeral_attrition(disk: bool) -> Result<(), String> {
     use cladefs::cladefsd::control::proto::{HandOverCellRequest, MigrateCellRequest};
     use madsim::rand::Rng as _;
     const ROUNDS: u64 = 6;
@@ -756,6 +805,9 @@ async fn ephemeral_attrition() -> Result<(), String> {
     let child = child.into_inner().cell;
 
     let told = Arc::new(Told::default());
+    if disk {
+        host_fs::faults::set(DISK_FAULTS);
+    }
     for round in 0..ROUNDS {
         let writing = write_round(at.clone(), round, WRITES, told.clone());
         let mut written = node(host).spawn(writing);
@@ -811,6 +863,7 @@ async fn ephemeral_attrition() -> Result<(), String> {
     }
 
     faults.set(bucket_cell::faults::Odds::NONE);
+    host_fs::faults::set(host_fs::faults::Odds::NONE);
     let expected = told.uploaded.lock().unwrap().clone();
     let reading = at.clone();
     let read = node(host)
