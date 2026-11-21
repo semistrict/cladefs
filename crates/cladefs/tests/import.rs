@@ -612,8 +612,8 @@ fn crafted_images_are_refused_with_einval() {
                 h.set_gid(1 << 40);
             }),
         ),
-        ("the PAX uid", with_pax("uid", b"root")),
-        ("the PAX gid", with_pax("gid", b"root")),
+        ("failed to parse pax uid", with_pax("uid", b"root")),
+        ("failed to parse pax gid", with_pax("gid", b"root")),
         ("the PAX time", with_pax("mtime", b"noon")),
         ("the PAX time", with_pax("atime", b"1.5x")),
         ("no device major number", old_device()),

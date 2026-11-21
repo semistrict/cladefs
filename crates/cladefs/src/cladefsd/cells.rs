@@ -768,33 +768,22 @@ pub(super) async fn import(
     .await?;
     // As the daemon's stores keep their cells: with the host's cache, which what the bucket
     // acknowledged of the image goes into and the import's check reads (TASK-237).
-    // cladefs: on a blocking thread of its own, as before: its walk of a layer's tar entries, which
-    // are not `Send`, spans its awaits (doc-24: image import stays outside the simulation).
-    let (at, keeping) = (path.clone(), keeping()?);
-    blocking(move || {
-        // cladefs: an import under way, its path held: what its caller may give up on (board 5599).
+    // cladefs: an import under way, its path held: what its caller may give up on (board 5599);
+    // on a blocking thread, as what a test has the failpoint do waits.
+    blocking(|| {
         fail::fail_point!("cladefsd::import");
-        let imported = (image.as_path(), reference.as_deref());
-        let made = crate::import::store_keeping(&at, (capacity, tenant), imported, keeping);
-        outside_the_simulation(made)
-            .map_err(|err| errno_of(format_args!("importing {}", image.display()), err))
+        Ok(())
     })
     .await?;
+    // cladefs: awaited, its walk of a layer's entries async (board 5614).
+    let imported = (image.as_path(), reference.as_deref());
+    crate::import::store_keeping(&path, (capacity, tenant), imported, keeping()?)
+        .await
+        .map_err(|err| errno_of(format_args!("importing {}", image.display()), err))?;
     let store = open_here(&path).await?;
     let cell = store.cell();
     store.close().await;
     Ok(cell)
-}
-
-/// cladefs: awaits `future`, blocking the calling thread, a blocking thread of the runtime's: what an
-/// image's import does, whose walk of a layer's tar entries, which are not `Send`, spans its awaits,
-/// and which stays outside the simulation (doc-24). Under madsim, which runs on one thread, it fails
-/// at once.
-fn outside_the_simulation<F: std::future::Future>(future: F) -> F::Output {
-    local_cell::blocks!(
-        "an image's import, outside the simulation (cells::outside_the_simulation)"
-    );
-    futures::executor::block_on(future)
 }
 
 /// The store at `path`, or, if it doesn't exist, one of `cell`, of `capacity` bytes, taken from

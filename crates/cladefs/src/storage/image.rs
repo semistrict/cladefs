@@ -32,15 +32,6 @@ use storage_device::{ReadOptions, WriteFlags, WriteOptions};
 /// The size of the transfer buffers' memory.
 const TRANSFER_HEAP_SIZE: usize = 32 * 1024 * 1024;
 
-/// Runs `f` on a thread of its own, as it blocks.
-async fn unblock<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, Error> {
-    let (done, result) = futures::channel::oneshot::channel();
-    std::thread::Builder::new().name("cladefs image".into()).spawn(move || {
-        let _ = done.send(f());
-    })?;
-    Ok(result.await?)
-}
-
 /// An Fxfs device on an image. See the module docs.
 pub(crate) struct ImageDevice {
     image: Arc<KeptImage>,
@@ -171,13 +162,14 @@ impl ImageDevice {
     async fn commit(&self, root: Option<Vec<u8>>) -> Result<(), Error> {
         let _writing = self.writes.write().await;
         let image = self.image.clone();
-        // cladefs: its flush's disk work on a thread of its own, as before; the commit's waits
-        // awaited there, an outermost entry's (board 2944).
-        unblock(move || {
-            futures::executor::block_on(image.store().commit(root.as_deref()))?;
-            image.committed()
-        })
-        .await?
+        // cladefs: a task of the bucket runtime's, off the executor's threads: the flush's disk
+        // work, in `block_in_place` there, hands that runtime's other tasks on (board 5614).
+        let committing = async move {
+            image.store().commit(root.as_deref()).await?;
+            image.committed().await
+        };
+        let runtime = local_cell::upload::bucket_runtime()?;
+        runtime.spawn(committing).await.map_err(Error::new)?
     }
 }
 
@@ -323,8 +315,7 @@ impl Device for ImageDevice {
     /// in its bucket.
     async fn close(&self) -> Result<(), Error> {
         self.flush().await?;
-        let image = self.image.clone();
-        unblock(move || image.wait_uploaded()).await?.context("uploading the image's commits")
+        self.image.wait_uploaded().await.context("uploading the image's commits")
     }
 
     async fn flush(&self) -> Result<(), Error> {
@@ -643,7 +634,7 @@ mod tests {
     /// if one runs. Walked before, a file listed could go before it was read, `NotFound` (CI run
     /// 43729753505).
     async fn quiesced(device: &ImageDevice) {
-        device.image.wait_uploaded().unwrap();
+        device.image.wait_uploaded().await.unwrap();
         device.store.wait_idle().await.unwrap();
         if let Some(collecting) = device.image.collecting() {
             collecting.collected();

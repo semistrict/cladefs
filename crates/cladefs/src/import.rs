@@ -35,13 +35,17 @@ use crate::filesystem::{Filesystem, Node};
 use crate::node::{FileType, Owner, SetAttr, SetTime, XattrMode};
 use crate::storage::Storage;
 use anyhow::{Context as _, bail, ensure};
+use futures::StreamExt as _;
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{BufRead, BufReader, Read};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncRead, AsyncReadExt as _, ReadBuf};
 
 /// The prefix of a whiteout's name.
 const WHITEOUT: &[u8] = b".wh.";
@@ -220,14 +224,14 @@ impl Importer {
     }
 
     /// Applies the layer `layer`, a tar archive, gzipped or not, read as it is applied.
-    pub async fn apply(&mut self, layer: impl Read) -> Result<(), Error> {
+    pub async fn apply(&mut self, layer: impl Read + Send) -> Result<(), Error> {
         self.apply_layer(layer).await.map_err(Error::new)
     }
 
-    async fn apply_layer<'r>(&mut self, layer: impl Read + 'r) -> anyhow::Result<()> {
+    async fn apply_layer<'r>(&mut self, layer: impl Read + Send + 'r) -> anyhow::Result<()> {
         let mut layer = BufReader::with_capacity(CHUNK, layer);
         let magic = layer.fill_buf().context("reading the layer")?;
-        let layer: Box<dyn Read + 'r> = match magic {
+        let layer: Box<dyn Read + Send + 'r> = match magic {
             [0x1f, 0x8b, ..] => Box::new(flate2::bufread::MultiGzDecoder::new(layer)),
             [0x28, 0xb5, 0x2f, 0xfd, ..] => {
                 return Err(refused("zstd-compressed layers are not supported"));
@@ -236,10 +240,21 @@ impl Importer {
         };
         self.made.clear();
         self.kept.clear();
-        let mut archive = tar::Archive::new(layer);
-        for entry in archive.entries().context("reading the layer")? {
-            let mut entry = entry.context("reading the layer")?;
-            let path = entry.path_bytes().into_owned();
+        // cladefs: walked as it is awaited, its entries held across the filesystem's awaits, which
+        // the `tar` crate's, not `Send`, were not (board 5614).
+        let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut archive = tokio_tar::Archive::new(InPlace { layer, failed: failed.clone() });
+        let mut entries = archive.entries().context("reading the layer")?;
+        while let Some(entry) = entries.next().await {
+            // What the walk itself refused, not a read of the layer, is the image's fault: a PAX
+            // record it parses, a header's checksum (TASK-79.88).
+            let read = std::sync::atomic::Ordering::Relaxed;
+            let mut entry = match entry {
+                Ok(entry) => entry,
+                Err(err) if !failed.load(read) => return Err(refused(err)),
+                Err(err) => return Err(anyhow::Error::new(err).context("reading the layer")),
+            };
+            let path = entry.path_bytes().context("reading the layer")?.into_owned();
             self.entry(&mut entry)
                 .await
                 .with_context(|| format!("applying {:?}", String::from_utf8_lossy(&path)))?;
@@ -248,18 +263,21 @@ impl Importer {
     }
 
     /// Applies the layer's entry `entry`.
-    async fn entry(&mut self, entry: &mut tar::Entry<'_, impl Read>) -> anyhow::Result<()> {
+    async fn entry(
+        &mut self,
+        entry: &mut LayerEntry<impl AsyncRead + Unpin + Send>,
+    ) -> anyhow::Result<()> {
         let entry_type = entry.header().entry_type();
         if entry_type.is_pax_global_extensions() {
             return Ok(());
         }
-        let path = normalize(&entry.path_bytes())?;
+        let path = normalize(&entry.path_bytes()?)?;
         let Some((parent, name)) = split(&path) else {
             // The root, which only takes the entry's attributes.
             if !entry_type.is_dir() {
                 return Err(refused("the root is not a directory"));
             }
-            let metadata = metadata(entry)?;
+            let metadata = metadata(entry).await?;
             return self.update_directory(&self.root(), &path, metadata).await;
         };
         if name == OPAQUE {
@@ -268,7 +286,7 @@ impl Importer {
         if let Some(whited_out) = name.strip_prefix(WHITEOUT) {
             return self.remove_lower(&join(parent, whited_out)).await;
         }
-        let metadata = metadata(entry)?;
+        let metadata = metadata(entry).await?;
         let dir = self.directory(parent).await?;
         match dir.lookup(name).await {
             Ok((existing, attr))
@@ -290,13 +308,13 @@ impl Importer {
         self.made.insert(path.clone());
         let (perm, owner) = (metadata.perm, metadata.owner);
         let (node, attr) = match entry_type {
-            tar::EntryType::Directory => {
+            tokio_tar::EntryType::Directory => {
                 let (made, _) = dir.mkdir(name, perm, owner).await?;
                 let made = self.remember_directory(&path, made);
                 return self.update_directory(&made, &path, metadata).await;
             }
-            tar::EntryType::Link => {
-                let target = entry.link_name_bytes().ok_or_else(|| refused("no link target"))?;
+            tokio_tar::EntryType::Link => {
+                let target = entry.link_name_bytes()?.ok_or_else(|| refused("no link target"))?;
                 let target = normalize(&target)?;
                 let target = self.find(&target).await?;
                 let target = target.ok_or_else(|| refused("the link's target is missing"))?;
@@ -305,17 +323,20 @@ impl Importer {
                 target.link(&dir, name).await?;
                 return Ok(());
             }
-            tar::EntryType::Regular | tar::EntryType::Continuous | tar::EntryType::GNUSparse => {
-                dir.create(name, perm, owner).await?
-            }
-            tar::EntryType::Symlink => {
-                let target = entry.link_name_bytes().ok_or_else(|| refused("no symlink target"))?;
+            tokio_tar::EntryType::Regular
+            | tokio_tar::EntryType::Continuous
+            | tokio_tar::EntryType::GNUSparse => dir.create(name, perm, owner).await?,
+            tokio_tar::EntryType::Symlink => {
+                let target =
+                    entry.link_name_bytes()?.ok_or_else(|| refused("no symlink target"))?;
                 dir.symlink(name, &target, owner).await?
             }
-            tar::EntryType::Char | tar::EntryType::Block | tar::EntryType::Fifo => {
+            tokio_tar::EntryType::Char
+            | tokio_tar::EntryType::Block
+            | tokio_tar::EntryType::Fifo => {
                 let (file_type, rdev) = match entry_type {
-                    tar::EntryType::Fifo => (FileType::Fifo, 0),
-                    tar::EntryType::Char => (FileType::CharDevice, device(entry.header())?),
+                    tokio_tar::EntryType::Fifo => (FileType::Fifo, 0),
+                    tokio_tar::EntryType::Char => (FileType::CharDevice, device(entry.header())?),
                     _ => (FileType::BlockDevice, device(entry.header())?),
                 };
                 dir.mknod(name, file_type, perm, rdev, owner).await?
@@ -493,15 +514,15 @@ impl Importer {
 /// a chunk at a time, and leaving their runs of zeros a block long as holes.
 async fn write_contents(
     file: &Node,
-    entry: &mut tar::Entry<'_, impl Read>,
+    entry: &mut LayerEntry<impl AsyncRead + Unpin + Send>,
     chunk: &mut [u8],
 ) -> anyhow::Result<()> {
-    let size = entry.size();
+    let size = entry.effective_size();
     // Where the data written ends: the file's size, as it was empty.
     let mut written = 0;
     let mut offset = 0;
     while offset < size {
-        let len = read_full(entry, chunk)?;
+        let len = read_entry(entry, chunk).await?;
         ensure!(len > 0, "the layer ends in the file, at {offset} of {size} bytes");
         // One write a run of data: a write waits for Fxfs's pager to let it dirty its pages,
         // which it asks for together, so a run of blocks costs one round trip, not one each.
@@ -614,7 +635,9 @@ fn refused(what: impl std::fmt::Display + Send + Sync + 'static) -> anyhow::Erro
 
 /// What `entry` says of the node it makes: its header, and its PAX records, which take
 /// precedence.
-fn metadata(entry: &mut tar::Entry<'_, impl Read>) -> anyhow::Result<Metadata> {
+async fn metadata(
+    entry: &mut LayerEntry<impl AsyncRead + Unpin + Send>,
+) -> anyhow::Result<Metadata> {
     let header = entry.header();
     let perm = (header.mode()? & 0o7777) as u16;
     let too_large = |_| refused("the owner's uid or gid is too large");
@@ -624,7 +647,8 @@ fn metadata(entry: &mut tar::Entry<'_, impl Read>) -> anyhow::Result<Metadata> {
     let mut times = Times { atime: mtime, mtime };
     let mut atime = None;
     let mut xattrs = Vec::new();
-    for record in entry.pax_extensions()?.into_iter().flatten() {
+    let pax = entry.pax_extensions().await?;
+    for record in pax.into_iter().flatten() {
         let record = record?;
         let key = record.key()?;
         if let Some(name) = key.strip_prefix(PAX_XATTR) {
@@ -671,7 +695,7 @@ fn since_epoch(since: Duration) -> anyhow::Result<SystemTime> {
 
 /// The device a device node's header names, as Linux encodes it for user space (`new_encode_dev`,
 /// as glibc's `makedev`), which Fxfs keeps.
-fn device(header: &tar::Header) -> anyhow::Result<u32> {
+fn device(header: &tokio_tar::Header) -> anyhow::Result<u32> {
     let major = header.device_major()?.ok_or_else(|| refused("no device major number"))?;
     let minor = header.device_minor()?.ok_or_else(|| refused("no device minor number"))?;
     if major >= 1 << 12 || minor >= 1 << 20 {
@@ -719,6 +743,58 @@ fn join(dir: &[u8], name: &[u8]) -> Vec<u8> {
 /// `path0`, as `0` follows `/`.
 fn inside(path: &[u8]) -> Range<Vec<u8>> {
     [path, b"/"].concat()..[path, b"0"].concat()
+}
+
+/// A layer's entry, as its walk gives it.
+type LayerEntry<R> = tokio_tar::Entry<tokio_tar::Archive<R>>;
+
+/// cladefs: a layer, read as its walk awaits it ([`tokio_tar`]), in place: the file, or what
+/// decompresses it, read on the awaiting thread, a disk read, synchronous as the store's are (board
+/// 2944), never pending (board 5614). `failed` says whether a read of it failed, which tells the
+/// walk's own refusals from the layer's I/O errors.
+struct InPlace<R> {
+    layer: R,
+    failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl<R: Read + Unpin> AsyncRead for InPlace<R> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        loop {
+            match this.layer.read(buf.initialize_unfilled()) {
+                Ok(read) => {
+                    buf.advance(read);
+                    return Poll::Ready(Ok(()));
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(err) => {
+                    this.failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                    return Poll::Ready(Err(err));
+                }
+            }
+        }
+    }
+}
+
+/// Reads from `entry` into `buf` until it is full or `entry` ends, and returns how much it read.
+async fn read_entry(
+    entry: &mut (impl AsyncRead + Unpin),
+    buf: &mut [u8],
+) -> std::io::Result<usize> {
+    let mut len = 0;
+    while len < buf.len() {
+        match entry.read(&mut buf[len..]).await {
+            Ok(0) => break,
+            Ok(read) => len += read,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(len)
 }
 
 /// Reads from `reader` into `buf` until it is full or `reader` ends, and returns how much it read.
@@ -822,7 +898,9 @@ impl OciImage {
     /// first.
     pub async fn import(&self, importer: &mut Importer) -> Result<(), Error> {
         for layer in &self.layers {
-            let path = verified_blob(&self.layout, &layer.digest).map_err(Error::new)?;
+            // cladefs: its whole blob hashed, off the runtime's other tasks (board 5614).
+            let verified = || verified_blob(&self.layout, &layer.digest);
+            let path = local_cell::upload::blocking(verified).map_err(Error::new)?;
             let file = std::fs::File::open(&path)
                 .with_context(|| format!("opening {}", path.display()))
                 .map_err(Error::new)?;

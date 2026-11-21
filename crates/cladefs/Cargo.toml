@@ -80,6 +80,7 @@ opentelemetry-otlp = { version = "0.33.1", default-features = false, features = 
 backtrace = "0.3.77"
 humantime = "2.4.0"
 loom = { workspace = true, optional = true }
+astral-tokio-tar = "0.7.1"
 
 [dev-dependencies]
 async-trait.workspace = true

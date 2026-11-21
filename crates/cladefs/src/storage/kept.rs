@@ -91,11 +91,11 @@ impl KeptImage {
     /// writer's or deleted, or its bucket out of reach for good, rather than the image go on as
     /// a cell no bucket has; it waits while more of its commits wait to be uploaded than the
     /// lag's bound; and the bucket's collector runs, if it is due.
-    pub fn committed(&self) -> anyhow::Result<()> {
+    pub async fn committed(&self) -> anyhow::Result<()> {
         if let Some(failed) = self.uploader.failed() {
             return Err(anyhow::Error::new(failed).context("the image's cell is not uploaded"));
         }
-        local_cell::upload::wait_on(self.uploader.lag(self.store.last_commit()?))?;
+        self.uploader.lag(self.store.last_commit()?).await?;
         if let Some(collecting) = &self.collecting {
             collecting.after_commit();
         }
@@ -104,8 +104,8 @@ impl KeptImage {
 
     /// Waits until the store's commits are uploaded: so a closed image's cell is whole in its
     /// bucket.
-    pub fn wait_uploaded(&self) -> anyhow::Result<()> {
-        Ok(local_cell::upload::wait_on(self.uploader.uploaded(self.store.last_commit()?))?)
+    pub async fn wait_uploaded(&self) -> anyhow::Result<()> {
+        Ok(self.uploader.uploaded(self.store.last_commit()?).await?)
     }
 
     /// Forks the store's cell, as of its last commit, to a new cell of its tenant's (TASK-364),
@@ -336,8 +336,8 @@ mod tests {
         assert!(image.collecting().is_none());
         image.store().write(ExtentId::new(7, 1), 0, &[1; 4096]).await.unwrap();
         image.store().commit(None).await.unwrap();
-        image.committed().unwrap();
-        image.wait_uploaded().unwrap();
+        image.committed().await.unwrap();
+        image.wait_uploaded().await.unwrap();
         assert_eq!(
             kept(&bucket_of(&path), bucket_cell::layout::test_cell(7)).await.0,
             BTreeMap::from([(ExtentId::new(7, 1), 4096)])
@@ -363,16 +363,16 @@ mod tests {
             image.store().write(extent(sequence), 0, &data).await.unwrap();
         }
         image.store().commit(None).await.unwrap();
-        image.committed().unwrap();
+        image.committed().await.unwrap();
         // Uploaded before they are freed: a segment of the commits sealing and freeing them both
         // would hold none of them.
-        image.wait_uploaded().unwrap();
+        image.wait_uploaded().await.unwrap();
         for sequence in 0..3 {
             image.store().free(extent(sequence)).unwrap();
         }
         image.store().commit(Some(b"root")).await.unwrap();
-        image.committed().unwrap();
-        image.wait_uploaded().unwrap();
+        image.committed().await.unwrap();
+        image.wait_uploaded().await.unwrap();
         drop(image);
 
         let own = dir.path().join("image.bucket");
