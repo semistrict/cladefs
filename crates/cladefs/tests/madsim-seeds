@@ -19,3 +19,5 @@
 171     board 5730: a handed-over cell's journal entry, its note now, unlinked as it was let go of, its directory's sync failing, answered EIO; asking again found nothing (ENOENT)
 210     board 5734: a target's acceptance released by its source, the cell's noting taken having failed after it: the target started again took its entry for a migration never accepted and removed the cell
 157     board 5948: a host's boot failed on its part cache's EIO, and the VM manager gave up on its control API within 5 s, before madsim started it again (1 to 10 s; GitHub's runner, Linux)
+868     board 5914: a member's first append of a log failing after its file was made, the empty file was no authentic copy, and every take failed (macOS)
+1171    board 5914: the same, its take failing for good (macOS)

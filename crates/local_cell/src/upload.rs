@@ -2352,7 +2352,10 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// can't be read, or reads shorter than its member's fence said, fails the take, as it may be
     /// the only one holding commits told replicated; and so does a log none of whose copies is
     /// authentic, as a log missing would look like a writer's base, given up
-    /// (`replicate::trimmed`).
+    /// (`replicate::trimmed`). A copy its member's fence says ends at nothing holds nothing, as
+    /// one it never made: a member makes a log's file at its first append, which may fail after
+    /// (board 5914: its write failing, ENOSPC, it held the file empty, which, no header of its own,
+    /// was no authentic copy, and every take failed).
     async fn read_longest(
         &self,
         cell: CellId,
@@ -2363,7 +2366,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // Each log's copies, by their members' fences' ends, the longest first.
         let mut copies: BTreeMap<u64, Vec<(u64, bucket_cell::layout::Member)>> = BTreeMap::new();
         for (member, ends) in fenced {
-            for &(log, end) in ends {
+            for &(log, end) in ends.iter().filter(|&&(_, end)| end > 0) {
                 copies.entry(log).or_default().push((end, member.clone()));
             }
         }
