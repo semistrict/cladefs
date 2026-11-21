@@ -3,9 +3,11 @@ id: TASK-722
 title: >-
   The scripts/*-host.sh drivers can target asahimbp: arm64, no Rust on the host,
   no clone of cladefs
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-21 07:02'
+updated_date: '2026-11-21 07:38'
 labels:
   - asahimbp
 dependencies: []
