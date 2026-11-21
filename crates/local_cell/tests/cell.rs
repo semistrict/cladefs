@@ -177,6 +177,20 @@ async fn writes_once() {
     assert_eq!(read(&cell, extent(1), 0, 2 * BLOCK), [[1; BLOCK], [2; BLOCK]].concat());
 }
 
+/// Board 2762: no cell writes an extent of the last sequence, past which no next sequence is: a
+/// write of one is refused, its next sequence as it was, and the cell goes on. Written, it wrapped
+/// the next sequence to 0 (release) or panicked under the state lock (checked builds).
+#[tokio::test(flavor = "multi_thread")]
+async fn extents_of_the_last_sequence_are_refused() {
+    let cell = create(MemDir::new(), 1 << 20);
+    cell.write(extent(1), 0, &[1; BLOCK]).await.unwrap();
+    let last = extent(u64::MAX);
+    error_is(cell.write(last, 0, &[2; BLOCK]).await, local_cell::LastSequence(last));
+    assert_eq!(cell.info().unwrap().next_sequence, 2);
+    cell.commit(None).await.unwrap();
+    assert_eq!(read(&cell, extent(1), 0, BLOCK), [1; BLOCK]);
+}
+
 /// cladefs: an extent freed once sealed is written no more, nor opened, though the cell holds it
 /// no longer, nor once it opens again, from its deltas or its checkpoint: forks, views and caches
 /// that hold it by its ID would take another's data for it (TASK-79.6). One freed while open,

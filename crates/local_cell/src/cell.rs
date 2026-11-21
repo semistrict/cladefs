@@ -108,6 +108,12 @@ pub struct TooLong {
     pub len: u64,
 }
 
+/// cladefs: the error of a write of an extent of the last sequence, past which no cell's next
+/// sequence is, nor a spent run's end (board 2762): refused, as no cell mints it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{0:?}: the last sequence, which no extent is of")]
+pub struct LastSequence(pub ExtentId);
+
 /// How a cell lays its extents out.
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
@@ -1171,7 +1177,11 @@ impl<D: Dir> Recovering<D> {
         // it (`Allocator::open`). Not the footers' next sequence, which their writers stamped
         // past their own floors (`Chain::close`), the next floor being the uploader's to say.
         let own = extents.lens().filter(|(extent, _)| extent.cell == cell.id);
-        let next_sequence = own.map(|(extent, _)| extent.sequence + 1).max().unwrap_or(0);
+        // cladefs: the bucket's state is authenticated, and its extents a cell's, of no last
+        // sequence ([`LastSequence`]): saturating all the same, as no arithmetic on what was read
+        // wraps (board 2762).
+        let next_sequence =
+            own.map(|(extent, _)| extent.sequence.saturating_add(1)).max().unwrap_or(0);
         let root = root.unwrap_or_default();
         remove_unheld(&*dir, cell.id, &extents, &named_own)?;
 
@@ -1909,6 +1919,9 @@ impl<D: Dir> LocalCell<D> {
         if extent.cell != self.cell.id {
             bail!(OtherCell(extent));
         }
+        if extent.sequence == u64::MAX {
+            bail!(LastSequence(extent));
+        }
         let state = self.writable()?;
         if state.gate.is_held() {
             return Ok(None);
@@ -2190,7 +2203,8 @@ impl<D: Dir> LocalCell<D> {
             }
             _ => unreachable!("an extent's data is in segments or its own file"),
         }
-        state.next_sequence = state.next_sequence.max(extent.sequence + 1);
+        // Not the last sequence, which writes refuse ([`LastSequence`]).
+        state.next_sequence = state.next_sequence.max(extent.sequence.saturating_add(1));
         self.count_open(state);
         self.written(state);
         self.see_ahead(state);

@@ -30,9 +30,12 @@ impl Spent {
         self.runs.range(..=sequence).next_back().is_some_and(|(_, &end)| sequence < end)
     }
 
-    /// Spends `sequence`.
+    /// Spends `sequence`, which is not the last: a run's end, past its last, is past it, and no
+    /// cell writes an extent of it (`local_cell::LastSequence`, board 2762), which a wrapped end
+    /// omitted silently.
     pub fn insert(&mut self, sequence: u64) {
-        self.insert_run(sequence, sequence + 1);
+        let end = sequence.checked_add(1).expect("no extent is of the last sequence (board 2762)");
+        self.insert_run(sequence, end);
     }
 
     /// Spends the run `start..end`, joining the runs it meets.

@@ -527,7 +527,11 @@ pub(crate) fn errno(error: anyhow::Error) -> Errno {
     {
         // cladefs: and its disk, or its tenant's limits, refusing it (doc-22).
         Errno::ENOSPC
-    } else if error.is::<Unaligned>() || error.is::<Unsectored>() || error.is::<TooLong>() {
+    } else if error.is::<Unaligned>()
+        || error.is::<Unsectored>()
+        || error.is::<TooLong>()
+        || error.is::<local_cell::LastSequence>()
+    {
         Errno::EINVAL
     } else if full_disk(&error) {
         // cladefs: the host's disk refusing what the open cell makes for the request, a raw file or
@@ -2691,7 +2695,7 @@ mod tests {
     #[test]
     fn each_open_cell_error_has_its_errno() {
         let extent = ExtentId { cell: 1, sequence: 2 };
-        let cases: [(anyhow::Error, Errno); 13] = [
+        let cases: [(anyhow::Error, Errno); 14] = [
             (local_cell::CutOff.into(), Errno::ESTALE),
             (anyhow::Error::new(NoExtent(extent)).context(NotHeld(extent)), Errno::EIO),
             (NoExtent(extent).into(), Errno::ENOENT),
@@ -2703,6 +2707,10 @@ mod tests {
             (Unaligned { offset: 1, len: 2 }.into(), Errno::EINVAL),
             (Unsectored { offset: 1, len: 2 }.into(), Errno::EINVAL),
             (TooLong { offset: 1, len: 2 }.into(), Errno::EINVAL),
+            (
+                local_cell::LastSequence(ExtentId { cell: 1, sequence: u64::MAX }).into(),
+                Errno::EINVAL,
+            ),
             (bucket_data(extent).into(), Errno::EIO),
             (anyhow::anyhow!("the disk"), Errno::EIO),
         ];
