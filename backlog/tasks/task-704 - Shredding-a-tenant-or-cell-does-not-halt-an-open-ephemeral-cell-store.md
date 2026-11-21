@@ -1,9 +1,11 @@
 ---
 id: TASK-704
 title: Shredding a tenant or cell does not halt an open ephemeral cell store
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-20 20:14'
+updated_date: '2026-11-21 00:43'
 labels: []
 dependencies: []
 documentation:
