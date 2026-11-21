@@ -185,6 +185,14 @@ class PatchRun(Stoppable, unittest.TestCase):
         self.assertEqual((self.tree / "f.txt").read_text(), ORIGINAL)
         self.assertFalse((self.tree / ".mutant-in").exists())
 
+    def test_a_command_not_found_ends_127_and_takes_the_mutant_out(self):
+        done = self.run_bash('patch_run m.patch log no-such-command; echo "status $?"')
+        self.assertEqual((done.stdout, done.stderr), ("status 127\n", ""))
+        self.assertEqual((self.tree / "log").read_text(),
+                         "no-such-command: No such file or directory\n")
+        self.assertEqual((self.tree / "f.txt").read_text(), ORIGINAL)
+        self.assertFalse((self.tree / ".mutant-in").exists())
+
     def test_a_sigterm_while_its_command_runs_stops_it_and_takes_the_mutant_out(self):
         runner = self.start(self.bash("patch_run m.patch log blocker; echo ran on"), self.tree)
         self.assertEqual((self.tree / "f.txt").read_text(), MUTATED)

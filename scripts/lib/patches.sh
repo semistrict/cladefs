@@ -140,11 +140,20 @@ patch_run() {
     _patch_in=$patch
     # In a process group of its own, so that a stop reaches what COMMAND started (cargo's tests, a
     # script's builds), and the terminal's ^C reaches the runner, which stops COMMAND. Never the
-    # terminal's own group, so not reading it: a read would stop it.
-    set -m
-    "$@" < /dev/null > "$log" 2>&1 &
+    # terminal's own group, so not reading it: a read would stop it. The child makes its group
+    # itself, before it runs COMMAND, not bash's job control (set -m), whose setpgid of the child
+    # raced the child's own on macOS under load, bash printing "child setpgid (PID to PID):
+    # Operation not permitted" (board 2954).
+    # A command not found ends 127, as bash's would.
+    python3 -c '
+import os, sys
+os.setpgid(0, 0)
+try:
+    os.execvp(sys.argv[1], sys.argv[1:])
+except OSError as error:
+    print(f"{sys.argv[1]}: {error.strerror}", file=sys.stderr)
+    sys.exit(127)' "$@" < /dev/null > "$log" 2>&1 &
     _patch_child=$!
-    set +m
     wait "$_patch_child"
     status=$?
     _patch_child=""
@@ -178,7 +187,8 @@ patch_recover() {
 _patch_stop() {
     trap '' TERM INT HUP
     if [[ -n $_patch_child ]]; then
-        kill -TERM -- "-$_patch_child" 2> /dev/null
+        # Its group, or, stopped before it made the group, the child alone.
+        kill -TERM -- "-$_patch_child" 2> /dev/null || kill -TERM "$_patch_child" 2> /dev/null
         wait "$_patch_child"
     fi
     [[ -z $_patch_in ]] || _patch_out
