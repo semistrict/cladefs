@@ -1,11 +1,11 @@
 ---
 id: TASK-704
 title: Shredding a tenant or cell does not halt an open ephemeral cell store
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-20 20:14'
-updated_date: '2026-11-21 00:44'
+updated_date: '2026-11-21 05:32'
 labels: []
 dependencies: []
 documentation:
@@ -24,12 +24,18 @@ Split from TASK-698.7 at the close of TASK-698 (2026-11-20). An open ephemeral s
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Forgetting the tenant or cell of an open ephemeral cell halts its store (EACCES), as a bucket cell store is halted
-- [ ] #2 A test shreds the tenant of an open ephemeral cell and sees its next read and write refused
+- [x] #1 Forgetting the tenant or cell of an open ephemeral cell halts its store (EACCES), as a bucket cell store is halted
+- [x] #2 A test shreds the tenant of an open ephemeral cell and sees its next read and write refused
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 scripts/upstream-changes.py --check passes
-- [ ] #2 Deviations from upstream documented where they occur
+- [x] #1 scripts/upstream-changes.py --check passes
+- [x] #2 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+No code change needed: an ephemeral cell's OpenCell is assembled through OpenCell::assemble like any other, which lists its Halt with its cell, so crate::bucket::forget (ShredCell, ForgetTenantKeys) already halts it with EACCES. The task's premise was wrong. Added cladefsd::tests::forgetting_keys_halts_open_ephemeral_cells: two ephemeral cells of one version open; forgetting the first's cell keys refuses its reads (own and inherited), writes and commits with EACCES while the second reads on; forgetting the tenant's halts the second (and the version's store the daemon holds). Passes on ubu1 with the other ephemeral/forget/shred tests (6/6). No upstream code touched.
+<!-- SECTION:FINAL_SUMMARY:END -->
