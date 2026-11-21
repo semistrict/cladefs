@@ -9,6 +9,5 @@
 # with the bug's fix, as its seeds join madsim-seeds.
 #
 # BOARD TEST                                            PANIC
-5721    ephemeral_cells_survive_disk_faults             round \d+: handing over: Errno\(ENOENT\)
 5721    ephemeral_cells_survive_disk_faults             the cell noted on hosts \[\d+, \d+\], held on \d+
 5721    ephemeral_cells_survive_disk_faults             host \d+ never answered

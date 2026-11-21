@@ -391,16 +391,20 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
             return Err(Errno::ENOTCONN);
         }
     };
-    OUTGOING.get().lock().unwrap().remove(&path);
     if !accepted {
         // Served here again: durably, before any opening, so that no crash brings the marker
-        // back, a later migration then asking for this one's hand-over.
+        // back, a later migration then asking for this one's hand-over. Under way until then
+        // (board 5721): its marker unlinked, its directory's sync failing, asking again finds the
+        // migration under way, writes its marker again, is refused again, and removes it again,
+        // where it would find neither and answer ENOENT.
         remove_durably(&marker_path).map_err(|err| {
             log::warn!("cladefsd: serving {} again: {err}", path.display());
             Errno::EIO
         })?;
+        OUTGOING.get().lock().unwrap().remove(&path);
         return Err(Errno::EAGAIN);
     }
+    OUTGOING.get().lock().unwrap().remove(&path);
     // Accepted: noted so, durably, then let go of, as asking again finds it noted (board 5665).
     let cell = local_cell::host_cell(&path).map_err(|_| Errno::EIO)?;
     let noted = HandedOver { migration, entry: host.entry(cell) };
