@@ -110,7 +110,8 @@ pub struct PhysMemory {
     /// Each chunk's arena and slot, `arena << 32 | slot`, or `UNASSIGNED`.
     chunks: Box<[AtomicU64]>,
     /// cladefs: where chunks to fault in go, to a thread of their own ([`PhysMemory::populate_later`]).
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    /// Unused under madsim, which faults them in as used (doc-24).
+    #[cfg_attr(any(not(target_os = "linux"), madsim), allow(dead_code))]
     populating: std::sync::Mutex<Option<std::sync::mpsc::Sender<usize>>>,
 }
 
