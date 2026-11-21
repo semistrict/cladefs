@@ -113,17 +113,24 @@ const BOOT_FAILED: &str = "the daemon's boot failed";
 /// The odds a call changing a host's disk fails at in the profiles with disk faults (board 5654).
 const DISK_FAULTS: host_fs::faults::Odds = host_fs::faults::Odds { fail: 0.002 };
 
+/// How long a host's control API may not answer, its daemon started again: madsim starts a node
+/// whose boot failed ([`BOOT_FAILED`]) again 1 to 10 s after (`restart_on_panic_matching`), and
+/// a boot of the next may fail too, as a disk's fault may fail any (board 5721: a caller giving
+/// up within 5 s took a host whose boot failed once for one never started again).
+const STARTED_WITHIN: Duration = Duration::from_secs(60);
+
 /// The daemon at `host`'s control API, once it answers.
 async fn connect(
     host: u8,
 ) -> cladefs::cladefsd::control::proto::cladefsd_client::CladefsdClient<tonic::transport::Channel> {
+    const AGAIN: Duration = Duration::from_millis(100);
     let mut failed = None;
-    for _ in 0..50 {
+    for _ in 0..STARTED_WITHIN.as_millis() / AGAIN.as_millis() {
         match cladefs::cladefsd::control::connect(control(host)).await {
             Ok(client) => return client,
             Err(err) => failed = Some(err),
         }
-        madsim::time::sleep(Duration::from_millis(100)).await;
+        madsim::time::sleep(AGAIN).await;
     }
     panic!("host {host}'s control API never answered: {failed:?}");
 }
