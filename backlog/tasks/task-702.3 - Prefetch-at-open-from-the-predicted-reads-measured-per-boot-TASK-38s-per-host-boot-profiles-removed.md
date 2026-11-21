@@ -3,10 +3,11 @@ id: TASK-702.3
 title: >-
   Prefetch at open from the predicted reads, measured per boot; TASK-38's
   per-host boot profiles removed
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-20 19:46'
-updated_date: '2026-11-21 00:46'
+updated_date: '2026-11-21 05:36'
 labels:
   - sandbox
   - performance
@@ -39,6 +40,18 @@ A cold host's first fork of a version reads its base a part at a time (TASK-670:
 - [ ] #1 scripts/upstream-changes.py --check passes
 - [ ] #2 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. bucket_cell fetch: Fetcher::fetch_ahead(extent, location, offset): the part holding the offset, found as read finds it (following moves), fetched at Priority::Ahead (demand promoted past it, peers asked first, under the host budget), kept in the part cache, not unpacked; nothing if the cache or memory holds it. HostFetcher::fetch_ahead on the bucket runtime.
+2. cladefs evidence: every guest opening of a fork of a version has a boot window (RECORDED_FOR) tracking the units its guest reads; the first fork of the version an interval also writes them as a recording (as now). At the window's end each boot's units are measured against the prediction it had: units predicted and read, predicted and unread, read and unpredicted, counters in stats (zpages, control).
+3. Prefetch: once the prediction is read, a task on the bucket runtime goes through its units in order, those of extents the fork's own store holds sealed (LocalCell::extent), each unit's bucket location (LocalCell::locate's BucketData; local data skipped), fetching them through HostFetcher::fetch_ahead, 128 at once; aborted as the store closes or drops; the guest never waits for it. Prefetches counter counts parts fetched.
+4. TASK-38 gone: profile.rs, the cache's Recorder hook, OpenCell::profile and replay, the profiling field; Opening.profiled renamed for what it now means (opened for a guest), open_without_profile with it; their tests turned into tests of the prefetch (forks prefetch their prediction; stores opened for the host prefetch nothing).
+5. Tests: bucket_cell: demand reads go ahead of fetch_ahead's, and more than four parts in flight; cladefs: a fork's prediction prefetched into the part cache, only of extents its store holds; the measurement counters.
+6. ubu1 python-sandbox e2e: a cold host's first boot of a version with evidence against a warm one, with cold and warm peers; docs/measurements.
+7. CONTEXT.md, doc-7/doc-24 where they name boot profiles; upstream-changes.py --check.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
