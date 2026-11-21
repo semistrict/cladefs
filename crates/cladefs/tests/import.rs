@@ -518,6 +518,31 @@ fn zstd_layers_are_refused() {
     })
 }
 
+/// Board 2526: an entry's path longer than `PATH_MAX` less its NUL is refused, `EINVAL`, saying
+/// so: one of 60 KB, a PAX record's, made the importer's memory quadratic in its depth. One as
+/// long as that is applied.
+#[test]
+fn paths_past_path_max_are_refused() {
+    let deep = |components: usize| ["a/"].repeat(components).concat() + "f";
+    block_on(async {
+        let fs = Filesystem::format(Storage::memory(STORAGE_SIZE)).await.unwrap();
+        let mut importer = Importer::new(&fs);
+        let longest = deep(2047);
+        assert_eq!(longest.len(), 4095);
+        importer.apply(layer_of(&longest).as_slice()).await.unwrap();
+        let error = importer.apply(layer_of(&deep(2048)).as_slice()).await.expect_err("applied");
+        assert_eq!(error.errno(), Some(Errno::EINVAL), "{error:#}");
+        assert!(format!("{error:#}").contains("a path of 4097 bytes, past 4095"), "{error:#}");
+        drop(importer);
+        close(fs).await;
+    })
+}
+
+/// A layer of one file at `path`, of any length: its PAX record's.
+fn layer_of(path: &str) -> Vec<u8> {
+    layer(&[Entry::new(path, Kind::File(b"deep"))]).unwrap()
+}
+
 #[test]
 fn paths_stay_in_the_image() {
     let mut header = tar::Header::new_gnu();

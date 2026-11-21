@@ -732,9 +732,19 @@ fn device(header: &tokio_tar::Header) -> anyhow::Result<u32> {
     Ok((minor & 0xff) | (major << 8) | ((minor & !0xff) << 12))
 }
 
+/// The most bytes of an entry's path, Linux's `PATH_MAX` less its NUL: what no path of a file
+/// system the image is of holds more of. cladefs: an image is untrusted (AGENTS.md, Trust
+/// boundaries): past it, an entry's path, of any length in a PAX record, made the importer hold a
+/// copy of each of its prefixes, memory quadratic in its depth (board 2526).
+const MAX_PATH: usize = 4095;
+
 /// `path`, an entry's, relative to the root: without leading slashes, `.` or empty components.
-/// Paths through `..` are refused, as images are not to name what is outside them.
+/// Paths through `..` are refused, as images are not to name what is outside them; and those
+/// longer than [`MAX_PATH`].
 fn normalize(path: &[u8]) -> anyhow::Result<Vec<u8>> {
+    if path.len() > MAX_PATH {
+        return Err(refused(format!("a path of {} bytes, past {MAX_PATH}", path.len())));
+    }
     let mut normal = Vec::with_capacity(path.len());
     for component in path.split(|&byte| byte == b'/') {
         match component {
