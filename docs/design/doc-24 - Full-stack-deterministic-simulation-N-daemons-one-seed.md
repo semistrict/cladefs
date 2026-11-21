@@ -357,6 +357,54 @@ Before the decision, the steps that served any of the three went on:
   message, a hang (nextest's profile madsim ends a test at five minutes) or a crash fails it. A
   line goes with its bug's fix.
 
+## Fault profiles and rule searches as built (board 2830, 2026-11-21)
+
+`crates/cladefs/tests/madsim.rs`'s attrition is one workload (a writer guest's rounds, each on the
+next of three hosts, takes at later placements, kills, zombie writers, the bucket failing and out
+of reach) over a `Profile` of fault families, each a test of its own, and all of them drawn at
+random per seed (`Profile::swarm`, FoundationDB's `addFailureInjection`):
+
+- **Network**: a host cut off both ways (`clog_node`), one way (`clog_node_in`/`_out`), or the
+  links between nodes cut one after another and mended in another order (FoundationDB's
+  swizzle); packets lost and delayed throughout, which TCP's streams ride out stalling.
+- **Replication**: a replicated cell's takes, a member killed with the writer's host and down
+  still as the next host takes the cell, forced (doc-21).
+- **Operations**: versions made and each forked at the end; writers freeing blocks told uploaded,
+  each freed reading no more; bases made, a version of each forked on another host, the base
+  deleted; the collector passing meanwhile and twice at the end, its grace gone between, from a
+  node of its own under the hosts' KMS; the hosts told other peers (SetPeers); a host drained, as
+  SIGTERM has it, before its kill.
+- **Pressure**: a host's memory and disk limited a while (SetMemoryLimit, ShrinkMemory,
+  SetDiskLimit), writes refused past them. The host's disk governor stays out of reach while a
+  simulated disk is a fixed terabyte (board 5899).
+- **Disks**: calls failing (board 5654), as before. BUGGIFY stays off in the full stack: turned on,
+  its sites switched by the madsim seed, it lost an ephemeral cell's Local commits (board 6034),
+  which it waits for.
+
+The checker: every block told uploaded and not freed reads as written on the last host, none freed
+does, each version's fork holds what was told uploaded before it, and each base's fork reads the
+block it inherited.
+
+**Rule searches** (`needs!`): a rule of `bucket_cell::Rules` off, seeds of its profile until one
+loses what a guest was told, each seed a process of its own (as scripts/test.sh runs them: a
+simulation's node-local values stay in its process, board 2890). Each rule was tried over 2,000
+seeds of the profile that reaches it. Five find theirs: `head_swap` (attrition),
+`collector_epochs` and `candidates_first` (frees and the collector), `references` and
+`references_relisted` (bases). `slots_at_birth` found its on Linux (seed 92 of the bases profile)
+but in none of 2,000 seeds on macOS, whose schedules differ; a search one platform misses would
+fail `scripts/test.sh` there, so it has none. The rest found none: `local_cell::sim`'s searches find each, their
+steps aimed at the protocol's races over 20,000 seeds, where a full-stack seed reaches them
+seldom; aiming the full stack's faults at those races is adoption 5 below. `local_cell::Rules`
+(the open cell's concurrency) found none either: its framings', flushes' and frees' rules over
+2,000 seeds of their profiles, and its views' and writes' rules guard a follower and a writer
+racing its own commits, which one simulated guest, its requests one at a time, never is; Shuttle's
+searches find them (`crates/local_cell/tests/shuttle`).
+
+**What it found**: cladefsd's drain counters were process statics, so each simulated host waited
+for every host's connections and calls, and simulations sharing a process woke each other's tasks
+(board 5806); with BUGGIFY on, an ephemeral cell's Local commits lost (board 6034); and, on main as
+it was, two live-migration endings of the ephemeral disk-faults profile (board 6032).
+
 ## What FoundationDB does that we don't (2026-11-20)
 
 Read in `~/src/foundationdb` at 7e7611f82 (2026-11-06). The user asked for this to be compared

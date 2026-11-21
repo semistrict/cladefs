@@ -29,7 +29,6 @@
 //! lost, as at a crash, and those durable that weren't uploaded are uploaded by the next daemon to
 //! open their cells.
 
-use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::sync::watch;
 
@@ -129,41 +128,45 @@ pub async fn drain(within: Duration) -> Result<(), Left> {
 }
 
 /// cladefs: work of a kind that a drain waits for, counted as it begins and ends ([`Work::begin`]):
-/// VM processes' connections, the control API's calls.
-pub(super) struct Work(LazyLock<watch::Sender<usize>>);
+/// VM processes' connections, the control API's calls. Its count is the daemon's: node-local, so
+/// that each simulated host counts its own, and no simulation's tasks wait on another's (board
+/// 5806).
+pub(super) struct Work(node_local::NodeLocal<watch::Sender<usize>>);
 
 impl Work {
     pub const fn new() -> Self {
-        Self(LazyLock::new(|| watch::channel(0).0))
+        Self(node_local::NodeLocal::new(|| watch::channel(0).0))
     }
 
     /// Begins work of the kind, until what it returns is dropped; or none, `None`, once the daemon
     /// drains: counted first, and given up if then the daemon drains, so that a drain that
     /// finds none counted finds none begun after, whatever their order.
     pub fn begin(&'static self) -> Option<Doing> {
-        self.0.send_modify(|count| *count += 1);
-        let doing = Doing(self);
+        let count = self.0.get();
+        count.send_modify(|count| *count += 1);
+        let doing = Doing(count);
         (!draining()).then_some(doing)
     }
 
     /// How much of it is under way.
-    pub fn count(&self) -> usize {
-        *self.0.borrow()
+    pub fn count(&'static self) -> usize {
+        *self.0.get().borrow()
     }
 
     /// Returns once none of it is under way.
-    pub(super) async fn done(&self) {
-        let mut count = self.0.subscribe();
+    pub(super) async fn done(&'static self) {
+        let mut count = self.0.get().subscribe();
         // The sender lives as long as the process.
         let _ = count.wait_for(|count| *count == 0).await;
     }
 }
 
-/// Work under way ([`Work::begin`]), until dropped.
-pub(super) struct Doing(&'static Work);
+/// Work under way ([`Work::begin`]), until dropped: of the count it began in, wherever it is
+/// dropped.
+pub(super) struct Doing(&'static watch::Sender<usize>);
 
 impl Drop for Doing {
     fn drop(&mut self) {
-        self.0.0.send_modify(|count| *count -= 1);
+        self.0.send_modify(|count| *count -= 1);
     }
 }
