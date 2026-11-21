@@ -138,6 +138,14 @@ const ALLOWED: &[(Allowed, &str)] = &[
         "The server serves no O_TMPFILE (FUSE_TMPFILE: EOPNOTSUPP), which tmpfs serves \
          (TASK-226): not generated.",
     ),
+    (
+        Allowed::LsmLabels,
+        "A host's LSM labels the reference's nodes as its policy has it, SELinux's \
+         security.selinux set on each as it is made, where the mount, a FUSE filesystem labelled \
+         by policy alone (genfscon), carries none: cladefs-mount stores no LSM label (board 5234). \
+         The label is left out of the trees compared, and listxattr, whose list and size would \
+         show it, is not generated on such a host.",
+    ),
 ];
 
 /// A difference [`ALLOWED`] lists.
@@ -160,6 +168,15 @@ enum Allowed {
     Holes,
     PosixAcls,
     Tmpfile,
+    LsmLabels,
+}
+
+/// The extended attribute a host's SELinux labels nodes with ([`Allowed::LsmLabels`]).
+const LSM_LABEL: &[u8] = b"security.selinux";
+
+/// Whether this host's LSM labels nodes with [`LSM_LABEL`]: SELinux is on (selinuxfs mounted).
+fn lsm_labels() -> bool {
+    Path::new("/sys/fs/selinux/enforce").exists()
 }
 
 /// Why `allowed` is, which it must be: what leaves something out names its entry so.
@@ -1158,7 +1175,8 @@ fn xattrs(path: &Path) -> Result<BTreeMap<Bytes, Bytes>, Errno> {
             ret(libc::llistxattr(path.as_ptr(), list.as_mut_ptr().cast(), list.len()) as i64)?;
         list.truncate(len as usize);
         let mut values = BTreeMap::new();
-        for name in xattr_names(&list) {
+        allowed(Allowed::LsmLabels);
+        for name in xattr_names(&list).into_iter().filter(|name| name.0 != LSM_LABEL) {
             let mut value = vec![0u8; 1 << 16];
             let named = cstring(&name.0);
             let len = libc::lgetxattr(
@@ -1859,12 +1877,6 @@ fn op(run: &Run) -> BoxedStrategy<Op> {
         ),
         (
             2,
-            (path(), xsize(), any::<bool>())
-                .prop_map(|(path, size, follow)| Op::Listxattr { path, size, follow })
-                .boxed(),
-        ),
-        (
-            2,
             (path(), xattr_name(), any::<bool>())
                 .prop_map(|(path, name, follow)| Op::Removexattr { path, name, follow })
                 .boxed(),
@@ -1878,6 +1890,12 @@ fn op(run: &Run) -> BoxedStrategy<Op> {
     ];
     if run.identities.len() > 1 {
         ops.push((4, (0..run.identities.len()).prop_map(|who| Op::As { who }).boxed()));
+    }
+    allowed(Allowed::LsmLabels);
+    if !lsm_labels() {
+        let listxattr = (path(), xsize(), any::<bool>())
+            .prop_map(|(path, size, follow)| Op::Listxattr { path, size, follow });
+        ops.push((2, listxattr.boxed()));
     }
     Union::new_weighted(ops).boxed()
 }
