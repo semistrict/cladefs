@@ -840,7 +840,9 @@ fn blocking<T, E: From<Errno>>(
         );
         return Err(Errno::EIO.into());
     }
-    // cladefs: outside the simulation: a VM process's client, which blocks at its entry.
+    // cladefs: outside the simulation: the sync twins of the client's `_async` calls, for sync
+    // callers, tools' and tests', which wait here, an outermost entry's (board 2948); the VMM's
+    // backend calls the `_async` ones (board 5614).
     futures::executor::block_on(future)
 }
 
