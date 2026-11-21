@@ -11,7 +11,7 @@
 //! peers too, replicating each other's cells over the simulated network (doc-21), cut off it a
 //! while as the seed says.
 
-#![cfg(all(madsim, target_os = "linux"))]
+#![cfg(madsim)]
 
 use bucket_cell::object_bucket::ObjectBucket;
 use cladefs::cladefsd::control::proto::{

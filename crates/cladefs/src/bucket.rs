@@ -510,8 +510,8 @@ impl Unreached {
 }
 
 /// cladefs: how many stores' uploaders run in this process, as it changes: what an extent daemon's
-/// drain waits to see none of (TASK-141.4): Linux's alone, as the daemon is.
-#[cfg(target_os = "linux")]
+/// drain waits to see none of (TASK-141.4): the daemon's, Linux's and the simulation's.
+#[cfg(any(target_os = "linux", madsim))]
 pub(crate) fn uploaders() -> tokio::sync::watch::Receiver<usize> {
     local_cell::upload::uploaders()
 }

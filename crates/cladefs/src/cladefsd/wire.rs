@@ -18,11 +18,20 @@
 //! outright and the old one refused. Every request is required of a daemon of the VM process's
 //! version, so none is optional: a refusal of one fails the connection.
 
-use super::codec::{Stage, StageOp};
-use std::io::{self, Read, Write};
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::net::UnixStream;
+use std::io;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::Mutex;
+// cladefs: a Unix stream's, Linux's alone: the VM process's half, as its client is
+// (`super::client`), and the daemon's outside the simulation, whose guests' connections are in
+// memory, macOS's included (board 2912).
+#[cfg(target_os = "linux")]
+use super::codec::{Stage, StageOp};
+#[cfg(target_os = "linux")]
+use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+#[cfg(target_os = "linux")]
+use std::os::unix::net::UnixStream;
 
 /// cladefs: a VM process's connection in memory, under madsim (doc-24).
 #[cfg(madsim)]
@@ -374,6 +383,7 @@ pub(crate) const MAP_MANY: u32 = 32;
 pub(crate) const STAGE_PRIVATE_COUNTS: u32 = 33;
 /// cladefs: how long a VM process's stage operations go uncounted at most while it makes them
 /// ([`STAGE_COUNTS`]): within a sample of the daemon's stats file (`CLADEFSD_STATS`).
+#[cfg(target_os = "linux")]
 pub(crate) const STAGE_COUNTS_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
 
 pub(crate) const OPEN_CREATE: u32 = 1 << 0;
@@ -484,8 +494,11 @@ pub(crate) struct Message {
 
 /// The sending half of a VM process's connection, which any of its threads sends whole messages
 /// through, each waiting for room as the socket fills: the daemon's is an [`AsyncSender`].
+/// cladefs: Linux's alone, as its client is.
+#[cfg(target_os = "linux")]
 pub(crate) struct Sender(Mutex<UnixStream>);
 
+#[cfg(target_os = "linux")]
 impl Sender {
     pub fn new(stream: UnixStream) -> Self {
         Self(Mutex::new(stream))
@@ -845,7 +858,8 @@ impl Drop for AsyncSender {
 }
 
 /// Whether the other end of the stream `fd` hung up, though its receiving end may not have read so
-/// yet.
+/// yet. cladefs: a Unix stream's, outside the simulation, whose connections are in memory.
+#[cfg(not(madsim))]
 pub(crate) fn hung_up(fd: BorrowedFd<'_>) -> bool {
     let mut poll = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLRDHUP, revents: 0 };
     // SAFETY: Polls a descriptor the caller keeps open, without waiting.
@@ -854,6 +868,7 @@ pub(crate) fn hung_up(fd: BorrowedFd<'_>) -> bool {
 }
 
 /// Waits until `stream` takes more bytes.
+#[cfg(target_os = "linux")]
 fn wait_writable(stream: &UnixStream) -> io::Result<()> {
     let mut poll = libc::pollfd { fd: stream.as_raw_fd(), events: libc::POLLOUT, revents: 0 };
     loop {
@@ -869,6 +884,7 @@ fn wait_writable(stream: &UnixStream) -> io::Result<()> {
 }
 
 /// Writes all of `bytes` to `stream`, blocking or not, waiting for room as it fills.
+#[cfg(target_os = "linux")]
 fn write_all(stream: &UnixStream, mut bytes: &[u8]) -> io::Result<()> {
     while !bytes.is_empty() {
         match (&*stream).write(bytes) {
@@ -883,12 +899,14 @@ fn write_all(stream: &UnixStream, mut bytes: &[u8]) -> io::Result<()> {
 }
 
 /// Sends what of `bytes` one `sendmsg` does, with `fds`: how many bytes it sent, at least one.
+#[cfg(target_os = "linux")]
 fn send_with_fds(stream: &UnixStream, bytes: &[u8], fds: &[BorrowedFd<'_>]) -> io::Result<usize> {
     send_parts(stream, &[bytes], fds)
 }
 
 /// Sends what of `parts`, in order, one `sendmsg` does, with `fds`: how many bytes it sent, at
 /// least one.
+#[cfg(target_os = "linux")]
 fn send_parts(stream: &UnixStream, parts: &[&[u8]], fds: &[BorrowedFd<'_>]) -> io::Result<usize> {
     let mut iov: Vec<libc::iovec> = (parts.iter())
         .map(|part| libc::iovec { iov_base: part.as_ptr() as *mut _, iov_len: part.len() })
@@ -933,7 +951,9 @@ fn send_parts(stream: &UnixStream, parts: &[&[u8]], fds: &[BorrowedFd<'_>]) -> i
 /// reads what the socket holds, many messages at once, rather than a message's header and payload
 /// each a read (TASK-91.16): a VM process's stage operations come in runs, a window change's
 /// together. The descriptors that come with what it reads it keeps, in order, for the messages
-/// that say they carry them ([`Header::fds`]).
+/// that say they carry them ([`Header::fds`]). cladefs: a VM process's, Linux's alone, as its client
+/// is (`super::client`).
+#[cfg(target_os = "linux")]
 pub(crate) struct Receiver {
     stream: UnixStream,
     /// What it read and has not received yet: `buffer[start..end]`.
@@ -945,8 +965,10 @@ pub(crate) struct Receiver {
 }
 
 /// cladefs: the bytes a [`Receiver`] reads at most at once.
+#[cfg(target_os = "linux")]
 const RECEIVE_BYTES: usize = 64 << 10;
 
+#[cfg(target_os = "linux")]
 impl Receiver {
     pub fn new(stream: UnixStream) -> Self {
         let buffer = vec![0; RECEIVE_BYTES].into_boxed_slice();
@@ -1184,6 +1206,8 @@ impl AsyncReceiver {
 }
 
 /// Receives what of `bytes` one `recvmsg` does, and the descriptors that came with them.
+/// cladefs: Linux's (`MSG_CMSG_CLOEXEC`), as a Unix stream's VM process is.
+#[cfg(target_os = "linux")]
 fn receive_with_fds(
     stream: &UnixStream,
     bytes: &mut [u8],

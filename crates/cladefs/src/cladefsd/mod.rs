@@ -90,12 +90,16 @@
 //! processes name stores, whether the cell one names counts, and whether they follow public
 //! bases. What may be done to a store is the store's, fixed as it opens ([`crate::CellAccess`]).
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", madsim))]
 mod boot;
 pub(crate) mod cells;
+// cladefs: a VM process's, whose memory and faults are Linux's (memfd, userfaultfd): no simulated
+// host has one, its guests calling it in memory (`guest`, board 2912).
+#[cfg(target_os = "linux")]
 pub(crate) mod client;
 mod codec;
 pub mod control;
+#[cfg(target_os = "linux")]
 mod device;
 pub mod disk;
 pub mod drain;
@@ -124,7 +128,7 @@ pub mod zpages;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", madsim))]
 pub use boot::boot;
 
 /// cladefs: has the daemon of this simulated host keep its stores' cells in `bucket`, which the
@@ -135,8 +139,10 @@ pub fn use_bucket(bucket: std::sync::Arc<bucket_cell::object_bucket::ObjectBucke
     cells::use_bucket(bucket);
 }
 pub use cells::{cache_config, replace_after};
+#[cfg(target_os = "linux")]
 pub use client::{CellClient, DaemonConnection, Unmapped, spawn_on_replies};
 pub use control::serve_control;
+#[cfg(target_os = "linux")]
 pub use device::DaemonDevice;
 pub use http::serve_http;
 pub use server::{Tenant, serve, serve_tenant};

@@ -60,7 +60,7 @@ impl Error {
 
     /// Whether what failed waited for something busy and gave up: another process's lock of a
     /// store (`local_cell`'s, which an extent daemon serving it holds).
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", madsim))]
     pub(crate) fn is_busy(&self) -> bool {
         self.0.chain().any(|cause| {
             cause

@@ -74,8 +74,8 @@ pub async fn boot(socket: &Path, memory: Option<u64>) -> anyhow::Result<()> {
     }
     let control = set_os("CLADEFSD_GRPC");
     // cladefs: its FUSE mount of cells, whose Mount service is on the control socket (TASK-475.2).
+    // Under madsim, refused (`mount::start`): FUSE is outside the simulation.
     if let Some(mount) = super::mount::Config::from_env().map_err(anyhow::Error::msg)? {
-        anyhow::ensure!(!cfg!(madsim), "a simulated host mounts no cells: FUSE is outside it");
         anyhow::ensure!(
             control.is_some(),
             "CLADEFSD_MOUNT is set, but CLADEFSD_GRPC names no control socket to attach cells through"

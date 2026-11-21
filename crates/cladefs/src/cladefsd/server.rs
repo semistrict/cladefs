@@ -393,6 +393,7 @@ impl Tenant {
 }
 
 /// `fd`, reopened read-only: a shared memory object no mapping of which can write it.
+#[cfg(target_os = "linux")]
 fn reopen_read_only(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<std::os::fd::OwnedFd> {
     use std::os::fd::AsRawFd;
     let path = std::ffi::CString::new(format!("/proc/self/fd/{}", fd.as_raw_fd())).unwrap();
@@ -403,6 +404,15 @@ fn reopen_read_only(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<std::os:
     }
     // SAFETY: Just opened, and owned here.
     Ok(unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(raw) })
+}
+
+/// cladefs: `fd` again, on macOS, where the daemon builds under madsim alone (board 2912): a
+/// shared memory object there is unlinked as it is made (physmem), and so can't be opened anew,
+/// read-only or not. Writable, then; but no process maps it: a simulated guest is in the
+/// simulation's process, and maps nothing it is handed.
+#[cfg(not(target_os = "linux"))]
+fn reopen_read_only(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<std::os::fd::OwnedFd> {
+    fd.try_clone_to_owned()
 }
 
 /// Serves the VM process at the other end of `stream`, of `tenant`, until it closes the
@@ -2011,9 +2021,7 @@ impl TransferArea {
         if len == 0 || len > MAX_TRANSFER_AREA {
             return Err(Errno::EINVAL);
         }
-        // SAFETY: Reads the seals of a descriptor the message carried.
-        let seals = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GET_SEALS) };
-        if seals < 0 || seals & libc::F_SEAL_SHRINK == 0 {
+        if !seals::against_shrinking(fd) {
             return Err(Errno::EINVAL);
         }
         // SAFETY: A stat buffer the call fills.
@@ -2039,10 +2047,7 @@ impl TransferArea {
             return Err(Errno::ENOMEM);
         }
         let area = Self { addr: std::ptr::NonNull::new(addr.cast()).unwrap(), len };
-        let seals = libc::F_SEAL_FUTURE_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SEAL;
-        // SAFETY: Seals a descriptor the message carried, mapped above.
-        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_ADD_SEALS, seals) } != 0 {
-            let err = std::io::Error::last_os_error();
+        if let Err(err) = seals::against_writes(fd) {
             log::warn!("cladefsd: a transfer area not to be sealed against writes: {err}");
             return Err(Errno::EINVAL);
         }
@@ -2057,7 +2062,11 @@ impl TransferArea {
         let mut resident = vec![0u8; (end - start) / page];
         // SAFETY: Of its mapping, page-aligned, a byte for each of its pages.
         let done = unsafe {
-            libc::mincore(self.addr.as_ptr().add(start).cast(), end - start, resident.as_mut_ptr())
+            libc::mincore(
+                self.addr.as_ptr().add(start).cast(),
+                end - start,
+                resident.as_mut_ptr().cast(),
+            )
         };
         if done != 0 {
             log::warn!("cladefsd: a transfer area's pages: {}", std::io::Error::last_os_error());
@@ -2092,6 +2101,43 @@ impl TransferArea {
         let addr = self.range(offset, len)?;
         // SAFETY: As above.
         Ok(unsafe { VolatileSliceMut::from_raw_parts(addr, len as usize) })
+    }
+}
+
+/// cladefs: a transfer area's seals, Linux's (memfd): macOS, where the simulation runs too, has
+/// none, so a transfer area is refused there, as no simulated guest makes one (board 2912).
+mod seals {
+    use std::os::fd::BorrowedFd;
+
+    /// Whether the memory `fd` is sealed against shrinking.
+    #[cfg(target_os = "linux")]
+    pub(super) fn against_shrinking(fd: BorrowedFd<'_>) -> bool {
+        use std::os::fd::AsRawFd;
+        // SAFETY: Reads the seals of a descriptor the caller keeps open.
+        let seals = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GET_SEALS) };
+        seals >= 0 && seals & libc::F_SEAL_SHRINK != 0
+    }
+
+    /// Seals the memory `fd` against future writes, growing and further seals.
+    #[cfg(target_os = "linux")]
+    pub(super) fn against_writes(fd: BorrowedFd<'_>) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+        let seals = libc::F_SEAL_FUTURE_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SEAL;
+        // SAFETY: Seals a descriptor the caller keeps open.
+        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_ADD_SEALS, seals) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub(super) fn against_shrinking(_: BorrowedFd<'_>) -> bool {
+        false
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub(super) fn against_writes(_: BorrowedFd<'_>) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::Unsupported.into())
     }
 }
 
@@ -2439,9 +2485,8 @@ const WATCH_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 struct Peer {
     acks: Arc<Acks>,
     sender: Arc<AsyncSender>,
-    /// Its process, as a pidfd: none if it is this one, as tests' are, whose code the daemon's own
-    /// is.
-    process: Option<std::os::fd::OwnedFd>,
+    /// Its process: none if it is this one, as tests' are, whose code the daemon's own is.
+    process: Option<VmProcess>,
     /// Whether the daemon let it go ([`Peer::let_go`]).
     let_go: AtomicBool,
     /// The bytes a reply to `MAPPINGS` of its window takes at most, once it has one (TASK-79.43):
@@ -2477,7 +2522,7 @@ impl Peer {
         let process = peer_process(stream)?;
         if let Some(process) = &process {
             // Signal 0, which checks the right to signal it, and sends nothing.
-            signal(process, 0).map_err(|err| {
+            process.signal(0).map_err(|err| {
                 std::io::Error::new(err.kind(), format!("the daemon may not kill it: {err}"))
             })?;
         }
@@ -2534,12 +2579,8 @@ impl Peer {
     /// Returns once its process has exited, holding no thread, its memory gone, and its mappings
     /// of the window; never, if it is this process.
     async fn exited(&self) -> std::io::Result<()> {
-        use std::os::fd::AsFd;
         let Some(process) = &self.process else { return std::future::pending().await };
-        // A pidfd is readable once its process has exited.
-        let exited =
-            tokio::io::unix::AsyncFd::with_interest(process.as_fd(), tokio::io::Interest::READABLE);
-        exited?.readable().await.map(drop)
+        process.exited().await
     }
 
     /// Its connection is gone, the process perhaps not: `reaching` pages, which go back once it
@@ -2560,7 +2601,7 @@ impl Peer {
             return;
         }
         // Which the daemon may, as it checked as the process connected (`Peer::connected`).
-        if let Err(err) = signal(process, libc::SIGKILL) {
+        if let Err(err) = process.signal(libc::SIGKILL) {
             log::error!("cladefsd: killing a VM process: {err}");
         }
         if let Err(err) = self.exited().await {
@@ -2569,24 +2610,54 @@ impl Peer {
     }
 }
 
-/// cladefs: sends `signal` to the process `process`, a pidfd, names: 0 sends none, but checks that
-/// this process may signal it.
-fn signal(process: &std::os::fd::OwnedFd, signal: libc::c_int) -> std::io::Result<()> {
-    use std::os::fd::AsRawFd;
-    // SAFETY: Signals the process the pidfd, which the caller keeps open, names.
-    let sent = unsafe {
-        libc::syscall(
-            libc::SYS_pidfd_send_signal,
-            process.as_raw_fd(),
-            signal,
-            std::ptr::null::<libc::siginfo_t>(),
-            0,
-        )
-    };
-    if sent != 0 {
-        return Err(std::io::Error::last_os_error());
+/// cladefs: a VM process, other than this one, as a pidfd. Under madsim, none: a simulated
+/// guest is in the simulation's process ([`peer_process`]), so the type has no values, and a
+/// simulated host, macOS's too, has no pidfds (doc-24, board 2912).
+#[cfg(not(madsim))]
+struct VmProcess(std::os::fd::OwnedFd);
+#[cfg(madsim)]
+enum VmProcess {}
+
+impl VmProcess {
+    /// Sends it `signal`: 0 sends none, but checks that this process may signal it.
+    #[cfg(not(madsim))]
+    fn signal(&self, signal: libc::c_int) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+        // SAFETY: Signals the process the pidfd, which it keeps open, names.
+        let sent = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                self.0.as_raw_fd(),
+                signal,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        };
+        if sent != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
     }
-    Ok(())
+
+    /// Returns once it has exited, holding no thread.
+    #[cfg(not(madsim))]
+    async fn exited(&self) -> std::io::Result<()> {
+        use std::os::fd::AsFd;
+        // A pidfd is readable once its process has exited.
+        let exited =
+            tokio::io::unix::AsyncFd::with_interest(self.0.as_fd(), tokio::io::Interest::READABLE);
+        exited?.readable().await.map(drop)
+    }
+
+    #[cfg(madsim)]
+    fn signal(&self, _: libc::c_int) -> std::io::Result<()> {
+        match *self {}
+    }
+
+    #[cfg(madsim)]
+    async fn exited(&self) -> std::io::Result<()> {
+        match *self {}
+    }
 }
 
 /// cladefs: the process at the other end of `stream`, as a pidfd, unless it is this one: the socket's
@@ -2596,13 +2667,13 @@ fn signal(process: &std::os::fd::OwnedFd, signal: libc::c_int) -> std::io::Resul
 /// the socket's other end hung up by then, the connection is refused. That leaves a race, on a
 /// kernel before 6.5, with a VM process that exits leaving the socket to another, as its child.
 #[cfg(madsim)]
-fn peer_process(_: &super::wire::Stream) -> std::io::Result<Option<std::os::fd::OwnedFd>> {
+fn peer_process(_: &super::wire::Stream) -> std::io::Result<Option<VmProcess>> {
     // cladefs: a simulated guest's, in this process, as a test's is (doc-24).
     Ok(None)
 }
 
 #[cfg(not(madsim))]
-fn peer_process(stream: &UnixStream) -> std::io::Result<Option<std::os::fd::OwnedFd>> {
+fn peer_process(stream: &UnixStream) -> std::io::Result<Option<VmProcess>> {
     use std::os::fd::{AsRawFd, FromRawFd};
     let fd = stream.as_raw_fd();
     let mut credentials = libc::ucred { pid: 0, uid: 0, gid: 0 };
@@ -2637,7 +2708,7 @@ fn peer_process(stream: &UnixStream) -> std::io::Result<Option<std::os::fd::Owne
     };
     if read == 0 {
         // SAFETY: A new descriptor, which the call gave this process.
-        return Ok(Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(pidfd) }));
+        return Ok(Some(VmProcess(unsafe { std::os::fd::OwnedFd::from_raw_fd(pidfd) })));
     }
     let err = std::io::Error::last_os_error();
     if err.raw_os_error() != Some(libc::ENOPROTOOPT) {
@@ -2656,7 +2727,7 @@ fn peer_process(stream: &UnixStream) -> std::io::Result<Option<std::os::fd::Owne
             "the VM process went as it connected",
         ));
     }
-    Ok(Some(process))
+    Ok(Some(VmProcess(process)))
 }
 
 /// cladefs: what of the guest's access a fault the window resolved as `faulted` refused, if it

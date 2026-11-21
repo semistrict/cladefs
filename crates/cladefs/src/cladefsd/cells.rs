@@ -157,7 +157,8 @@ pub(super) fn store_key(path: &Path) -> PathBuf {
 /// it, or the control API working on it, fails with `EBUSY` at once. `EBUSY` if a connection not
 /// going writes it, or followers have it open; waits for one going, or the daemon's work, at most
 /// [`CLOSING_WAIT`]. The store kept open of it for forks, if any, closed. Awaited, holding no
-/// thread (board 2946).
+/// thread (board 2946). Linux's alone, as the mount is.
+#[cfg(target_os = "linux")]
 pub(crate) async fn hold_mounted(path: &Path) -> Result<MountHold, Errno> {
     let (hold, kept) = table().hold_mounted(&store_key(path), CLOSING_WAIT).await?;
     close_kept(kept).await;
@@ -165,6 +166,7 @@ pub(crate) async fn hold_mounted(path: &Path) -> Result<MountHold, Errno> {
 }
 
 /// cladefs: a store the daemon's FUSE mount holds ([`hold_mounted`]), let go as it is dropped.
+#[cfg(target_os = "linux")]
 pub(crate) struct MountHold(#[allow(dead_code, reason = "held for its drop")] Hold);
 
 /// Holds the store at `path` for the daemon, which no connection opens meanwhile: `EBUSY` while a

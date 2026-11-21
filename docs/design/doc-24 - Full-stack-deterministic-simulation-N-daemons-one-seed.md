@@ -334,6 +334,23 @@ Before the decision, the steps that served any of the three went on:
 9. **CI**: a few hundred seeds per profile on each push, a soak at night, failing seeds kept as
    regression seeds, as `local_cell::sim`'s are.
 
+## On macOS, and its known failures in CI (board 2912, 2026-11-21)
+
+- **The daemon builds under madsim on macOS**: its dependencies are Linux's and, under madsim,
+  every OS's (`cfg(any(target_os = "linux", madsim))`), its tests/madsim.rs no longer Linux's
+  alone. What stays Linux's is outside the simulation: a VM process's client (memfds,
+  userfaultfd) and its half of the wire, the FUSE mount (`mount::start` refuses under madsim),
+  pidfds (`VmProcess`, uninhabited under madsim) and a transfer area's seals (refused off Linux).
+  A shared memory object macOS unlinked as it made it can't be reopened read-only: the default
+  arena's is handed on as it is, to simulated guests that map nothing. The macOS CI job runs the
+  madsim part, 20 seeds; seeds differ between the OSes (seed 71 fails one way on Linux, seed 6
+  another on macOS).
+- **Known failures**: scripts/madsim-seeds.py runs every seed, then fails the part on any failure
+  but those crates/cladefs/tests/madsim-known lists, each an open bug's, by its test and the start
+  of its panic's message, said as known with its board task. Another test's failure, another
+  message, a hang (nextest's profile madsim ends a test at five minutes) or a crash fails it. A
+  line goes with its bug's fix.
+
 ## What FoundationDB does that we don't (2026-11-20)
 
 Read in `~/src/foundationdb` at 7e7611f82 (2026-11-06). The user asked for this to be compared

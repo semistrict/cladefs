@@ -613,7 +613,9 @@ pub(crate) fn guest_request(message: &Message) -> Result<(Option<NonZeroU64>, &[
     Ok((Some(guest), rest))
 }
 
-/// cladefs: the bytes a [`REQUEST`] says the guest request `guest` in (TASK-260).
+/// cladefs: the bytes a [`REQUEST`] says the guest request `guest` in (TASK-260): a VM process's
+/// client's, Linux's alone.
+#[cfg(target_os = "linux")]
 pub(crate) fn request_bytes(guest: NonZeroU64) -> [u8; REQUEST_BYTES] {
     guest.get().to_le_bytes()
 }
@@ -696,6 +698,7 @@ pub(crate) struct StageCounts {
 }
 
 impl StageCounts {
+    #[cfg(target_os = "linux")]
     fn args(&self) -> [u64; 5] {
         let [ops, ns, overwrites, leave_outs] = self.costs;
         [ops, ns, overwrites, leave_outs, self.installed]
@@ -713,6 +716,7 @@ impl StageCounts {
 pub(crate) type PrivateCosts = [u64; 5];
 
 impl Made {
+    #[cfg(target_os = "linux")]
     pub fn encode(&self) -> Header {
         match *self {
             Made::Ack { id, counts } => Header::new(ACK, id).with_args(&counts.args()),
@@ -966,6 +970,7 @@ impl Advanced {
         [self.commit, 0, 0, 0, 0]
     }
 
+    #[cfg(target_os = "linux")]
     pub fn from_args(args: [u64; 5]) -> Self {
         Self { commit: args[0] }
     }

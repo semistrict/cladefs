@@ -14,12 +14,20 @@
 //! cells written back and their stores closed once nothing uses them, within the drain's
 //! bound. Unmounted otherwise meanwhile (`umount`), it serves no more, and the daemon goes on
 //! serving VMs; its stores close as it drains.
+//!
+//! cladefs: under madsim, a simulated host mounts nothing, FUSE being outside the simulation
+//! (doc-24): [`start`] refuses, and [`close`] has nothing to close, on macOS too, whose FUSE is
+//! not Linux's (board 2912).
 
 use crate::error::Error;
+#[cfg(not(madsim))]
 use crate::fuse::control::{self, Stores};
+#[cfg(not(madsim))]
 use crate::fuse::{MountOptions, StoresMount};
 use std::path::PathBuf;
+#[cfg(not(madsim))]
 use std::sync::Mutex;
+#[cfg(not(madsim))]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Where the daemon mounts its cells, and keeps their cells' stores.
@@ -68,16 +76,20 @@ impl Config {
 }
 
 /// The mount, and where its cells come from: from [`start`] until [`close`] takes it.
+#[cfg(not(madsim))]
 static MOUNT: Mutex<Option<(StoresMount, Stores)>> = Mutex::new(None);
 
 /// Whether the daemon mounted its cells ([`start`]).
+#[cfg(not(madsim))]
 static MOUNTED: AtomicBool = AtomicBool::new(false);
 
 /// Whether [`close`] closed the mount, its cells written back.
+#[cfg(not(madsim))]
 static CLOSED: AtomicBool = AtomicBool::new(false);
 
 /// Mounts the daemon's directory of cells as `config` says, its cells taken from the bucket at
 /// `bucket`, the host's: before the control API serves, whose Mount service it is ([`service`]).
+#[cfg(not(madsim))]
 pub fn start(config: &Config, bucket: String) -> Result<(), Error> {
     std::fs::create_dir_all(&config.stores).map_err(|err| {
         Error::new(anyhow::Error::new(err).context(format!("making {}", config.stores.display())))
@@ -110,15 +122,29 @@ pub(super) fn service() -> Option<
     Some(control::service(mount.server(), stores.clone()))
 }
 
+/// cladefs: under madsim, refused: a simulated host mounts no cells, FUSE being outside the
+/// simulation (doc-24).
+#[cfg(madsim)]
+pub fn start(config: &Config, _: String) -> Result<(), Error> {
+    Err(Error::new(anyhow::anyhow!(
+        "a simulated host mounts no cells at {}: FUSE is outside the simulation",
+        config.mountpoint.display()
+    )))
+}
+
 /// Whether the daemon mounted its cells and has not closed them, as [`close`] does, or failed to:
 /// what a drain past its bound left.
 pub(super) fn left() -> bool {
-    MOUNTED.load(Ordering::Acquire) && !CLOSED.load(Ordering::Acquire)
+    #[cfg(not(madsim))]
+    return MOUNTED.load(Ordering::Acquire) && !CLOSED.load(Ordering::Acquire);
+    #[cfg(madsim)]
+    false
 }
 
 /// Closes the daemon's mount, if it has one, as it drains: unmounted lazily, so at once from its
 /// mount point, and once nothing uses it, its cells written back and their stores closed. Holds
 /// no thread of the runtime while it waits.
+#[cfg(not(madsim))]
 pub(super) async fn close() -> Result<(), Error> {
     let Some((mount, _)) = MOUNT.lock().unwrap().take() else { return Ok(()) };
     let mountpoint = mount.mountpoint().to_owned();
@@ -132,6 +158,12 @@ pub(super) async fn close() -> Result<(), Error> {
     })?;
     CLOSED.store(true, Ordering::Release);
     log::info!("cladefsd: the cells mounted at {} closed", mountpoint.display());
+    Ok(())
+}
+
+/// cladefs: under madsim, nothing to close: a simulated host mounts no cells ([`start`]).
+#[cfg(madsim)]
+pub(super) async fn close() -> Result<(), Error> {
     Ok(())
 }
 

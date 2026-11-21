@@ -113,6 +113,9 @@
 #![deny(missing_docs)]
 // Every unsafe block says why it is sound, other threads included (TASK-444.4).
 #![deny(clippy::undocumented_unsafe_blocks)]
+// cladefs: the daemon's control calls' futures, an image's import's holding the store's, nest deeper than the
+// default on macOS, whose madsim build of the daemon overflowed it (board 2912), as cladefsctl's did.
+#![recursion_limit = "256"]
 
 // cladefs: `tests-kms` has a host given no KMS encrypt under the tests' KMS, its KEKs known to all
 // (`bucket::testing`, TASK-411.28): this crate's tests' and sqlite_cladefs', which their
@@ -127,7 +130,7 @@ compile_error!(
 
 pub mod bucket;
 mod cache;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", madsim))]
 pub mod cladefsd;
 mod dax;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]

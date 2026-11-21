@@ -103,9 +103,13 @@ madsim = "=0.2.34"
 workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.7.15"
+
+# The extent daemon's (cladefsd): Linux's, and under madsim everywhere, as its simulation runs on
+# macOS too (board 2912).
+[target.'cfg(any(target_os = "linux", madsim))'.dependencies]
 async-task = "4.7.1"
 hyper-util = { version = "0.1.21", features = ["tokio"] }
-io-uring = "0.7.15"
 pprof = { version = "0.15.0", default-features = false, features = ["prost-codec", "flamegraph", "frame-pointer"] }
 prost = "0.14.4"
 tokio-stream = { version = "0.1.19", features = ["net"] }

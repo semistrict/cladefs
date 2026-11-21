@@ -98,3 +98,14 @@ not (
         | test(=mapped_reads_follow_commits)))
 )
 """
+
+# The full-stack simulation's seeds (scripts/madsim-seeds.py, board 2912): each seed's tests all
+# run, whatever fails, and the failures written to JUnit's report, in the target's
+# nextest/madsim/junit.xml, which the script reads each seed's failures from, to tell those
+# crates/cladefs/tests/madsim-known knows from new ones. A test runs in a fraction of a second: one
+# still running after five minutes has hung, and is ended and failed, so that the run says which
+# seed hung rather than outlasting its job.
+[profile.madsim]
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 5 }
+junit = { path = "junit.xml", store-success-output = false, store-failure-output = true }

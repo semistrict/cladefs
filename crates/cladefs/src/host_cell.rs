@@ -163,7 +163,7 @@ pub(crate) async fn bucket_numbered(home: &str, number: u16) -> Result<Arc<Objec
 /// cladefs: what the decoded states of the cells this process's buckets keep, or its stores hold
 /// as the maps of the extents they share, hold: each once, however many stores share it
 /// (`bucket_cell::recovery::Decoded::held`, TASK-453).
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", madsim, test))]
 pub(crate) fn decoded_held() -> bucket_cell::recovery::Held {
     let buckets = BUCKETS.get().lock().unwrap();
     (buckets.values())
@@ -175,7 +175,7 @@ pub(crate) fn decoded_held() -> bucket_cell::recovery::Held {
 /// Makes `bucket` this process's of `url`, before any store naming it opens, as the tests do the
 /// buckets they put themselves in front of, and the simulation the bucket its hosts share; unless it
 /// is already, the same.
-#[cfg(any(test, all(madsim, target_os = "linux")))]
+#[cfg(any(test, madsim))]
 pub(crate) fn use_bucket(url: &str, bucket: Arc<ObjectBucket>) {
     let mut buckets = BUCKETS.get().lock().unwrap();
     let had = buckets.entry(url.to_owned()).or_insert_with(|| bucket.clone());
@@ -565,7 +565,7 @@ pub(crate) fn versions_made() -> usize {
 }
 
 /// cladefs: where the store this process made the version `version` of `cell` of is, if it did.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", madsim))]
 pub(crate) fn version_made_of(cell: CellId, version: u64) -> Option<PathBuf> {
     VERSIONS_MADE.get().lock().unwrap().get(&(cell, version)).cloned()
 }
