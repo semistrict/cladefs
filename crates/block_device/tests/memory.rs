@@ -2,13 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! What a file set's commits hold in memory, counted by an allocator that counts: a commit copies
-//! its data once (TASK-583), and holes punched cost what holds data alone (TASK-584).
+//! What a block device's flushes hold in memory, counted by an allocator that counts: a flush
+//! copies its data once (TASK-583), and discards cost what holds data alone (TASK-584).
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use extent_files::{FileSet, Options};
+use block_device::{BlockDevice, Options};
 use storage_device::DeviceHolder;
 use storage_device::fake_device::FakeDevice;
 
@@ -73,57 +73,55 @@ fn measure(f: impl FnOnce()) -> (usize, isize) {
     (peak - before, after as isize - before as isize)
 }
 
-fn file_set() -> std::sync::Arc<FileSet> {
+fn blocks() -> std::sync::Arc<BlockDevice> {
     let device = FakeDevice::new(1 << 19, PAGE as u32).calm();
-    FileSet::open(DeviceHolder::new(device), Options::default()).unwrap()
+    BlockDevice::open(DeviceHolder::new(device), Options::default()).unwrap()
 }
 
-/// TASK-583: a commit of 64 MiB written holds, besides the data written and what the device keeps
+/// TASK-583: a flush of 64 MiB written holds, besides the data written and what the device keeps
 /// of it, the data once more at most: the plan's copy. It held three copies: the written chunks
 /// cloned, the plan's, and each extent's copy to write.
 #[test]
-fn a_commit_copies_its_data_once() {
-    let file_set = file_set();
-    file_set.open_file("big", true).unwrap();
+fn a_flush_copies_its_data_once() {
+    let blocks = blocks();
     let dirty = 64 * MIB;
     let data: Vec<u8> = (0..dirty).map(|i| (i / PAGE) as u8 ^ i as u8).collect();
-    file_set.write("big", 0, &data).unwrap();
+    blocks.write(0, &data).unwrap();
     drop(data);
-    let (peak, left) = measure(|| file_set.sync("big").unwrap());
+    let (peak, left) = measure(|| blocks.flush().unwrap());
     // The device keeps what it was written, and the written chunks are gone: what is left beyond
     // the written chunks' bytes is the device's.
     let device = (left + dirty as isize) as usize;
     let beyond = peak - device;
-    assert!(beyond < dirty + dirty / 10, "a commit of {dirty} held {beyond} beyond the device's");
+    assert!(beyond < dirty + dirty / 10, "a flush of {dirty} held {beyond} beyond the device's");
     let mut read = vec![0; PAGE];
-    file_set.read("big", 5 * PAGE as u64, &mut read).unwrap();
+    blocks.read(5 * PAGE as u64, &mut read).unwrap();
     assert_eq!(read[1], 5 ^ 1);
 }
 
-/// TASK-584: punching a 1 GiB file of holes, whole, holds nothing and leaves nothing to commit;
-/// punching 64 MiB of data notes it as one range, not a page at a time, and reads as zeros once
-/// committed.
+/// TASK-584: discarding 1 GiB of holes, whole, holds nothing and leaves nothing to flush;
+/// discarding 64 MiB of data notes it as one range, not a page at a time, and reads as zeros once
+/// flushed.
 #[test]
-fn punching_holds_what_holds_data_alone() {
-    let file_set = file_set();
-    file_set.open_file("memory", true).unwrap();
+fn discarding_holds_what_holds_data_alone() {
+    let blocks = blocks();
     let size = 1u64 << 30;
-    file_set.truncate("memory", size).unwrap();
-    file_set.sync("memory").unwrap();
+    blocks.resize(size).unwrap();
+    blocks.flush().unwrap();
     let (peak, _) = measure(|| {
-        file_set.punch("memory", 0, size).unwrap();
-        file_set.sync("memory").unwrap();
+        blocks.discard(0, size).unwrap();
+        blocks.flush().unwrap();
     });
-    assert!(peak < 64 << 10, "punching holes held {peak} bytes");
+    assert!(peak < 64 << 10, "discarding holes held {peak} bytes");
 
     let data = 64 * MIB;
-    file_set.write("memory", 0, &vec![7; data]).unwrap();
-    file_set.sync("memory").unwrap();
-    let (peak, _) = measure(|| file_set.punch("memory", 0, size).unwrap());
+    blocks.write(0, &vec![7; data]).unwrap();
+    blocks.flush().unwrap();
+    let (peak, _) = measure(|| blocks.discard(0, size).unwrap());
     // The nodes naming its 16384 pages, read already, and the range: not 16384 entries.
-    assert!(peak < 64 << 10, "punching 64 MiB of data held {peak} bytes");
-    file_set.sync("memory").unwrap();
+    assert!(peak < 64 << 10, "discarding 64 MiB of data held {peak} bytes");
+    blocks.flush().unwrap();
     let mut read = vec![1; PAGE];
-    file_set.read("memory", 4096 * PAGE as u64, &mut read).unwrap();
+    blocks.read(4096 * PAGE as u64, &mut read).unwrap();
     assert_eq!(read, vec![0; PAGE]);
 }

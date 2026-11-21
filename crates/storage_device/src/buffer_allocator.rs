@@ -272,7 +272,7 @@ mod buffer_source {
 
     /// On a host, anonymous memory, which reads as zeros until written and is committed as it is
     /// touched, as a VMO is: `alloc_zeroed` of a page's alignment zeroes every page at once on
-    /// Linux, 64 MiB for each FakeDevice made, most of an extent_files model test's time.
+    /// Linux, 64 MiB for each FakeDevice made, most of a block_device model test's time.
     #[cfg(unix)]
     mod memory {
         pub fn map(size: usize) -> *mut u8 {

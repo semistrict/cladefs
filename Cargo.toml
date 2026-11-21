@@ -146,7 +146,7 @@ fsverity_merkle = { path = "crates/fsverity_merkle" }
 blob_metadata = { path = "crates/blob_metadata" }
 block_protocol = { path = "crates/block_protocol" }
 storage_device = { path = "crates/storage_device" }
-extent_files = { path = "crates/extent_files" }
+block_device = { path = "crates/block_device" }
 local_cell = { path = "crates/local_cell" }
 follower = { path = "crates/follower" }
 follower_history = { path = "crates/follower_history" }

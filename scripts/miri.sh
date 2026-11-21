@@ -45,7 +45,7 @@ if [[ -z $probe ]]; then
 fi
 
 if (( ${#crates[@]} == 0 )); then
-    crates=(physmem virtio_extent extent_files extent_frame extent_store extent_remote extent_keys
+    crates=(physmem virtio_extent block_device extent_frame extent_store extent_remote extent_keys
             fxfs-posix follower follower_history sqlite_cladefs fxfs-sim-diff fxfs-automount
             cladefs-examples cladefs)
 fi

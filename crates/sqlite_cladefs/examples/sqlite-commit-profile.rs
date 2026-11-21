@@ -2,13 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Where a SQLite transaction of one row's time goes on a file set (TASK-301): the device's
-//! requests and the window's, each timed as the file set makes them; the cell's flushes, phase by
+//! Where a SQLite transaction of one row's time goes on a database (TASK-301): the device's
+//! requests and the window's, each timed as the database makes them; the cell's flushes, phase by
 //! phase (`local_cell::timings`); and, for scale, what an fsync of a block appended to a file
 //! takes on the same disk, and a commit of SQLite's own WAL with `synchronous=FULL`.
 //!
-//! Configurations: `image`, the file set on an in-process image (`cladefs::Storage`); on Linux,
-//! `daemon`, on a cell an extent daemon on a thread of this process serves, its files mapped
+//! Configurations: `image`, the database on an in-process image (`cladefs::Storage`); on Linux,
+//! `daemon`, on a cell an extent daemon on a thread of this process serves, its file mapped
 //! into its window.
 //!
 //! Usage: sqlite-commit-profile [COMMITS], 1,000 by default.
@@ -17,7 +17,7 @@ use anyhow::Error;
 use async_trait::async_trait;
 use cladefs::Storage;
 use rusqlite::{Connection, OpenFlags, params};
-use sqlite_cladefs::{FileSet, Options, register};
+use sqlite_cladefs::{Database, Options, register};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -122,7 +122,7 @@ impl Device for Timing {
 struct TimingWindow(sqlite_cladefs::daemon::DaemonWindow);
 
 #[cfg(target_os = "linux")]
-impl sqlite_cladefs::FileSetWindow for TimingWindow {
+impl sqlite_cladefs::Window for TimingWindow {
     fn memory(&self) -> (std::ptr::NonNull<u8>, u64) {
         self.0.memory()
     }
@@ -211,8 +211,8 @@ fn summary(config: &str, times: &mut [Duration]) {
     );
 }
 
-fn on_file_set(config: &str, file_set: Arc<FileSet>, count: usize) {
-    let registration = register(config, file_set.clone()).unwrap();
+fn on_database(config: &str, database: Arc<Database>, count: usize) {
+    let registration = register(config, database.clone()).unwrap();
     let connection =
         Connection::open_with_flags_and_vfs("p.db", OpenFlags::default(), config).unwrap();
     println!("{config}:");
@@ -220,7 +220,7 @@ fn on_file_set(config: &str, file_set: Arc<FileSet>, count: usize) {
     summary(config, &mut times);
     drop(connection);
     drop(registration);
-    file_set.close().unwrap();
+    database.close().unwrap();
 }
 
 /// What appending `blocks` blocks to a file and syncing them takes on the disk under `dir`.
@@ -289,9 +289,9 @@ fn main() {
         let device = local_cell::upload::wait_on(Storage::create(root.join("image"), 64 << 30))
             .unwrap()
             .into_device();
-        let file_set =
-            FileSet::open(DeviceHolder::new(Timing(device)), Options::default()).unwrap();
-        on_file_set("image", file_set, count);
+        let database =
+            Database::open(DeviceHolder::new(Timing(device)), Options::default()).unwrap();
+        on_database("image", database, count);
     }
     #[cfg(target_os = "linux")]
     {
@@ -303,9 +303,9 @@ fn main() {
         let window = sqlite_cladefs::daemon::DaemonWindow::new(cell.clone(), 1 << 30).unwrap();
         let device =
             DeviceHolder::new(Timing(DeviceHolder::new(cladefs::DaemonDevice::new(cell).unwrap())));
-        let file_set =
-            FileSet::open_mapped(device, Box::new(TimingWindow(window)), Options::default())
+        let database =
+            Database::open_mapped(device, Box::new(TimingWindow(window)), Options::default())
                 .unwrap();
-        on_file_set("daemon", file_set, count);
+        on_database("daemon", database, count);
     }
 }
