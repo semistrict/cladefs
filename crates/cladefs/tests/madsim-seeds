@@ -16,3 +16,5 @@
 265     board 5721: a handed-over cell's journal entry, its removal failing, was said nowhere: the host refused every later migration of the cell to it (ALREADY_EXISTS)
 307     board 5721: a target's acceptance written but not synced, answered yes at once on asking again, then lost with its entry at a crash: the cell noted on no host (macOS)
 725     board 5764: a sync through a connection's open cell dropped its reference unclosed, the connection letting the cell go meanwhile (Linux)
+171     board 5730: a handed-over cell's journal entry, its note now, unlinked as it was let go of, its directory's sync failing, answered EIO; asking again found nothing (ENOENT)
+210     board 5734: a target's acceptance released by its source, the cell's noting taken having failed after it: the target started again took its entry for a migration never accepted and removed the cell

@@ -7196,6 +7196,87 @@ fn ephemeral_cells_fork_from_versions_and_retire_their_references() {
     assert_eq!(references(), vec![]);
 }
 
+/// Boards 5732 and 5734: a target takes a cell's migrations by the cell's epoch, one request at a
+/// time: a prepare asked again answers as before; a newer one supersedes the migration it took,
+/// dropping what that staged; an older one, late, it refuses. A hand-over asked of another
+/// incarnation of the target's is answered neither yes nor no; one naming another take of the
+/// migration than its prepare's answer is refused, what it took dropped, its reference with it.
+/// A migration is renewed while taken, and an accepted one released.
+#[test]
+fn targets_take_a_cells_migrations_by_its_epoch() {
+    use super::migration::target;
+    use super::peers::proto::{FileDigest, MigrateHandOverRequest, MigratePrepareRequest};
+    use tonic::Code;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let ephemeral = crate::ephemeral_host::open(&dir.path().join("ephemeral")).unwrap();
+    let path = dir.path().join("cell");
+    let staged = |migration| crate::ephemeral_host::staging(&path, migration);
+    let (parent, child) = (crate::CellId { tenant: 1, id: 2 }, crate::CellId { tenant: 1, id: 7 });
+    let prepare = |migration, epoch| MigratePrepareRequest {
+        migration,
+        tenant: child.tenant,
+        cell: child.id,
+        parent_tenant: parent.tenant,
+        parent_cell: parent.id,
+        at: 3,
+        bucket: "memory:///cells".into(),
+        to: path.display().to_string(),
+        epoch,
+    };
+    let bucket = super::cells::daemon_bucket().unwrap();
+    let references = || {
+        let listing =
+            bucket_cell::lifecycle::ephemeral_references(&*bucket, ephemeral.incarnation());
+        control(listing).into_iter().map(|(_, child)| child).collect::<Vec<_>>()
+    };
+
+    let (incarnation, token) = control(target::prepare(prepare(0x11, 2))).unwrap();
+    assert_eq!(incarnation, ephemeral.incarnation());
+    assert!(staged(0x11).is_dir());
+    assert_eq!(references(), vec![child]);
+    assert_eq!(control(target::prepare(prepare(0x11, 2))).unwrap(), (incarnation, token));
+    let late = control(target::prepare(prepare(0x13, 1))).unwrap_err();
+    assert_eq!(late.code(), Code::Aborted, "{late}");
+    assert!(staged(0x11).is_dir() && !staged(0x13).exists());
+    let (_, newer) = control(target::prepare(prepare(0x15, 3))).unwrap();
+    assert_ne!(newer, token);
+    assert!(!staged(0x11).exists() && staged(0x15).is_dir());
+    assert_eq!(references(), vec![child], "the reference kept, the newer migration's alike");
+    target::renew(0x15).unwrap();
+    assert_eq!(target::renew(0x11).unwrap_err().code(), Code::NotFound);
+
+    let hand_over = |incarnation, token| MigrateHandOverRequest {
+        migration: 0x15,
+        incarnation,
+        token,
+        files: vec![FileDigest { path: "description".into(), len: 1, crc: None }],
+    };
+    let unknown = control(target::hand_over(hand_over(incarnation ^ 2, newer))).unwrap_err();
+    assert_eq!(unknown.code(), Code::FailedPrecondition, "{unknown}");
+    assert!(staged(0x15).is_dir(), "neither yes nor no: nothing dropped");
+    assert!(!control(target::hand_over(hand_over(incarnation, newer ^ 2))).unwrap());
+    assert!(!staged(0x15).exists(), "refused, what it took dropped");
+    assert_eq!(ephemeral.entries().unwrap(), vec![]);
+    assert_eq!(references(), vec![]);
+    assert!(
+        !control(target::hand_over(hand_over(incarnation, newer))).unwrap(),
+        "refused for good"
+    );
+
+    // Released, an acceptance whose cell's noting failed has it noted taken first.
+    let (_, token) = control(target::prepare(prepare(0x19, 4))).unwrap();
+    ephemeral.accept(0x19, child).unwrap();
+    assert_eq!(ephemeral.entry(child).unwrap().receiving(), Some((0x19, token)));
+    control(target::release(0x19)).unwrap();
+    assert!(!ephemeral.accepted(0x19));
+    assert_eq!(
+        ephemeral.entry(child).unwrap().migrating,
+        None,
+        "noted taken before it was forgotten"
+    );
+}
+
 /// TASK-704: an open ephemeral cell is halted as its host forgets its keys, or its
 /// tenant's, as a bucket cell's is: its reads, of its own extents and of what it inherits, and its
 /// writes and commits fail with `EACCES`; another ephemeral cell of the version's reads on until

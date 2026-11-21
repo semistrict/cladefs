@@ -13,16 +13,19 @@
 //!   ephemeral cells, their references naming it, are lost with it, and decommissioning it
 //!   (`DecommissionHost`) retires those references;
 //! - `cells/<TENANT>.<CELL>`, one for each ephemeral cell it may hold, written, durably, before
-//!   the cell's reference: its parent and origin, its cell's path, and the bucket its parent is
-//!   kept in; and the migration it is being taken by from another host, if it is (TASK-698.4).
-//!   Removed once the reference is;
-//! - `accepted/<MIGRATION>`, one for each migration it accepted, kept for good, so that it answers
-//!   yes to a hand-over it accepted however late it is asked again, the cell gone on since
-//!   (specs/ephemeral, `remembersAccepted`).
+//!   the cell's reference: its parent and origin, its cell's path, the bucket its parent is
+//!   kept in, and the cell's epoch; and the migration it is being taken by from another host, if
+//!   it is (TASK-698.4), or that took it from here, the cell let go of (board 5730). Removed once
+//!   the reference is;
+//! - `accepted/<MIGRATION>`, one for each migration it accepted, so that it answers yes to a
+//!   hand-over it accepted however late it is asked again, the cell gone on since
+//!   (specs/ephemeral, `remembersAccepted`); kept until the migration's source, having let the
+//!   cell go, asks no more and releases it (board 5734).
 //!
 //! As the daemon starts, before it serves, each journal entry whose cell is not there, an
 //! ephemeral cell's of its cell, has its reference retired and goes: a fork its host crashed in,
-//! or a deletion.
+//! or a deletion; and each a migration was taking here and never accepted, what it took dropped
+//! with it.
 
 use crate::CellId;
 use anyhow::{Context as _, Error, bail};
@@ -45,10 +48,35 @@ pub(crate) struct Entry {
     pub origin: Origin,
     pub path: PathBuf,
     pub bucket: String,
-    /// The migration it is being taken by, its files staged beside its path ([`staging`]), until
-    /// this host accepts it.
-    #[serde(default)]
-    pub migration: Option<u64>,
+    /// The cell's epoch: its last migration's, each newer than every one before it, as the
+    /// prepares of the hosts it was on carry it, so that a target tells a late prepare from the
+    /// cell's next (board 5732). 0 for a cell forked here, never migrated.
+    pub epoch: u64,
+    /// The migration it is being taken by, or that took it from here, if any.
+    pub migrating: Option<Migrating>,
+}
+
+/// A migration of a journal entry's cell.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum Migrating {
+    /// Being taken here by migration `id`, its files staged beside its path ([`staging`]), until
+    /// this host accepts it; `token` made as this host took its prepare, new to that take, which
+    /// its hand-over must name (specs/ephemeral, `boundToPrepare`).
+    Receiving { id: u64, token: u64 },
+    /// Handed over by migration `id` to the peer at `peer`, which accepted it: its cell directory
+    /// goes, then its reference, then this entry, `peer` told it may forget it accepted `id`
+    /// (board 5730, board 5734).
+    HandedOver { id: u64, peer: String },
+}
+
+impl Entry {
+    /// The migration taking its cell here, if one is: its ID and token.
+    pub fn receiving(&self) -> Option<(u64, u64)> {
+        match self.migrating {
+            Some(Migrating::Receiving { id, token }) => Some((id, token)),
+            _ => None,
+        }
+    }
 }
 
 /// Where a migration `migration` to `path` stages the cell's files until its hand-over.
@@ -126,9 +154,17 @@ impl Host {
         forgotten.with_context(|| format!("forgetting {}", path.display()))
     }
 
-    /// Remembers, durably, for good, that it accepted migration `migration`.
-    pub fn accept(&self, migration: u64) -> Result<(), Error> {
-        write_durably(&self.dir.join(ACCEPTED).join(format!("{migration:x}")), b"")
+    /// Remembers, durably, that it accepted migration `migration`, of the cell `child`, until its
+    /// source releases it.
+    pub fn accept(&self, migration: u64, child: CellId) -> Result<(), Error> {
+        let path = self.dir.join(ACCEPTED).join(format!("{migration:x}"));
+        write_durably(&path, &serde_json::to_vec(&child)?)
+    }
+
+    /// The cell migration `migration` took, if this host accepted it.
+    pub fn accepted_cell(&self, migration: u64) -> Option<CellId> {
+        let bytes = host_fs::read(self.dir.join(ACCEPTED).join(format!("{migration:x}"))).ok()?;
+        serde_json::from_slice(&bytes).ok()
     }
 
     /// Whether it accepted migration `migration`.
@@ -136,9 +172,28 @@ impl Host {
         host_fs::exists(self.dir.join(ACCEPTED).join(format!("{migration:x}")))
     }
 
+    /// Forgets, durably, that it accepted migration `migration`: its source let the cell go, and
+    /// asks no more (board 5734).
+    pub fn release(&self, migration: u64) -> Result<(), Error> {
+        let path = self.dir.join(ACCEPTED).join(format!("{migration:x}"));
+        match host_fs::remove_file(&path) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            removed => Ok(removed.and_then(|()| host_fs::sync_dir(self.dir.join(ACCEPTED)))?),
+        }
+    }
+
     /// The entry of the cell migration `migration` is taking here, if one is.
     pub fn receiving(&self, migration: u64) -> Result<Option<Entry>, Error> {
-        Ok(self.entries()?.into_iter().find(|entry| entry.migration == Some(migration)))
+        let taking = |entry: &Entry| entry.receiving().is_some_and(|(id, _)| id == migration);
+        Ok(self.entries()?.into_iter().find(taking))
+    }
+
+    /// The entries of the cells handed over from `path`, not yet let go of.
+    pub fn handed_over(&self, path: &Path) -> Result<Vec<Entry>, Error> {
+        let handed = |entry: &Entry| {
+            matches!(entry.migrating, Some(Migrating::HandedOver { .. })) && entry.path == path
+        };
+        Ok(self.entries()?.into_iter().filter(handed).collect())
     }
 
     /// The ephemeral cell `child`'s entry, if it has one.
@@ -171,7 +226,9 @@ impl Host {
     }
 
     /// Retires the references of the ephemeral cells its journal names that it holds no more: its
-    /// cell at its path gone, or not an ephemeral cell's of its cell. Returns how many. An entry
+    /// cell at its path gone, or not an ephemeral cell's of its cell; or a migration's it was
+    /// taking, never accepted, which the daemon's going stopped. Those handed over it leaves to
+    /// the migration's letting go (`cladefsd::migration`), which runs first. Returns how many. An entry
     /// whose retiring fails, its disk failing, is said and left: to the next start, or to a
     /// migration's prepare here, which takes an entry of a cell this host holds not for none
     /// (board 5721); the daemon starts whatever one entry's disk does.
@@ -189,10 +246,13 @@ impl Host {
 
     /// [`Host::retire_stale`]'s of `entry`: whether it retired it.
     async fn retire_if_stale(&self, entry: Entry) -> Result<bool, Error> {
+        if let Some(Migrating::HandedOver { .. }) = entry.migrating {
+            return Ok(false);
+        }
         // A migration it accepted, crashed before it noted the cell taken: taken, as the
         // hand-over did (TASK-713); the cell its, as its source let it go.
-        if entry.migration.is_some_and(|migration| self.accepted(migration)) {
-            let taken = Entry { migration: None, ..entry };
+        if entry.receiving().is_some_and(|(migration, _)| self.accepted(migration)) {
+            let taken = Entry { migrating: None, ..entry };
             self.note(&taken)?;
             if self.holds(&taken)? {
                 return Ok(false);
@@ -201,15 +261,8 @@ impl Host {
             return Ok(true);
         }
         // A migration being taken, which the daemon's going stopped: given up (TASK-698.4).
-        if let Some(migration) = entry.migration {
-            // Taken into place already, its acceptance not: given up too, as its source, letting
-            // the cell go only once it is accepted, holds it still (board 5721). Left, a retry took
-            // it after this retired its reference. Its removal no more held at its first step.
-            let taken = Entry { migration: None, ..entry.clone() };
-            if self.holds(&taken)? {
-                let path = entry.path.clone();
-                local_cell::upload::blocking(move || local_cell::remove_cell_dir(&path))?;
-            }
+        if let Some((migration, _)) = entry.receiving() {
+            self.drop_moved(&entry)?;
             // Its entry and reference, then its files: dropped part way, a staging an entry names
             // is one a retry of its migration may take for whole (board 5721).
             self.retire(&entry).await?;
@@ -234,6 +287,23 @@ impl Host {
         let (origin, child) = (entry.origin, entry.child);
         bucket_cell::lifecycle::unrefer_ephemeral(&*bucket, origin, self.incarnation, child).await;
         self.forget(child)
+    }
+
+    /// Removes the cell directory at the path of `entry`, a migration's being taken here, if it is
+    /// its cell's: taken into place already, its acceptance not (boards 5721, 5728). Its source,
+    /// letting the cell go only once it is accepted, holds it still; left, a retry took it after
+    /// its reference was retired, and it kept the path from every later migration to it. Its
+    /// removal no more held at its first step.
+    pub fn drop_moved(&self, entry: &Entry) -> Result<(), Error> {
+        if self.holds(entry)? {
+            log::warn!(
+                "cladefsd: {}: a migration's cell, never accepted, removed",
+                entry.path.display()
+            );
+            let path = entry.path.clone();
+            local_cell::upload::blocking(move || local_cell::remove_cell_dir(&path))?;
+        }
+        Ok(())
     }
 
     /// Whether it holds `entry`'s cell: its cell directory there, whole, its ephemeral cell's.
@@ -287,7 +357,8 @@ mod tests {
             origin,
             path: dir.path().join("store"),
             bucket: "memory:///e".into(),
-            migration: None,
+            epoch: 0,
+            migrating: None,
         };
         host.note(&entry).unwrap();
         host_fs::write(dir.path().join(CELLS).join("torn"), b"{\"child\"").unwrap();
@@ -298,7 +369,11 @@ mod tests {
         host.forget(child).unwrap();
         assert_eq!(host.entries().unwrap(), vec![]);
         assert!(!host.accepted(0x3c));
-        host.accept(0x3c).unwrap();
+        host.accept(0x3c, child).unwrap();
         assert!(open(dir.path()).unwrap().accepted(0x3c));
+        assert_eq!(host.accepted_cell(0x3c), Some(child));
+        host.release(0x3c).unwrap();
+        assert!(!open(dir.path()).unwrap().accepted(0x3c));
+        host.release(0x3c).unwrap();
     }
 }

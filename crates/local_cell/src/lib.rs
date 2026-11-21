@@ -221,9 +221,9 @@ pub use dir::{Dir, DirFile, DiskDir, DiskFile, File, HostDir, HostFile, closed};
 pub use extent_frame::segment::CellId;
 pub use framed::{Aligned, Located, Packed, Unpacked, read_object, read_whole, unpacked, unpacks};
 pub use host::{
-    create_host, create_host_at_version, create_host_ephemeral, delete_host, host_bucket,
-    host_cell, host_ephemeral, host_local_checkpoint, host_token, host_version, made_host, place,
-    place_host, remove_cell_dir, unmade_host,
+    create_host, create_host_at_version, create_host_ephemeral, delete_host, deleting_host,
+    host_bucket, host_cell, host_ephemeral, host_local_checkpoint, host_token, host_version,
+    made_host, place, place_host, remove_cell_dir, unmade_host,
 };
 pub use layout::{Description, Format, Place};
 pub use mem::{Io, MemDir, MemDisk, MemDiskFile, MemFile};
