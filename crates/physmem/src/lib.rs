@@ -317,6 +317,18 @@ pub fn count_free_pages() -> u64 {
     pmm::node().count_free_pages()
 }
 
+/// cladefs: the pages freed and quarantined, of every arena, which come back once every second
+/// stage that may map them has made its changes (board 5662).
+pub fn count_quarantined_pages() -> u64 {
+    pmm::node().count_quarantined_pages()
+}
+
+/// cladefs: the arenas exhausted, whose relief found nothing to free: their allocations fail until
+/// a page of theirs is freed, a cap changes or a later pass frees something (board 5662).
+pub fn count_exhausted_arenas() -> u64 {
+    pmm::node().count_exhausted_arenas()
+}
+
 /// The bytes of physical memory.
 pub fn count_total_bytes() -> u64 {
     pmm::node().count_total_bytes()

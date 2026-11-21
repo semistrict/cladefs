@@ -399,6 +399,17 @@ impl Arenas {
         self.total_cap
     }
 
+    /// cladefs: the pages of every arena freed and quarantined, still to come back (board 5662).
+    pub(super) fn quarantined(&self) -> usize {
+        self.arenas.values().map(|entry| entry.quarantined).sum()
+    }
+
+    /// cladefs: the arenas whose relief found nothing to free, whose allocations fail until a page
+    /// of theirs is freed (board 5662).
+    pub(super) fn exhausted(&self) -> usize {
+        self.arenas.values().filter(|entry| entry.relief.exhausted).count()
+    }
+
     /// An allocation of `arena`'s, starved and held to `starved`, asks for relief, which relief's
     /// next pass gives the arena at that cap ([`Arenas::take_asked`]). Returns whether the
     /// allocation fails rather than waits for it: the arena is exhausted, or, gone, has nothing to

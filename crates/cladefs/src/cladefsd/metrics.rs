@@ -38,7 +38,9 @@
 //! - `cladefsd_memory_bytes`, `cladefsd_memory_limit_bytes` and
 //!   `cladefsd_memory_capacity_bytes`: the memory the daemon's cached extents' pages
 //!   hold, every tenant's together, its limit, if any, and the most the daemon's kernel has
-//!   (TASK-50.3); `cladefsd_tenant_memory_bytes{tenant}` and
+//!   (TASK-50.3); cladefs: `cladefsd_memory_free_bytes`, `cladefsd_memory_quarantined_bytes` and
+//!   `cladefsd_memory_exhausted_arenas`: of it, pages free, pages freed and waiting for VM
+//!   processes to unmap them, and the arenas whose relief found nothing to free (board 5662); `cladefsd_tenant_memory_bytes{tenant}` and
 //!   `cladefsd_tenant_memory_limit_bytes{tenant}`: each tenant's alive, by its ID, in
 //!   base 32, as cells name it.
 //! - `cladefsd_disk_bytes`, `cladefsd_disk_reserved_bytes` and `cladefsd_disk_limit_bytes`: the
@@ -649,6 +651,22 @@ pub(super) fn gauges() -> Vec<(&'static str, &'static str, u64)> {
         ),
         ("memory_bytes", "Memory extents' pages hold, every tenant's.", physmem::arenas_bytes()),
         ("memory_capacity_bytes", "The most memory the daemon has.", physmem::count_total_bytes()),
+        // cladefs: what a page-in finding no pages has to go on (board 5662).
+        (
+            "memory_free_bytes",
+            "Of the daemon's memory, pages free, of any arena's or none's.",
+            physmem::count_free_pages() * crate::pages::page_size(),
+        ),
+        (
+            "memory_quarantined_bytes",
+            "Pages freed and quarantined, waiting for VM processes to unmap them.",
+            physmem::count_quarantined_pages() * crate::pages::page_size(),
+        ),
+        (
+            "memory_exhausted_arenas",
+            "Arenas whose relief found nothing to free: their allocations fail.",
+            physmem::count_exhausted_arenas(),
+        ),
     ];
     if let Some(limit) = physmem::total_cap() {
         gauges.push(("memory_limit_bytes", "The limit of every tenant's memory.", limit));

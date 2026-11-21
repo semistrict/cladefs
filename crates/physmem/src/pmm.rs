@@ -385,6 +385,16 @@ impl PmmNode {
         self.free_count.load(Ordering::Relaxed)
     }
 
+    /// cladefs: the pages freed and quarantined, of every arena, still to come back (board 5662).
+    pub(crate) fn count_quarantined_pages(&self) -> u64 {
+        self.locked().quarantined() as u64
+    }
+
+    /// cladefs: the arenas exhausted: their relief found nothing to free (board 5662).
+    pub(crate) fn count_exhausted_arenas(&self) -> u64 {
+        self.locked().exhausted() as u64
+    }
+
     /// Return amount of physical memory in this node, in bytes.
     pub(crate) fn count_total_bytes(&self) -> u64 {
         self.pages.memory.size() as u64

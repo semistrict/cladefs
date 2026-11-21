@@ -69,8 +69,14 @@ mod host {
 
     /// The daemon's metrics reported, by their names less `cladefsd_`: besides them, any gauge
     /// of private pages.
-    const REPORTED: [&str; 6] = [
+    const REPORTED: [&str; 11] = [
         "memory_bytes",
+        // cladefs: what a page-in finding no pages had to go on (board 5662).
+        "memory_limit_bytes",
+        "memory_capacity_bytes",
+        "memory_free_bytes",
+        "memory_quarantined_bytes",
+        "memory_exhausted_arenas",
         "window_pages",
         "window_mapped_bytes",
         "faults_total",

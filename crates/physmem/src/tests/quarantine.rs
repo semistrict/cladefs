@@ -8,8 +8,9 @@
 //! (`pmm::quarantine`, TASK-79.9, TASK-106).
 
 use crate::{
-    ArenaId, CHUNK_SIZE, NoMemory, Page, Quarantined, Wait, alloc, count_free_pages, create_arena,
-    keep_spare_chunks, page_size, quarantine_with, relieve_with, set_arena_cap,
+    ArenaId, CHUNK_SIZE, NoMemory, Page, Quarantined, Wait, alloc, count_free_pages,
+    count_quarantined_pages, create_arena, keep_spare_chunks, page_size, quarantine_with,
+    relieve_with, set_arena_cap,
 };
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -28,9 +29,11 @@ fn staged_pages_are_quarantined_until_dropped() {
     let staged = alloc(ArenaId::DEFAULT, Wait::No).unwrap();
     let frame = staged.frame();
     staged.mark_staged();
-    let free = count_free_pages();
+    let (free, quarantined_before) = (count_free_pages(), count_quarantined_pages());
     drop(staged);
     assert_eq!(count_free_pages(), free, "freed, not quarantined");
+    // cladefs: counted as quarantined until it comes back (board 5662).
+    assert_eq!(count_quarantined_pages(), quarantined_before + 1);
     let pages = quarantined.lock().unwrap().pop().expect("quarantined");
     assert_eq!(pages.len(), 1);
     assert!(!pages.is_empty());
@@ -40,6 +43,7 @@ fn staged_pages_are_quarantined_until_dropped() {
     assert_ne!(next.frame(), frame, "a quarantined page allocated");
     drop(pages);
     assert_eq!(count_free_pages(), free);
+    assert_eq!(count_quarantined_pages(), quarantined_before);
     let again = alloc(ArenaId::DEFAULT, Wait::No).unwrap();
     assert_eq!(again.frame(), frame, "freed at the front of its arena's list");
 }
