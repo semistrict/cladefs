@@ -36,7 +36,7 @@ impl Drop for KillOnDrop {
 /// A daemon of a host: its process, its VM socket, a client of its control API, and its
 /// ephemeral cells' directory.
 struct Daemon {
-    _process: KillOnDrop,
+    process: KillOnDrop,
     vms: PathBuf,
     control: Client,
     ephemeral: PathBuf,
@@ -69,7 +69,20 @@ fn daemon(dir: &Path, bucket: &Path, peers: &[String]) -> Daemon {
         std::thread::sleep(Duration::from_millis(20));
     }
     let control = Client::connect(&control).unwrap();
-    Daemon { _process: process, vms, control, ephemeral }
+    Daemon { process, vms, control, ephemeral }
+}
+
+impl Daemon {
+    /// Kills its process, as a crash does.
+    fn kill(&mut self) {
+        let _ = self.process.0.kill();
+        let _ = self.process.0.wait();
+    }
+}
+
+/// Where the migration `migration` of a cell to `host`'s `ephemeral-cell` stages its files.
+fn staging(host: &Path, migration: u64) -> PathBuf {
+    host.join(format!(".ephemeral-cell.migrating-{migration:x}"))
 }
 
 /// Two loopback addresses no one listens at yet.
@@ -189,13 +202,22 @@ fn ephemeral_cells_migrate_live_between_hosts() {
     );
 }
 
-/// A hand-over the target never answers leaves the cell given up on the source, its store opened
-/// there no more, the source restarted too; the target restarted gives up the migration it was
-/// taking, and its reference;
-/// asked again, it refuses, and the source serves the cell again, holding all it held, the only
-/// one referring to its origin.
-#[test]
-fn hand_overs_refused_leave_the_source_serving() {
+/// A cell forked on the source, written there, its store closed: the directory the bucket and
+/// both hosts are in, each host's peers, the source's and target's daemons, the cell's path on the
+/// source and its ID.
+struct Forked {
+    dir: tempfile::TempDir,
+    peers: [[String; 2]; 2],
+    source: Daemon,
+    target: Daemon,
+    here: PathBuf,
+    child: cladefs::CellId,
+    inherited: ExtentId,
+}
+
+/// Forks an ephemeral cell on a source, of a version of a base there, and writes `extents` of its
+/// own, its store closed after.
+fn forked(extents: u64) -> Forked {
     let dir = tempfile::tempdir().unwrap();
     let bucket = dir.path().join("bucket");
     let hosts = [dir.path().join("source"), dir.path().join("target")];
@@ -203,11 +225,9 @@ fn hand_overs_refused_leave_the_source_serving() {
         std::fs::create_dir(path).unwrap();
     }
     let [source_at, target_at] = addresses();
-    let source_peers = [source_at.clone(), target_at.clone()];
-    let source = daemon(&hosts[0], &bucket, &source_peers);
-    let target_peers = [target_at.clone(), source_at];
-    let target = daemon(&hosts[1], &bucket, &target_peers);
-
+    let peers = [[source_at.clone(), target_at.clone()], [target_at, source_at]];
+    let source = daemon(&hosts[0], &bucket, &peers[0]);
+    let target = daemon(&hosts[1], &bucket, &peers[1]);
     let base = hosts[0].join("base");
     let store = CellClient::connect(&source.vms, &base, CAPACITY).unwrap();
     let inherited = ExtentId { cell: store.cell(), sequence: 1 };
@@ -219,39 +239,102 @@ fn hand_overs_refused_leave_the_source_serving() {
     let from = cladefs::CellVersion { tenant: stated.tenant, cell: stated.cell, version };
     let here = hosts[0].join("ephemeral-cell");
     let child = source.control.fork_ephemeral(from, &here).unwrap();
-    let own = |sequence| ExtentId { cell: child.id, sequence };
     let store = CellClient::connect(&source.vms, &here, CAPACITY).unwrap();
-    for sequence in 1..=4 {
-        write(&store, own(sequence));
+    for sequence in 1..=extents {
+        write(&store, ExtentId { cell: child.id, sequence });
     }
     drop(store);
-    let there = hosts[1].join("ephemeral-cell");
-    source.control.migrate_cell(&here, &target_at, &there).unwrap();
-    assert_eq!(referring(&bucket).len(), 2, "the source's and the target's");
+    Forked { dir, peers, source, target, here, child, inherited }
+}
 
-    drop(target);
-    let unanswered = source.control.hand_over_cell(&here).unwrap_err();
-    assert_eq!(unanswered.errno(), Some(cladefs::Errno::ENOTCONN));
-    assert!(CellClient::connect(&source.vms, &here, CAPACITY).is_err(), "given up, it opens not");
-    // The source restarted keeps the cell given up, its reference with it.
-    drop(source);
-    let source = daemon(&hosts[0], &bucket, &source_peers);
-    assert!(CellClient::connect(&source.vms, &here, CAPACITY).is_err(), "given up, it opens not");
-    assert_eq!(referring(&bucket).len(), 2, "the source's kept as it started again");
-
-    let target = daemon(&hosts[1], &bucket, &target_peers);
-    assert_eq!(referring(&bucket).len(), 1, "the target's given up as it started again");
-    let refused = source.control.hand_over_cell(&here).unwrap_err();
-    assert_eq!(refused.errno(), Some(cladefs::Errno::EAGAIN));
-    assert!(!there.exists());
-    let noted =
-        |daemon: &Daemon| std::fs::read_dir(daemon.ephemeral.join("cells")).unwrap().count();
-    assert_eq!((noted(&source), noted(&target)), (1, 0), "the cell is the source's alone");
-    let store = CellClient::connect(&source.vms, &here, CAPACITY).unwrap();
-    assert!(read(&store, inherited) == data(1));
-    for sequence in 1..=4 {
-        assert!(read(&store, own(sequence)) == data(sequence), "extent {sequence} read otherwise");
+impl Forked {
+    fn bucket(&self) -> PathBuf {
+        self.dir.path().join("bucket")
     }
+
+    /// The directory of host `host`: 0 the source's, 1 the target's.
+    fn host(&self, host: usize) -> PathBuf {
+        self.dir.path().join(["source", "target"][host])
+    }
+
+    /// The target's peer address.
+    fn target_at(&self) -> &str {
+        &self.peers[1][0]
+    }
+
+    /// Host `host`'s daemon, killed, as a crash does, and started again.
+    fn restart(&mut self, host: usize) {
+        let (dir, bucket) = (self.host(host), self.bucket());
+        let killed = match host {
+            0 => &mut self.source,
+            _ => &mut self.target,
+        };
+        killed.kill();
+        *killed = daemon(&dir, &bucket, &self.peers[host]);
+    }
+
+    /// How many cells each host's journal notes: the source's, then the target's.
+    fn noted(&self) -> (usize, usize) {
+        let noted =
+            |daemon: &Daemon| std::fs::read_dir(daemon.ephemeral.join("cells")).unwrap().count();
+        (noted(&self.source), noted(&self.target))
+    }
+
+    /// Asserts the cell served on the source again, the target holding nothing of it: noted on
+    /// the source alone, referred to by it alone, its `extents` reading as written.
+    fn assert_served_again(&self, there: &Path, extents: u64) {
+        assert!(!there.exists());
+        assert_eq!(self.noted(), (1, 0), "the cell is the source's alone");
+        assert_eq!(referring(&self.bucket()).len(), 1, "the source's reference alone");
+        let store = CellClient::connect(&self.source.vms, &self.here, CAPACITY).unwrap();
+        assert!(read(&store, self.inherited) == data(1), "the parent's extent read otherwise");
+        for sequence in [1, extents / 2, extents] {
+            let extent = ExtentId { cell: self.child.id, sequence };
+            assert!(read(&store, extent) == data(sequence), "extent {sequence} read otherwise");
+        }
+    }
+
+    /// Asserts the cell handed over to the target, at `there`: noted there alone, referred to by
+    /// it alone, its `extents` reading as written.
+    fn assert_handed_over(&self, there: &Path, extents: u64) {
+        assert!(!self.here.exists(), "the source's store goes once handed over");
+        assert_eq!(self.noted(), (0, 1), "the cell is the target's alone");
+        assert_eq!(referring(&self.bucket()).len(), 1, "the target's reference alone");
+        let store = CellClient::connect(&self.target.vms, there, CAPACITY).unwrap();
+        for sequence in 1..=extents {
+            let extent = ExtentId { cell: self.child.id, sequence };
+            assert!(read(&store, extent) == data(sequence), "extent {sequence} read otherwise");
+        }
+    }
+}
+
+/// A hand-over the target never answers leaves the cell given up on the source, its store opened
+/// there no more, the source restarted too; the target restarted gives up the migration it was
+/// taking, and its reference;
+/// asked again, it refuses, and the source serves the cell again, holding all it held, the only
+/// one referring to its origin.
+#[test]
+fn hand_overs_refused_leave_the_source_serving() {
+    let mut forked = forked(4);
+    let there = forked.host(1).join("ephemeral-cell");
+    forked.source.control.migrate_cell(&forked.here, forked.target_at(), &there).unwrap();
+    assert_eq!(referring(&forked.bucket()).len(), 2, "the source's and the target's");
+
+    forked.target.kill();
+    let unanswered = forked.source.control.hand_over_cell(&forked.here).unwrap_err();
+    assert_eq!(unanswered.errno(), Some(cladefs::Errno::ENOTCONN));
+    let opens = |forked: &Forked| CellClient::connect(&forked.source.vms, &forked.here, CAPACITY);
+    assert!(opens(&forked).is_err(), "given up, it opens not");
+    // The source restarted keeps the cell given up, its reference with it.
+    forked.restart(0);
+    assert!(opens(&forked).is_err(), "given up, it opens not");
+    assert_eq!(referring(&forked.bucket()).len(), 2, "the source's kept as it started again");
+
+    forked.restart(1);
+    assert_eq!(referring(&forked.bucket()).len(), 1, "the target's given up as it started again");
+    let refused = forked.source.control.hand_over_cell(&forked.here).unwrap_err();
+    assert_eq!(refused.errno(), Some(cladefs::Errno::EAGAIN));
+    forked.assert_served_again(&there, 4);
 }
 
 /// A target missing a file the hand-over names refuses it, dropping what it took and its
@@ -259,34 +342,10 @@ fn hand_overs_refused_leave_the_source_serving() {
 /// target's staging before the hand-over.
 #[test]
 fn hand_overs_naming_files_the_target_lacks_are_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let bucket = dir.path().join("bucket");
-    let hosts = [dir.path().join("source"), dir.path().join("target")];
-    for path in [&bucket, &hosts[0], &hosts[1]] {
-        std::fs::create_dir(path).unwrap();
-    }
-    let [source_at, target_at] = addresses();
-    let source = daemon(&hosts[0], &bucket, &[source_at.clone(), target_at.clone()]);
-    let target = daemon(&hosts[1], &bucket, &[target_at.clone(), source_at]);
-    let base = hosts[0].join("base");
-    let store = CellClient::connect(&source.vms, &base, CAPACITY).unwrap();
-    write(&store, ExtentId { cell: store.cell(), sequence: 1 });
-    drop(store);
-    let version = source.control.make_version(&base, None).unwrap();
-    source.control.sync_cell(&base).unwrap();
-    let stated = source.control.stat_cell(&base).unwrap();
-    let from = cladefs::CellVersion { tenant: stated.tenant, cell: stated.cell, version };
-    let here = hosts[0].join("ephemeral-cell");
-    let child = source.control.fork_ephemeral(from, &here).unwrap();
-    let own = |sequence| ExtentId { cell: child.id, sequence };
-    let store = CellClient::connect(&source.vms, &here, CAPACITY).unwrap();
-    for sequence in 1..=BEFORE {
-        write(&store, own(sequence));
-    }
-    drop(store);
-    let there = hosts[1].join("ephemeral-cell");
-    let migration = source.control.migrate_cell(&here, &target_at, &there).unwrap();
-    let staged = hosts[1].join(format!(".ephemeral-cell.migrating-{migration:x}"));
+    let forked = forked(BEFORE);
+    let (here, there) = (&forked.here, forked.host(1).join("ephemeral-cell"));
+    let migration = forked.source.control.migrate_cell(here, forked.target_at(), &there).unwrap();
+    let staged = staging(&forked.host(1), migration);
     let kept = |dir: &Path| -> Vec<PathBuf> {
         let mut found = Vec::new();
         let mut dirs = vec![dir.join("kept")];
@@ -302,20 +361,73 @@ fn hand_overs_naming_files_the_target_lacks_are_refused() {
         found
     };
     let deadline = Instant::now() + Duration::from_secs(60);
-    while kept(&staged).len() < kept(&here).len() || kept(&here).is_empty() {
+    while kept(&staged).len() < kept(here).len() || kept(here).is_empty() {
         assert!(Instant::now() < deadline, "the rounds never sent the kept segments");
         std::thread::sleep(Duration::from_millis(200));
     }
     std::fs::remove_file(&kept(&staged)[0]).unwrap();
-    let refused = source.control.hand_over_cell(&here).unwrap_err();
+    let refused = forked.source.control.hand_over_cell(here).unwrap_err();
     assert_eq!(refused.errno(), Some(cladefs::Errno::EAGAIN));
-    assert!(!there.exists() && !staged.exists(), "the target dropped what it took");
-    let noted =
-        |daemon: &Daemon| std::fs::read_dir(daemon.ephemeral.join("cells")).unwrap().count();
-    assert_eq!((noted(&source), noted(&target)), (1, 0), "the cell is the source's alone");
-    assert_eq!(referring(&bucket).len(), 1);
-    let store = CellClient::connect(&source.vms, &here, CAPACITY).unwrap();
-    for sequence in [1, BEFORE / 2, BEFORE] {
-        assert!(read(&store, own(sequence)) == data(sequence), "extent {sequence} read otherwise");
+    assert!(!staged.exists(), "the target dropped what it took");
+    forked.assert_served_again(&there, BEFORE);
+}
+
+/// board 2934: a source restarted between a migration's prepare and its hand-over, which pursues
+/// that migration no more, migrates the cell to the same target again: the target gives the older
+/// migration up at the new one's prepare (specs/ephemeral, `supersedes`), rather than refusing the
+/// cell's migrations there for as long as it runs.
+#[test]
+fn a_migration_its_source_lost_is_superseded_by_the_next() {
+    let mut forked = forked(4);
+    let there = forked.host(1).join("ephemeral-cell");
+    let control = &forked.source.control;
+    let older = control.migrate_cell(&forked.here, forked.target_at(), &there).unwrap();
+    let target_dir = forked.host(1);
+    let staged = |migration: u64| staging(&target_dir, migration);
+    assert!(staged(older).exists());
+    forked.restart(0);
+    let control = &forked.source.control;
+    let newer = control.migrate_cell(&forked.here, forked.target_at(), &there).unwrap();
+    assert_ne!(newer, older);
+    assert!(!staged(older).exists(), "the older migration's files dropped");
+    control.hand_over_cell(&forked.here).unwrap();
+    forked.assert_handed_over(&there, 4);
+}
+
+/// board 2934: a hand-over whose last files failed to land, asked again, sends them again and
+/// names every file of the store, so that the target takes it whole, never a hand-over naming
+/// nothing, which the target would take as whole.
+#[test]
+fn hand_overs_asked_again_send_and_name_every_file() {
+    let forked = forked(4);
+    let there = forked.host(1).join("ephemeral-cell");
+    let control = &forked.source.control;
+    let migration = control.migrate_cell(&forked.here, forked.target_at(), &there).unwrap();
+    let staged = staging(&forked.host(1), migration);
+    // A file of the store's, not a kept segment, that the hand-over sends: a directory in its
+    // place in the target's staging, so that writing it fails.
+    let mut files = Vec::new();
+    let mut dirs = vec![PathBuf::new()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(forked.here.join(&dir)).unwrap() {
+            let entry = entry.unwrap();
+            let relative = dir.join(entry.file_name());
+            match entry.file_type().unwrap().is_dir() {
+                true if !["kept", "replica-spool"].map(Path::new).contains(&&*relative) => {
+                    dirs.push(relative)
+                }
+                true => {}
+                false if relative != Path::new("store.deleted") => files.push(relative),
+                false => {}
+            }
+        }
     }
+    files.sort();
+    let blocked = staged.join(files.last().expect("the store's files"));
+    std::fs::create_dir_all(&blocked).unwrap();
+    let unanswered = control.hand_over_cell(&forked.here).unwrap_err();
+    assert_eq!(unanswered.errno(), Some(cladefs::Errno::ENOTCONN));
+    std::fs::remove_dir(&blocked).unwrap();
+    control.hand_over_cell(&forked.here).unwrap();
+    forked.assert_handed_over(&there, 4);
 }

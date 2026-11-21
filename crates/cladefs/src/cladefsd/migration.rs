@@ -10,7 +10,9 @@
 //!
 //! 1. **Prepare** (`MigrateCell`): the target notes the cell in its journal and writes its own
 //!    reference to the cell's origin before it takes anything (`targetRefersFirst`), and answers
-//!    its incarnation.
+//!    its incarnation. Taking an older migration of the cell, never accepted, it gives that one up
+//!    first (`supersedes`): the cell's writer, preparing this one, pursues it no more. A source
+//!    whose prepare went unanswered aborts that migration by its ID (`SourceLoses`).
 //! 2. **Rounds**, while the guest runs: the kept segments not sent yet, each whole, sparse.
 //! 3. **Hand-over** (`HandOverCell`), once nothing has the store open here, its VM process gone:
 //!    the source gives the cell up first, durably, a marker in its store refusing every opening
@@ -21,9 +23,9 @@
 //!    good (`remembersAccepted`); refusing, it drops what it took and its reference, and never takes
 //!    that migration after (`refuseFinal`).
 //! 4. Accepted, the source removes its store, then retires its own reference (`sourceRetiresLast`);
-//!    refused, it removes its marker and serves the cell again. Not answered, the marker stays,
-//!    the store unopened here, and asking again, after a restart too, asks the target again, which
-//!    answers as it did.
+//!    refused, it removes its marker, durably, and serves the cell again. Not answered, the marker
+//!    stays, the store unopened here, and asking again, after a restart too, sends again what the
+//!    target lacks and asks it again, naming every file as before; the target answers as it did.
 
 use super::peers::proto::peer_client::PeerClient;
 use super::peers::proto::{
@@ -71,6 +73,32 @@ struct Outgoing {
     stopped: std::sync::atomic::AtomicBool,
 }
 
+impl Outgoing {
+    fn new(
+        migration: u64,
+        peer: String,
+        incarnation: u64,
+        client: PeerClient<tonic::transport::Channel>,
+    ) -> Self {
+        let sent = tokio::sync::Mutex::default();
+        let stopped = std::sync::atomic::AtomicBool::new(false);
+        Outgoing { migration, peer, incarnation, client, sent, stopped }
+    }
+
+    /// The migration a store's marker names, asked again with nothing known sent, as after a
+    /// restart.
+    fn resumed(marker: Marker) -> Result<Self, Errno> {
+        let client = client(&marker.peer)?;
+        let resumed = Self::new(marker.migration, marker.peer, marker.incarnation, client);
+        resumed.stopped.store(true, std::sync::atomic::Ordering::Release);
+        Ok(resumed)
+    }
+
+    fn marker(&self) -> Marker {
+        Marker { migration: self.migration, peer: self.peer.clone(), incarnation: self.incarnation }
+    }
+}
+
 node_local::node_local! {
     /// The migrations from this host under way, by their stores' paths.
     static OUTGOING: Mutex<BTreeMap<PathBuf, Arc<Outgoing>>> = Mutex::new(BTreeMap::new());
@@ -97,6 +125,10 @@ pub(super) async fn migrate(path: PathBuf, peer: String, to: String) -> Result<u
     let host = ephemeral_host::host()?;
     let read = path.clone();
     let (checkpoint, cell) = super::cells::blocking(move || {
+        // Given up to a migration already: that one's to hand over first.
+        if host_fs::exists(read.join(MARKER)) {
+            return Err(Errno::EBUSY);
+        }
         let checkpoint = local_cell::host_local_checkpoint(&read).map_err(|_| Errno::ENOENT)?;
         let cell = local_cell::host_cell(&read).map_err(|_| Errno::ENOENT)?;
         Ok((checkpoint.ok_or(Errno::EINVAL)?, cell))
@@ -119,19 +151,21 @@ pub(super) async fn migrate(path: PathBuf, peer: String, to: String) -> Result<u
         bucket: entry.bucket.clone(),
         to,
     };
-    let prepared = client.migrate_prepare(prepare).await.map_err(|refused| {
-        log::warn!("cladefsd: preparing migration {migration:x} at {peer}: {refused}");
-        Errno::ENOTCONN
-    })?;
-    let incarnation = prepared.into_inner().incarnation;
-    let outgoing = Arc::new(Outgoing {
-        migration,
-        peer,
-        incarnation,
-        client,
-        sent: tokio::sync::Mutex::default(),
-        stopped: std::sync::atomic::AtomicBool::new(false),
-    });
+    let prepared = match client.migrate_prepare(prepare).await {
+        Ok(prepared) => prepared.into_inner(),
+        Err(refused) => {
+            log::warn!("cladefsd: preparing migration {migration:x} at {peer}: {refused}");
+            // Prepared there or not, its answer lost: aborted by ID, as this host pursues it no
+            // more. Not delivered, the target gives it up as it starts, or at the cell's next
+            // prepare there (specs/ephemeral, `SourceLoses`, `supersedes`).
+            let abort = MigrateAbortRequest { migration };
+            if let Err(err) = client.migrate_abort(abort).await {
+                log::info!("cladefsd: aborting migration {migration:x} at {peer}: {err}");
+            }
+            return Err(Errno::ENOTCONN);
+        }
+    };
+    let outgoing = Arc::new(Outgoing::new(migration, peer, prepared.incarnation, client));
     OUTGOING.get().lock().unwrap().insert(path.clone(), outgoing.clone());
     let runtime = crate::bucket::bucket_runtime().map_err(|_| Errno::EIO)?;
     runtime.spawn(async move {
@@ -206,13 +240,15 @@ fn files(path: &Path) -> std::io::Result<Vec<(String, u64)>> {
 }
 
 /// Sends the file at `relative` in the store at `path`, `len` bytes long, whole, its data and its
-/// holes: returns the bytes it takes of the disk.
+/// holes, the last piece carrying the holes, so that it lands as it is here over any copy sent
+/// before: returns the bytes it takes of the disk.
 async fn send(outgoing: &Outgoing, path: &Path, relative: &str, len: u64) -> Result<u64, Status> {
     let file = host_fs::File::open(path.join(relative)).map_err(|err| status(relative, err))?;
     let (data, allocated) = layout_of(&file, len).map_err(|err| status(relative, err))?;
+    let holes = gaps(&data, len);
     let mut client = outgoing.client.clone();
     let mut pieces = Vec::new();
-    for (start, end) in data {
+    for &(start, end) in &data {
         let mut at = start;
         while at < end {
             let take = (end - at).min(PIECE as u64) as usize;
@@ -225,14 +261,15 @@ async fn send(outgoing: &Outgoing, path: &Path, relative: &str, len: u64) -> Res
     if pieces.is_empty() {
         pieces.push((0, Vec::new()));
     }
-    for (offset, bytes) in pieces {
+    let last = pieces.len() - 1;
+    for (piece, (offset, bytes)) in pieces.into_iter().enumerate() {
         let request = MigrateFileRequest {
             migration: outgoing.migration,
             path: relative.to_owned(),
             offset,
             bytes,
             len,
-            holes: Vec::new(),
+            holes: if piece == last { holes.clone() } else { Vec::new() },
         };
         client.migrate_file(request).await?;
     }
@@ -248,18 +285,17 @@ fn layout_of(file: &host_fs::File, len: u64) -> std::io::Result<(Vec<(u64, u64)>
     Ok((data.into_iter().map(|range| (range.start, range.end)).collect(), allocated))
 }
 
-/// The holes of `file`, `len` bytes long: what lies between its ranges of data.
-fn holes_of(file: &host_fs::File, len: u64) -> std::io::Result<Vec<Range>> {
-    let (data, _) = layout_of(file, len)?;
+/// The holes of a file `len` bytes long whose ranges of data are `data`: what lies between them.
+fn gaps(data: &[(u64, u64)], len: u64) -> Vec<Range> {
     let mut holes = Vec::new();
     let mut at = 0;
-    for (start, end) in data.into_iter().chain([(len, len)]) {
+    for &(start, end) in data.iter().chain([&(len, len)]) {
         if start > at {
             holes.push(Range { offset: at, len: start - at });
         }
         at = end;
     }
-    Ok(holes)
+    holes
 }
 
 /// The CRC32C of the file at `path`.
@@ -281,50 +317,60 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
     let marker_path = path.join(MARKER);
     let marked: Option<Marker> =
         host_fs::read(&marker_path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok());
-    let outgoing = OUTGOING.get().lock().unwrap().get(&path).cloned();
-    let (marker, files) = match (marked, &outgoing) {
-        // Given up before: asked again, sending nothing more.
-        (Some(marker), _) => (marker, None),
+    let under_way = OUTGOING.get().lock().unwrap().get(&path).cloned();
+    // Held alone, the store changes no more: rounds are over.
+    if let Some(under_way) = &under_way {
+        under_way.stopped.store(true, std::sync::atomic::Ordering::Release);
+    }
+    let outgoing = match (marked, under_way) {
         (None, Some(outgoing)) => {
-            outgoing.stopped.store(true, std::sync::atomic::Ordering::Release);
-            let marker = Marker {
-                migration: outgoing.migration,
-                peer: outgoing.peer.clone(),
-                incarnation: outgoing.incarnation,
-            };
-            let bytes = serde_json::to_vec(&marker).map_err(|_| Errno::EIO)?;
+            let bytes = serde_json::to_vec(&outgoing.marker()).map_err(|_| Errno::EIO)?;
             write_durably(&marker_path, &bytes).map_err(|err| {
                 log::warn!("cladefsd: giving {} up: {err}", path.display());
                 Errno::EIO
             })?;
-            let files = finish(outgoing, &path).await.map_err(|err| {
-                log::warn!("cladefsd: migration {:x}'s last files: {err}", outgoing.migration);
-                Errno::ENOTCONN
-            })?;
-            (marker, Some(files))
+            outgoing
         }
+        // Given up before: asked again, the marker naming the migration.
+        (Some(marker), Some(outgoing)) if outgoing.migration == marker.migration => outgoing,
+        (Some(marker), _) => Arc::new(Outgoing::resumed(marker)?),
         (None, None) => return Err(Errno::ENOENT),
     };
-    let mut client = match &outgoing {
-        Some(outgoing) => outgoing.client.clone(),
-        None => client(&marker.peer)?,
-    };
-    let files = files.unwrap_or_default();
-    let request = MigrateHandOverRequest {
-        migration: marker.migration,
-        incarnation: marker.incarnation,
-        files,
-    };
-    let accepted = match client.migrate_hand_over(request).await {
+    let migration = outgoing.migration;
+    // What the target lacks, sent again however often asked; staged there no more, the target
+    // accepted the migration or gave it up, as its answer says.
+    match finish(&outgoing, &path).await {
+        Ok(()) => {}
+        Err(gone) if gone.code() == tonic::Code::NotFound => {
+            log::info!("cladefsd: migration {migration:x} staged no more: {}", gone.message());
+        }
+        Err(err) => {
+            log::warn!("cladefsd: migration {migration:x}'s last files: {err}");
+            return Err(Errno::ENOTCONN);
+        }
+    }
+    // The hand-over names every file of the store, so that the target takes it only whole
+    // (`openAtNamed`).
+    let files = named(&path).map_err(|err| {
+        log::warn!("cladefsd: naming {}'s files: {err}", path.display());
+        Errno::EIO
+    })?;
+    let request = MigrateHandOverRequest { migration, incarnation: outgoing.incarnation, files };
+    let accepted = match outgoing.client.clone().migrate_hand_over(request).await {
         Ok(answer) => answer.into_inner().accepted,
         Err(unanswered) => {
-            log::warn!("cladefsd: migration {:x}'s hand-over: {unanswered}", marker.migration);
+            log::warn!("cladefsd: migration {migration:x}'s hand-over: {unanswered}");
             return Err(Errno::ENOTCONN);
         }
     };
     OUTGOING.get().lock().unwrap().remove(&path);
     if !accepted {
-        host_fs::remove_file(&marker_path).map_err(|_| Errno::EIO)?;
+        // Served here again: durably, before any opening, so that no crash brings the marker
+        // back, a later migration then asking for this one's hand-over.
+        remove_durably(&marker_path).map_err(|err| {
+            log::warn!("cladefsd: serving {} again: {err}", path.display());
+            Errno::EIO
+        })?;
         return Err(Errno::EAGAIN);
     }
     // Accepted: the store here goes, then this host's reference (`sourceRetiresLast`).
@@ -342,10 +388,10 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
     Ok(())
 }
 
-/// Sends what the rounds of `outgoing` have not of the store at `path`, given up: the kept
+/// Sends what `outgoing` has not sent of the store at `path`, given up: its directories; the kept
 /// segments not sent, and the holes of those sent that gave back more since; and every other file,
-/// whole. Returns every file of the store, as the hand-over names them.
-async fn finish(outgoing: &Outgoing, path: &Path) -> Result<Vec<FileDigest>, Status> {
+/// whole.
+async fn finish(outgoing: &Outgoing, path: &Path) -> Result<(), Status> {
     let mut sent = outgoing.sent.lock().await;
     // Its directories first, the empty ones among them: a directory's path ends with `/`.
     for dir in dirs(path).map_err(|err| status("listing", err))? {
@@ -359,39 +405,52 @@ async fn finish(outgoing: &Outgoing, path: &Path) -> Result<Vec<FileDigest>, Sta
         };
         outgoing.client.clone().migrate_file(request).await?;
     }
-    let mut named = Vec::new();
     for (relative, len) in files(path).map_err(|err| status("listing", err))? {
-        let kept = relative.starts_with("kept/");
         match sent.get(&relative) {
-            Some(&(was, allocated)) if kept && was == len => {
+            Some(&(was, allocated)) if relative.starts_with("kept/") && was == len => {
                 let file =
                     host_fs::File::open(path.join(&relative)).map_err(|e| status(&relative, e))?;
-                let (_, now) = layout_of(&file, len).map_err(|err| status(&relative, err))?;
+                let (data, now) = layout_of(&file, len).map_err(|err| status(&relative, err))?;
                 if now != allocated {
-                    let holes = holes_of(&file, len).map_err(|err| status(&relative, err))?;
                     let request = MigrateFileRequest {
                         migration: outgoing.migration,
                         path: relative.clone(),
                         offset: 0,
                         bytes: Vec::new(),
                         len,
-                        holes,
+                        holes: gaps(&data, len),
                     };
                     outgoing.client.clone().migrate_file(request).await?;
+                    sent.insert(relative, (len, now));
                 }
             }
             _ => {
                 let allocated = send(outgoing, path, &relative, len).await?;
-                sent.insert(relative.clone(), (len, allocated));
+                sent.insert(relative, (len, allocated));
             }
         }
-        let crc = match kept {
+    }
+    Ok(())
+}
+
+/// Every file of the store at `path`, given up, as its hand-over names them: its length, and the
+/// CRC of each but the kept segments'.
+fn named(path: &Path) -> std::io::Result<Vec<FileDigest>> {
+    let mut named = Vec::new();
+    for (relative, len) in files(path)? {
+        let crc = match relative.starts_with("kept/") {
             true => None,
-            false => Some(crc_of(&path.join(&relative)).map_err(|err| status(&relative, err))?),
+            false => Some(crc_of(&path.join(&relative))?),
         };
         named.push(FileDigest { path: relative, len, crc });
     }
     Ok(named)
+}
+
+/// Removes the file at `path`, durably.
+fn remove_durably(path: &Path) -> std::io::Result<()> {
+    host_fs::remove_file(path)?;
+    host_fs::sync_dir(path.parent().unwrap_or(Path::new(".")))
 }
 
 /// Writes `bytes` to a file at `path`, whole, durably.
@@ -414,7 +473,10 @@ pub(super) mod target {
     }
 
     /// Prepares the migration `request` names: the cell noted, then its reference written here
-    /// before anything is taken, then its staging directory made. Again, it answers as before.
+    /// before anything is taken, then its staging directory made. Asked again, it prepares again,
+    /// each step as it did. An older migration of the cell it is taking, never accepted, it gives
+    /// up first: its source, the cell's writer, preparing this one, pursues that one no more, its
+    /// answer lost or its daemon restarted since (specs/ephemeral, `supersedes`).
     pub(crate) async fn prepare(request: MigratePrepareRequest) -> Result<u64, Status> {
         let host = host()?;
         let MigratePrepareRequest {
@@ -435,9 +497,12 @@ pub(super) mod target {
         let path = PathBuf::from(to);
         let entry = Entry { child, origin, path: path.clone(), bucket, migration: Some(migration) };
         match host.entry(child) {
-            Some(found) if found == entry => return Ok(host.incarnation()),
-            Some(_) => return Err(Status::already_exists(format!("cell {child} is here"))),
             None => {}
+            Some(found) if found == entry => {}
+            Some(found) if found.migration.is_some_and(|older| !host.accepted(older)) => {
+                supersede(&host, &found, &entry).await?;
+            }
+            Some(_) => return Err(Status::already_exists(format!("cell {child} is here"))),
         }
         if host_fs::exists(&path) {
             return Err(Status::already_exists(format!("{} is there", path.display())));
@@ -447,7 +512,33 @@ pub(super) mod target {
             crate::host_cell::bucket(&entry.bucket).map_err(|err| status("its bucket", err))?;
         bucket_cell::lifecycle::refer_ephemeral(&*bucket, origin, host.incarnation(), child).await;
         host_fs::create_dir_all(staging(&path, migration)).map_err(|err| status("staging", err))?;
+        log::info!("cladefsd: migration {migration:x} of {child} prepared, to {}", path.display());
         Ok(host.incarnation())
+    }
+
+    /// Gives up the older migration of `found`, never accepted, for `entry`'s: what it staged
+    /// dropped, and its reference too unless `entry`'s is the same.
+    async fn supersede(
+        host: &ephemeral_host::Host,
+        found: &Entry,
+        entry: &Entry,
+    ) -> Result<(), Status> {
+        let older = found.migration.expect("an entry being taken");
+        log::info!("cladefsd: migration {older:x} of {} superseded", found.child);
+        drop_staged(&staging(&found.path, older)).map_err(|err| status("dropping it", err))?;
+        if (found.origin, &found.bucket) != (entry.origin, &entry.bucket) {
+            host.retire(found).await.map_err(|err| status("retiring its reference", err))?;
+        }
+        Ok(())
+    }
+
+    /// Removes the directory `staged`, if there, durably: no crash brings it back.
+    fn drop_staged(staged: &Path) -> std::io::Result<()> {
+        if !host_fs::exists(staged) {
+            return Ok(());
+        }
+        host_fs::remove_dir_all(staged)?;
+        host_fs::sync_dir(staged.parent().unwrap_or(Path::new(".")))
     }
 
     /// The staging directory of the migration `migration`, being taken here.
@@ -464,6 +555,10 @@ pub(super) mod target {
         let host = host()?;
         let MigrateFileRequest { migration, path, offset, bytes, len, holes } = request;
         let (_, staged) = staged(&host, migration)?;
+        // Dropped, as the migration was given up as this request came: not made again.
+        if !host_fs::is_dir(&staged) {
+            return Err(Status::not_found(format!("migration {migration:x} given up")));
+        }
         // A directory, empty or not, its path ending with `/`.
         if let Some(dir) = path.strip_suffix('/') {
             if dir.split('/').any(|part| part == ".." || part.is_empty()) {
@@ -502,9 +597,19 @@ pub(super) mod target {
         if host.accepted(migration) {
             return Ok(true);
         }
-        let Ok((entry, staged)) = staged(&host, migration) else { return Ok(false) };
-        let whole = incarnation == host.incarnation() && holds(&staged, &files);
-        if !whole {
+        let (entry, staged) = match staged(&host, migration) {
+            Ok(staged) => staged,
+            Err(gone) => {
+                log::warn!("cladefsd: refusing migration {migration:x}: {}", gone.message());
+                return Ok(false);
+            }
+        };
+        let lacking = match incarnation == host.incarnation() {
+            true => lacking(&staged, &files),
+            false => Some(format!("asked of incarnation {incarnation:x}")),
+        };
+        if let Some(lacking) = lacking {
+            log::warn!("cladefsd: refusing migration {migration:x}: {lacking}");
             refuse(&host, &entry, &staged).await?;
             return Ok(false);
         }
@@ -536,18 +641,24 @@ pub(super) mod target {
         entry: &Entry,
         staged: &Path,
     ) -> Result<(), Status> {
-        if host_fs::exists(&staged) {
-            host_fs::remove_dir_all(staged).map_err(|err| status("dropping it", err))?;
-        }
+        drop_staged(staged).map_err(|err| status("dropping it", err))?;
         host.retire(entry).await.map_err(|err| status("retiring its reference", err))
     }
 
-    /// Whether `staged` holds every one of `files`, of its length, of its CRC if named.
-    fn holds(staged: &Path, files: &[FileDigest]) -> bool {
-        files.iter().all(|FileDigest { path, len, crc }| {
+    /// What `staged` lacks of `files`, each of its length, of its CRC if named: the first file it
+    /// lacks so, if any. A store has files: a hand-over naming none names no store.
+    fn lacking(staged: &Path, files: &[FileDigest]) -> Option<String> {
+        if files.is_empty() {
+            return Some("the hand-over names no file".to_owned());
+        }
+        files.iter().find_map(|FileDigest { path, len, crc }| {
             let at = staged.join(path);
-            let sized = host_fs::metadata(&at).is_ok_and(|metadata| metadata.len() == *len);
-            sized && crc.is_none_or(|crc| crc_of(&at).is_ok_and(|found| found == crc))
+            let found = host_fs::metadata(&at).map(|metadata| metadata.len());
+            if found.as_ref().ok() != Some(len) {
+                return Some(format!("{path}: {found:?} bytes, not {len}"));
+            }
+            let found = crc.and_then(|_| crc_of(&at).ok());
+            (crc.is_some() && found != *crc).then(|| format!("{path}: CRC {found:?}, not {crc:?}"))
         })
     }
 

@@ -6,3 +6,5 @@
 #
 # SEED  what it found
 3       TASK-699: the conditional-write probe took a bucket out of reach for one refusing updates
+71      board 2934: a refused hand-over's marker, its removal not durable, back after a crash: the next migration asked as the older, the target left noting the cell
+310     board 2934: the same, the target then refusing every later migration of the cell (ALREADY_EXISTS)
