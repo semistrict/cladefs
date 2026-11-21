@@ -3,10 +3,11 @@ id: TASK-702.2
 title: >-
   Read evidence: each recording of a version's reads is an object written once
   beside the version
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-20 19:46'
-updated_date: '2026-11-20 22:22'
+updated_date: '2026-11-21 00:46'
 labels:
   - sandbox
   - cache
