@@ -34,6 +34,7 @@
 //! durable state, the cell's own log being: it is synced never, and emptied as a replicator
 //! starts. Its failing breaks the replicator, whose commits then wait for the bucket.
 
+use crate::untrusted::Cursor;
 use event_listener::Event;
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
@@ -64,15 +65,18 @@ pub fn own_frame(sequence: u64, file: &[u8]) -> Vec<u8> {
     frame
 }
 
-/// The extents an own log's bytes hold, whole: each sequence and file.
-pub fn own_frames(mut bytes: &[u8]) -> Vec<(u64, Vec<u8>)> {
+/// The extents an own log's bytes hold, whole: each sequence and file. A member's bytes, untrusted:
+/// read through [`Cursor`], a frame cut short or of a length past what is left ending them
+/// (board 5408).
+#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+pub fn own_frames(bytes: &[u8]) -> Vec<(u64, Vec<u8>)> {
+    let mut bytes = Cursor::new(bytes);
     let mut frames = Vec::new();
-    while bytes.len() >= 16 {
-        let sequence = u64::from_le_bytes(bytes[..8].try_into().unwrap());
-        let len = u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize;
-        let Some(file) = bytes.get(16..16 + len) else { break };
+    while let Some(sequence) = bytes.u64()
+        && let Some(len) = bytes.u64().and_then(|len| usize::try_from(len).ok())
+        && let Some(file) = bytes.take(len)
+    {
         frames.push((sequence, file.to_vec()));
-        bytes = &bytes[16 + len..];
     }
     frames
 }

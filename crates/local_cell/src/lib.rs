@@ -199,6 +199,7 @@ mod sync;
 pub use sync::wait_here;
 mod timings;
 pub use timings::{DURABLE_PHASES, FLUSH_PHASES, FRAMING_PHASES, Phases, Timed, Timings, timings};
+mod untrusted;
 pub mod upload;
 mod uploads;
 mod views;

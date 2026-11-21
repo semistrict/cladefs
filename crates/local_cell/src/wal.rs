@@ -60,6 +60,7 @@ use crate::layout::{
 };
 use crate::raw::{RawEncryption, SECTOR};
 use crate::segments::{fold, footer_last, segment_footer};
+use crate::untrusted::Cursor;
 use anyhow::{Context as _, Error, ensure};
 use extent_frame::segment::{CellId, Chain, Contents, Footer, epoch_of, writer_of};
 use extent_frame::{KeyId, Salt};
@@ -318,6 +319,9 @@ const LOG_FIELDS: usize = LOG_MAGIC.len() + 3 * 8;
 /// header reads.
 pub(crate) const LOG_HEADER: usize = LOG_FIELDS + 8 + 4 + SALT_LEN + MAC_LEN;
 
+/// cladefs: the bytes of a log's header its MAC is of: all but the MAC.
+const LOG_SIGNED: usize = LOG_HEADER - MAC_LEN;
+
 /// cladefs: the header of `segment`'s log, its records salted with `salt`, MACed by `encryption`,
 /// which encrypts its raw file and log ([`LOG_MAGIC`]).
 pub(crate) fn log_header(salt: u64, segment: SegmentId, encryption: &RawEncryption) -> Vec<u8> {
@@ -346,21 +350,23 @@ pub(crate) struct LogHeader {
 
 impl LogHeader {
     /// The header of `log`, `segment`'s log's bytes, if it has one, and it is `segment`'s.
+    /// cladefs: the log's bytes, its host's disk's or a member's, untrusted: read through
+    /// [`Cursor`], none of a log shorter than a header, whatever its first bytes (board 5436).
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
     pub fn of(log: &[u8], segment: SegmentId) -> Option<Self> {
-        if log.get(..LOG_MAGIC.len())? != LOG_MAGIC {
+        let (header, _) = log.split_first_chunk::<LOG_HEADER>()?;
+        let mut fields = Cursor::new(header);
+        if fields.array()? != *LOG_MAGIC {
             return None;
         }
-        let u64_at = |at: usize| u64::from_le_bytes(log[at..at + 8].try_into().unwrap());
-        let [salt, cell, number] = [0, 1, 2].map(|field| u64_at(LOG_MAGIC.len() + field * 8));
+        let (salt, cell, number) = (fields.u64()?, fields.u64()?, fields.u64()?);
         if (SegmentId { cell, number }) != segment {
             return None;
         }
-        let signed = log.get(..LOG_HEADER - MAC_LEN)?;
-        let generation = u32::from_le_bytes(log[LOG_FIELDS + 8..][..4].try_into().unwrap());
-        let key = KeyId { cell: u64_at(LOG_FIELDS), generation };
-        let salt_at = LOG_FIELDS + 12;
-        let key_salt = Salt(log[salt_at..salt_at + SALT_LEN].try_into().unwrap());
-        let mac = log.get(LOG_HEADER - MAC_LEN..LOG_HEADER)?.try_into().unwrap();
+        let key = KeyId { cell: fields.u64()?, generation: fields.u32()? };
+        let key_salt = Salt(fields.array()?);
+        let mac = fields.array()?;
+        let (signed, _) = header.split_first_chunk::<LOG_SIGNED>()?;
         Some(Self { salt, encrypted: (key, key_salt, mac), signed: signed.to_vec() })
     }
 
@@ -1240,6 +1246,20 @@ mod tests {
             next_sequence: extent + 1,
             ..Contents::default()
         }
+    }
+
+    /// Board 5436: a log's header is read from untrusted bytes: of a log shorter than a header,
+    /// whatever its first bytes (its magic among them), none, at every length; and of a whole one,
+    /// the header it was written with. Of 8 to 31 bytes starting with the magic, the read panicked.
+    #[test]
+    fn headers_of_logs_cut_short_are_none() {
+        let header = log_header(0x5a17, segment(3), &encryption());
+        for len in 0..LOG_HEADER {
+            assert!(LogHeader::of(&header[..len], segment(3)).is_none(), "{len} bytes");
+        }
+        let read = LogHeader::of(&header, segment(3)).expect("a whole header");
+        assert_eq!(read.salt, 0x5a17);
+        assert!(LogHeader::of(&header, segment(4)).is_none(), "another segment's");
     }
 
     /// cladefs: an encryption of a segment's raw file and log, under the tests' DEK, as the cell's
