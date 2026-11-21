@@ -4,7 +4,7 @@
 # found in the LICENSE file.
 
 # Measure ranged GETs from object storage on the test host, an x86-64 Linux machine of one's own,
-# over ssh (CLADEFS_TEST_HOST, ubu1 by default; scripts/lib/host.sh), as a measurement, alone there
+# over ssh (CLADEFS_TEST_HOST; scripts/lib/host.sh), as a measurement, alone there
 # and on CPUs of its own (fxjob --bench) (TASK-28.11; doc-7, decision 9): cladefs-gets puts an
 # object in the bucket, GETs parts of it by part size and GETs in flight, and deletes it
 # (scripts/lib/gets-linux-host.sh). The table, the test host and the source measured go to

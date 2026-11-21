@@ -12,7 +12,7 @@
 # and results, the directory it writes to. The Lima VM's tree is a host_tree
 # too, in the VM's home (scripts/lib/lima.sh).
 #
-# A test host, provisioned already (ubu1, by its system-setup.d steps),
+# A test host, provisioned already (by its own setup),
 # sets CLADEFS_TEST_HOST_PROVISIONED=1: host_setup checks it and installs nothing, the
 # caller's Rust (PATH, CARGO_HOME, RUSTUP_HOME) is what builds, and host_need
 # takes a tool there at whatever version it is. CLADEFS_TEST_HOST_WORK names the work

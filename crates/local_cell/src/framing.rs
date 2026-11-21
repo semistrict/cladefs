@@ -12,11 +12,12 @@
 //! in, 8,192 faults, and its packing threads took compressors afresh, their tables faulted in too.
 //! On a host whose CPUs its VMs' vCPUs keep busy, a thread gets its share of them and no more: so
 //! the faults, and the copying and looking on the framer's thread, took most of a framing's time,
-//! up to half a second each of 0.8 s beside 28 spinning threads on ubu1's 8 CPUs (cell-bench
-//! framing); and on ubu1's sandboxes run, its slow framings read for 2.5 s, compressed for 2.3 s
-//! and wrote for 0.6 s of 5.3 s, 1.1 s of it waiting to run. Each part in a buffer kept
-//! ([`Buffer`]), as are the packing threads' compressors, a framing faults nothing in. Reading the
-//! parts on threads too took the VMs' CPUs from them: dead-ends/framing-reads-on-threads.md.
+//! up to half a second each of 0.8 s beside 28 spinning threads on the test host's 8 CPUs
+//! (cell-bench framing); and on the test host's sandboxes run, its slow framings read for 2.5 s,
+//! compressed for 2.3 s and wrote for 0.6 s of 5.3 s, 1.1 s of it waiting to run. Each part in a
+//! buffer kept ([`Buffer`]), as are the packing threads' compressors, a framing faults nothing in.
+//! Reading the parts on threads too took the VMs' CPUs from them:
+//! dead-ends/framing-reads-on-threads.md.
 //!
 //! A framing read its segment's data seconds after the guest wrote it, the segment closing: on a
 //! host short of memory, the long mode's 16 GiB at its limit, the host had let its pages go, clean
@@ -50,8 +51,8 @@ use std::sync::{Condvar, Mutex};
 /// come: two segments' worth of parts, 64 MiB, and as many compressors. Taken
 /// afresh, each framing's 32 MiB of buffers were faulted in page by page, 8,192 faults, and each
 /// thread's compressor's tables too, every framing: as much of its reading's time as the copying
-/// (cell-bench framing, perf stat on ubu1). More framings at once than that take theirs afresh,
-/// and keep them only while there is room.
+/// (cell-bench framing, perf stat on the test host). More framings at once than that take theirs
+/// afresh, and keep them only while there is room.
 const KEPT: usize = 2 * 32;
 
 /// cladefs: what [`KEPT`] keeps, taken by framings and given back.

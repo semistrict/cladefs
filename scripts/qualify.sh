@@ -5,10 +5,10 @@
 
 # Qualify cladefs as LangSmith's sandboxes run it, before a candidate is handed to them (TASK-330):
 # the sandboxes' run (scripts/sandboxes.sh, TASK-330.1) in CLADEFS_QUALIFY_SANDBOXES's mode (long,
-# the default, a quarter hour on ubu1 under fxjob --bench; or short), then guests writing all the
-# while against a bucket that slows, fails and answers again, for CLADEFS_QUALIFY_SOAK_SECS seconds
-# (fxfs-guest-bucket-soak, TASK-330.3, RustFS's bucket through a degrading proxy; default 1800, 1200
-# at least; 0 for none); every extent daemon of both held to its design's budgets
+# the default, a quarter hour on the test host under fxjob --bench; or short), then guests writing
+# all the while against a bucket that slows, fails and answers again, for CLADEFS_QUALIFY_SOAK_SECS
+# seconds (fxfs-guest-bucket-soak, TASK-330.3, RustFS's bucket through a degrading proxy; default
+# 1800, 1200 at least; 0 for none); every extent daemon of both held to its design's budgets
 # (scripts/budgets.py, TASK-330.2). On Linux with KVM, as root, as scripts/test-e2e.sh runs guests;
 # what that takes from the environment passes through, such as CLADEFS_GUEST_KERNEL, and
 # CLADEFS_E2E_PREBUILT with CLADEFS_E2E_HARNESS, this tree's harness driving another's build

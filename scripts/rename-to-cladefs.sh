@@ -26,12 +26,12 @@
 #   branches and tags (fxdax-v1.16.1*, fxdax-pci-r1), which stay on GitHub as they were;
 # - the Google Cloud KMS test key ring and keys (keyRings/fxdax-test, its fxdax-test-N and
 #   fxdax-probe keys, TASK-411.18), which Cloud KMS never deletes, so the tests name them as made;
-# - what ubu1's own setup (its ~/docs/system-setup.d steps) made under the old name, which a
+# - what the test host's own setup made under the old name, which a
 #   checkout cannot rename: the scratch disk and its mount (fxdax-scratch), the work under it
 #   (fxdax-host), fxjob's slices (fxdax.slice, fxdax-work.slice, fxdax-bench.slice), the resctrl
 #   group (resctrl/fxdax-bench), the setup's steps (NNN-fxdax_*.sh), the tap device's unit
 #   (fxdax-vmm-test-tap), the Linux hosts' work directory (/var/lib/fxdax-test), and the
-#   checkouts, ubu1's and this Mac's (src/fxdax).
+#   checkouts, the test host's and this Mac's (src/fxdax).
 #
 # This script keeps its own words.
 set -euo pipefail

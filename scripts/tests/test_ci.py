@@ -152,7 +152,7 @@ class Ci(unittest.TestCase):
         """TASK-330.1: the sandboxes' short mode, LangSmith's CI's topology, on every push to main,
         once main passed it on GitHub's runner (TASK-336, TASK-400, TASK-401): sandboxes.yml,
         reusable, its job the short mode's, its artifacts' builds and the guest kernel cached, so
-        that it doesn't build them whole each push. Its long mode is ubu1's (TASK-330.5)."""
+        that it doesn't build them whole each push. Its long mode is the test host's (TASK-330.5)."""
         text = CI.read_text()
         self.assertIn("push:\n    branches: [main]\n", text)
         self.assertEqual(workflow_job(text, "sandboxes"),

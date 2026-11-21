@@ -11,17 +11,17 @@
 #
 #   build-guest-kernel.sh [arm64|x86_64]
 #
-# builds for this machine's architecture by default. It runs on Linux, natively; on macOS, run
-# it in Lima: scripts/lib/lima.sh build-guest-kernel.sh. The sources and the build live under
+# builds for this machine's architecture by default. It runs on Linux, natively; on macOS, run it in
+# Lima: scripts/lib/lima.sh build-guest-kernel.sh. The sources and the build live under
 # $CLADEFS_GUEST_KERNEL_WORK (default: ~/cladefs-guest-kernel), and its out/<arch> gets the kernel
-# (Image for arm64, vmlinux for x86-64, as Firecracker loads them) and what builds it elsewhere,
-# on the same release: patches/, the series (git am); libcladefs_linux.a, the Rust, for fs/cladefs; and
-# cladefs.config, cladefs's options over the configuration. CLADEFS_GUEST_KERNEL_PROFILE (below) builds
-# one for profiling, CLADEFS_GUEST_KERNEL_LOCK_STAT one counting locks' contention,
-# CLADEFS_GUEST_KERNEL_DEBUG one checking its locking and races, CLADEFS_GUEST_KERNEL_KASAN one checking
-# its memory accesses, CLADEFS_GUEST_KERNEL_RUST_CHECKS one whose Rust checks itself.
-# CLADEFS_GUEST_KERNEL_JOBS is make's jobs (default: the CPUs), fewer on a host others share (ubu1),
-# its Rust's cargo's CARGO_BUILD_JOBS's.
+# (Image for arm64, vmlinux for x86-64, as Firecracker loads them) and what builds it elsewhere, on
+# the same release: patches/, the series (git am); libcladefs_linux.a, the Rust, for fs/cladefs; and
+# cladefs.config, cladefs's options over the configuration. CLADEFS_GUEST_KERNEL_PROFILE (below)
+# builds one for profiling, CLADEFS_GUEST_KERNEL_LOCK_STAT one counting locks' contention,
+# CLADEFS_GUEST_KERNEL_DEBUG one checking its locking and races, CLADEFS_GUEST_KERNEL_KASAN one
+# checking its memory accesses, CLADEFS_GUEST_KERNEL_RUST_CHECKS one whose Rust checks itself.
+# CLADEFS_GUEST_KERNEL_JOBS is make's jobs (default: the CPUs), fewer on a host others share (the
+# test host), its Rust's cargo's CARGO_BUILD_JOBS's.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)

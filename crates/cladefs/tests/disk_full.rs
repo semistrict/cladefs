@@ -10,8 +10,8 @@
 //! refused with ENOSPC on its writes alone, and its store goes on committing; once the bucket is
 //! back, what waited uploads, leaves the disk, and the guest writes again.
 //!
-//! Root's: it mounts the filesystem (`mount -o loop`), as ubu1's runs do (`sudo`, under fxjob);
-//! ignored otherwise.
+//! Root's: it mounts the filesystem (`mount -o loop`), as the test host's runs do (`sudo`, under
+//! fxjob); ignored otherwise.
 
 #![cfg(target_os = "linux")]
 

@@ -6,7 +6,7 @@
 # Sourced by the scripts whose runs load a Linux host for long (scripts/sandboxes.sh): what the
 # host and the run's cgroup spend as the run goes, into a log that outlives a run that runs out of
 # them. The sandboxes' long mode ran a CI runner out of memory and down, its artifacts with it, and
-# on ubu1 ran past 2 hours unfinished with nothing kept to say why (TASK-330.5).
+# on the test host ran past 2 hours unfinished with nothing kept to say why (TASK-330.5).
 
 # resources_sample prints one sample: the time; the host's load, memory and CPU time by kind
 # (/proc/stat's, in clock ticks); the run's cgroup's memory by kind, its memory events, its CPU

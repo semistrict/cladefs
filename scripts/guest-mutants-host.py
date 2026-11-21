@@ -14,8 +14,8 @@ case, and the check of it that fails if the case is a checks suite:
     scripts/guest-mutants-host.py RESULTS [MUTANT...]
     scripts/guest-mutants-host.py --check
 
-runs each (or those named) as a run of scripts/test-host.sh on the test host (CLADEFS_TEST_HOST,
-ubu1 by default): in a worktree there of HEAD, which origin has, with the mutant's patch in
+runs each (or those named) as a run of scripts/test-host.sh on the test host (CLADEFS_TEST_HOST):
+in a worktree there of HEAD, which origin has, with the mutant's patch in
 (CLADEFS_TEST_HOST_PATCH, scripts/lib/host.sh), its killer's case alone, of its checks the
 killer's alone (CLADEFS_CHECKS), CLADEFS_E2E_REPEATS times, on a guest kernel of its kind built
 from the worktree; the test host keeps its kernels' builds (host_kernel,

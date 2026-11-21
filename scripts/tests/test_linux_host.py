@@ -377,7 +377,7 @@ class Network(unittest.TestCase):
         self.assertEqual((done.returncode, done.stdout.splitlines(), done.stderr), (0, said, ""))
 
 class Provisioned(unittest.TestCase):
-    """A test host, provisioned already (ubu1): CLADEFS_TEST_HOST_WORK names the work directory,
+    """A test host, provisioned already: CLADEFS_TEST_HOST_WORK names the work directory,
     and with CLADEFS_TEST_HOST_PROVISIONED=1 host_need takes a tool there at the version it is,
     where it would install the pinned one (TASK-276.6). Here cargo is a fake whose nextest says a
     version other than the pinned one, and which fails anything else, an install among them."""

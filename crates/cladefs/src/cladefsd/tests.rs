@@ -6422,8 +6422,8 @@ fn whatever_a_vm_process_says_harms_no_other() {
     // What it says reaches past the checks: not every request is refused. Those served, every
     // one of which it hears of (TASK-686: once, only those before it hung up, fewer the busier
     // the host: 468 in a loaded workspace run), are as many as the cases drawn have served: 580
-    // to 899 in 23 runs on ubu1 (2026-11-20), about 740 on average. Refusing everything serves
-    // none.
+    // to 899 in 23 runs on the test host (2026-11-20), about 740 on average. Refusing everything
+    // serves none.
     let (served, restored) = (served.load(Ordering::Relaxed), restored.load(Ordering::Relaxed));
     println!("{served} requests served, {restored} of them restores");
     assert!(served > 300, "{served} requests served");

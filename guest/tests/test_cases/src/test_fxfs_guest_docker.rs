@@ -16,8 +16,8 @@
 //! a tar of its files, CLADEFS_DOCKER_BUILDS times (default 3), each round's stages anew. Two of 17 such
 //! builds oopsed there, then locked up. CLADEFS_DOCKER_BUILD_CPUS, a host CPU list such as `0-3`,
 //! runs the VM on those CPUs alone: its vCPUs then preempt each other, as on a host with no CPU
-//! to spare. Its uploads are some ten times its builds' data (44 GB for ~3.8 GB built, on ubu1):
-//! past the default, put the bucket on disk (CLADEFSD_BUCKET=file://DIR/), as the default
+//! to spare. Its uploads are some ten times its builds' data (44 GB for ~3.8 GB built, on the test
+//! host): past the default, put the bucket on disk (CLADEFSD_BUCKET=file://DIR/), as the default
 //! bucket, on /dev/shm, fills at 1024 MiB a build (TASK-314).
 
 use macros::{guest, host};

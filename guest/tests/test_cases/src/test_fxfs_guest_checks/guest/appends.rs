@@ -206,12 +206,12 @@ pub(super) fn test_append_writeback() {
 const ALONE: u8 = 32;
 
 /// cladefs: the most of the guest's time the median of append_writeback's fdatasyncs alone may take,
-/// scaled as the budgets are ([`scale`]): 50 times the most measured. TASK-323, on ubu1, release
-/// kernel, 55 rounds (-dax, -dax-small and -dax-delay, rounds on ZFS and on ext4): the median
-/// 59-103 us, the longest 2.4 ms, all 32 at most 5.8 ms, while the host took 1.3-14.6 s. A sleep in
-/// each fsync of 60 ms made the median 62.9 ms (guest/mutants/task-323-fsync-sleeps.patch), of
-/// 6 ms 11.1 ms. The median, not the sum: in most rounds one or two of the 32 took about 2 ms, the
-/// rest about 0.1 ms.
+/// scaled as the budgets are ([`scale`]): 50 times the most measured. TASK-323, on the test host,
+/// release kernel, 55 rounds (-dax, -dax-small and -dax-delay, rounds on ZFS and on ext4): the
+/// median 59-103 us, the longest 2.4 ms, all 32 at most 5.8 ms, while the host took 1.3-14.6 s. A
+/// sleep in each fsync of 60 ms made the median 62.9 ms
+/// (guest/mutants/task-323-fsync-sleeps.patch), of 6 ms 11.1 ms. The median, not the sum: in most
+/// rounds one or two of the 32 took about 2 ms, the rest about 0.1 ms.
 const FDATASYNC: Duration = Duration::from_millis(5);
 
 /// cladefs: how long the bound device has had a request in flight, all told (`busy_ns`).

@@ -8,8 +8,8 @@
 //! them; from its global allocator, which counts them as it counted pages boxed (a test's heap
 //! budget, cladefs's `heap`). Each page boxed on its own, as before, was memory the process had
 //! never touched, which faulted in a 4 KiB page at a time: 81 µs of a 256 KiB write's 237 to copy
-//! it into the cache, on ubu1, against 20 with malloc's heap in huge pages, and 25 with these
-//! frames.
+//! it into the cache, on the test host, against 20 with malloc's heap in huge pages, and 25 with
+//! these frames.
 //!
 //! A frame is taken from the slab lowest in memory that has one free, a frame used before first,
 //! so that the frames in use stay packed in few slabs, as a slab allocator packs them. Slabs are

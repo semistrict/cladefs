@@ -3,19 +3,19 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Run cladefs's guest tests (scripts/test-e2e.sh) as a measurement's job on a shared Linux host
-# (ubu1), where the results are kept on another filesystem than a host's stores are on: the run
+# Run cladefs's guest tests (scripts/test-e2e.sh) as a measurement's job on a shared Linux host (the
+# test host), where the results are kept on another filesystem than a host's stores are on: the run
 # writes in a directory of its own in the job's temporary one (TMPDIR: fxjob's, on the host's
 # scratch disk, short enough for the cases' sockets), so that the cases' stores and the extent
 # daemon's part cache, which test-e2e.sh keeps with its results, are on a local disk's ext4, as a
-# host's are; and once the run ends, however it does, RESULTS gets what it left, but for the
-# stores, the buckets, the part caches and the guests' root filesystems and images, which are no
-# results, and the directory goes: the run's logs name it, and this says where the results are.
-# The run is a round under scripts/contamination.py (TASK-375), which records what others wrote
-# meanwhile to the disk that directory is on, the stores' and no other (RESULTS's own, ZFS on
-# ubu1, it could not check): its record, contamination.json, is in CLADEFS_BENCH_RESULTS, beside
-# the bench's report, where scripts/bench-ab.py reads both, or in RESULTS if the run has none.
-# Copying the results back is after the round, and none of it.
+# host's are; and once the run ends, however it does, RESULTS gets what it left, but for the stores,
+# the buckets, the part caches and the guests' root filesystems and images, which are no results,
+# and the directory goes: the run's logs name it, and this says where the results are. The run is a
+# round under scripts/contamination.py (TASK-375), which records what others wrote meanwhile to the
+# disk that directory is on, the stores' and no other (RESULTS's own, ZFS on the test host, it could
+# not check): its record, contamination.json, is in CLADEFS_BENCH_RESULTS, beside the bench's
+# report, where scripts/bench-ab.py reads both, or in RESULTS if the run has none. Copying the
+# results back is after the round, and none of it.
 #
 #   scripts/test-e2e-job.sh RESULTS [ARG...]
 #
@@ -26,8 +26,8 @@
 #
 # A TMPDIR unset, or on another filesystem than ext4, is refused (2) before anything runs, as
 # scripts/sandboxes.sh refuses its disk: what a store's syncs cost is its filesystem's. With the
-# results on ubu1's home, ZFS, and so the store there, bench-fs-fxfs-guest-dax's sync-loop ran
-# 10.8/s at 25 ms of bucket latency, a file bucket there too; 15.9/s with the bucket on tmpfs;
+# results on the test host's home, ZFS, and so the store there, bench-fs-fxfs-guest-dax's sync-loop
+# ran 10.8/s at 25 ms of bucket latency, a file bucket there too; 15.9/s with the bucket on tmpfs;
 # 30.1/s with the store on the scratch disk besides, one bucket round trip a sync (TASK-397).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)

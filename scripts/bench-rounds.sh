@@ -3,19 +3,18 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Rounds of guest test cases on this Linux host, a shared one (ubu1), each case run once a round,
-# the cases' order reversed every other round (A B, B A, ...), so that what drifts on the host
-# over the hours moves every case alike (TASK-350). Each run is a scripts/test-e2e.sh of the one
-# case, as root (its cases attach loop devices), as a measurement: `fxjob --bench`, which gives
-# it cores, most of the L3, memory bandwidth and memory of its own whatever else the host runs,
-# or fails the run (ubu1's system-setup.d/146-fxdax_cgroups.sh). So a run doesn't wait for the
-# host to be quiet: what the rest of the host does reaches it only through what isolation can't
-# split, the disks (ZFS schedules its own IO) and the kernel's shared locks. Before each run it
-# drops the host's caches, the page cache and what of ZFS's ARC can go; and it records, in
-# RESULTS/runs.tsv, each run's round, case, outcome, the host's load and the ARC's size before
-# and after, and the time the run's tasks stalled (pressure stall information of
-# fxdax-bench.slice, in ms, `some`) waiting on CPU, memory and IO: what a run's numbers are
-# read against.
+# Rounds of guest test cases on this Linux host, a shared one, each case run once a round, the
+# cases' order reversed every other round (A B, B A, ...), so that what drifts on the host over the
+# hours moves every case alike (TASK-350). Each run is a scripts/test-e2e.sh of the one case, as
+# root (its cases attach loop devices), as a measurement: `fxjob --bench`, which gives it cores,
+# most of the L3, memory bandwidth and memory of its own whatever else the host runs, or fails the
+# run (the test host's setup). So a run doesn't wait for the host to be quiet: what the rest of the
+# host does reaches it only through what isolation can't split, the disks (ZFS schedules its own IO)
+# and the kernel's shared locks. Before each run it drops the host's caches, the page cache and what
+# of ZFS's ARC can go; and it records, in RESULTS/runs.tsv, each run's round, case, outcome, the
+# host's load and the ARC's size before and after, and the time the run's tasks stalled (pressure
+# stall information of fxdax-bench.slice, in ms, `some`) waiting on CPU, memory and IO: what a run's
+# numbers are read against.
 #
 #   scripts/bench-rounds.sh RESULTS ROUNDS CASE...
 #
@@ -27,15 +26,15 @@
 # Each run may hold CLADEFS_ROUNDS_MEM (16G) of memory, page cache, the extent daemon's and its
 # bucket together.
 #
-# A run's numbers are cladefs's on a host's disks, not this host's results' filesystem's (ubu1's
-# home, ZFS, whose syncs a durable sync then measured: bench-fs-fxfs-guest-dax's sync-loop 10.8/s
-# there at 25 ms of bucket latency, 30.1/s as below, TASK-397). Each run's stores and its extent
-# daemon's part cache are on ext4, as a host's local disk: in the job's temporary directory,
+# A run's numbers are cladefs's on a host's disks, not this host's results' filesystem's (the test
+# host's home, ZFS, whose syncs a durable sync then measured: bench-fs-fxfs-guest-dax's sync-loop
+# 10.8/s there at 25 ms of bucket latency, 30.1/s as below, TASK-397). Each run's stores and its
+# extent daemon's part cache are on ext4, as a host's local disk: in the job's temporary directory,
 # fxjob's, on the host's scratch disk, which goes with the job (scripts/test-e2e-job.sh, which
-# refuses another filesystem). Its bucket is test-e2e.sh's own, a file bucket in memory, on
-# tmpfs, whose distance CLADEFS_BUCKET_LATENCY_MS stands for, unless CLADEFSD_BUCKET names
-# one: it counts against the run's memory, and a case whose working set of gigabytes overruns
-# that (TASK-350) takes more of it (CLADEFS_ROUNDS_MEM), or a bucket named on a disk.
+# refuses another filesystem). Its bucket is test-e2e.sh's own, a file bucket in memory, on tmpfs,
+# whose distance CLADEFS_BUCKET_LATENCY_MS stands for, unless CLADEFSD_BUCKET names one: it counts
+# against the run's memory, and a case whose working set of gigabytes overruns that (TASK-350) takes
+# more of it (CLADEFS_ROUNDS_MEM), or a bucket named on a disk.
 #
 # Each run's results go to RESULTS/CASE/round-K: test-e2e.sh's logs (e2e, copied there as the run
 # ends, without the stores and the guests' root filesystems), and the fs bench's report as JSON
@@ -57,7 +56,7 @@ cases=("$@")
 [[ $rounds =~ ^[1-9][0-9]*$ ]] || { echo "ROUNDS is a count" >&2; exit 2; }
 mkdir -p "$results"
 results=$(cd "$results" && pwd)
-command -v fxjob > /dev/null || { echo "fxjob not found: this runs on a host with fxjob (ubu1)" >&2; exit 2; }
+command -v fxjob > /dev/null || { echo "fxjob not found: this runs on a test host with fxjob" >&2; exit 2; }
 
 proc=${CLADEFS_TEST_HOST_PROC:-/proc} sys=${CLADEFS_TEST_HOST_SYS:-/sys}
 load() { cut -d' ' -f1 "$proc/loadavg"; }

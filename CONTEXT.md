@@ -17,7 +17,7 @@ _Avoid_: VM (when the kernel is meant), client
 
 **Host**:
 The machine that runs the VMs, their VM processes and one extent daemon.
-_Avoid_: hypervisor; "host" for ubu1 (say **test host**)
+_Avoid_: hypervisor; "host" for a test host (say **test host**)
 
 **VM process**:
 The Firecracker process of one VM, which holds its extent device and its DAX window's host memory.
@@ -505,7 +505,7 @@ A host's dropping the keys of a shredded tenant or cell, fencing its stores.
 ### Testing and measurement
 
 **Test host**:
-A Linux machine of one's own that runs cladefs's Linux tests over ssh; ubu1 by default. Its drivers keep the `-host.sh` suffix, short for "on the test host"; its env vars say `TEST_HOST` (`CLADEFS_TEST_HOST*`).
+A Linux machine of one's own that runs cladefs's Linux tests over ssh, named by `CLADEFS_TEST_HOST`. Its drivers keep the `-host.sh` suffix, short for "on the test host"; its env vars say `TEST_HOST` (`CLADEFS_TEST_HOST*`).
 _Avoid_: host alone
 
 **Driver**:

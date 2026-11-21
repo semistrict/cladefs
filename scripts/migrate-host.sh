@@ -17,7 +17,7 @@
 #   scripts/migrate-host.sh [RESULTS]
 #
 # CLADEFS_MIGRATE_HOSTS names the two test hosts, as ssh does (default: CLADEFS_TEST_HOST twice,
-# ubu1's, the second run on the same test host as the first, after it): of one CPU model, which a
+# the second run on the same test host as the first, after it): of one CPU model, which a
 # snapshot restores on. CLADEFS_MIGRATE_BUCKET names the bucket and prefix the run keeps its
 # cells under, an object store's URL both test hosts reach, under a prefix of the run's own,
 # which the run leaves; by default, with one test host for both, a directory of the run's own there

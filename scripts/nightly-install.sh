@@ -5,9 +5,9 @@
 
 # Install the nightly (scripts/nightly-host.sh, TASK-441) for the user running this: its clone of
 # cladefs, its git identity, and its cron entry, at 02:00 local time, the quiet hour in fxjob's
-# history of ubu1 (jobs in every hour but 02:00-04:00, 2026-11-13..15). Run again, it changes
-# nothing that is right already: the entry is replaced, never added twice. ubu1's setup calls it
-# from a system-setup.d step, as the user (docs/testing.md has the step).
+# history of the test host (jobs in every hour but 02:00-04:00, 2026-11-13..15). Run again, it
+# changes nothing that is right already: the entry is replaced, never added twice. The test host's
+# setup calls it, as the user (docs/testing.md).
 #
 #   scripts/nightly-install.sh [ORIGIN]
 #

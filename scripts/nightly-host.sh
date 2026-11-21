@@ -3,7 +3,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# The nightly on ubu1 (TASK-441): main's head measured against the commit the night before
+# The nightly on the test host (TASK-441): main's head measured against the commit the night before
 # measured, in interleaved rounds of the same night, inside one fxjob --bench job, and what moved
 # filed as backlog tasks, pushed to main. A cron entry runs it at 02:00 (scripts/nightly-install.sh),
 # from the nightly's own clone of cladefs (CLADEFS_NIGHTLY_REPO, default ~/src/cladefs-nightly),
@@ -28,9 +28,9 @@
 # night that could not run: a result, said in the history page, not a crash; the next night measures
 # the same commits again (nightly.py plan).
 #
-# The scratch disk, /mnt/fxdax-scratch, is every job's on ubu1, and the first night found it full as
-# its measurement began (TASK-489). So a night first removes its own earlier runs' directories,
-# those of the nightly's name whose job is not running (scripts/lib/host.sh's
+# The scratch disk, /mnt/fxdax-scratch, is every job's on the test host, and the first night found
+# it full as its measurement began (TASK-489). So a night first removes its own earlier runs'
+# directories, those of the nightly's name whose job is not running (scripts/lib/host.sh's
 # CLADEFS_TEST_HOST_SWEEP; one night runs at a time, the lock below), and keeps only the artifacts
 # the next night reuses, tonight's two sides' (CLADEFS_NIGHTLY_KEEP_COUNT, 2: tonight's head is its
 # base, and a night that measured nothing is measured again); then checks the disk has the room it

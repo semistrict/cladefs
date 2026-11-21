@@ -267,7 +267,8 @@ class Refusals(unittest.TestCase):
                                             "new directory.\n"))
 
     def test_the_ab_takes_the_fs_bench_or_the_qualification(self):
-        status, _, err = bash(f"{SCRIPTS / 'bench-ab-host.sh'}", {"CLADEFS_AB_SUITE": "soak"})
+        status, _, err = bash(f"{SCRIPTS / 'bench-ab-host.sh'}",
+                              {"CLADEFS_TEST_HOST": "host1", "CLADEFS_AB_SUITE": "soak"})
         self.assertEqual((status, err), (2, "CLADEFS_AB_SUITE is fs or qualify\n"))
 
 

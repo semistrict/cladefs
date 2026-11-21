@@ -60,7 +60,7 @@ class Disks(unittest.TestCase):
                          ({"sdc": "8:32"}, {}, {}, [], []))
 
     def test_a_zvols_pool_and_the_pools_disk_are_found(self):
-        """ubu1: the scratch disk a zvol on the pool /home is on, the pool on the one NVMe."""
+        """host1: the scratch disk a zvol on the pool /home is on, the pool on the one NVMe."""
         self.tree.zvol("zd0", "230:0", "tank/vol/scratch")
         self.tree.disk("nvme0n1", "259:0")
         self.tree.partition("nvme0n1", "nvme0n1p3", "259:3")
@@ -297,7 +297,7 @@ class Accounting(unittest.TestCase):
             "others wrote 20.0 MB/s to its disk over the round, bound 10 (nvme0n1 20.0)"]))
 
     def test_the_pools_other_datasets_writes_are_others(self):
-        """ubu1: a loader in /home, on the pool the scratch zvol is on, never passes the zvol's
+        """host1: a loader in /home, on the pool the scratch zvol is on, never passes the zvol's
         own device; ZFS counts it for /home's dataset."""
         layout = Layout(devices={"zd0": "230:0"}, pools={"tank": {"tank/scratch"}},
                         beneath={"nvme0n1": "tank"})
@@ -594,7 +594,7 @@ class Drivers(unittest.TestCase):
 
         self.assertEqual(check(), (2, "", "usage: contamination-check.sh RESULTS\n"))
         self.assertEqual(check(tempfile.mkdtemp()), (
-            2, "", "fxjob not found: this runs on a host with fxjob (ubu1)\n"))
+            2, "", "fxjob not found: this runs on a test host with fxjob\n"))
 
 
 if __name__ == "__main__":

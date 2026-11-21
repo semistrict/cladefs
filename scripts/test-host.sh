@@ -4,7 +4,7 @@
 # found in the LICENSE file.
 
 # Qualify cladefs on the test host, an x86-64 Linux machine of one's own with KVM, over ssh
-# (CLADEFS_TEST_HOST, ubu1 by default; scripts/lib/host.sh): a worktree there of the commit, which
+# (CLADEFS_TEST_HOST; scripts/lib/host.sh): a worktree there of the commit, which
 # origin has, runs the workspace's tests and cladefs's guest tests (guest/tests), in its
 # Firecracker, whose DAX window takes KVM's faults through userfaultfd
 # (scripts/lib/test-linux-host.sh), under fxjob; the results come back to RESULTS (default: a

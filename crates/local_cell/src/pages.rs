@@ -268,7 +268,7 @@ impl PageCache {
     /// so that what this allows past `room` under pressure is dirty pages alone, to be written.
     /// With the fixed bounds alone, a burst of 256 MiB, as cell-bench's, was evicted as it was
     /// written, and read back from the disk to be framed: the commit after it 2-4x slower on
-    /// ubu1 than through the host's page cache.
+    /// the test host than through the host's page cache.
     pub fn size_to(&self, room: u64) {
         let floors = self.options;
         self.background.store((room / 10).max(floors.background), Ordering::Relaxed);
@@ -1005,8 +1005,8 @@ impl<F: File> File for Cached<F> {
     /// it written, or in flight, rather than write it all itself then (TASK-433.8). Until then
     /// this woke the flusher alone, which wrote nothing under [`Options::background`]: the writer
     /// then wrote back every range it waited for, a MiB at a time, cell-bench `burst`'s writes
-    /// 2.3x slower and its commit 5x on ubu1 against the host's page cache. A failure is the
-    /// file's next sync's. With no flusher, nothing: its writers write back as they go.
+    /// 2.3x slower and its commit 5x on the test host against the host's page cache. A failure is
+    /// the file's next sync's. With no flusher, nothing: its writers write back as they go.
     fn write_behind(&self, offset: u64, len: u64) -> io::Result<()> {
         let paged: Arc<dyn Paged> = self.shared.clone();
         self.shared.cache.begin(Arc::downgrade(&paged), offset..offset + len);
@@ -1408,7 +1408,8 @@ mod tests {
     /// Eviction, writers' write-back and the flusher order the files by keys other threads change
     /// as they go: each by its key as it was once, not as each comparison finds it, which is no
     /// order at all, and a sort given none panics (Rust's "user-provided comparison function does
-    /// not correctly implement a total order"), as the flusher did on ubu1, dying (TASK-493).
+    /// not correctly implement a total order"), as the flusher did on the test host, dying
+    /// (TASK-493).
     #[test]
     fn files_ordered_by_keys_changing_as_they_are_read() {
         for count in 0..=256 {

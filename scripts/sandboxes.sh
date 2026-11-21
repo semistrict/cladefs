@@ -11,14 +11,14 @@
 #   sandboxes.sh [short|long]
 #
 # short (the default) is for every push, minutes; long, LangSmith's 16 VMs, eight at a time, a
-# quarter hour, is the qualification's before each candidate, on ubu1 (scripts/qualify.sh). The disk
-# is CLADEFS_SANDBOX_DISK's (default: TMPDIR's), which must be ext4: the run's directory there holds
-# the bucket's data, which RustFS serves (scripts/test-e2e-rustfs.sh, which runs the case), and
-# scripts/test-e2e.sh's results (CLADEFS_E2E_RESULTS, by default in the run's directory), the case's
-# stores and the daemons' part caches among them; and RustFS's log (rustfs.log) and what the host
-# and the run spend (resources.log, scripts/lib/resources.sh). What test-e2e.sh takes from the
-# environment passes through (CLADEFS_GUEST_KERNEL, CLADEFS_E2E_PREBUILT). The bucket's data goes at
-# the end, and the run's directory with it unless it holds the results.
+# quarter hour, is the qualification's before each candidate, on the test host (scripts/qualify.sh).
+# The disk is CLADEFS_SANDBOX_DISK's (default: TMPDIR's), which must be ext4: the run's directory
+# there holds the bucket's data, which RustFS serves (scripts/test-e2e-rustfs.sh, which runs the
+# case), and scripts/test-e2e.sh's results (CLADEFS_E2E_RESULTS, by default in the run's directory),
+# the case's stores and the daemons' part caches among them; and RustFS's log (rustfs.log) and what
+# the host and the run spend (resources.log, scripts/lib/resources.sh). What test-e2e.sh takes from
+# the environment passes through (CLADEFS_GUEST_KERNEL, CLADEFS_E2E_PREBUILT). The bucket's data
+# goes at the end, and the run's directory with it unless it holds the results.
 #
 # Exits 0 if the run passed, 1 if it failed (test-e2e.sh's status), 2 if it couldn't be set up.
 set -euo pipefail
@@ -42,7 +42,7 @@ mkdir "$bucket_data"
 results=${CLADEFS_E2E_RESULTS:-$work/results}
 mkdir -p "$results"
 # What the host and the run spend, every 30 s, in the results: the long mode ran a CI runner out of
-# memory and down, and ran on ubu1 past 2 hours with nothing kept to say why (TASK-330.5).
+# memory and down, and ran on the test host past 2 hours with nothing kept to say why (TASK-330.5).
 resources_watch "$results/resources.log"
 
 cleanup() {

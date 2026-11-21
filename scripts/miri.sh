@@ -6,7 +6,7 @@
 # Runs cladefs's own crates' tests under Miri, which finds undefined behaviour in unsafe code as it
 # runs (TASK-444.4): use after free, out-of-bounds and misaligned accesses, data races, aliasing
 # broken (Stacked Borrows), a value invalid for its type. On Linux, with the nightly the guest's Rust
-# pins and its Miri (~/docs/system-setup.d's cladefs_miri step on a host of one's own).
+# pins and its Miri (the test host's setup installs them on a host of one's own).
 #
 #   miri.sh [CRATE...]            the tests of scripts/miri-tests, those Miri runs, of the crates
 #   miri.sh --probe [CRATE...]    every test of the crates (the own crates with unsafe code by

@@ -4,7 +4,7 @@
 # found in the LICENSE file.
 
 # An A/B of cell-bench's cases that time a store on a host's disk (`durable`, `burst`), two
-# worktrees' builds of it, on this Linux host, a shared one (ubu1): what a change to the store's
+# worktrees' builds of it, on this Linux host, a shared one: what a change to the store's
 # write path costs (TASK-539.4, the stores' files counted as they write them).
 #
 #   scripts/cell-bench-ab.sh A_WORKTREE B_WORKTREE RESULTS [ROUNDS]

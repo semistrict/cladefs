@@ -21,14 +21,14 @@
 # Usage: perf-gate-host.sh [--nested] RESULTS [PHASE...]
 #
 # The test host (CLADEFS_TEST_HOST, scripts/lib/host.sh) is of the kind the numbers are reported as:
-# bare metal, as ubu1 is, by default; with --nested, a VM whose guests are nested. Numbers of the
-# two kinds are not compared. The PHASEs, in order, of `single`, `density` and `gate`, all three by
-# default: each a run of its own, `gate` reading both runs' results in RESULTS. A release guest
-# kernel unless CLADEFS_GUEST_KERNEL_BUILD says otherwise; each Firecracker in its jailer's jail, as
-# production runs it, unless CLADEFS_FIRECRACKER_JAIL is set empty (TASK-172: a jailed VM process's
-# DAX window budgets its mappings as the host allows, as an unjailed one's does); CLADEFS_GATE_* are
-# the gates' thresholds (pgbench-gate.py), and every other CLADEFS_* and CLADEFSD_* reaches the test
-# host (test-host.sh), CLADEFS_GUEST_CMDLINE among them.
+# bare metal, as the test host is, by default; with --nested, a VM whose guests are nested. Numbers
+# of the two kinds are not compared. The PHASEs, in order, of `single`, `density` and `gate`, all
+# three by default: each a run of its own, `gate` reading both runs' results in RESULTS. A release
+# guest kernel unless CLADEFS_GUEST_KERNEL_BUILD says otherwise; each Firecracker in its jailer's
+# jail, as production runs it, unless CLADEFS_FIRECRACKER_JAIL is set empty (TASK-172: a jailed VM
+# process's DAX window budgets its mappings as the host allows, as an unjailed one's does);
+# CLADEFS_GATE_* are the gates' thresholds (pgbench-gate.py), and every other CLADEFS_* and
+# CLADEFSD_* reaches the test host (test-host.sh), CLADEFS_GUEST_CMDLINE among them.
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 usage() { echo "Usage: $0 [--nested] RESULTS [single|density|gate]..." >&2; exit 2; }

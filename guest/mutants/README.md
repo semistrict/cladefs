@@ -20,7 +20,7 @@ mutant is run and what its fate is:
 - **`Kernel:`** what it runs on: `sim`, `guest/sim`'s simulator, in seconds; `model`, guest/sim's
   model of Fxfs alone, beside Fxfs, as `crates/fxfs-sim-diff` runs it, for a drift of the model's
   that dax.c in the simulator can't see; or the guest kernel a test host builds for it, `release`,
-  `debug` (lockdep and KCSAN) or `kasan`, in minutes on ubu1. Only what the simulator can't find
+  `debug` (lockdep and KCSAN) or `kasan`, in minutes on the test host. Only what the simulator can't find
   needs a real kernel.
 - **`Killer:`** the run that must fail with the mutant in. The mutant is killed only if it does:
   another test failing doesn't count, and the run's other tests aren't run.
@@ -48,7 +48,7 @@ The comments after say what the bug was, how it was found, and how its killer fa
   against the model's comparison with Fxfs, and fails if one of `Kernel: model` lives; `--check`
   applies and reverses each.
 - `scripts/guest-mutants-host.py RESULTS` runs those of a real kernel on a Linux host of one's own
-  (`CLADEFS_TEST_HOST`, ubu1 by default), each a run of `scripts/test-host.sh` with its patch applied;
+  (`CLADEFS_TEST_HOST`), each a run of `scripts/test-host.sh` with its patch applied;
   `--check` checks every header, and that each of these and the model's applies (`scripts/test.sh`'s
   scripts part).
-- `scripts/dax-gate.sh` runs the simulator's first, then the rest, on ubu1: each must be killed.
+- `scripts/dax-gate.sh` runs the simulator's first, then the rest, on the test host: each must be killed.

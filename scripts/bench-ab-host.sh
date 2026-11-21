@@ -4,7 +4,7 @@
 # found in the LICENSE file.
 
 # An A/B of the fs bench on the test host, an x86-64 Linux machine of one's own, over ssh
-# (CLADEFS_TEST_HOST, ubu1 by default; scripts/lib/host.sh; scripts/lib/bench-ab-linux-host.sh,
+# (CLADEFS_TEST_HOST; scripts/lib/host.sh; scripts/lib/bench-ab-linux-host.sh,
 # TASK-276): each side's commit built there once, in a worktree of its own, into artifacts of its
 # own, as ordinary work (fxjob), then, as a measurement, alone and on CPUs of its own (fxjob
 # --bench), which no build takes (scripts/lib/host.sh's host_job, TASK-368), ROUNDS rounds of both
@@ -38,7 +38,7 @@
 # how). Its harness this tree's, the same for both sides (scripts/lib/bench-ab-linux-host.sh);
 # CLADEFS_QUALIFY_SANDBOXES and CLADEFS_QUALIFY_SOAK_SECS size each round; its results go to
 # docs/measurements/HOST-qualify-ab-<time>-<mark>, and its job may take 12 h in a cgroup of 16 GiB,
-# the most a measurement has on ubu1 (CLADEFS_TEST_HOST_LIMIT, CLADEFS_TEST_HOST_MEM).
+# the most a measurement has on the test host (CLADEFS_TEST_HOST_LIMIT, CLADEFS_TEST_HOST_MEM).
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo/scripts/lib/host.sh"

@@ -1,6 +1,6 @@
 # Guest filesystem audit checks
 
-Run these checks from a revision on origin. The test-host driver applies the fixture in its disposable worktree, builds the guest kernel, and runs the checks on ubu1. The patch carries both the probes and the guest tests registered against them.
+Run these checks from a revision on origin. The test-host driver applies the fixture in its disposable worktree, builds the guest kernel, and runs the checks on the test host. The patch carries both the probes and the guest tests registered against them.
 
 ```sh
 CLADEFS_TEST_HOST_COMMIT=HEAD \

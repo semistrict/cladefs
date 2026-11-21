@@ -117,7 +117,7 @@ class Job(unittest.TestCase):
 
     def test_the_run_is_a_round_recorded_of_the_disk_its_stores_are_on(self):
         # The directory the run wrote in, in the job's temporary one, is the round's disk, and no
-        # other: not the results', which is ubu1's ZFS home under bench-rounds.sh, unchecked.
+        # other: not the results', which is the test host's ZFS home under bench-rounds.sh, unchecked.
         status, errors = self.job("bench-fs-fxfs-guest-dax")
         self.assertEqual((status, errors), (0, self.moved()))
         self.assertEqual(self.recorded(), [
@@ -150,7 +150,7 @@ class Job(unittest.TestCase):
         self.assertEqual(list((self.tree / "tmp").iterdir()), [])
 
     def test_a_temporary_directory_on_another_filesystem_is_refused(self):
-        # ubu1's home, where a durable sync measured ZFS's syncs, and /tmp, memory.
+        # the test host's home, where a durable sync measured ZFS's syncs, and /tmp, memory.
         for fstype in ["zfs", "tmpfs"]:
             with self.subTest(fstype):
                 status, errors = self.job("case", fstype=fstype)

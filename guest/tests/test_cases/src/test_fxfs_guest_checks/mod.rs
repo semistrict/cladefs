@@ -58,7 +58,7 @@ const SCALE: &str = "CLADEFS_CHECKS_SCALE";
 /// cladefs: how much of a check's time the host may take, as a multiple of its budget: the guest's
 /// clock leaves the host's time out of the budget, but for a [`HOST_SCALE`]th of it (`guest::run`'s
 /// `Clock`, TASK-263), which the suite's limit allows one check whole (`host`'s `timeout_secs`).
-/// On ubu1 a check's host time was 12.2 times its budget at most (append_writeback's 64
+/// On the test host a check's host time was 12.2 times its budget at most (append_writeback's 64
 /// fdatasyncs, 36.6 s of 3 s, its runs' directories on ZFS), and half that again.
 const HOST_SCALE: f64 = 18.0;
 

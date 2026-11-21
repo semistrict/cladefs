@@ -4,8 +4,8 @@
 # found in the LICENSE file.
 
 # The gate a change to the guest's DAX code passes before it is pushed (TASK-119.8): two runs of
-# HEAD, a commit origin has, at once on the test host (scripts/test-host.sh; CLADEFS_TEST_HOST, ubu1
-# by default). The first runs HEAD's DAX suites, repeats of each: the checks with delays injected
+# HEAD, a commit origin has, at once on the test host (scripts/test-host.sh; CLADEFS_TEST_HOST).
+# The first runs HEAD's DAX suites, repeats of each: the checks with delays injected
 # (fxfs-guest-checks-dax-delay) and on a small window (-small), and the crash test and its variant
 # killing its process (-killed). The second runs pgbench-dax-forked, on a base's database, whose
 # files are DAX and whose stores copy on write, whose data is checked and whose write path's

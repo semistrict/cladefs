@@ -171,7 +171,7 @@ attribute is ever computed. The request path adds one more load per request, in
 The daemon records every span, so each request, commit, page-in and bucket request pays for a real
 span. `span-bench` (`crates/cladefs-examples/examples/span-bench.rs`) times a bucket request's span
 (started, three attributes set, ended, its trace kept as a sample), off and recorded, the fastest of
-5 rounds of a million. On ubu1 (x86_64), release build, under `fxjob --bench`, 2026-11-19:
+5 rounds of a million. On the test host (x86_64), release build, under `fxjob --bench`, 2026-11-19:
 
 | | per span |
 |---|---|

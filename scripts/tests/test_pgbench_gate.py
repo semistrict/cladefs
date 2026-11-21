@@ -2,7 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-"""Tests of scripts/pgbench-gate.py, which gates a ubu1 run of pgbench, and of DAX's cases, on their
+"""Tests of scripts/pgbench-gate.py, which gates a test host run of pgbench, and of DAX's cases, on their
 throughput and memory."""
 
 import json

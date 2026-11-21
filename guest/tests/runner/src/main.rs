@@ -201,7 +201,7 @@ fn on_path(command: &str) -> bool {
     })
 }
 
-/// cladefs: how a case runs on `host`. Root, as on ubu1, unshares its network itself:
+/// cladefs: how a case runs on `host`. Root, as on the test host, unshares its network itself:
 /// `buildah unshare` as root, with no subordinate IDs, entered user namespace after user namespace
 /// till its memfd's name, which grows with each, was past the kernel's 249 bytes (`memfd_create:
 /// invalid argument`), which once had the hosts run every case unisolated (CLADEFS_NO_UNSHARE). A case
@@ -1029,7 +1029,7 @@ mod tests {
     }
 
     /// cladefs: a repeat's outcome as data: the run's knobs and those the case chose, which its
-    /// replay runs it with, alone, on ubu1.
+    /// replay runs it with, alone, on the test host.
     #[test]
     fn an_outcome_says_how_to_replay_it() {
         let ran = Ran {

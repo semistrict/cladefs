@@ -3,7 +3,7 @@
 # found in the LICENSE file.
 
 """Tests of scripts/ab-rounds.py, the round-by-round comparison the nightly judges by (TASK-441.1),
-on A/B results shaped as ubu1's (docs/measurements/ubu1-loop-baseline-2026-11-11's bench JSON,
+on A/B results shaped as the test host's (docs/measurements/ubu1-loop-baseline-2026-11-11's bench JSON,
 contamination.py's records, scripts/counts.sh's outputs as the macOS runs of 2026-11-15 have them)."""
 
 import json

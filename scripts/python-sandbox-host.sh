@@ -4,7 +4,7 @@
 # found in the LICENSE file.
 
 # Time data-analysis sandboxes from fork to answers on the test host, an x86-64 Linux machine of
-# one's own, over ssh (CLADEFS_TEST_HOST, ubu1 by default; scripts/lib/host.sh), as a measurement,
+# one's own, over ssh (CLADEFS_TEST_HOST; scripts/lib/host.sh), as a measurement,
 # alone there and on CPUs of its own (fxjob --bench) (TASK-665): guest/tests' case
 # fxfs-guest-python-sandbox, three extent daemons with part caches and each other as peers, one
 # RustFS bucket 25 ms away, a base of uv-installed pandas and marimo with no bytecode, and its

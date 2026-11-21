@@ -176,7 +176,7 @@ fn mounted() -> bool {
 /// meanwhile for the host, the device having a request in flight (the driver's `busy_ns`). The
 /// host's time differs from host to host, and with their load: its disk's, making the guest's
 /// commits durable, 4 times as long on some GCE hosts as on others; and its writes', which took
-/// xattrs_bounded's fill from 0.6 s to 5.8 s on a host whose CPUs 8 agents shared (ubu1, load 40
+/// xattrs_bounded's fill from 0.6 s to 5.8 s on a host whose CPUs 8 agents shared (load 40
 /// to 150). What a check's budget bounds is its work, the guest's, and its waits on anything but
 /// the device: a hang is still killed at its budget. The host's time counts too, but a
 /// [`HOST_SCALE`]th of it, so that a device that never answers has the check killed, by name, as

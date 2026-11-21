@@ -6,7 +6,7 @@
 it, in the nightly's clone of an origin, on this machine as its local test host
 (scripts/lib/host.sh's CLADEFS_TEST_HOST=local), with fake_ssh.py's host tools (fxjob, which says
 whether a job measured, sudo, setsid, timeout, flock), a backlog CLI of its own (FAKE_BACKLOG) and a host script in the
-bench-ab-linux-host.sh's place (FAKE_AB) whose rounds are fixtures shaped as ubu1's
+bench-ab-linux-host.sh's place (FAKE_AB) whose rounds are fixtures shaped as the test host's
 (test_ab_rounds.write_round). And scripts/nightly-install.sh's cron entry."""
 
 import datetime
@@ -101,8 +101,8 @@ IDENTITY = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NA
 BASE_IOPS = [6077.151, 6100.0]
 
 
-class Ubu1:
-    """This machine as ubu1, in a temporary directory: a bare origin of cladefs whose scripts are
+class NightlyHost:
+    """This machine as the nightly host, in a temporary directory: a bare origin of cladefs whose scripts are
     the nightly's and FAKE_AB; a home whose src/cladefs-nightly is the nightly's clone of it; and
     the host's tools."""
 
@@ -118,7 +118,7 @@ class Ubu1:
             f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "{bin_}/fake_backlog.py" "$@"\n')
         (bin_ / "backlog").chmod(0o755)
         self.state = self.home / ".local" / "state" / "cladefs" / "nightly"
-        # The scratch disk as fake_ssh.py's df has it, 250 GiB free, as ubu1's whole: room for a
+        # The scratch disk as fake_ssh.py's df has it, 250 GiB free, as the test host's whole: room for a
         # night, whatever this machine's disk has.
         (self.home / "df-free").write_text(f"{250 << 20}\n")
         self.backlog = self.dir / "backlog.json"
@@ -223,56 +223,56 @@ class Ubu1:
 
 class Nights(unittest.TestCase):
     def test_a_night_main_did_not_move_does_nothing(self):
-        ubu1 = Ubu1()
-        ubu1.advance()
-        status, _, err = ubu1.night(ubu1.rounds(1.0))
+        host1 = NightlyHost()
+        host1.advance()
+        status, _, err = host1.night(host1.rounds(1.0))
         self.assertEqual(status, 0, err)
-        before = ubu1.main()
-        calls = (ubu1.home / "fxjob-calls").read_text()
-        status, _, err = ubu1.night(ubu1.rounds(1.0))
+        before = host1.main()
+        calls = (host1.home / "fxjob-calls").read_text()
+        status, _, err = host1.night(host1.rounds(1.0))
         self.assertEqual(status, 0, err)
-        self.assertEqual(ubu1.main(), before)
-        self.assertEqual((ubu1.home / "fxjob-calls").read_text(), calls)
-        [record] = ubu1.nights()
-        self.assertEqual(ubu1.log().splitlines()[-1].split(" ", 1)[1],
+        self.assertEqual(host1.main(), before)
+        self.assertEqual((host1.home / "fxjob-calls").read_text(), calls)
+        [record] = host1.nights()
+        self.assertEqual(host1.log().splitlines()[-1].split(" ", 1)[1],
                          f"nothing to measure: main's code is {record['head'][:12]}'s, which the "
                          f"night of {record['date']} measured")
         # Nor does a night after a commit of the backlog's alone.
-        ubu1.git(ubu1.pusher, "pull", "-q", "--rebase", "origin", "main")
-        ubu1.commit(ubu1.pusher, {"backlog/tasks/task-1 - x.md": "a task\n"})
-        ubu1.git(ubu1.pusher, "push", "-q", "origin", "HEAD:main")
-        before = ubu1.main()
-        status, _, err = ubu1.night(ubu1.rounds(1.0))
-        self.assertEqual((status, ubu1.main()), (0, before), err)
+        host1.git(host1.pusher, "pull", "-q", "--rebase", "origin", "main")
+        host1.commit(host1.pusher, {"backlog/tasks/task-1 - x.md": "a task\n"})
+        host1.git(host1.pusher, "push", "-q", "origin", "HEAD:main")
+        before = host1.main()
+        status, _, err = host1.night(host1.rounds(1.0))
+        self.assertEqual((status, host1.main()), (0, before), err)
 
     def test_a_quiet_night_builds_as_work_measures_alone_and_files_nothing(self):
-        ubu1 = Ubu1()
-        parent = ubu1.main()
-        head = ubu1.advance()
-        status, _, err = ubu1.night(ubu1.rounds(1.0))
+        host1 = NightlyHost()
+        parent = host1.main()
+        head = host1.advance()
+        status, _, err = host1.night(host1.rounds(1.0))
         self.assertEqual(status, 0, err)
-        [record] = ubu1.nights()
+        [record] = host1.nights()
         self.assertEqual((record["base"], record["head"], record["outcome"], record["moved"],
                           record["tasks"]), (parent, head, "measured", [], []))
-        self.assertEqual(ubu1.jobs(record), [f"build work {parent} {head}",
+        self.assertEqual(host1.jobs(record), [f"build work {parent} {head}",
                                              f"measure bench {parent} {head}"])
-        self.assertEqual(ubu1.tasks(), [])
-        self.assertEqual(ubu1.git(ubu1.origin, "log", "-1", "--format=%s", "main"),
+        self.assertEqual(host1.tasks(), [])
+        self.assertEqual(host1.git(host1.origin, "log", "-1", "--format=%s", "main"),
                          f"nightly {record['date'][:10]}: {parent[:8]}..{head[:8]}, nothing moved")
 
     def test_a_metric_that_moved_is_one_task_and_on_later_nights_a_note(self):
-        ubu1 = Ubu1()
-        parent = ubu1.main()
-        first = ubu1.advance("first")
-        status, _, err = ubu1.night(ubu1.rounds(0.8))
+        host1 = NightlyHost()
+        parent = host1.main()
+        first = host1.advance("first")
+        status, _, err = host1.night(host1.rounds(0.8))
         self.assertEqual(status, 0, err)
-        [task] = ubu1.tasks()
+        [task] = host1.tasks()
         marker = "[nightly:fxfs-guest-dax fsync-append slower]"
         self.assertEqual(task["title"], f"Nightly: fxfs-guest-dax fsync-append 25% slower on main, "
                                         f"{parent[:8]}..{first[:8]} {marker}")
         self.assertEqual((task["labels"], task["notes"]), (["perf", "nightly"], []))
-        [record] = ubu1.nights()
-        where = f"docs/measurements/{record_directory(ubu1, record)}/nightly.md"
+        [record] = host1.nights()
+        where = f"docs/measurements/{record_directory(host1, record)}/nightly.md"
         self.assertIn(f"- Base, the commit the night before measured: {parent}\n"
                       f"- Head, main: {first}\n"
                       "- Each round, base against head: r1: base 6,089, head 4,871 (1.250×); "
@@ -285,121 +285,121 @@ class Nights(unittest.TestCase):
                       "scripts/bench-ab-host.sh RESULTS && scripts/ab-rounds.py compare RESULTS "
                       "base head\n", task["description"])
         # The commit holds the results, the history page and the task.
-        changed = ubu1.git(ubu1.origin, "show", "--name-only", "--format=", "main").splitlines()
+        changed = host1.git(host1.origin, "show", "--name-only", "--format=", "main").splitlines()
         self.assertIn("docs/measurements/nightly-history.md", changed)
         self.assertIn("backlog/tasks/task-900 - nightly.md", changed)
-        self.assertIn(f"docs/measurements/{record_directory(ubu1, record)}/night.json", changed)
+        self.assertIn(f"docs/measurements/{record_directory(host1, record)}/night.json", changed)
         self.assertEqual(record["tasks"], [{"key": "fxfs-guest-dax fsync-append slower",
                                             "id": "TASK-900", "action": "filed"}])
 
-        second = ubu1.advance("second")
-        status, _, err = ubu1.night(ubu1.rounds(0.8))
+        second = host1.advance("second")
+        status, _, err = host1.night(host1.rounds(0.8))
         self.assertEqual(status, 0, err)
-        [task] = ubu1.tasks()
-        _, record = ubu1.nights()
+        [task] = host1.tasks()
+        _, record = host1.nights()
         self.assertEqual((record["base"], record["head"]), (first, second))
         self.assertEqual(task["notes"], [
             f"{record['date'][:10]}: again on {first[:8]}..{second[:8]}: r1: base 6,089, head 4,871 "
             "(1.250×); r2: base 6,089, head 4,871 (1.250×); r3: base 6,089, head 4,871 (1.250×) "
-            f"(docs/measurements/{record_directory(ubu1, record)}/nightly.md)"])
+            f"(docs/measurements/{record_directory(host1, record)}/nightly.md)"])
         self.assertEqual(record["tasks"], [{"key": "fxfs-guest-dax fsync-append slower",
                                             "id": "TASK-900", "action": "noted"}])
         self.assertIn("| fxfs-guest-dax fsync-append 25% slower | TASK-900 (noted) |",
-                      ubu1.history())
+                      host1.history())
 
     def test_a_done_task_is_filed_again(self):
-        ubu1 = Ubu1()
-        ubu1.advance("first")
-        ubu1.night(ubu1.rounds(0.8))
-        tasks = ubu1.tasks()
+        host1 = NightlyHost()
+        host1.advance("first")
+        host1.night(host1.rounds(0.8))
+        tasks = host1.tasks()
         tasks[0]["status"] = "Done"
-        ubu1.backlog.write_text(json.dumps(tasks))
-        ubu1.advance("second")
-        status, _, err = ubu1.night(ubu1.rounds(0.8))
+        host1.backlog.write_text(json.dumps(tasks))
+        host1.advance("second")
+        status, _, err = host1.night(host1.rounds(0.8))
         self.assertEqual(status, 0, err)
-        self.assertEqual([task["id"] for task in ubu1.tasks()], ["TASK-900", "TASK-901"])
+        self.assertEqual([task["id"] for task in host1.tasks()], ["TASK-900", "TASK-901"])
 
     def test_three_nights_in_a_row_without_a_result_file_a_task(self):
-        ubu1 = Ubu1()
-        parent = ubu1.main()
+        host1 = NightlyHost()
+        parent = host1.main()
         heads = []
         for night in range(3):
-            heads.append(ubu1.advance(f"n{night}"))
-            status, _, err = ubu1.night(ubu1.rounds(1.0), CLADEFS_FAKE_NIGHTLY="fail-build-b")
+            heads.append(host1.advance(f"n{night}"))
+            status, _, err = host1.night(host1.rounds(1.0), CLADEFS_FAKE_NIGHTLY="fail-build-b")
             self.assertEqual(status, 0, err)
-            self.assertEqual(len(ubu1.tasks()), 0 if night < 2 else 1)
-        records = ubu1.nights()
+            self.assertEqual(len(host1.tasks()), 0 if night < 2 else 1)
+        records = host1.nights()
         self.assertEqual([(r["base"], r["head"], r["outcome"], r["why"]) for r in records],
                          [(parent, head, "could not run",
                            "head failed to build (see build-b.log and guest-kernel-b.log)")
                           for head in heads])
-        [task] = ubu1.tasks()
+        [task] = host1.tasks()
         self.assertEqual(task["title"], "Nightly: 3 nights in a row measured nothing "
                                         "[nightly:no-result]")
-        self.assertIn("**The last 3 nights measured nothing** (a task is filed).", ubu1.history())
+        self.assertIn("**The last 3 nights measured nothing** (a task is filed).", host1.history())
         # A night that measured ends the streak.
-        ubu1.advance("fixed")
-        status, _, err = ubu1.night(ubu1.rounds(1.0))
+        host1.advance("fixed")
+        status, _, err = host1.night(host1.rounds(1.0))
         self.assertEqual(status, 0, err)
-        self.assertEqual(ubu1.nights()[-1]["outcome"], "measured")
-        self.assertNotIn("measured nothing**", ubu1.history())
+        self.assertEqual(host1.nights()[-1]["outcome"], "measured")
+        self.assertNotIn("measured nothing**", host1.history())
 
     def test_a_night_whose_rounds_were_all_left_out_has_no_result(self):
-        ubu1 = Ubu1()
-        ubu1.advance()
-        status, _, err = ubu1.night(ubu1.rounds(0.8, verdicts={1: "contaminated", 2: "contaminated",
+        host1 = NightlyHost()
+        host1.advance()
+        status, _, err = host1.night(host1.rounds(0.8, verdicts={1: "contaminated", 2: "contaminated",
                                                                3: "contaminated"}))
         self.assertEqual(status, 0, err)
-        [record] = ubu1.nights()
+        [record] = host1.nights()
         self.assertEqual((record["outcome"], record["why"], record["moved"]),
                          ("no result", "every round was left out (contaminated, or its control "
                                        "moved)", []))
         self.assertIn("**The last night measured nothing**: a task is filed at 3.",
-                      ubu1.history())
-        self.assertEqual(ubu1.tasks(), [])
+                      host1.history())
+        self.assertEqual(host1.tasks(), [])
 
     def test_a_night_that_measured_nothing_is_measured_again(self):
-        """TASK-489: the first night on ubu1 built both sides and measured nothing; main did not
+        """TASK-489: the first night built both sides and measured nothing; main did not
         move, and the next night did nothing, as the night had measured main's code."""
-        ubu1 = Ubu1()
-        parent = ubu1.main()
-        first = ubu1.advance("first")
+        host1 = NightlyHost()
+        parent = host1.main()
+        first = host1.advance("first")
         left_out = {1: "contaminated", 2: "contaminated", 3: "contaminated"}
-        for rounds, environment in [(None, {}), (ubu1.rounds(1.0, left_out), {}),
-                                    (ubu1.rounds(1.0), {"CLADEFS_FAKE_NIGHTLY": "fail-build-b"}),
-                                    (ubu1.rounds(1.0), {})]:
-            status, _, err = ubu1.night(rounds, **environment)
+        for rounds, environment in [(None, {}), (host1.rounds(1.0, left_out), {}),
+                                    (host1.rounds(1.0), {"CLADEFS_FAKE_NIGHTLY": "fail-build-b"}),
+                                    (host1.rounds(1.0), {})]:
+            status, _, err = host1.night(rounds, **environment)
             self.assertEqual(status, 0, err)
-        self.assertEqual([(r["base"], r["head"], r["outcome"]) for r in ubu1.nights()],
+        self.assertEqual([(r["base"], r["head"], r["outcome"]) for r in host1.nights()],
                          [(parent, first, "could not run"), (parent, first, "no result"),
                           (parent, first, "could not run"), (parent, first, "measured")])
         # Measured, it is not measured again; main's next head is, against it.
-        status, _, err = ubu1.night(ubu1.rounds(1.0))
-        self.assertEqual((status, len(ubu1.nights())), (0, 4), err)
-        second = ubu1.advance("second")
-        ubu1.night(ubu1.rounds(1.0, left_out))
-        third = ubu1.advance("third")
-        ubu1.night(ubu1.rounds(1.0))
-        self.assertEqual([(r["base"], r["head"], r["outcome"]) for r in ubu1.nights()[4:]],
+        status, _, err = host1.night(host1.rounds(1.0))
+        self.assertEqual((status, len(host1.nights())), (0, 4), err)
+        second = host1.advance("second")
+        host1.night(host1.rounds(1.0, left_out))
+        third = host1.advance("third")
+        host1.night(host1.rounds(1.0))
+        self.assertEqual([(r["base"], r["head"], r["outcome"]) for r in host1.nights()[4:]],
                          [(first, second, "no result"), (first, third, "measured")])
 
     def test_a_night_of_the_second_and_head_of_another_has_results_of_its_own(self):
         """TASK-647: nights a second apart of one head, as this test's nights are on CI's runners,
         named their results alike: the second's mkdir failed, `File exists`. Every name of the
         next two minutes taken, the night takes the first count after its own."""
-        ubu1 = Ubu1()
-        ubu1.main()
-        head = ubu1.advance("first")
+        host1 = NightlyHost()
+        host1.main()
+        head = host1.advance("first")
         host = subprocess.run(["hostname", "-s"], capture_output=True, text=True,
                               check=True).stdout.strip()
-        measurements = ubu1.clone / "docs" / "measurements"
+        measurements = host1.clone / "docs" / "measurements"
         now = datetime.datetime.now(datetime.timezone.utc)
         for second in range(120):
             at = now + datetime.timedelta(seconds=second)
             (measurements / f"{host}-nightly-{at:%Y-%m-%dT%H%M%SZ}-{head[:8]}").mkdir(parents=True)
-        status, _, err = ubu1.night(ubu1.rounds(1.0))
+        status, _, err = host1.night(host1.rounds(1.0))
         self.assertEqual(status, 0, err)
-        listed = ubu1.git(ubu1.origin, "ls-tree", "-r", "--name-only", "main", "docs/measurements")
+        listed = host1.git(host1.origin, "ls-tree", "-r", "--name-only", "main", "docs/measurements")
         nights = [path.split("/")[2] for path in listed.splitlines() if path.endswith("/night.json")]
         self.assertEqual(len(nights), 1, listed)
         self.assertRegex(nights[0], rf"^{host}-nightly-\d{{4}}-\d\d-\d\dT\d{{6}}Z-{head[:8]}-2$")
@@ -409,17 +409,17 @@ GIB = 1 << 30
 
 
 class Room(unittest.TestCase):
-    """TASK-489: the scratch disk, which every job on ubu1 shares, full as the first night's
+    """TASK-489: the scratch disk, which every job on the test host shares, full as the first night's
     measurement began."""
 
     def test_a_night_short_of_room_before_measuring_says_so(self):
-        ubu1 = Ubu1()
-        (ubu1.home / "df-free").write_text(f"{200 * GIB >> 10}\n")
-        (ubu1.home / "du-size").write_text(f"{83 * GIB >> 10}\n")
-        ubu1.advance()
-        status, _, err = ubu1.night(ubu1.rounds(1.0), CLADEFS_FAKE_FILL=f"{5 * GIB >> 10}")
+        host1 = NightlyHost()
+        (host1.home / "df-free").write_text(f"{200 * GIB >> 10}\n")
+        (host1.home / "du-size").write_text(f"{83 * GIB >> 10}\n")
+        host1.advance()
+        status, _, err = host1.night(host1.rounds(1.0), CLADEFS_FAKE_FILL=f"{5 * GIB >> 10}")
         self.assertEqual(status, 0, err)
-        [record] = ubu1.nights()
+        [record] = host1.nights()
         why = ("the scratch disk /mnt/fake-scratch had 5.0 GiB free before measuring, the night "
                "needs 20.0 GiB (see room.txt; CLADEFS_NIGHTLY_ROOM_MEASURE)")
         self.assertEqual((record["outcome"], record["why"], record["status"]),
@@ -430,9 +430,9 @@ class Room(unittest.TestCase):
                        {"phase": "measure", "free": 5 * GIB, "need": 20 * GIB,
                         "verdict": "short", "disk": "/mnt/fake-scratch"}],
             "built": 83 * GIB, "rounds": None})
-        self.assertEqual(ubu1.jobs(record), [f"build work {record['base']} {record['head']}"])
-        directory = record_directory(ubu1, record)
-        self.assertEqual(ubu1.git(ubu1.origin, "show",
+        self.assertEqual(host1.jobs(record), [f"build work {record['base']} {record['head']}"])
+        directory = record_directory(host1, record)
+        self.assertEqual(host1.git(host1.origin, "show",
                                   f"main:docs/measurements/{directory}/nightly.md").splitlines()[2:9],
                          [f"Base {record['base']}, head (main) {record['head']}: could not run: "
                           f"{why}.", "", "## The scratch disk", "",
@@ -441,49 +441,49 @@ class Room(unittest.TestCase):
                           "- Before measuring: 5.0 GiB free on /mnt/fake-scratch, 20.0 GiB "
                           "needed (short).",
                           "- The run's directory once built: 83.0 GiB."])
-        lines = [line.split(" ", 1)[1] for line in ubu1.log().splitlines()]
+        lines = [line.split(" ", 1)[1] for line in host1.log().splitlines()]
         self.assertIn(f"night {record['base'][:8]}..{record['head'][:8]}: could not run: {why}; "
                       "0 moved, 0 broke; tasks none", lines)
 
     def test_a_night_short_of_room_before_building_builds_nothing(self):
-        ubu1 = Ubu1()
-        (ubu1.home / "df-free").write_text(f"{100 * GIB >> 10}\n")
-        ubu1.advance()
-        status, _, err = ubu1.night(ubu1.rounds(1.0))
+        host1 = NightlyHost()
+        (host1.home / "df-free").write_text(f"{100 * GIB >> 10}\n")
+        host1.advance()
+        status, _, err = host1.night(host1.rounds(1.0))
         self.assertEqual(status, 0, err)
-        [record] = ubu1.nights()
+        [record] = host1.nights()
         self.assertEqual((record["outcome"], record["why"]), (
             "could not run", "the scratch disk /mnt/fake-scratch had 100.0 GiB free before "
                              "building, the night needs 120.0 GiB (see room.txt; "
                              "CLADEFS_NIGHTLY_ROOM_BUILD)"))
-        self.assertFalse((ubu1.home / "fxjob-calls").exists())
+        self.assertFalse((host1.home / "fxjob-calls").exists())
 
     def test_the_need_follows_what_earlier_nights_took(self):
-        ubu1 = Ubu1()
-        (ubu1.home / "df-free").write_text(f"{250 * GIB >> 10}\n")
-        (ubu1.home / "du-size").write_text(f"{90 * GIB >> 10}\n")
-        ubu1.advance("first")
-        status, _, err = ubu1.night(ubu1.rounds(1.0), CLADEFS_FAKE_ROUNDS_SIZE=str(30 * GIB))
+        host1 = NightlyHost()
+        (host1.home / "df-free").write_text(f"{250 * GIB >> 10}\n")
+        (host1.home / "du-size").write_text(f"{90 * GIB >> 10}\n")
+        host1.advance("first")
+        status, _, err = host1.night(host1.rounds(1.0), CLADEFS_FAKE_ROUNDS_SIZE=str(30 * GIB))
         self.assertEqual(status, 0, err)
-        ubu1.advance("second")
-        status, _, err = ubu1.night(ubu1.rounds(1.0))
+        host1.advance("second")
+        status, _, err = host1.night(host1.rounds(1.0))
         self.assertEqual(status, 0, err)
-        first, second = ubu1.nights()
+        first, second = host1.nights()
         self.assertEqual((first["room"]["built"], first["room"]["rounds"]), (90 * GIB, 30 * GIB))
         # A fifth more than the most taken: 108 GiB built and 36 measured.
         self.assertEqual([check["need"] for check in second["room"]["checks"]],
                          [144 * GIB, 36 * GIB])
         # Or the settings, if more.
         self.assertEqual(
-            subprocess.run([sys.executable, str(SCRIPTS / "nightly.py"), "--root", str(ubu1.clone),
+            subprocess.run([sys.executable, str(SCRIPTS / "nightly.py"), "--root", str(host1.clone),
                             "room"], capture_output=True, text=True, check=True,
-                           env={**ubu1.environment, "CLADEFS_NIGHTLY_ROOM_BUILD": "1T",
+                           env={**host1.environment, "CLADEFS_NIGHTLY_ROOM_BUILD": "1T",
                                 "CLADEFS_NIGHTLY_ROOM_MEASURE": "40G"}).stdout,
             f"{(1 << 40) + 40 * GIB} {40 * GIB}\n")
 
     def test_earlier_nights_runs_go_but_what_others_and_the_next_night_use(self):
-        ubu1 = Ubu1()
-        scratch = ubu1.dir / "scratch"
+        host1 = NightlyHost()
+        scratch = host1.dir / "scratch"
         ended = scratch / "run-nightly-20261116T070003Z-2ad571cf"
         running = scratch / "run-nightly-20261115T070003Z-11111111"
         others = [scratch / "run-t435-20261116T070003Z-22222222",
@@ -493,14 +493,14 @@ class Room(unittest.TestCase):
             (run / "job" / "lock").touch()
             (run / "trees" / "head" / "target" / "release").mkdir(parents=True)
         hold(self, running / "job" / "lock")
-        ubu1.advance()
-        status, _, err = ubu1.night(ubu1.rounds(1.0))
+        host1.advance()
+        status, _, err = host1.night(host1.rounds(1.0))
         self.assertEqual(status, 0, err)
         self.assertEqual(sorted(path.name for path in scratch.iterdir()),
                          sorted([running.name] + [path.name for path in others]))
-        [record] = ubu1.nights()
-        driver = ubu1.git(ubu1.origin, "show", f"main:docs/measurements/"
-                                               f"{record_directory(ubu1, record)}/driver.log")
+        [record] = host1.nights()
+        driver = host1.git(host1.origin, "show", f"main:docs/measurements/"
+                                               f"{record_directory(host1, record)}/driver.log")
         self.assertEqual(driver.splitlines()[:2], [f"Keeping {running}: its job runs.",
                                                    f"Removing {ended}, an earlier run of "
                                                    "nightly's."])
@@ -510,8 +510,8 @@ def short(sha):
     return sha[:8]
 
 
-def record_directory(ubu1, record):
-    listed = ubu1.git(ubu1.origin, "ls-tree", "-r", "--name-only", "main", "docs/measurements")
+def record_directory(host1, record):
+    listed = host1.git(host1.origin, "ls-tree", "-r", "--name-only", "main", "docs/measurements")
     path = next(path for path in listed.splitlines()
                 if path.endswith(f"-{record['head'][:8]}/night.json"))
     return path.split("/")[2]
@@ -530,64 +530,64 @@ fi
 
 
 class Pushes(unittest.TestCase):
-    def hook(self, ubu1, text):
-        hooks = ubu1.dir / "hooks"
+    def hook(self, host1, text):
+        hooks = host1.dir / "hooks"
         hooks.mkdir(exist_ok=True)
         (hooks / "pre-push").write_text(text)
         (hooks / "pre-push").chmod(0o755)
-        ubu1.git(ubu1.clone, "config", "core.hooksPath", str(hooks))
+        host1.git(host1.clone, "config", "core.hooksPath", str(hooks))
 
     def test_a_push_refused_as_main_moved_is_rebased_and_pushed_again(self):
-        ubu1 = Ubu1()
-        ubu1.advance()
-        self.hook(ubu1, MOVES_MAIN.format(marker=ubu1.dir / "raced", pusher=ubu1.pusher))
-        status, _, err = ubu1.night(ubu1.rounds(1.0))
+        host1 = NightlyHost()
+        host1.advance()
+        self.hook(host1, MOVES_MAIN.format(marker=host1.dir / "raced", pusher=host1.pusher))
+        status, _, err = host1.night(host1.rounds(1.0))
         self.assertEqual(status, 0, err)
-        subjects = ubu1.git(ubu1.origin, "log", "--format=%s", "-2", "main").splitlines()
+        subjects = host1.git(host1.origin, "log", "--format=%s", "-2", "main").splitlines()
         self.assertEqual(subjects[1], "raced")
         self.assertRegex(subjects[0], r"^nightly \d{4}-\d{2}-\d{2}: [0-9a-f]{8}\.\.[0-9a-f]{8}, "
                                       r"nothing moved$")
-        lines = [line.split(" ", 1)[1] for line in ubu1.log().splitlines()]
+        lines = [line.split(" ", 1)[1] for line in host1.log().splitlines()]
         self.assertTrue(lines[-2].startswith("push 1 failed: "), lines)
         self.assertEqual(lines[-1], "pushed to origin's main (try 2)")
-        self.assertFalse((ubu1.state / "push-failed.txt").exists())
+        self.assertFalse((host1.state / "push-failed.txt").exists())
 
     def test_a_failed_push_stays_here_says_so_and_goes_the_next_night(self):
-        ubu1 = Ubu1()
-        first = ubu1.advance("first")
-        self.hook(ubu1, "#!/bin/sh\necho no pushes tonight >&2\nexit 1\n")
-        status, _, err = ubu1.night(ubu1.rounds(1.0))
+        host1 = NightlyHost()
+        first = host1.advance("first")
+        self.hook(host1, "#!/bin/sh\necho no pushes tonight >&2\nexit 1\n")
+        status, _, err = host1.night(host1.rounds(1.0))
         self.assertEqual(status, 1, err)
-        self.assertEqual(ubu1.main(), first)
-        failed = (ubu1.state / "push-failed.txt").read_text()
-        local = ubu1.git(ubu1.clone, "rev-parse", "HEAD")
+        self.assertEqual(host1.main(), first)
+        failed = (host1.state / "push-failed.txt").read_text()
+        local = host1.git(host1.clone, "rev-parse", "HEAD")
         self.assertIn(f"the nightly's push of {local} to origin's main failed: ", failed)
         self.assertIn("no pushes tonight", failed)
         self.assertIn("its results stay in the nightly's clone", failed)
-        self.assertEqual(ubu1.log().count("failed: "), 3)
+        self.assertEqual(host1.log().count("failed: "), 3)
 
-        ubu1.git(ubu1.clone, "config", "--unset", "core.hooksPath")
-        second = ubu1.advance("second")
-        status, _, err = ubu1.night(ubu1.rounds(1.0))
+        host1.git(host1.clone, "config", "--unset", "core.hooksPath")
+        second = host1.advance("second")
+        status, _, err = host1.night(host1.rounds(1.0))
         self.assertEqual(status, 0, err)
-        first_night, second_night = ubu1.nights()
+        first_night, second_night = host1.nights()
         self.assertEqual((first_night["head"], second_night["base"], second_night["head"]),
                          (first, first, second))
-        self.assertEqual(ubu1.git(ubu1.origin, "log", "--format=%s", "-3", "main").splitlines()[1:],
+        self.assertEqual(host1.git(host1.origin, "log", "--format=%s", "-3", "main").splitlines()[1:],
                          [f"nightly {first_night['date'][:10]}: {short(first_night['base'])}.."
                           f"{short(first)}, nothing moved", "a commit"])
         self.assertEqual(len(second_night["push"]), 1)
         self.assertIn(f"the nightly's push of {local} to origin's main failed", second_night["push"][0])
         self.assertIn("(pushed ", second_night["push"][0])
-        self.assertFalse((ubu1.state / "push-failed.txt").exists())
-        self.assertFalse((ubu1.state / "push-recovered.txt").exists())
+        self.assertFalse((host1.state / "push-failed.txt").exists())
+        self.assertFalse((host1.state / "push-recovered.txt").exists())
 
 
 class Install(unittest.TestCase):
     def test_the_cron_entry_is_one_at_two_and_replaced_not_added(self):
-        ubu1 = Ubu1()
-        bin_ = ubu1.dir / "bin"
-        crontab = ubu1.dir / "crontab.txt"
+        host1 = NightlyHost()
+        bin_ = host1.dir / "bin"
+        crontab = host1.dir / "crontab.txt"
         crontab.write_text("5 * * * * other job\n")
         (bin_ / "crontab").write_text(
             f'#!/bin/sh\nif [ "$1" = -l ]; then cat {crontab}; else cat > {crontab}.new && '
@@ -597,32 +597,32 @@ class Install(unittest.TestCase):
                 (bin_ / tool).write_text("#!/bin/sh\nexit 0\n")
                 (bin_ / tool).chmod(0o755)
         (bin_ / "crontab").chmod(0o755)
-        environment = {**ubu1.environment, "CLADEFS_NIGHTLY_CRONTAB": str(bin_ / "crontab"),
-                       "CLADEFS_NIGHTLY_REPO": str(ubu1.dir / "installed")}
+        environment = {**host1.environment, "CLADEFS_NIGHTLY_CRONTAB": str(bin_ / "crontab"),
+                       "CLADEFS_NIGHTLY_REPO": str(host1.dir / "installed")}
         for _ in range(2):
             done = subprocess.run(["/bin/bash", str(SCRIPTS / "nightly-install.sh"),
-                                   str(ubu1.origin)], capture_output=True, text=True,
+                                   str(host1.origin)], capture_output=True, text=True,
                                   env=environment)
             self.assertEqual(done.returncode, 0, done.stderr)
-        state = ubu1.home / ".local" / "state" / "cladefs" / "nightly"
+        state = host1.home / ".local" / "state" / "cladefs" / "nightly"
         self.assertEqual(crontab.read_text().splitlines(), [
             "5 * * * * other job",
             f"0 2 * * * PATH={bin_}:/usr/local/bin:/usr/bin:/bin "
-            f"{ubu1.dir / 'installed'}/scripts/nightly-host.sh >> {state}/cron.log 2>&1 "
+            f"{host1.dir / 'installed'}/scripts/nightly-host.sh >> {state}/cron.log 2>&1 "
             "# cladefs nightly (scripts/nightly-install.sh)"])
-        self.assertEqual(ubu1.git(ubu1.dir / "installed", "config", "user.name"), "cladefs nightly")
+        self.assertEqual(host1.git(host1.dir / "installed", "config", "user.name"), "cladefs nightly")
 
     def test_what_the_nightly_needs_is_checked_first(self):
-        ubu1 = Ubu1()
+        host1 = NightlyHost()
         # A PATH of only what the script must find, git and hostname: /usr/bin holds flock on
         # Linux, not on macOS (TASK-441.4).
-        path = ubu1.dir / "path"
+        path = host1.dir / "path"
         path.mkdir()
         for tool in ("git", "hostname"):
             (path / tool).symlink_to(shutil.which(tool))
-        done = subprocess.run(["/bin/bash", str(SCRIPTS / "nightly-install.sh"), str(ubu1.origin)],
+        done = subprocess.run(["/bin/bash", str(SCRIPTS / "nightly-install.sh"), str(host1.origin)],
                               capture_output=True, text=True,
-                              env={**ubu1.environment, "PATH": str(path)})
+                              env={**host1.environment, "PATH": str(path)})
         self.assertEqual((done.returncode, done.stderr),
                          (1, "The nightly can't run here: missing fxjob flock backlog cargo\n"))
 

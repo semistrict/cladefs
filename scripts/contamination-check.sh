@@ -3,25 +3,25 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Checks, on a host with fxjob (ubu1), that a measurement's round says when others wrote beside it
-# (scripts/contamination.py, TASK-375): two rounds, each a measurement of its own (fxjob --bench),
-# one alone, one beside a disk loader, then scripts/bench-ab.py's comparison of the two. It takes
-# about four minutes once the measurements' slot is free.
+# Checks, on a host with fxjob (the test host), that a measurement's round says when others wrote
+# beside it (scripts/contamination.py, TASK-375): two rounds, each a measurement of its own (fxjob
+# --bench), one alone, one beside a disk loader, then scripts/bench-ab.py's comparison of the two.
+# It takes about four minutes once the measurements' slot is free.
 #
 #   scripts/contamination-check.sh RESULTS
 #
-# RESULTS is a new directory on the measurements' scratch disk (/mnt/fxdax-scratch on ubu1). A
-# round here is no guest's: for CLADEFS_CONTAMINATION_CHECK_SECS seconds (default 90) it rewrites a
-# 64 MiB file with fsync in its job's TMPDIR, on the scratch disk, and records each pass's time
-# (`pass`, s) and what it wrote (`written`, MiB), as a case does (RESULTS/NAME/bench-check.json).
-# The loader rewrites a 64 MiB file with fsync twice a second, 128 MB/s at most, in
-# CLADEFS_CONTAMINATION_CHECK_LOAD (default the home, on ubu1 a ZFS dataset of the pool the scratch
-# zvol is on), inside the round's own job, started before the round and killed after it: never as
-# ordinary work beside a measurement. Its writes are others' to the round by ZFS's count of the
-# home's dataset. A loader on the scratch disk itself, inside the round's job, would be the
-# round's own cgroup's I/O, and mark nothing: what a loader in another cgroup does to the scratch
-# disk's own count this check doesn't show (scripts/tests/test_contamination.py does, on a host
-# of its own making).
+# RESULTS is a new directory on the measurements' scratch disk (/mnt/fxdax-scratch on the test
+# host). A round here is no guest's: for CLADEFS_CONTAMINATION_CHECK_SECS seconds (default 90) it
+# rewrites a 64 MiB file with fsync in its job's TMPDIR, on the scratch disk, and records each
+# pass's time (`pass`, s) and what it wrote (`written`, MiB), as a case does
+# (RESULTS/NAME/bench-check.json). The loader rewrites a 64 MiB file with fsync twice a second, 128
+# MB/s at most, in CLADEFS_CONTAMINATION_CHECK_LOAD (default the home, on the test host a ZFS
+# dataset of the pool the scratch zvol is on), inside the round's own job, started before the round
+# and killed after it: never as ordinary work beside a measurement. Its writes are others' to the
+# round by ZFS's count of the home's dataset. A loader on the scratch disk itself, inside the
+# round's job, would be the round's own cgroup's I/O, and mark nothing: what a loader in another
+# cgroup does to the scratch disk's own count this check doesn't show
+# (scripts/tests/test_contamination.py does, on a host of its own making).
 #
 # What it checks: the round alone is clean, its record naming the cgroup whose I/O was taken for
 # its own; the round beside the loader is contaminated, saying how much others wrote; and the
@@ -76,7 +76,7 @@ case ${1:-} in
 esac
 (( $# == 1 )) || { echo "usage: contamination-check.sh RESULTS" >&2; exit 2; }
 command -v fxjob > /dev/null ||
-    { echo "fxjob not found: this runs on a host with fxjob (ubu1)" >&2; exit 2; }
+    { echo "fxjob not found: this runs on a test host with fxjob" >&2; exit 2; }
 [[ ! -e $1 ]] || { echo "$1 exists: name a new directory" >&2; exit 2; }
 secs=${CLADEFS_CONTAMINATION_CHECK_SECS:-90}
 [[ $secs =~ ^[1-9][0-9]*$ ]] ||

@@ -15,7 +15,7 @@
 # scripts/lib/linux-host-setup.sh's host_kernel and host_cargo, scripts/gc-sweep.sh's cargo.
 #
 # A measurement is told by its cgroup, not by anything its caller says: fxjob runs it in a scope
-# of fxdax-bench.slice (ubu1's system-setup.d/146-fxdax_cgroups.sh), where `sudo` inside it stays,
+# of fxdax-bench.slice (the test host's setup), where `sudo` inside it stays,
 # and which no variable a script forgot to pass can lose. CLADEFS_SELF_CGROUP names the file that
 # says this process's cgroup (default /proc/self/cgroup), for the tests. Sourcing this defines its
 # functions and does nothing else.

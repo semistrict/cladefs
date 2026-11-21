@@ -322,7 +322,7 @@ pub(super) fn test_xattrs_bounded() {
     // host's disk, made durable by the sync after, not by itself. The host's time is left out of
     // the budget, which bounds the guest's (TASK-263): what the sets ask of it, this counts.
     // 4,540 writes for the check's 3,967 sets, the sync's and the removal's among them, in each
-    // of 52 rounds (ubu1, the page cache's and DAX suites).
+    // of 52 rounds (the page cache's and DAX suites).
     let sets = set / value.len() as u64;
     let writes = fill_host.writes;
     assert!(writes >= sets, "{sets} sets: {fill_host}, not one written as each was set");

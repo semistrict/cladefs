@@ -361,9 +361,9 @@ struct Counts {
 /// before it says it failed). Every write of a host's uploads, as many as its upload memory holds,
 /// sending its object to a full or failing bucket again and again, each as its own backoff said,
 /// was most of the extent daemon's CPU in the qualification's bucket soak: the kernel's copies into
-/// the sockets and the pages it zeroed for them, 1,200 of its 1,580 s on ubu1. And as the bucket
-/// answers again, those waiting don't all go at once: RustFS on a slow disk refused such a rush
-/// (`SlowDown`), failing each write it refused again, until the soak ran out of time.
+/// the sockets and the pages it zeroed for them, 1,200 of its 1,580 s on the test host. And as the
+/// bucket answers again, those waiting don't all go at once: RustFS on a slow disk refused such a
+/// rush (`SlowDown`), failing each write it refused again, until the soak ran out of time.
 #[derive(Default)]
 struct Turns {
     window: std::sync::Mutex<Window>,

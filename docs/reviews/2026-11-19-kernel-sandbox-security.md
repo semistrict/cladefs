@@ -46,7 +46,7 @@ installed (`vendor/firecracker/src/vmm/src/persist.rs`, `builder.rs`;
 host-kernel surface that Firecracker's filter is intended to remove. It is not, alone, proof of host
 compromise: chroot and the jail UID still constrain ordinary file and tenant access.
 
-**Dynamically confirmed on ubu1:** `/proc/<pid>/task/*/status` showed `Seccomp: 0` for exactly
+**Dynamically confirmed on the test host:** `/proc/<pid>/task/*/status` showed `Seccomp: 0` for exactly
 `cladefsd client`, `cladefs-memory-` and `dax faults`; the VM's other threads were filtered. The
 record is `fxfs-guest-snapshot-memory-cell-dax/log.txt` in the kernel-probes results.
 
@@ -69,7 +69,7 @@ of live VMM payload per queue, outside daemon and tenant accounting. A guest can
 buffer, so its own RAM need not scale with the VMM's allocations. Credit must be reserved before
 payload gathering, or gathering must use bounded transfer memory.
 
-**Measured on ubu1:** 32 unanswered 8 MiB writes gathered **268,454,256 bytes** in the VMM. A full
+**Measured on the test host:** 32 unanswered 8 MiB writes gathered **268,454,256 bytes** in the VMM. A full
 256-entry queue at the same size extrapolates to about 1.94 GiB.
 
 ### TASK-602 — high, previously known: repeated MAP grows daemon bookkeeping without bound
@@ -93,7 +93,7 @@ pointer operation.
 
 Error handling zeroes every writable byte not returned (`crates/virtio_extent/src/requests.rs:81-96`).
 The only total bound is `u32::MAX`. An unknown-type request with 255 aliased 16 MiB writable
-segments wrote exactly **`0xff000000` bytes** in the probe (88.6 ms on ubu1). Aliasing avoids
+segments wrote exactly **`0xff000000` bytes** in the probe (88.6 ms on the test host). Aliasing avoids
 proportional guest RAM, and repeated requests provide deterministic host work amplification;
 distinct descriptors also consume memory bandwidth and populate guest RAM. Descriptor work needs a
 protocol-sized bound, not a wire-length-sized one.
@@ -107,7 +107,7 @@ that ends in `EACCES` can therefore cause cross-tenant I/O and host side effects
 metadata/timing oracle. It does not itself return plaintext; random version IDs also impede blind
 enumeration. Authorization must precede source recovery and mutation.
 
-**Dynamically confirmed on ubu1:** the request returned `EACCES` but still created and recovered the
+**Dynamically confirmed on the test host:** the request returned `EACCES` but still created and recovered the
 victim's version store under `cladefs-versions-<pid>/`. No victim commit-number change was observed
 in this setup, so the demonstrated side effect is unauthorized recovery/host mutation, not a claimed
 writer sync.
@@ -157,11 +157,11 @@ out-of-range and wrapping accesses before subtraction or memory access.
 
 | Probe | Result |
 |---|---|
-| 256 randomized compromised-VM cases on ubu1: malformed messages, cross-tenant IDs/paths, forged ACKs, memfd abuse, floods and truncation | **Passed in 164 s.** No observed cross-tenant bytes, daemon crash, or protocol-budget violation in that generator. |
+| 256 randomized compromised-VM cases on the test host: malformed messages, cross-tenant IDs/paths, forged ACKs, memfd abuse, floods and truncation | **Passed in 164 s.** No observed cross-tenant bytes, daemon crash, or protocol-budget violation in that generator. |
 | Direct greatest-sequence checked-build write | **Failed as security expected:** overflow at `cell.rs:1923`, shared-lock poisoning, `SIGABRT`. |
 | Standalone release greatest-sequence write/commit/free/rewrite | **Write-once bypass confirmed:** first write and rewrite both `Ok`, `next_sequence = 0`, new `0xa5` read back. |
 | Same extent mapped 1,000 extra times | **1,001 window registrations**, confirming unbounded duplicate bookkeeping. |
-| Unknown request with 255 aliased 16 MiB writable descriptors | **`0xff000000` bytes written**, 88.6 ms on ubu1 in the cache-hot case. |
+| Unknown request with 255 aliased 16 MiB writable descriptors | **`0xff000000` bytes written**, 88.6 ms on the test host in the cache-hot case. |
 | Real guest-kernel malformed virtio requests | **Six unknown-flag types did not return `EINVAL` (`0x3f`).** Nine range/cross-cell attacks were refused correctly; the normal self-test passed. |
 | Real trapping seccomp attempts against ptrace, process_vm_writev, bpf, perf, io_uring, direct userfaultfd, namespaces/mounts, modules, pidfds, exec and KVM_CREATE_VM | **A valid two-entry io_uring was created, and register/enter were invoked.** All other high-risk attempts trapped. UFFDIO_API is the positive control. |
 | Per-thread `Seccomp` state after Cell restore | **Confirmed:** `Seccomp: 0` on exactly `cladefsd client`, `cladefs-memory-`, and `dax faults`; other VM threads filtered. |
@@ -176,7 +176,7 @@ silently patched in this review.
 ## Coverage and limits
 
 Three independent source tracks reviewed the guest kernel/virtio boundary, Firecracker's jail and
-seccomp implementation, and the daemon/tenant protocol. Dynamic work ran on x86-64 ubu1 with KVM,
+seccomp implementation, and the daemon/tenant protocol. Dynamic work ran on the x86-64 test host with KVM,
 the production musl filters and jailer where the case required them, plus local checked and release
 store probes.
 

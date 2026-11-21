@@ -9,14 +9,13 @@
 # migrate-host.sh; and through test-host.sh, perf-gate-host.sh, soak-host.sh,
 # soak-workloads-host.sh, guest-mutants-host.py and dax-gate.sh.
 #
-# The test host, CLADEFS_TEST_HOST as ssh names it (default ubu1), or `local`, this machine itself,
-# reached without ssh (as the nightly on ubu1 runs, from cron: scripts/nightly-host.sh), is an
-# x86-64 Linux machine with KVM, set up once by its own setup, not by a run (ubu1's
-# ~/docs/system-setup.d: 140-fxdax_dev.sh's packages, those scripts/lib/linux-host-setup.sh lists,
-# and the user's Rust, in ~/.cargo, with cargo-nextest; 141's sudo without a password; 143's ext4
-# scratch disk, /mnt/fxdax-scratch; 146's fxjob; 147's cargo-mutants, perf and bpftrace), and whose
-# clone of cladefs, CLADEFS_TEST_HOST_REPO (a path in its home, default src/fxdax), fetches from
-# cladefs's origin. Others' runs share it.
+# The test host, CLADEFS_TEST_HOST as ssh names it (no default: which host is the caller's
+# choice), or `local`, this machine itself, reached without ssh (as the nightly runs, from cron:
+# scripts/nightly-host.sh), is an x86-64 Linux machine with KVM, set up once by its own setup, not
+# by a run (the packages scripts/lib/linux-host-setup.sh lists, and the user's Rust, in ~/.cargo,
+# with cargo-nextest; sudo without a password; an ext4 scratch disk, /mnt/fxdax-scratch; fxjob;
+# cargo-mutants, perf and bpftrace), and whose clone of cladefs, CLADEFS_TEST_HOST_REPO (a path
+# in its home, default src/fxdax), fetches from cladefs's origin. Others' runs share it.
 #
 # A run is a directory on the test host, RUN under CLADEFS_TEST_HOST_SCRATCH (default
 # /mnt/fxdax-scratch/fxdax-host), RUN the run's name (host_run): a worktree of the commit run, which
@@ -59,7 +58,11 @@
 # The drivers run these functions under `||`, where errexit stops nothing, so each checks the
 # status of its every step itself.
 
-host=${CLADEFS_TEST_HOST:-ubu1}
+host=${CLADEFS_TEST_HOST:-}
+[[ -n $host ]] || {
+    echo "CLADEFS_TEST_HOST names the test host, as ssh does, or local: none is set" >&2
+    exit 2
+}
 [[ $host =~ ^[A-Za-z0-9._@-]+$ ]] ||
     { echo "CLADEFS_TEST_HOST names a host, as ssh does: $host" >&2; exit 2; }
 host_repo=${CLADEFS_TEST_HOST_REPO:-src/fxdax}
@@ -332,6 +335,8 @@ host_env_local() {
         # Where the benchmark's cases write their measurements, wherever they
         # run; bench-linux-host.sh alone sets it.
         CLADEFS_BENCH_RESULTS) ;;
+        # Which machine the driver reaches: the driver's own, nothing there reads it.
+        CLADEFS_TEST_HOST) ;;
         *) return 1 ;;
     esac
 }

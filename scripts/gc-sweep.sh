@@ -34,7 +34,7 @@
 # cell's objects by kind as they found it to RESULTS/cell-SIDE-COUNT-rROUND-objects.txt, and a
 # table of them to RESULTS/gc-sweep-cell.md: the cell's objects, the pages a store of 1,000 keys a
 # page lists them in (which cladefs-gc counts as requests, a page each, since TASK-455), the requests,
-# the seconds and the most memory of each. On ubu1, scripts/gc-sweep-host.sh runs it, as a
+# the seconds and the most memory of each. On the test host, scripts/gc-sweep-host.sh runs it, as a
 # measurement.
 #
 # --prepare builds the binaries and fills the buckets, and stops; --prepared sweeps what a

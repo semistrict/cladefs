@@ -8,7 +8,7 @@
 # not of the host's. append_writeback's budget leaves the host's time out (TASK-263), and its syncfs
 # loop keeps the device busy the whole time, so its 64 fdatasyncs' sleeps passed as the host's. Its
 # fdatasyncs alone, each its time but for the device's, find the median at 62.9 ms, of 5 ms
-# (ubu1, 2026-11-10; the budget's guest time 2.06 s of 3 s, which alone would have passed it; a 6 ms
+# (2026-11-10; the budget's guest time 2.06 s of 3 s, which alone would have passed it; a 6 ms
 # sleep's median 11.1 ms). super.c, which guest/sim doesn't build. Put in by hand, not a past bug.
 
 --- a/guest/linux/fs/cladefs/super.c

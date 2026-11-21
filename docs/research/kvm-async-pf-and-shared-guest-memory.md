@@ -3,7 +3,7 @@
 Research for TASK-456.3 (2026-11-16). The question: cladefs restores Firecracker VMs whose guest RAM
 is a userfaultfd-registered anonymous mapping, installs pages read-only from a daemon's shared memfd
 pages under UFFD write-protect, and must give a guest store a private copy while a load keeps the
-shared page. On ubu1 (Ubuntu `7.0.0-43-generic`, x86-64) nearly every first touch arrives from a
+shared page. On the test host (Ubuntu `7.0.0-43-generic`, x86-64) nearly every first touch arrives from a
 kworker (`events`) as a write fault, so loads become private copies.
 
 Sources are the upstream kernel at tags (fetched from git.kernel.org), kernel documentation, patch
@@ -167,7 +167,7 @@ Ubuntu's `7.0.0-43-generic` may carry Ubuntu patches; everything below is upstre
   the vCPU runnable when the worker is done.
 - So the guest's `MSR_KVM_ASYNC_PF_EN` decides only **how** the vCPU waits (PV event, or APF halt),
   not **whether** the worker runs, unless HLT exits are disabled. Clearing the MSR leaves async PF
-  on, delivered as APF halt: consistent with what ubu1 showed.
+  on, delivered as APF halt: consistent with what the test host showed.
 - Also: a Linux guest enables async PF only with `KVM_FEATURE_ASYNC_PF_INT` and without the
   `no-kvmapf` boot parameter, and does not set `KVM_ASYNC_PF_SEND_ALWAYS`, so faults taken while
   the guest is in kernel mode are APF halts even when enabled
@@ -353,7 +353,7 @@ All v7.0; same logic in v6.1 (`hva_to_pfn_slow(addr, async, ...)` with `FOLL_NOW
   ([`fs/userfaultfd.c`: `handle_userfault`](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/fs/userfaultfd.c?h=v7.0)). GUP turns that into 0
   pages (`-EBUSY` → `ret = 0`, `__get_user_pages`), `hva_to_pfn` into `KVM_PFN_ERR_NEEDS_IO`, and
   KVM goes async (1.2). The worker's `FOLL_WRITE` GUP then blocks in `handle_userfault` and
-  userspace sees `UFFD_PAGEFAULT_FLAG_WRITE` from the kworker's tid. That is the ubu1 trace. If
+  userspace sees `UFFD_PAGEFAULT_FLAG_WRITE` from the kworker's tid. That is the test host's trace. If
   userspace resolves it by installing the page write-protected, the worker's GUP retries
   (`VM_FAULT_RETRY` after wake), finds a uffd-wp PTE, and faults again: `do_wp_page` →
   `handle_userfault(VM_UFFD_WP)`: a second, WP+WRITE message from the kworker for what was a load.
@@ -596,7 +596,7 @@ in place of `MAP_SHARED` + `UFFDIO_WRITEPROTECT`.
 - **userfaultfd for guest_memfd** (5.6): post-copy for guest_memfd, still copies, no cross-VM
   sharing.
 
-## Measurements on ubu1 (2026-11-16)
+## Measurements on the test host (2026-11-16)
 
 Every fault on a restored VM's memory window logged (thread, access, write-protect flag, whether the
 page was installed), branch t456-measure, fxfs-guest-snapshot-memory-volume-dax: a 512 MiB VM

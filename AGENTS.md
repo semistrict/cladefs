@@ -36,37 +36,14 @@ of a batch.
 
 ### Linux runs go to the least loaded test host
 
-Two test hosts, physical machines others' agents share, both with `fxjob` (`--bench` for
-measurements), `/dev/kvm` and `/dev/fuse`:
+Linux runs go to a test host: a physical machine others' agents share, with `fxjob` (`--bench`
+for measurements), `/dev/kvm` and `/dev/fuse`, set up once by its own setup. The user keeps
+several, and their names, what each can run and how to pick the least loaded one live outside the
+repo, in the user's `fleet` skill: read it before any Linux run. A run goes to the least loaded
+test host that can run it; an A/B, or a number compared with earlier ones, stays on the host whose
+numbers it is compared with.
 
-- **ubu1**: x86-64, 16 CPUs, 27 GB; Rust installed, a clone of cladefs; the `scripts/*-host.sh`
-  drivers below, the nightly, and the measurement history (`docs/measurements/ubu1-*`).
-- **asahimbp**: arm64 (Apple Silicon, 16K pages), 11 CPUs, 17 GB; no Rust on the host: a job runs
-  in the `localhost/fxdax-rust` podman image, inside its fxjob scope (`fxjob --name N --mem 8G --
-  podman run --rm -v ~/src/fxdax:/src:Z ... localhost/fxdax-rust ...`); its tree is an rsync copy,
-  not a clone. Its `--bench` has P-cores 7-10 to itself.
-
-The user's rule (2026-11-21): send each run to whichever of them is less loaded, among those that
-can run it. Before starting a run, look at both:
-
-```sh
-for h in ubu1 asahimbp; do echo "== $h $(ssh $h uptime | sed 's/.*load/load/')"; ssh $h fxjob ps | sed -n '/^reserved/p;/^POS/,/^$/p'; done
-```
-
-Less loaded is the host with no jobs waiting (`POS ... WAITING`) and the most of its budget left
-unreserved (`reserved X of Y, N of M CPUs`), relative to its size; the load average breaks a tie
-(asahimbp's Nomad containers and ubu1's nightly are outside fxjob's budget). What still picks the
-host for you:
-
-- the `scripts/*-host.sh` drivers need an x86-64 host with Rust and a clone: ubu1 only, for now;
-- an A/B, or a number compared with earlier ones (a perf gate's floor, the nightly), stays on the
-  host whose numbers it is compared with: two hosts' numbers never mix;
-- x86-64-only work (an x86-64 guest kernel, its guest cases) goes to ubu1; work about arm64 or 16K
-  pages to asahimbp;
-- anything that runs in the podman image (builds, `cargo nextest`, clippy, madsim seed loops) runs
-  on either: there the load alone decides.
-
-On ubu1, runs go through the `scripts/*-host.sh` drivers (`scripts/lib/host.sh`;
+Runs go through the `scripts/*-host.sh` drivers (`scripts/lib/host.sh`;
 `CLADEFS_TEST_HOST` names another test host): `test-host.sh`, `bench-host.sh`, `bench-ab-host.sh`, `perf-gate-host.sh`, `soak-host.sh`, `soak-workloads-host.sh`,
 `mutants-host.sh`, `guest-mutants-host.py`, `gets-host.sh`, `migrate-host.sh`,
 `fork-time-host.sh`, `gc-sweep-host.sh`. A run is a worktree there of a commit origin has (push first; HEAD of a clean
@@ -80,8 +57,8 @@ the job running: `DRIVER resume RUN RESULTS` fetches it, `DRIVER cancel RUN` end
 number as `CLADEFS_TEST_HOST_RUN` (e.g. `r1040`). An agent's shell runs under no_new_privs, which stops sudo
 however sudoers reads: run a driver needing root (`CLADEFS_TEST_HOST=local` ones) through
 `systemd-run --user --wait --pipe -- ...`, a service of the user's manager that does not inherit
-it, rather than leave the run to the user (the user's word, 2026-11-19). ubu1's setup is its `~/docs/system-setup.d` steps: what a
-run needs installed goes there as a step, never into a run.
+it, rather than leave the run to the user (the user's word, 2026-11-19). What a run needs
+installed goes into the test host's setup as a step, never into a run.
 
 ## Commit in batches, only what compiled and passed its tests
 

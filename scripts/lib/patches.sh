@@ -9,7 +9,7 @@
 # patch takes it (`-F0`), and BSD patch (macOS) is laxer: it takes a hunk whose header counts other
 # lines than it has, and one with more context on one side of its changes than the other away from
 # the file's ends, which GNU patch then anchors to the file's start or end. A patch re-anchored by
-# hand on macOS checked there and failed on ubu1 (TASK-395).
+# hand on macOS checked there and failed on the test host (TASK-395).
 
 # patch_well_formed PATCH: whether each of its hunks has the lines its header counts, and as many
 # lines of context after its changes as before, but at the start or end of the file it changes.

@@ -3,7 +3,7 @@
 ```sh
 scripts/test.sh          # macOS or Linux
 scripts/test-linux.sh    # Linux, in a Lima VM
-scripts/test-host.sh     # x86-64 Linux with KVM, on the test host over ssh (ubu1)
+scripts/test-host.sh     # x86-64 Linux with KVM, on the test host over ssh
 ```
 
 `scripts/lima-setup.sh` creates the Lima VM the Linux scripts use on macOS, and
@@ -65,7 +65,7 @@ a second, a command past its budget, or a daemon past its own; LangSmith's pin's
 put back, fail it (`crates/cladefs/mutants/framed-in-copies.patch`). The short mode, eight VMs,
 minutes, runs on GitHub's runners' nested KVM on every push to main
 (`.github/workflows/sandboxes.yml`, from `ci.yml`), and by hand on a branch. The long mode is
-LangSmith's controlled load, 16 VMs eight at a time, each doing more: it runs on ubu1 alone, by
+LangSmith's controlled load, 16 VMs eight at a time, each doing more: it runs on the test host alone, by
 hand, in the qualification before each candidate (below), as no CI runner has its memory (TASK-330.5).
 Each run keeps what the host and the run spent every 30 s (`resources.log`):
 
@@ -78,7 +78,7 @@ scripts/sandboxes.sh [short|long]   # Linux (KVM); CLADEFS_SANDBOX_DISK, ext4, h
 of New York's taxi trips, none of it compiled to bytecode. It runs on three extent daemons with
 part caches that are each other's peers, and one RustFS bucket 25 ms away. Each sandbox starts
 marimo and runs a notebook whose answers are checked, cold and then warm on each host, timed phase
-by phase, with each host's bucket GETs and peer parts. It runs on ubu1 as a measurement, and its
+by phase, with each host's bucket GETs and peer parts. It runs on the test host as a measurement, and its
 first numbers are in `docs/measurements/ubu1-python-sandbox-2026-11-19T1842Z-7786f0b5`:
 
 ```sh
@@ -88,7 +88,7 @@ scripts/python-sandbox-host.sh   # CLADEFS_PYSANDBOX_ROUNDS, default 2
 ## Before a candidate goes to LangSmith
 
 LangSmith runs cladefs at a commit they take, their pin (96c7808b8 as of 2026-11-11, TASK-310), and
-bump it now and then. Before a candidate is offered, it is qualified against their pin on ubu1,
+bump it now and then. Before a candidate is offered, it is qualified against their pin on the test host,
 alone there (`fxjob --bench`), the two interleaved, A B then B A (TASK-330.4):
 
 ```sh
@@ -112,11 +112,11 @@ ranges apart), and each side's failed checks. A candidate goes to LangSmith when
 every check and nothing moved the wrong way that the change didn't mean to move.
 
 `fxjob --bench` gives a measurement cores, cache, memory bandwidth and memory of its own; not the
-disk, ubu1's one NVMe, which others write to all the while. So every round of a measurement runs
+disk, the test host's one NVMe, which others write to all the while. So every round of a measurement runs
 under `scripts/contamination.py` (the A/B's rounds, `scripts/bench-host.sh`'s run,
 `scripts/bench-rounds.sh`'s), which records in the round's results (`contamination.json`) what
 others read from and wrote to the round's disk as it ran, the disk's own count less the round's
-cgroup's, and under ubu1's scratch zvol the pool's other datasets' writes; and how long the
+cgroup's, and under the test host's scratch zvol the pool's other datasets' writes; and how long the
 round's tasks stalled on CPU, memory and I/O. A round others wrote more than 10 MB/s beside,
 or 50 MB/s in any one minute, is contaminated (`CLADEFS_CONTAMINATION_WRITE_MB_S`,
 `CLADEFS_CONTAMINATION_MINUTE_WRITE_MB_S`): `scripts/bench-ab.py` leaves its timings and rates out
@@ -130,14 +130,14 @@ checks the record on a host with fxjob, a round alone and one beside a loader of
 
 ```sh
 scripts/contamination.py run RESULTS -- scripts/qualify.sh RESULTS
-scripts/contamination-check.sh /mnt/fxdax-scratch/contamination-check   # ubu1, four minutes
+scripts/contamination-check.sh /mnt/fxdax-scratch/contamination-check   # the test host, four minutes
 ```
 
 `scripts/test-guest-kernel.sh` builds the guest kernel with Fxfs in it and runs
 the guest tests on it, in Lima on macOS.
 
 `scripts/test-host.sh` runs them too, on the test host, a Linux machine of one's own, over ssh
-(`CLADEFS_TEST_HOST`, ubu1 by default): in a worktree there of a commit origin has,
+(`CLADEFS_TEST_HOST`): in a worktree there of a commit origin has,
 under `fxjob`, copying the results back and removing the worktree
 (`scripts/lib/host.sh`).
 
@@ -157,13 +157,13 @@ PTE writable, which guest/sim found (`guest/sim`).
 make check-tla             # about two hours, each model in minutes, on Java; fetches TLC once
 ```
 
-## The nightly measurement on ubu1
+## The nightly measurement on the nightly host
 
-Every night at 02:00 a cron entry on ubu1 runs `scripts/nightly-host.sh` from the nightly's own
-clone (`~/src/cladefs-nightly`), main's own copy of it (TASK-441). If main's code didn't change
+Every night at 02:00 a cron entry on the nightly host (a test host) runs
+`scripts/nightly-host.sh` from the nightly's own clone (`~/src/cladefs-nightly`), main's own copy of it (TASK-441). If main's code didn't change
 since the last night that measured (its newest commit that changed more than `docs/measurements` and
 `backlog`), it does nothing. Otherwise it measures main's head against the commit that night
-measured, as an A/B (`scripts/bench-ab-host.sh`, on ubu1 itself, `CLADEFS_TEST_HOST=local`): the
+measured, as an A/B (`scripts/bench-ab-host.sh`, on the test host itself, `CLADEFS_TEST_HOST=local`): the
 head built as work, the base's artifacts kept from the night it was the head (`CLADEFS_AB_KEEP`),
 then three rounds of both sides interleaved alone in `fxjob --bench`, each of the fs bench's cases
 an agent sandbox stands on: the guest's Fxfs with DAX (cold and warm reads, fsynced appends,
@@ -187,7 +187,7 @@ are committed to main from the clone, the push retried on a main that moved; a p
 stays in the clone and is said in `~/.local/state/cladefs/nightly/push-failed.txt`, and the next
 night pushes it first.
 
-- Results: `docs/measurements/ubu1-nightly-<time>-<head>/nightly.md` for each night, and
+- Results: `docs/measurements/<host>-nightly-<time>-<head>/nightly.md` for each night, and
   `docs/measurements/nightly-history.md` for all of them, newest first.
 - A night that **could not run** (a side failed to build, no round ran, or the scratch disk was
   short of room) or that has **no result** (every round was left out: the disk was busy, or the
@@ -202,22 +202,21 @@ night pushes it first.
   why). Short of it, the night could not run, and its `nightly.md` names the disk, the free space
   found and the need.
   A single metric's NO RESULT means one of its rounds and that round's rerun were both left out.
-- The log: `~/.local/state/cladefs/nightly/nightly.log` on ubu1, a line a step; cron's output in
+- The log: `~/.local/state/cladefs/nightly/nightly.log` on the test host, a line a step; cron's output in
   `cron.log` beside it.
 
-A night by hand, on ubu1 (it skips if a night measured main's code already):
+A night by hand, on the test host (it skips if a night measured main's code already):
 
 ```sh
 ~/src/cladefs-nightly/scripts/nightly-host.sh
 ```
 
-Installing it is ubu1's setup, a `~/docs/system-setup.d` step that runs, as the user,
-`scripts/nightly-install.sh` (the clone, its git identity, the cron entry; it checks first that
-fxjob, flock, cargo-nextest, Backlog.md's `backlog` and a fetch without a prompt are there):
+The nightly host's setup installs it: it runs `scripts/nightly-install.sh` as the user (the clone,
+its git identity, the cron entry; it checks first that fxjob, flock, cargo-nextest, Backlog.md's
+`backlog` and a fetch without a prompt are there):
 
 ```sh
-# ~/docs/system-setup.d/151-cladefs_nightly.sh
-sudo -u ramon -H bash -lc '~/src/fxdax/scripts/nightly-install.sh'
+scripts/nightly-install.sh
 ```
 
 ## Benchmarks
@@ -234,7 +233,7 @@ spreads and ratios to ext4. The guests' root filesystem is an Alpine image
 built with podman.
 
 ```sh
-scripts/bench-host.sh      # x86-64 Linux with KVM, on the test host (ubu1)
+scripts/bench-host.sh      # x86-64 Linux with KVM, on the test host
 scripts/bench.sh           # this host, Linux
 scripts/bench-linux.sh     # Linux, in a Lima VM
 ```

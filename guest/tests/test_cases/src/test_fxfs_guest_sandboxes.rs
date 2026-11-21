@@ -15,8 +15,8 @@
 //! address and credentials, AWS_*) and its data's directory (CLADEFS_SANDBOX_BUCKET_DIR), which this
 //! checks is on the case's disk. CLADEFS_SANDBOX_MODE says how much: `short` (the default), eight
 //! VMs at once, minutes, for every push to main (.github/workflows/sandboxes.yml); or `long`,
-//! LangSmith's controlled load's sixteen, eight at a time, each doing more, by hand on ubu1 before
-//! each candidate handed to LangSmith (scripts/qualify.sh, TASK-330.5).
+//! LangSmith's controlled load's sixteen, eight at a time, each doing more, by hand on the test
+//! host before each candidate handed to LangSmith (scripts/qualify.sh, TASK-330.5).
 //!
 //! Each host imports the sandboxes' image once, as a base: an Alpine root with PostgreSQL and git,
 //! Docker's static binaries and its buildx plugin, and a BusyBox image to build from; each VM
@@ -203,10 +203,10 @@ RUN apk add --no-cache postgresql postgresql-contrib git
     }
 
     /// The long mode's VMs: 5.5 GiB for eight at once, beside two daemons of 2 GiB, RustFS and the
-    /// stores' page cache, within the 16 GiB a measurement has on ubu1 (fxjob --bench, TASK-330.5):
-    /// a run of a quarter hour touches every page it has, and with the short mode's sizes, its
-    /// guests' 7.5 GiB, its daemons' 3 GiB caches full and RustFS's 1 GB, a daemon was killed for
-    /// memory at 16 GiB and again at 18 GiB, the hosts' every job's.
+    /// stores' page cache, within the 16 GiB a measurement has on the test host (fxjob --bench,
+    /// TASK-330.5): a run of a quarter hour touches every page it has, and with the short mode's
+    /// sizes, its guests' 7.5 GiB, its daemons' 3 GiB caches full and RustFS's 1 GB, a daemon was
+    /// killed for memory at 16 GiB and again at 18 GiB, the hosts' every job's.
     fn long_shape(role: Role) -> (u8, u32) {
         match role {
             Role::Builder => (8, 1024),
@@ -249,7 +249,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
                 timeout_secs: 1200,
             }),
             // LangSmith's controlled load's shape (TASK-310): 16 VMs, 8 at a time, each doing more
-            // than a short run's; on ubu1 by hand before each candidate (TASK-330.5).
+            // than a short run's; on the test host by hand before each candidate (TASK-330.5).
             Ok("long") => Ok(Mode {
                 name: "long",
                 at_once: 8,

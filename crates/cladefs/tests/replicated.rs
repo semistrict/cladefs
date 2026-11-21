@@ -166,8 +166,8 @@ fn check(store: &CellClient, sequences: std::ops::RangeInclusive<u64>) {
 
 /// Makes the bucket at `bucket` out of reach of its writers, or in reach again: its directory
 /// moved aside and a file in its place, which no write goes through, root's neither (the
-/// verifying review of TASK-537.3.6: ubu1's runs are root's, whom a read-only directory stops
-/// not); then back.
+/// verifying review of TASK-537.3.6: the test host's runs are root's, whom a read-only directory
+/// stops not); then back.
 fn reachable(bucket: &Path, reach: bool) {
     let aside = bucket.with_extension("aside");
     match reach {

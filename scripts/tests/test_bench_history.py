@@ -199,12 +199,12 @@ source; its note says what it was for. Medians of the iterations.
         hosts' of before; an A/B's (scripts/bench-ab-host.sh) is none, its report its own."""
         measurements = Path(tempfile.mkdtemp())
         run(measurements, "2026-10-17T1609Z", {"fxfs-guest-dax": 1500.0})
-        run(measurements, "2026-11-11T1200Z-0123abcd", {"fxfs-guest-dax": 1700.0}, host="ubu1")
-        run(measurements, "ab-2026-11-11T1300Z-4567cdef", {"fxfs-guest-dax": 1800.0}, host="ubu1")
+        run(measurements, "2026-11-11T1200Z-0123abcd", {"fxfs-guest-dax": 1700.0}, host="host1")
+        run(measurements, "ab-2026-11-11T1300Z-4567cdef", {"fxfs-guest-dax": 1800.0}, host="host1")
         self.assertEqual(
             re.findall(r"^\| \[([^]]+)\]\(([^)]+)\)", bench_history.history(measurements), re.M),
             [("2026-10-17T1609Z", "gce-fs-bench-2026-10-17T1609Z/"),
-             ("2026-11-11T1200Z-0123abcd", "ubu1-fs-bench-2026-11-11T1200Z-0123abcd/")],
+             ("2026-11-11T1200Z-0123abcd", "host1-fs-bench-2026-11-11T1200Z-0123abcd/")],
         )
 
     def test_empty_directories_are_no_runs(self):

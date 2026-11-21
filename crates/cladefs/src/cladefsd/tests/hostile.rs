@@ -2513,8 +2513,8 @@ fn mappings_asked_for_past_the_credit_let_their_vm_process_go() {
         super::send_until_let_go(&sender, asked);
         // TASK-677: before it is let go, the daemon makes two replies of a million mappings, 32
         // MiB each, the third past its credit: 8.7 to 8.8 s from the first asked, alone, in a
-        // debug build on ubu1 (2026-11-20), so a loaded run passed the 10 s it once had. Within
-        // what any of the case's steps may take, as the rest of them are.
+        // debug build on the test host (2026-11-20), so a loaded run passed the 10 s it once had.
+        // Within what any of the case's steps may take, as the rest of them are.
         super::assert_let_go(&sender, &stream, WAIT);
     });
     assert!(held <= credit + SLACK, "{} MiB held, past {} MiB", held >> 20, credit >> 20);

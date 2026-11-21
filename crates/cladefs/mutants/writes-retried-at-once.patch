@@ -1,7 +1,7 @@
 # Every write goes as soon as it is made or retried, whatever the bucket's writes of its kind do, as
 # before TASK-382: a full or failing bucket is sent each of the host's uploads, its object whole,
 # again and again, each as its own backoff says, most of the daemon's CPU in the qualification's
-# bucket soak (1,200 of its 1,580 s on ubu1), where a probe at a time would do.
+# bucket soak (1,200 of its 1,580 s on the test host), where a probe at a time would do.
 # Kind: failures
 # Killer: cladefsd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound
 --- a/crates/bucket_cell/src/object_bucket.rs

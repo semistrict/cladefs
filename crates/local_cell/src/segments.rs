@@ -1532,13 +1532,13 @@ impl<F: File> Unframed<F> {
 /// its own file, then the directories of framed and of raw files, one after another: three syncs,
 /// each a journal commit of the host's file system and a flush of its disk's cache, whose queue a
 /// disk VMs share keeps full, 2-4 s each with eight VMs writing at once, the framings after it
-/// waiting (TASK-92.41's A/B on ubu1). The segments' framings end once it returns: what waits for
-/// their framed files to be durable waits for that (the uploader, a closing between commits, a
-/// cell's closing), and their raw files and logs go no sooner, as before. A crash meanwhile may
-/// keep any of the framed files whole, each torn or not as the others are, under its own name or
-/// its segment's: an opening removes the first, and reads one whole only while those before it
-/// are whole too, checking each whose raw file is still there, and closes again from its raw file
-/// and log any after the first that isn't (`wal::recover`).
+/// waiting (TASK-92.41's A/B on the test host). The segments' framings end once it returns: what
+/// waits for their framed files to be durable waits for that (the uploader, a closing between
+/// commits, a cell's closing), and their raw files and logs go no sooner, as before. A crash
+/// meanwhile may keep any of the framed files whole, each torn or not as the others are, under its
+/// own name or its segment's: an opening removes the first, and reads one whole only while those
+/// before it are whole too, checking each whose raw file is still there, and closes again from its
+/// raw file and log any after the first that isn't (`wal::recover`).
 pub(crate) fn make_durable<D: Dir>(
     dir: &D,
     cell: u64,

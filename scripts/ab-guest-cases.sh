@@ -3,7 +3,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# An interleaved A/B of guest cases on this Linux host (ubu1), two sides' prebuilt artifacts
+# An interleaved A/B of guest cases on this Linux host, two sides' prebuilt artifacts
 # (scripts/test-e2e.sh's CLADEFS_E2E_BUILD_ONLY) booting one guest kernel: ROUNDS rounds, each
 # running every case on both sides, A then B in odd rounds and B then A in even ones, so that what
 # drifts on the shared host over the hours moves both sides alike (TASK-310). Each run is a

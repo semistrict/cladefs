@@ -310,8 +310,8 @@ pub const MMAP_THRESHOLD: usize = 1 << 20;
 /// `M_MMAP_THRESHOLD`), before any thread but the caller's is made: the segments it frames and
 /// uploads, 32 MiB each, the parts it fetches, of a MiB. By default glibc raises that threshold to
 /// the largest allocation freed, up to 32 MiB, and keeps buffers below it in its arenas, one a
-/// thread at most eight times the CPUs: under an upload backlog on ubu1, 134 of them, 64 MiB
-/// each, held 2.6 GB of anonymous memory the daemon had freed, twice its heap at its peak
+/// thread at most eight times the CPUs: under an upload backlog on the test host, 134 of them,
+/// 64 MiB each, held 2.6 GB of anonymous memory the daemon had freed, twice its heap at its peak
 /// (TASK-317), what the host's OOM killer took it for. Nothing elsewhere: another C library's
 /// allocator is left as it is.
 pub fn return_large_allocations() {

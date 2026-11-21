@@ -71,8 +71,8 @@ and after each run on its `fxfs stats:` lines), are reported as their percentile
 bound of the bucket each falls in, bucket k's 1.024 us times 2 to the k, the last's none.
 
 A gate whose cases didn't run is left out. The host's kind (`nested`, as a cloud VM is, or
-`bare-metal`, as ubu1 is) is reported with the numbers, which differ much between the two (window remaps and
-first-touch mappings cost more nested), never compared across.
+`bare-metal`, as the test host is) is reported with the numbers, which differ much between the two
+(window remaps and first-touch mappings cost more nested), never compared across.
 
 Usage: scripts/pgbench-gate.py [--host nested|bare-metal] [--json PATH] RESULTS...
 

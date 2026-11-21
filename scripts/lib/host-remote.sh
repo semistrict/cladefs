@@ -34,7 +34,7 @@
 # is not running: their drivers are gone.
 #
 # launch runs job/command apart from the SSH session, as a dropped connection or the driver's
-# machine sleeping ends nothing, under fxjob (system-setup.d/146-fxdax_cgroups.sh), with --bench if
+# machine sleeping ends nothing, under fxjob (the test host's setup), with --bench if
 # BENCH is 1, with --mem MEMORY if one is given; it returns once the job holds its lock. wait waits
 # for the lock, saying `waiting` once it has a connection, then `status N`, or `lost` if the job
 # ended without its status, as with the test host's restart, or `lost unreadable` if its status file
@@ -56,10 +56,10 @@
 # among them, which the user's systemd manager can neither stop nor kill: a job its memory limit
 # killed (the kernel's OOM killer took one process, the manager failed to stop the rest) ran on as
 # root, nextest and its tests, in a run's directory removed under it (TASK-344's first Linux suite
-# on ubu1). The job runs it once fxjob returns, before its status, and cancel after its signal.
-# fxjob kills what is left of its scope itself since TASK-353; reap stays for what it can't reach:
-# cancel's TERM ends the job's shell, freeing its lock, while fxjob still reaps, and a job whose
-# fxjob was killed outright, or is older than that, leaves its scope to reap here.
+# on the test host). The job runs it once fxjob returns, before its status, and cancel after its
+# signal. fxjob kills what is left of its scope itself since TASK-353; reap stays for what it can't
+# reach: cancel's TERM ends the job's shell, freeing its lock, while fxjob still reaps, and a job
+# whose fxjob was killed outright, or is older than that, leaves its scope to reap here.
 # CLADEFS_TEST_HOST_PROC names the processes' directory (default /proc), for the tests.
 set -euo pipefail
 

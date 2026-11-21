@@ -4,7 +4,7 @@
 # found in the LICENSE file.
 
 """The nightly measurement's planning and reporting (TASK-441.1, TASK-441.2), which
-scripts/nightly-host.sh runs on ubu1 from cron, in the nightly's own clone, ROOT.
+scripts/nightly-host.sh runs on the nightly host from cron, in the nightly's own clone, ROOT.
 
 Each night's results are a directory of docs/measurements, HOST-nightly-<time>-<head>, holding
 what scripts/bench-ab-host.sh fetched, `night.json`, what the night found, and `nightly.md`, the
@@ -79,7 +79,7 @@ BAD_NIGHTS = 3
 # after the first night, which built both sides, the nightly's run directories held 83 GB, and a
 # fifth more is 100G. Its
 # measurement: the rounds' results, each case's store and guests' images on the same disk while it
-# runs and what failed cases leave there until the end; no night has measured on ubu1 yet, so 20G,
+# runs and what failed cases leave there until the end; no night had measured yet, so 20G,
 # a guess until rounds-size.txt says more, which the margin then follows.
 ROOM = {"build": ("CLADEFS_NIGHTLY_ROOM_BUILD", "100G"),
         "measure": ("CLADEFS_NIGHTLY_ROOM_MEASURE", "20G")}
@@ -225,7 +225,8 @@ def change(row):
 
 
 def replay(row, record, environ):
-    """The commands that replay `row`'s measurement on ubu1, from a checkout of main."""
+    """The commands that replay `row`'s measurement on the nightly host, from a checkout of
+    main."""
     base, head = record["base"], record["head"]
     if row["kind"] == "count" and row["case"] in ab_rounds.COUNT_BENCHES:
         return (f"for c in {base} {head}; do git worktree add /tmp/counts-$c $c; "
@@ -354,7 +355,7 @@ def file_tasks(backlog, record, results_name):
             f"- Head, main: {head}\n"
             f"- Each round, {A} against {B}: {rounds}\n"
             f"- Results: {where}\n\n"
-            f"Replay on ubu1, from a checkout of main:\n\n    {row['replay']}\n\n"
+            f"Replay on the nightly host, from a checkout of main:\n\n    {row['replay']}\n\n"
             "Find the commit of the range that moved it (git log base..head), and either fix it "
             "or say here why the change is right; a later night that measures it again notes it "
             "here.")
@@ -368,7 +369,7 @@ def file_tasks(backlog, record, results_name):
             f"The nightly (scripts/nightly-host.sh, TASK-441): {each['said']}.\n\n"
             f"- Base: {base}\n- Head: {head}\n- Results: {where}\n"
             + "".join(f"- {detail}\n" for detail in each["details"])
-            + f"\nReplay on ubu1, from a checkout of main:\n\n    {each['replay']}\n")
+            + f"\nReplay on the nightly host, from a checkout of main:\n\n    {each['replay']}\n")
         note = f"{record['date'][:10]}: again on {short(base)}..{short(head)} ({where})"
         found, action = backlog.file(marker(each["key"]), title, description, note)
         tasks.append({"key": each["key"], "id": found, "action": action})
@@ -447,10 +448,10 @@ def history(measurements):
     lines = [
         "# The nightly's history",
         "",
-        "Each night on ubu1 (scripts/nightly-host.sh, TASK-441), main's head measured against the "
-        "commit the night before measured, in interleaved rounds of the same night, with the "
-        "control case and exact counts (scripts/ab-rounds.py). A night main did not move ran "
-        "nothing and is not here. A metric that moved is a backlog task, labelled nightly. "
+        "Each night on the nightly host (scripts/nightly-host.sh, TASK-441), main's head measured "
+        "against the commit the night before measured, in interleaved rounds of the same night, "
+        "with the control case and exact counts (scripts/ab-rounds.py). A night main did not move "
+        "ran nothing and is not here. A metric that moved is a backlog task, labelled nightly. "
         "Written by scripts/nightly.py; do not edit.",
         "",
     ]

@@ -5,13 +5,13 @@
 
 """Says when others wrote to a measurement round's disk (TASK-375). `fxjob --bench` gives a
 measurement cores, cache, memory bandwidth and memory of its own, and caps other fxjob work's I/O
-on ubu1's scratch disk alone: the disk it does not isolate. ubu1 has one NVMe, its scratch disk a
-zvol on the pool /home is on, and a round of TASK-330.4's A/B ran wholly beside another agent's
-186 MB/s loader with nothing in its results saying so. A round driver runs its round under this
-(scripts/lib/bench-ab-linux-host.sh, scripts/lib/bench-linux-host.sh, and scripts/bench-rounds.sh
-through scripts/test-e2e-job.sh, which names the round's disk, its job's scratch directory, the
-results being on another; a scripts/bench.sh or scripts/qualify.sh run by hand is wrapped the same
-way):
+on the test host's scratch disk alone: the disk it does not isolate. The test host had one NVMe, its
+scratch disk a zvol on the pool /home is on, and a round of TASK-330.4's A/B ran wholly beside
+another agent's 186 MB/s loader with nothing in its results saying so. A round driver runs its
+round under this (scripts/lib/bench-ab-linux-host.sh, scripts/lib/bench-linux-host.sh, and
+scripts/bench-rounds.sh through scripts/test-e2e-job.sh, which names the round's disk, its job's
+scratch directory, the results being on another; a scripts/bench.sh or scripts/qualify.sh run by
+hand is wrapped the same way):
 
     contamination.py run RESULTS [DISK...] -- COMMAND...   runs COMMAND, a round, and exits with its
                                                            status, RESULTS/contamination.json written
@@ -48,7 +48,7 @@ mark the round. No measurement's driver sets it.
 The bounds, on others' writes to the round's disks together, in MB (10^6 bytes) a second:
 CLADEFS_CONTAMINATION_WRITE_MB_S over the round (default 10) and
 CLADEFS_CONTAMINATION_MINUTE_WRITE_MB_S in any one minute (default 50), TASK-375's proposal. What
-ubu1 has shown since: beside clean rounds, what the scratch zvol wrote that was not the
+the test host has shown since: beside clean rounds, what the scratch zvol wrote that was not the
 measurement's (ext4's journal thread, which is no cgroup's, among it) was 0.5 to 6.3 MB/s in 30 s
 samples (TASK-330.5, TASK-322); ordinary work beside a measurement, capped by fxjob, 25 to 27 MB/s
 (TASK-374); the loader that went unseen, 186 MB/s. Reads are recorded and not judged: nothing

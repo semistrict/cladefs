@@ -6,15 +6,15 @@
 // What a VM process's changes to its DAX window cost its thread receiving from the extent daemon,
 // `cladefsd client`, which makes every change in turn (crates/cladefs/src/dax/uffd.rs), and its
 // fault thread's, `dax faults` (TASK-276.6): each second, each system call the threads made, by
-// kind (an mmap by the protection it maps with, an ioctl by its command: userfaultfd's
-// UFFDIO_COPY c028aa03, REGISTER c020aa00, WAKE 8010aa02, WRITEPROTECT c018aa06, KVM's
-// KVM_PRE_FAULT_MEMORY c028aed5, printed in decimal), how many and their microseconds; and the
-// TLB shootdowns among them: the cross-CPU calls they waited for (smp_call_function_many_cond)
-// and KVM's flushes of the vCPUs' TLBs (kvm_flush_remote_tlbs). Run as root beside a case,
-// `bpftrace scripts/dax-stage-syscalls.bt [CPUS] > OUT`, and stop it with SIGINT; the seconds'
-// lines line up with the case's log by the wall clock each starts with. CPUS, a mask, traces the
-// threads on those CPUs alone, as a measurement given CPUs of its own runs (ubu1's fxjob --bench:
-// 0xf0f0, CPUs 4-7 and 12-15, so 61680); none, or 0, every CPU's.
+// kind (an mmap by the protection it maps with, an ioctl by its command: userfaultfd's UFFDIO_COPY
+// c028aa03, REGISTER c020aa00, WAKE 8010aa02, WRITEPROTECT c018aa06, KVM's KVM_PRE_FAULT_MEMORY
+// c028aed5, printed in decimal), how many and their microseconds; and the TLB shootdowns among
+// them: the cross-CPU calls they waited for (smp_call_function_many_cond) and KVM's flushes of the
+// vCPUs' TLBs (kvm_flush_remote_tlbs). Run as root beside a case, `bpftrace
+// scripts/dax-stage-syscalls.bt [CPUS] > OUT`, and stop it with SIGINT; the seconds' lines line up
+// with the case's log by the wall clock each starts with. CPUS, a mask, traces the threads on those
+// CPUs alone, as a measurement given CPUs of its own runs (the test host's fxjob --bench: 0xf0f0,
+// CPUs 4-7 and 12-15, so 61680); none, or 0, every CPU's.
 
 BEGIN
 {
@@ -42,7 +42,7 @@ tracepoint:syscalls:sys_enter_mprotect
 	@start[tid] = nsecs;
 }
 
-// pwrite64 has no syscall tracepoint here (Linux 7.0, ubu1): its kernel function, as the
+// pwrite64 has no syscall tracepoint here (Linux 7.0, the test host): its kernel function, as the
 // others' tracepoints are, entered and returned.
 kprobe:ksys_pwrite64
 /(comm == "cladefsd client" || comm == "dax faults") && ($1 == 0 || ($1 >> cpu) & 1)/

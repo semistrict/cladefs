@@ -4,7 +4,7 @@
 # found in the LICENSE file.
 
 # Mutation testing (scripts/mutants.sh, TASK-44.1) on the test host, an x86-64 Linux machine of
-# one's own, over ssh (CLADEFS_TEST_HOST, ubu1 by default; scripts/lib/host.sh), where cladefs's
+# one's own, over ssh (CLADEFS_TEST_HOST; scripts/lib/host.sh), where cladefs's
 # Linux-only code (the extent daemon, the DAX window's userfaultfd) builds and its tests run
 # (scripts/lib/mutants-linux-host.sh). Each crate's report comes back to RESULTS (default:
 # docs/measurements/HOST-mutants-<time>-<mark>, the run's mark).

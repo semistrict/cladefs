@@ -201,7 +201,7 @@ if part firecracker; then
     # The API's parsing of the device's configuration, PUT /cladefs/{id} (TASK-503).
     "$root/scripts/firecracker-cargo.sh" nextest run -p firecracker --bin firecracker \
         --features cladefs -E 'test(/request::cladefs::/)'
-    # Where KVM is, as on ubu1: the PCI transport's tests and the device managers'
+    # Where KVM is, as on the test host: the PCI transport's tests and the device managers'
     # persistence tests, which make VMs, the extent device's window a BAR of its device's over PCI
     # (TASK-267); with CLADEFS_FIRECRACKER_TESTS=all, the vmm crate's whole suite, its integration
     # tests too, in their place. One at a time, as Firecracker runs them (--test-threads=1): they
