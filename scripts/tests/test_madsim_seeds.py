@@ -23,7 +23,7 @@ FAKE_NEXTEST = Path(__file__).resolve().with_name("fake_nextest.py")
 KNOWN = r"""
 # BOARD TEST PANIC
 5721 ephemeral_cells_survive_disk_faults   round \d+: handing over: Errno\(ENOENT\)
-5721 ephemeral_cells_survive_disk_faults   the cell noted on hosts \[\d+, \d+\], held on \d+
+5721 ephemeral_cells_survive_disk_faults   the cell noted on hosts \[\d+(, \d+)+\], held on \d+
 5469 ephemeral_cells_survive_crashes_and_migrations  called `Result::unwrap\(\)` on an `Err` value: Errno\(EBUSY\)
 """
 
@@ -77,6 +77,11 @@ class FailuresTest(unittest.TestCase):
         self.assertEqual(failure.known.board, 5721)
         self.assertEqual(str(failure), "seed 6: cladefs::madsim ephemeral_cells_survive_disk_faults:"
                                        " the cell noted on hosts [0, 2], held on 2: known, board 5721")
+
+    def test_a_listed_panic_matches_however_many_hosts_it_names(self):
+        [failure] = self.failures(("cladefs::madsim", "ephemeral_cells_survive_disk_faults",
+                                   panic("the cell noted on hosts [0, 1, 2], held on 1")))
+        self.assertEqual(failure.known.board, 5721)
 
     def test_another_panic_of_a_listed_test_is_new(self):
         [failure] = self.failures(("cladefs::madsim", "ephemeral_cells_survive_disk_faults",

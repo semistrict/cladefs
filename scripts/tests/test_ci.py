@@ -177,11 +177,12 @@ class Ci(unittest.TestCase):
         """TASK-149.20.2: the macos job runs scripts/test.sh's workspace and Shuttle parts on a
         macOS runner, a part a job, every failure: what cladefs compiles for macOS alone (physmem's
         physical map, local_cell's syncs, bucket_cell's cache, cladefs's storage I/O) ran on
-        laptops alone."""
+        laptops alone. Board 2912: and the madsim part, the daemon's simulation building on macOS
+        too."""
         text = CI.read_text()
         macos = re.search(r"^  macos:\n(.*?)^  \S", text, re.MULTILINE | re.DOTALL).group(1)
         self.assertIn("runs-on: macos-15", macos)
-        self.assertIn("parts: [workspace, shuttle]", macos)
+        self.assertIn("parts: [workspace, shuttle, madsim]", macos)
         self.assertIn("CLADEFS_TEST_PARTS: ${{ matrix.parts }}", macos)
         self.assertIn("run: scripts/test.sh --no-fail-fast", macos)
         self.assertIn("submodules: true", macos)
