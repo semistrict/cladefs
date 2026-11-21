@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-20 19:46'
-updated_date: '2026-11-21 05:36'
+updated_date: '2026-11-21 06:18'
 labels:
   - sandbox
   - performance
@@ -57,4 +57,6 @@ A cold host's first fork of a version reads its base a part at a time (TASK-670:
 
 <!-- SECTION:NOTES:BEGIN -->
 From TASK-702.1 (2026-11-20): predict the units any of the last 8 recordings read, no score threshold, fetched in the order of each unit's earliest read in any of them (5x less modelled waiting than by mean time when one set serves two workloads, docs/measurements/ubu1-python-sandbox-2026-11-20T2043Z-dc6e5dff); concurrency matters (modelled waiting 16.5 s at 32 fetches at once, 7.4 s at 64, ~0 at 128, 30 ms a fetch).
+
+Built (2026-11-21): bucket_cell Fetcher::fetch_ahead (the part holding an offset, moves followed as read follows them, fetched at Priority::Ahead, kept in the part cache, not unpacked; nothing without a cache or if held); HostFetcher::fetch_ahead. crate::evidence: every guest opening of a fork of a version has a boot (10 s window); one fork per host and interval also writes it as a recording; at the window's end each boot is measured against the prediction it had: stats predicted-read, predicted-unread, read-unpredicted (units). Prefetch: once the prediction is read, its units in order, those of extents the fork's store holds in the bucket (LocalCell::place), 128 at once under the host's 64-GET budget, demand first; aborted as the store goes; prefetches counts parts fetched. TASK-38 gone: profile.rs, the cache's recorder hook, OpenCell::profile and replay; Opening.profiled is Opening.guest, open_without_profile open_for_host; the two profile tests became forks_of_a_version_fetch_their_prediction_ahead and stores_worked_on_here_fetch_nothing_ahead; fs-bench's fork-profiled case became fork-predicted (forks of one version of the base). Measurement harness: CLADEFS_PYSANDBOX_COLD adds a cold host's first boot after the rounds with cold peers (every host restarted) and with warm peers (one restarted). Mac: changed crates 1163/1163.
 <!-- SECTION:NOTES:END -->
