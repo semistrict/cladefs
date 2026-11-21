@@ -4,8 +4,9 @@
 
 //! What a span costs the daemon (TASK-258, TASK-672.1): a bucket request's, started, three
 //! attributes set, ended, as `bucket_cell::trace` makes it; off, as a process that records no spans
-//! makes it, and recorded, as the daemon records every span for `/z/tracez`
-//! (`cladefs::cladefsd::otel::install`), its trace kept as a sample, exported not.
+//! makes it, and recorded, as the daemon records a sampled trace's spans for `/z/tracez`
+//! (`cladefs::cladefsd::otel::install`), every trace sampled here, its trace kept as a sample,
+//! exported not.
 //!
 //! ```sh
 //! cargo run --release -p cladefs-examples --example span-bench [SPANS]
@@ -36,7 +37,7 @@ fn main() {
         (0..5).map(|_| round()).min().unwrap()
     };
     println!("a span off costs {:?}", fastest());
-    cladefs::cladefsd::otel::install(None);
+    cladefs::cladefsd::otel::install(opentelemetry_sdk::trace::Sampler::AlwaysOn, None);
     println!("a span recorded costs {:?}", fastest());
 }
 

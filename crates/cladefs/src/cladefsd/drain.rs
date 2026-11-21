@@ -152,7 +152,7 @@ impl Work {
     }
 
     /// Returns once none of it is under way.
-    async fn done(&self) {
+    pub(super) async fn done(&self) {
         let mut count = self.0.subscribe();
         // The sender lives as long as the process.
         let _ = count.wait_for(|count| *count == 0).await;

@@ -28,6 +28,8 @@ cladefs = { path = "../cladefs", features = ["testing"] }
 fxfs.workspace = true
 libc.workspace = true
 object_store.workspace = true
+# span-bench records every span, as the daemon's sampler would keep each trace (TASK-707).
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace"] }
 storage_device.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

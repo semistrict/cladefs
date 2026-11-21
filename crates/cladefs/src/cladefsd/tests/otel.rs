@@ -79,7 +79,7 @@ fn spans_trace_requests_commits_and_uploads() {
     let exporter = InMemorySpanExporter::default();
     let export =
         Export::new(SimpleSpanProcessor::new(exporter.clone()), Box::new(Sampler::AlwaysOn));
-    otel::install(Some(export));
+    otel::install(Sampler::AlwaysOn, Some(export));
     let cell = write_read_commit();
     let spans = exporter.get_finished_spans().unwrap();
     // cladefs: as `TENANT/CELL`, in base 32 (TASK-364, TASK-504).
@@ -149,7 +149,7 @@ fn nothing_is_exported_while_tracing_is_off() {
 #[test]
 fn spans_are_recorded_unexported() {
     host();
-    otel::install(None);
+    otel::install(Sampler::AlwaysOn, None);
     write_read_commit();
     let recorder = tracez::recorder();
     let counts = recorder.counts();

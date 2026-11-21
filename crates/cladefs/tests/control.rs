@@ -274,6 +274,60 @@ fn imports_that_fail_leave_no_store() {
     assert_eq!(daemon.cell(&store).unwrap(), cell);
 }
 
+/// An import its caller gave up on runs to its end, its path held until then (board 5599, board
+/// 5384): stopped at the await its caller left it in, it let go of its path while its blocking
+/// work went on, and a CreateCell of the path made a store there beside the import's.
+#[test]
+fn imports_given_up_on_hold_their_paths_to_their_end() {
+    use cladefs::import::testing::{Entry, Kind, layer};
+    use std::sync::{Mutex, mpsc};
+    let dir = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::new(dir.path());
+    let image = dir.path().join("layer.tar");
+    let hello = b"hello from the image\n";
+    std::fs::write(&image, layer(&[Entry::new("hello", Kind::File(hello))]).unwrap()).unwrap();
+    let store = dir.path().join("store");
+
+    // The import held under way, its path held, saying so, until let go.
+    let (under_way, seen) = mpsc::channel();
+    let (go, gone) = mpsc::channel::<()>();
+    let gone = Mutex::new(gone);
+    fail::cfg_callback("cladefsd::import", move || {
+        under_way.send(()).unwrap();
+        gone.lock().unwrap().recv().unwrap();
+    })
+    .unwrap();
+    // Its caller gives up once it is under way: the call dropped, its stream reset.
+    let request = ImportImageRequest {
+        path: name(&store),
+        capacity: CAPACITY,
+        image: name(&image),
+        reference: String::new(),
+        tenant: 0,
+    };
+    let mut client = daemon.client.clone();
+    daemon.runtime.block_on(async {
+        let call = tokio::spawn(async move { client.import_image(request).await });
+        tokio::task::spawn_blocking(move || seen.recv().unwrap()).await.unwrap();
+        call.abort();
+        assert!(call.await.unwrap_err().is_cancelled());
+    });
+    // The path is the import's still: a CreateCell of it waits its turn, and gives up.
+    assert_eq!(failure(daemon.create(&store, NEW, None)), (Code::FailedPrecondition, Errno::EBUSY));
+
+    // Let go, the import ends, the store the image's.
+    fail::remove("cladefsd::import");
+    go.send(()).unwrap();
+    assert_eq!(failure(daemon.import(&store, &image)), (Code::AlreadyExists, Errno::EEXIST));
+    let size = futures::executor::block_on(async {
+        let fs = cladefs::Filesystem::mount(cladefs::Storage::open(&store).unwrap()).await.unwrap();
+        let (_, attr) = fs.root().lookup(b"hello").await.unwrap();
+        fs.close().await.unwrap();
+        attr.size
+    });
+    assert_eq!(size, hello.len() as u64);
+}
+
 /// A fork of a cell this host never had: the cell's store taken from object storage
 /// (CreateCell of its cell, placed after the host that wrote it), then forked (ForkCell), whose
 /// VM reads what the cell held, its data fetched as read.

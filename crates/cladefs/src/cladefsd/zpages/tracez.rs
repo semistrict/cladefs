@@ -10,9 +10,9 @@
 //! buckets on its own, its trace saying where it went (`cladefs.source`) and the stack that waited
 //! for it (`cladefs.backtrace`, TASK-672.2).
 //!
-//! One [`SpanProcessor`] sees every span, the tracer provider sampling all of them: the
-//! [`Recorder`], and, if spans are exported over OTLP, the exporter behind it ([`Export`]), handed
-//! the traces its sampler keeps. A trace's spans are held as they end, until none of it runs, and
+//! One [`SpanProcessor`] sees every span the tracer provider's sampler makes, of a sample of the
+//! traces (`otel::sampler`, TASK-707): the [`Recorder`], and, if spans are exported over OTLP, the
+//! exporter behind it ([`Export`]), handed the traces its sampler keeps. A trace's spans are held as they end, until none of it runs, and
 //! then kept as samples, the latest [`SAMPLES`] of each span name in each bucket, sharing the trace
 //! they are of: bounded spans of a trace ([`TRACE_SPANS`]), traces held at once ([`OPEN_TRACES`]),
 //! so bounded memory however many spans the daemon makes.

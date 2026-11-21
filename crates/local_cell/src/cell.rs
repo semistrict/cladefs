@@ -17,6 +17,7 @@ use crate::layout::{
     create_cell_dirs, extent_path, files_of, list_numbers, log_path, numbered_path,
     open_extent_path, open_segment_path, segment_path, spare_path,
 };
+use crate::pool::spawn_or_return;
 use crate::raw::{RawEncryption, RawFile};
 use crate::replicate::{Flushed, Replicator, log_of, own_frame, own_of};
 use crate::seals;
@@ -28,7 +29,7 @@ use crate::state::{
     Framing, Gate, Holding, Job, Life, Locked, OwnFiles, Packing, Readable, Reader, Space,
     Standing, State, Uncommitted, Unreferenced, Writable,
 };
-use crate::sync::{AsyncMutex, AsyncMutexGuard, Event, Mutex, rules, spawn_or_return, thread};
+use crate::sync::{AsyncMutex, AsyncMutexGuard, Event, Mutex, rules};
 use crate::timings::{self, Flush, Waits, flush};
 use crate::uploads::Closed;
 use crate::views::{Limits, Sealed, View, Views};
@@ -702,7 +703,7 @@ impl<D: Dir> Framer<D> {
             return false;
         }
         let syncer = self.clone();
-        spawn_or_return("store durable", (), move |()| syncer.make_written_durable()).is_some()
+        spawn_or_return((), move |()| syncer.make_written_durable()).is_some()
     }
 
     /// The thread making the segments framed durable: those written since it last did, together,
@@ -2092,7 +2093,7 @@ impl<D: Dir> LocalCell<D> {
                     }
                     opener.idle.notify(usize::MAX);
                 };
-                match spawn_or_return("store opener", preparation, prepare) {
+                match spawn_or_return(preparation, prepare) {
                     None => return,
                     Some(preparation) => preparation,
                 }
@@ -3009,7 +3010,7 @@ impl<D: Dir> LocalCell<D> {
         let framer = self.framer();
         if self.dir.concurrent() {
             let thread = framer.clone();
-            if spawn_or_return("store framer", (), move |()| thread.frame_queued()).is_none() {
+            if spawn_or_return((), move |()| thread.frame_queued()).is_none() {
                 return;
             }
         }
@@ -3580,33 +3581,25 @@ impl<D: Dir> LocalCell<D> {
         Ok(records)
     }
 
-    /// cladefs: runs `first`, and `then`, at once, `then` on a thread of its own, one of the helpers
-    /// every flush of the process shares (`durability::HELPERS`); or in turn, on this thread, if
-    /// none is free, the directory does one thing at a time, or the host refuses the thread. Not
-    /// at once under Shuttle, which fails an execution that ends with a scoped thread not run, as
-    /// a flush on a thread a test leaves behind would.
-    fn at_once<T: Send>(
+    /// cladefs: runs `first`, and `then`, at once, `then` on a thread of the pool's, if one is free,
+    /// as one of the helpers every flush of the process shares (`durability::HELPERS`); or in turn,
+    /// on this thread, if none is, or the directory does one thing at a time.
+    fn at_once<T: Send + 'static>(
         &self,
         first: impl FnOnce() -> Result<(), Error>,
-        then: impl FnOnce() -> Result<T, Error> + Send + Copy,
+        then: impl Fn() -> Result<T, Error> + Sync,
     ) -> Result<T, Error> {
         let helper = crate::durability::Helpers::take(1);
-        if !self.dir.concurrent() || cfg!(feature = "shuttle") || helper.count() == 0 {
+        if !self.dir.concurrent() || helper.count() == 0 {
             first()?;
             return then();
         }
-        thread::scope(|scope| {
-            let other = thread::Builder::new().spawn_scoped(scope, then);
-            let done = first();
-            let other = match other {
-                Ok(other) => other.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
-                Err(error) => {
-                    log::warn!("extent store: a flush's syncs in turn: {error}");
-                    then()
-                }
-            };
-            done.and(other)
-        })
+        // `then`, run once: by the helper, if it begins first, or after `first`.
+        let taken = std::sync::atomic::AtomicBool::new(false);
+        let once = || (!taken.swap(true, std::sync::atomic::Ordering::AcqRel)).then(&then);
+        let ((done, mine), theirs) = crate::pool::help(1, &once, || (first(), once()));
+        let other = mine.or(theirs.into_iter().flatten().next()).expect("`then`, run once");
+        done.and(other)
     }
 
     /// cladefs: the records of `commits`, a flush's, by the segments they were made in, in order:

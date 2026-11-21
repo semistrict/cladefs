@@ -3532,7 +3532,9 @@ async fn counting_followers_walks_no_extents() {
 /// At once, `FLUSHES` stores' flushes run at most, each on a thread of the runtime's for its
 /// syncs alone (board 2944), and the 15 they share to sync their files on beside their own
 /// (`local_cell`'s `HELPERS`): the most threads seen at once, looking every millisecond, are a
-/// small part of the stores'. Once their commits are durable, the runtime keeps threads for
+/// small part of the stores'. Those 15, and the stores' framers', syncers' and openers', are of
+/// the stores' pool (`local_cell::pool`), which keeps no more than its bound however many stores
+/// commit (board 2944). Once their commits are durable, the runtime keeps threads for
 /// the requests that ran at once, not for the stores: 2 and a little over 2 for each guest
 /// committing (8 to 9 for 3 guests, 18 to 25 for 9, 58 to 70 for 33, whether 150, 300 or 600 stores
 /// were open, in a container of 15 processors), more under load, as a thread just done is not yet
@@ -3549,8 +3551,8 @@ fn hundreds_of_writers_flush_on_threads_they_share() {
     use std::sync::atomic::{AtomicBool, Ordering};
     const STORES: usize = 300;
     const WRITERS: usize = 8;
-    // The runtime's, those flushing among them.
-    const NAMES: [&str; 1] = ["cladefsd io"];
+    // The runtime's, those flushing among them; and the stores' pool's.
+    const NAMES: [&str; 2] = ["cladefsd io", local_cell::pool::NAME];
     host();
     super::raise_open_files_limit().unwrap();
     let dir = tempfile::tempdir_in("/var/tmp").unwrap();
@@ -3647,6 +3649,8 @@ fn hundreds_of_writers_flush_on_threads_they_share() {
     );
     assert!(most[0] < STORES / 4, "{most:?} named {NAMES:?} at once");
     assert!(kept[0] < STORES / 4, "{threads} threads kept: {kept:?} named {NAMES:?}, of {names:?}");
+    let pool = local_cell::pool::threads();
+    assert!(most[1] <= pool && kept[1] <= pool, "{most:?} at most, {kept:?} kept, of {pool}");
     // Four turns, however long the load made them.
     assert!(turns <= 4, "ordered commits durable {turns} turns after, {lag:?}");
     drop(stores);
@@ -6531,6 +6535,12 @@ const PANIC_HOLDING: &str = "CLADEFSD_TEST_PANIC_HOLDING";
 #[ignore = "run by a_panic_holding_a_shared_lock_stops_the_daemon, in a process of its own"]
 fn child_panics_holding() {
     let Ok(lock) = std::env::var(PANIC_HOLDING) else { return };
+    // Its abort is what its parent looks for, no crash to keep: no core dump, which a host's
+    // systemd-coredump took 5 s to write for each child, its parent's twelve past its minute
+    // (asahimbp, board 2944).
+    let none = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: setrlimit reads `none` alone.
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_CORE, &none) }, 0);
     local_cell::shared::abort_on_panics();
     host();
     let ps = page_size() as usize;

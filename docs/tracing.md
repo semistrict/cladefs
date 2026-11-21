@@ -2,9 +2,9 @@
 
 `cladefsd` makes spans of what it does: the requests it serves, the commits they cause and each
 commit's phases, uploads to the bucket and each bucket request, store opens and forks,
-extent-cache page-ins, and memory-relief passes. It records every span in its own memory and shows
-them at `/z/tracez` (see [z-pages](#z-pages)), unless `CLADEFSD_TRACES=off`. It exports them over
-OTLP only when told to.
+extent-cache page-ins, and memory-relief passes. It records a sample of the traces, one in a hundred
+by default, whole, in its own memory and shows them at `/z/tracez` (see [z-pages](#z-pages)), unless
+`CLADEFSD_TRACES=off`. It exports the same traces over OTLP only when told to.
 The code is `crates/bucket_cell/src/trace.rs`, which makes the spans,
 `crates/cladefs/src/cladefsd/otel.rs`, which starts the recorder and the exporter (TASK-258), and
 `crates/cladefs/src/cladefsd/zpages/`, which serves the pages (TASK-672).
@@ -13,7 +13,7 @@ The code is `crates/bucket_cell/src/trace.rs`, which makes the spans,
 
 | Variable | Meaning | Default |
 |---|---|---|
-| `CLADEFSD_TRACES` | `otlp` exports spans. `off` makes none: nothing is recorded or exported, `/z/tracez` says spans are off, and each span costs a load, as before `/z/tracez` (TASK-707). Any other value except empty makes the daemon refuse to start. Unset, or `otlp`, spans are recorded for `/z/tracez`. | recorded, not exported |
+| `CLADEFSD_TRACES` | `otlp` exports spans. `off` makes none: nothing is recorded or exported, `/z/tracez` says spans are off, and each span costs a load, as before `/z/tracez` (TASK-707). Any other value except empty makes the daemon refuse to start. Unset, or `otlp`, the sampled traces' spans are recorded for `/z/tracez`. | sampled, recorded, not exported |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | The collector, OTLP over HTTP with protobuf. `/v1/traces` is appended. `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` names the full URL instead. | `http://localhost:4318` |
 | `OTEL_SERVICE_NAME` | The service the spans belong to. | `cladefsd` |
 | `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG` | OpenTelemetry's standard sampler variables. | see Sampling |
@@ -25,11 +25,14 @@ it exports what it has left before it exits.
 ### Sampling
 
 Each request, each background flush, each upload and each relief pass starts a trace, and a busy
-daemon starts thousands a second. So unless `OTEL_TRACES_SAMPLER` is set, the daemon exports
-`parentbased_traceidratio` with ratio `0.01`: one trace in a hundred, whole. The sampler decides
-per trace, from the trace ID, as it would for a root span, so every span of an exported trace is
-exported. Sampling only limits what is exported: `/z/tracez` records every span.
-`OTEL_TRACES_SAMPLER_ARG` alone changes the ratio. To export everything while debugging:
+daemon starts thousands a second. A recorded span costs about 5 µs under load: recording every one
+took 7% of the daemon's CPU under pgbench (see [Cost while recorded](#cost-while-recorded)). So
+unless `OTEL_TRACES_SAMPLER` is set, the daemon makes `parentbased_traceidratio` with ratio `0.01`:
+one trace in a hundred, whole. The sampler decides per trace, from the trace ID, as it would for a
+root span, so every span of a sampled trace is made, and none of another. The same traces are
+recorded for `/z/tracez` and, with `CLADEFSD_TRACES=otlp`, exported. `/z/tracez`'s counts are of
+the sampled traces: about one in a hundred of the spans. `OTEL_TRACES_SAMPLER_ARG` alone changes the
+ratio (TASK-707). To record and export everything while debugging:
 
 ```sh
 OTEL_TRACES_SAMPLER=always_on
@@ -133,7 +136,7 @@ The summary page links to page-ins that went to the bucket:
 
 Latencies are wall clock, so a span that waited for the bucket lands in the slow buckets on its
 own. The buckets are Census's: >0, >10µs, >100µs, >1ms, >10ms, >100ms, >1s, >10s, >100s. Counts are
-since the daemon started.
+since the daemon started, of the sampled traces' spans ([Sampling](#sampling)).
 
 The recorder holds each trace's spans as they end, until no span of the trace runs. It then keeps
 each span as a sample of its name and latency bucket, with the whole trace: the latest 4 of each
@@ -168,8 +171,8 @@ attribute is ever computed. The request path adds one more load per request, in
 
 ## Cost while recorded
 
-The daemon records every span, so each request, commit, page-in and bucket request pays for a real
-span. `span-bench` (`crates/cladefs-examples/examples/span-bench.rs`) times a bucket request's span
+A sampled trace's request, commit, page-in and bucket request each pay for a real span.
+`span-bench` (`crates/cladefs-examples/examples/span-bench.rs`) times a bucket request's span
 (started, three attributes set, ended, its trace kept as a sample), off and recorded, the fastest of
 5 rounds of a million. On the test host (x86_64), release build, under `fxjob --bench`, 2026-11-19:
 
@@ -178,9 +181,12 @@ span. `span-bench` (`crates/cladefs-examples/examples/span-bench.rs`) times a bu
 | off | 2 ns |
 | recorded | 497 ns |
 
-A request makes one span, or a few with its commit's phases. A page-in that reads from the host's
-disk takes tens of microseconds, and one from the bucket milliseconds, so their spans cost them
-little. At 20 000 requests a second, recording takes about 1% of a core.
+That is a span alone, warm, on one thread. Under load a recorded span costs ten times as much:
+fxfs-guest-pgbench-dax on the test host (TASK-707, 2026-11-21, stores on a RAM-backed disk), every
+span recorded, took 0.399 ms of the daemon's CPU per commit, against 0.371 ms with
+`CLADEFSD_TRACES=off`: 7% of its CPU, some 5 µs a span at its 8 500 spans a second. Hence the
+sampling: a span of a trace not sampled records nothing, and the daemon's CPU is about as with spans
+off.
 
 ```sh
 cargo run --release -p cladefs-examples --example span-bench

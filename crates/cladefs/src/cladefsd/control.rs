@@ -159,9 +159,11 @@ fn stats_response(stats: super::stats::HostStats) -> GetStatsResponse {
 /// cladefs: the API's calls in flight, which a drain waits for, refusing more (TASK-141.4).
 pub(super) static CALLS: super::drain::Work = super::drain::Work::new();
 
-/// cladefs: the API's service, `S`, its calls counted in [`CALLS`] until they are answered, and
-/// refused (`UNAVAILABLE`) as the daemon drains (TASK-141.4): what a call does is done once it is
-/// answered, as none streams. The health service's calls are not, as its watches never end.
+/// cladefs: the API's service, `S`, its calls counted in [`CALLS`] until they end, and refused
+/// (`UNAVAILABLE`) as the daemon drains (TASK-141.4): each runs to its end in a task of its own,
+/// whether or not its caller waits for its answer, as the API promises (board 5599,
+/// [`crate::caller`]), so that what a call does is done once it ends, as none streams. The health
+/// service's calls are not, as its watches never end.
 #[derive(Clone)]
 struct Drained<S>(S);
 
@@ -210,11 +212,20 @@ where
             let refused = Status::unavailable("the extent daemon drains, as it is about to exit");
             return Box::pin(std::future::ready(Refusal::refused(refused)));
         };
+        // cladefs: in a task of its own, which runs to its end, counted until then, whether or not
+        // its caller waits for the answer (board 5599): a caller's deadline, or its stream reset,
+        // drops what awaits it, which stops at whatever await it was in otherwise.
         let answered = self.0.call(request);
-        Box::pin(async move {
+        let detached = crate::caller::detached(async move {
             let answered = answered.await;
             drop(call);
             answered
+        });
+        Box::pin(async move {
+            detached.await.unwrap_or_else(|unfinished| {
+                log::error!("cladefsd: a control call: {unfinished}");
+                Refusal::refused(Status::unavailable(unfinished.to_string()))
+            })
         })
     }
 }
@@ -1445,4 +1456,66 @@ fn whom(tenant: Option<u64>, none: &str) -> String {
 /// `path`, as a request names it: `EINVAL` unless it is UTF-8.
 fn name(path: &Path) -> Result<String, crate::Error> {
     path.to_str().map(str::to_owned).ok_or_else(|| crate::Error::from(Errno::EINVAL))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::channel::oneshot;
+
+    /// A service of one call, which waits for `go`, then says whether its caller had given up.
+    struct OneCall(Option<(oneshot::Receiver<()>, oneshot::Sender<&'static str>)>);
+
+    impl tower::Service<()> for OneCall {
+        type Response = http::Response<()>;
+        type Error = std::convert::Infallible;
+        type Future = futures::future::BoxFuture<'static, Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(
+            &mut self,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, (): ()) -> Self::Future {
+            let (go, ended) = self.0.take().expect("one call");
+            Box::pin(async move {
+                go.await.unwrap();
+                let heard = match futures::FutureExt::now_or_never(crate::caller::gone()) {
+                    Some(()) => "its caller gone",
+                    None => "its caller waiting",
+                };
+                ended.send(heard).unwrap();
+                Ok(http::Response::new(()))
+            })
+        }
+    }
+
+    /// A call of the API whose caller gives up, dropping what awaits its answer, runs to its end,
+    /// counted for the drain until then (board 5599): stopped at the await it was in, it left what
+    /// it began half done (board 5382, board 5384).
+    #[tokio::test]
+    async fn calls_given_up_on_run_to_their_end() {
+        let (go, going) = oneshot::channel();
+        let (ended, end) = oneshot::channel();
+        let mut service = Drained(OneCall(Some((going, ended))));
+        let answer = tower::Service::call(&mut service, ());
+        assert_eq!(CALLS.count(), 1);
+        drop(answer);
+        assert_eq!(CALLS.count(), 1, "a call given up on stopped");
+        go.send(()).unwrap();
+        assert_eq!(end.await, Ok("its caller gone"));
+        CALLS.done().await;
+
+        // One whose caller waits is answered, its caller never heard gone.
+        let (go, going) = oneshot::channel();
+        let (ended, end) = oneshot::channel();
+        let mut service = Drained(OneCall(Some((going, ended))));
+        let answer = tower::Service::call(&mut service, ());
+        go.send(()).unwrap();
+        assert!(answer.await.is_ok());
+        assert_eq!(end.await, Ok("its caller waiting"));
+        assert_eq!(CALLS.count(), 0);
+    }
 }
