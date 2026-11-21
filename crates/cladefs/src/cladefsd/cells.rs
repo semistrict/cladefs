@@ -772,6 +772,8 @@ pub(super) async fn import(
     // are not `Send`, spans its awaits (doc-24: image import stays outside the simulation).
     let (at, keeping) = (path.clone(), keeping()?);
     blocking(move || {
+        // cladefs: an import under way, its path held: what its caller may give up on (board 5599).
+        fail::fail_point!("cladefsd::import");
         let imported = (image.as_path(), reference.as_deref());
         let made = crate::import::store_keeping(&at, (capacity, tenant), imported, keeping);
         outside_the_simulation(made)

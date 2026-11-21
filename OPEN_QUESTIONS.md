@@ -21,6 +21,20 @@ the worktrees stay as they are, nothing in them is lost, and TASK-444.4–.11 wa
 
 # Decisions
 
+## Control calls run to their end whoever gives up; waits that change nothing end with their caller (board 5599, 2026-11-21)
+
+`Drained` runs every call of the control API and the mount's service in a task of its own
+(`crate::caller::detached`), counted for the drain until it ends, as cladefsd.proto promises: a
+caller's deadline or reset no longer stops a call at whatever await it was in (board 5382, 5384,
+615, and the cancellation halves of 5546, 5394, 5396, 5404). A wait that changes nothing asks to
+end with its caller by name (`caller::gone`): ResizeCell's wait for its guest, as TASK-43.6 has it.
+SyncCell does not: a sync given up on goes on waiting for its uploads, its store open and its path
+held, until they land; it could end with `gone` too, closing its store, if holding the path while
+the bucket is out proves in the way. The peer service is left as it was: a GetPart whose asker gave
+up should stop (board 2480 complains of ones that don't), so detaching it needs a call-by-call
+choice. *Undo:* `Drained::call` awaiting `self.0.call(request)` itself; the control tests'
+`calls_given_up_on_run_to_their_end` and `imports_given_up_on_hold_their_paths_to_their_end` go red.
+
 ## Hosts of pages larger than 4 KiB: no windows of extents' blocks; no LSM labels on cladefs-mount (board 5230, 5232, 5234, 2026-11-21)
 
 The first arm64 test host (16 KiB pages, SELinux) failed three ways. A window maps a store's 4 KiB

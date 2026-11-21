@@ -173,7 +173,8 @@ impl<G: Guest> Drop for Asked<'_, G> {
 /// Sets `store`'s capacity to `capacity` bytes, as the connection holding it does, whose guest is
 /// `guest`: grows it, and tells the guest; or asks the guest to shrink, through `shrinking`, and
 /// shrinks it if the guest does (`ENOSPC` if it doesn't), waiting `wait` at most for its answer
-/// (`ETIMEDOUT`), holding no thread meanwhile. Never below what the store holds (`ENOSPC`). One at
+/// (`ETIMEDOUT`), or until its call's caller gives up (`ECONNABORTED`, [`crate::caller::gone`]),
+/// holding no thread meanwhile. Never below what the store holds (`ENOSPC`). One at
 /// a time: a grow landing between a shrink's answer and the store's taking it would leave the
 /// store smaller than its guest was told (TASK-79.41).
 pub(crate) async fn resize_held(
@@ -198,8 +199,20 @@ pub(crate) async fn resize_held(
     let mut asked = Asked { guest, kept: current, settled: false };
     let mut waiting = Waiting::new(shrinking, capacity);
     guest.tell(capacity, true)?;
-    let took = within(wait, &mut waiting.answered).await;
+    // cladefs: a wait that changes nothing, which ends with its call's caller, whose call runs to
+    // its end otherwise (board 5599): a shrink its caller gave up on stops waiting (TASK-43.6),
+    // the guest told the capacity kept as `asked` goes.
+    let took = {
+        let answered = std::pin::pin!(within(wait, &mut waiting.answered));
+        match futures::future::select(answered, std::pin::pin!(crate::caller::gone())).await {
+            futures::future::Either::Left((took, _)) => Some(took),
+            futures::future::Either::Right(((), _)) => None,
+        }
+    };
     drop(waiting);
+    let Some(took) = took else {
+        return Err(Errno::ECONNABORTED);
+    };
     match took {
         Some(Ok(true)) => {
             store.set_capacity(capacity).await?;

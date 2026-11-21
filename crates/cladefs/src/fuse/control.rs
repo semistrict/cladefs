@@ -333,15 +333,11 @@ fn cell_errno(err: &bucket_cell::Error) -> Errno {
     crate::bucket::errno(&failure).unwrap_or(Errno::EIO)
 }
 
-/// Runs `work` in a task of its own, which completes though the caller gives up on it, and its
-/// result as the API's.
-async fn whole<T: Send + 'static>(
-    work: impl Future<Output = Result<T, Error>> + Send + 'static,
-) -> Result<T, Status> {
-    match tokio::spawn(work).await {
-        Ok(done) => done.map_err(failed),
-        Err(err) => Err(failed(Error::new(err))),
-    }
+/// Runs `work`, and returns its result as the API's. cladefs: whole, though the caller gives up on
+/// it, as the daemon serves every call of this service in a task of its own (`cladefsd::control`'s
+/// `Drained`, board 5599).
+async fn whole<T>(work: impl Future<Output = Result<T, Error>>) -> Result<T, Status> {
+    work.await.map_err(failed)
 }
 
 /// The status of a call that failed with `err`: its errno's, `EIO` if it has none, saying what
