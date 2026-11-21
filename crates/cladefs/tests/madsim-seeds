@@ -13,3 +13,4 @@
 107     board 5721: an accepted hand-over's note unlinked, its directory's sync failing, answered EIO; asking again found nothing (ENOENT)
 755     board 5721: a refused hand-over's marker unlinked, its directory's sync failing, answered EIO; asking again found no migration under way (ENOENT)
 17      board 5721: an accepted hand-over's note created, its write failing (ENOSPC), left empty: every asking again failed to read it, the host never answering
+265     board 5721: a handed-over cell's journal entry, its removal failing, was said nowhere: the host refused every later migration of the cell to it (ALREADY_EXISTS)

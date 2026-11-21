@@ -112,16 +112,16 @@ impl Host {
     }
 
     /// Forgets `child`, its reference gone: durably, so that no crash brings its entry back
-    /// (TASK-714).
-    pub fn forget(&self, child: CellId) {
+    /// (TASK-714). Failing, it says so (board 5721: an entry left, said nowhere, had this host
+    /// refuse every later migration of the cell to it, the cell "here"), for its caller to try
+    /// again: forgetting an entry gone already does nothing.
+    pub fn forget(&self, child: CellId) -> Result<(), Error> {
         let path = self.entry_path(child);
         let forgotten = match host_fs::remove_file(&path) {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
             removed => removed.and_then(|()| host_fs::sync_dir(self.dir.join(CELLS))),
         };
-        if let Err(err) = forgotten {
-            log::warn!("cladefsd: forgetting {}: {err}", path.display());
-        }
+        forgotten.with_context(|| format!("forgetting {}", path.display()))
     }
 
     /// Remembers, durably, for good, that it accepted migration `migration`.
@@ -200,13 +200,13 @@ impl Host {
         Ok(retired)
     }
 
-    /// Retires `entry`'s reference, then the entry.
+    /// Retires `entry`'s reference, then the entry: failing if the entry does not go, which retiring
+    /// again finishes.
     pub async fn retire(&self, entry: &Entry) -> Result<(), Error> {
         let bucket = crate::host_cell::bucket(&entry.bucket)?;
         let (origin, child) = (entry.origin, entry.child);
         bucket_cell::lifecycle::unrefer_ephemeral(&*bucket, origin, self.incarnation, child).await;
-        self.forget(child);
-        Ok(())
+        self.forget(child)
     }
 }
 
@@ -259,7 +259,7 @@ mod tests {
         assert_eq!(host.entries().unwrap(), vec![entry.clone()]);
         assert_eq!(host_fs::read_dir(dir.path().join(CELLS)).unwrap().count(), 1);
         assert_eq!(host.entry(child), Some(entry));
-        host.forget(child);
+        host.forget(child).unwrap();
         assert_eq!(host.entries().unwrap(), vec![]);
         assert!(!host.accepted(0x3c));
         host.accept(0x3c).unwrap();
