@@ -165,7 +165,9 @@ being down blocks only additions.
 A host finds another bucket by its number (TASK-633.3): in the record in its own bucket's root,
 or, for a number that copy lacks, in the root bucket's. It opens the bucket at the URL recorded and
 refuses it unless the bucket's identity is the one recorded (`ESTALE`); a number no record holds
-is `ENOENT`. Each bucket is opened with the host's environment, its own variables first:
+is `ENOENT`. It asks each of these once: a bucket out of reach fails the request it was for, as
+that bucket failing would, and the request goes on without it (a mirror's copies here, TASK-633.8)
+or tries again, rather than waiting for it to come back (board 5528). Each bucket is opened with the host's environment, its own variables first:
 `CLADEFSD_BUCKET_<N>_<NAME>` stands for `NAME` for bucket N, so that buckets of other clouds,
 regions or accounts each get their own credentials:
 
@@ -240,7 +242,10 @@ tenant's KEK under NEW, then give the hosts NEW alone. To shred a tenant, run
 `cladefsctl shred-tenant TENANT` (`ShredTenant`) against every host's daemon: it
 replaces the tenant's KEK object by a tombstone, so that nothing of the tenant's
 unwraps anywhere and no KEK is made for it again, and has each host forget its
-keys (a host not told refuses it within a minute). As for a cell, a bucket with
+keys (a host not told refuses it within a minute). It shreds in every bucket at
+once, each within 30 s: one out of reach is said failed, the others shredded,
+and shredding again finishes it. A bucket under a KMS its record names is never
+asked. As for a cell, a bucket with
 versioning on needs non-current versions of `tenants/<tenant>/kek` expired, by
 the rule above. It is not BYOK: a tenant holding its own key uses a real KMS.
 

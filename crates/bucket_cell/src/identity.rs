@@ -225,15 +225,37 @@ pub fn given(number: u16) -> bool {
 
 /// The bucket's identity, if it was formatted or added.
 pub async fn get(bucket: &impl Bucket) -> Result<Option<Identity>, Error> {
-    match bucket::get(bucket, layout::IDENTITY).await? {
-        Some(object) => decode(&object.bytes).map(Some),
-        None => Ok(None),
-    }
+    let found = bucket::get(bucket, layout::IDENTITY).await?;
+    found.map(|object| decode(&object.bytes)).transpose()
 }
 
 /// The registry in `bucket`'s root: the root bucket's own, or a copy, if it has one.
 pub async fn registry(bucket: &impl Bucket) -> Result<Option<Registry>, Error> {
     Ok(registry_versioned(bucket).await?.map(|(registry, _)| registry))
+}
+
+/// cladefs: [`get`], asking once: the bucket failing, out of reach, fails it rather than being
+/// retried until it answers (board 5528). For what finds other buckets for a request
+/// ([`crate::object_bucket::Registered`]), whose request goes on without them, or tries again.
+pub async fn get_once(bucket: &impl Bucket) -> Result<Option<Identity>, Error> {
+    let found = once(bucket, layout::IDENTITY).await?;
+    found.map(|object| decode(&object.bytes)).transpose()
+}
+
+/// cladefs: [`registry`], asking once, as [`get_once`] asks (board 5528).
+pub async fn registry_once(bucket: &impl Bucket) -> Result<Option<Registry>, Error> {
+    let found = once(bucket, layout::BUCKETS).await?;
+    found.map(|object| decode(&object.bytes)).transpose()
+}
+
+/// The object at `key` in `bucket`, if any, asked for once.
+async fn once(bucket: &impl Bucket, key: &str) -> Result<Option<bucket::Object>, Error> {
+    match bucket.get(key).await {
+        Ok(object) => Ok(Some(object)),
+        Err(bucket::Error::NotFound) => Ok(None),
+        Err(bucket::Error::Refused(refusal)) => Err(bucket::Refused::of(key, refusal).into()),
+        Err(err) => Err(Error::Read(format!("{key}: {err}"))),
+    }
 }
 
 /// The registry in `bucket`'s root, and the version of its object.

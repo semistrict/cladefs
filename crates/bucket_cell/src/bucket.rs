@@ -200,7 +200,7 @@ pub struct Refused {
 }
 
 impl Refused {
-    fn of(key: &str, refusal: Refusal) -> Self {
+    pub(crate) fn of(key: &str, refusal: Refusal) -> Self {
         Self { key: key.to_owned(), refusal }
     }
 }

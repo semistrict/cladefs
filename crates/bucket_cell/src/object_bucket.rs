@@ -1131,30 +1131,32 @@ impl Registered {
         let reached = reach(url, options, &Client::DEFAULT)
             .map_err(|err| crate::Error::Read(format!("bucket {number} at {url}: {err}")))?;
         let bucket = ObjectBucket::reached(reached);
-        crate::identity::verified(entry, crate::identity::get(&bucket).await?)?;
+        crate::identity::verified(entry, crate::identity::get_once(&bucket).await?)?;
         Ok(bucket)
     }
 
     /// What the registry records of the bucket numbered `number`, as `home` reaches it: its copy
     /// in `home`'s root, or, for a number that copy lacks, the root bucket's registry, the
-    /// authority. `NoBucket` for a number neither records.
+    /// authority. `NoBucket` for a number neither records. cladefs: each read asked once, a bucket
+    /// out of reach failing it, as it fails the request it is for, which goes on without it or
+    /// tries again (board 5528); never waiting for that bucket.
     pub async fn entry(
         &self,
         home: &ObjectBucket,
         number: u16,
     ) -> Result<crate::identity::Entry, crate::Error> {
         use crate::identity::{self, ROOT};
-        let copy = identity::registry(home).await?;
+        let copy = identity::registry_once(home).await?;
         if let Some(entry) = copy.as_ref().and_then(|copy| copy.bucket(number)) {
             return Ok(entry.clone());
         }
-        let ours = identity::get(home).await?.ok_or(crate::Error::NoBucket(number))?;
+        let ours = identity::get_once(home).await?.ok_or(crate::Error::NoBucket(number))?;
         let root = copy.as_ref().and_then(|copy| copy.bucket(ROOT));
         let root = match (ours.number, root) {
             (ROOT, _) | (_, None) => return Err(crate::Error::NoBucket(number)),
             (_, Some(root)) => self.reach(root).await?,
         };
-        let registry = identity::registry(&root).await?;
+        let registry = identity::registry_once(&root).await?;
         let entry = registry.as_ref().and_then(|registry| registry.bucket(number));
         entry.cloned().ok_or(crate::Error::NoBucket(number))
     }
@@ -2533,26 +2535,12 @@ pub(crate) mod tests {
         });
     }
 
-    /// TASK-633.8: a resolver opening every other bucket as the one at `url`, empty: what a host
-    /// asks of a bucket out of reach then finds nothing there, at once, and its counts show it.
-    struct Emptied(String);
-
-    impl Resolve for Emptied {
-        fn open<'a>(
-            &'a self,
-            _: &'a ObjectBucket,
-            _: u16,
-        ) -> futures::future::BoxFuture<'a, Result<Arc<ObjectBucket>, crate::Error>> {
-            Box::pin(async move { Ok(Arc::new(ObjectBucket::from_url(&self.0).unwrap())) })
-        }
-    }
-
     /// TASK-633.8 (AC #4): a version mirrored here, its children here live with its bucket out of
     /// reach: a host started since, which knows nothing of the version but what this bucket holds,
     /// recovers a child and reads what it inherited, takes it, commits, and forks its own version
     /// into another child, which reads both; it asks the version's bucket nothing but listings of
     /// moves (a mirrored cell's are listed in both buckets, those of the other skipped when it
-    /// fails).
+    /// fails). board 5528: found as a host finds it, by the registry, out of reach at once.
     #[test]
     fn children_of_a_mirrored_version_live_with_its_bucket_out_of_reach() {
         use crate::mirror::{Mirrored, mirror};
@@ -2569,10 +2557,16 @@ pub(crate) mod tests {
             let mirrored = mirror(&*bucket, &*bucket.own(), 1, parent, at).await.unwrap();
             assert!(matches!(mirrored, Mirrored::Done { referred: 1, .. }), "{mirrored:?}");
 
-            std::fs::create_dir(dir.path().join("emptied")).unwrap();
-            let emptied = Emptied(format!("file://{}", dir.path().join("emptied").display()));
+            // board 5528: the version's bucket out of reach, as the registry finds it, every
+            // request of a bucket opened from now on failing as one out of service.
             let home = ObjectBucket::from_url(&two.home_url).unwrap();
-            let cut = Arc::new(home.routed(Arc::new(emptied)));
+            let faults = dir.path().join("faults");
+            std::fs::write(&faults, "failing=unavailable").unwrap();
+            // SAFETY: nextest runs each test in a process of its own, whose other threads don't
+            // read the environment.
+            unsafe { std::env::set_var("CLADEFS_BUCKET_FAULTS", &faults) };
+            let cut =
+                Arc::new(home.routed(Arc::new(Registered::new(Vec::<(String, String)>::new()))));
             let inherited = recovery::recover(&*cut, child, Some(origin)).await.unwrap().state;
             let ring = ring_of(&*cut, child).await.unwrap();
             let read = |ring, extent, location| crate::fetch::read(&cut, ring, extent, location);
@@ -3639,6 +3633,52 @@ pub(crate) mod tests {
         // bucket's first get; the listing's one; the delete's one.
         let answered = [("too-long", 1), ("put", 1), ("answered", 4)];
         assert_eq!(server.requests(), std::collections::BTreeMap::from(answered));
+    }
+
+    /// board 5528: what the registry records of a bucket, found by a bucket whose copy of it lacks
+    /// that bucket, is read in the root bucket's, asked once: the root out of reach, it fails at
+    /// once, as the request it is for does, rather than waiting for the root; the root back, it
+    /// finds it.
+    #[test]
+    fn registry_misses_needing_a_root_out_of_reach_fail_at_once() {
+        use crate::identity::{self, Asked, Details};
+        runtime().block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = |number: u16| dir.path().join(format!("bucket-{number}"));
+            let url = |number| format!("file://{}", path(number).display());
+            let [root, second, third] = [1, 2, 3].map(|number| {
+                std::fs::create_dir(path(number)).unwrap();
+                ObjectBucket::from_url(&url(number)).unwrap()
+            });
+            let root_details = Details { url: Some(url(1)), ..Details::default() };
+            identity::format(&root, &root_details, Asked::default()).await.unwrap();
+            let added = |number| Details { url: Some(url(number)), ..Details::default() };
+            let (_, registry) =
+                identity::add(&root, &root_details, &second, added(2), Asked::default())
+                    .await
+                    .unwrap();
+            identity::spread(&registry, &second).await.unwrap();
+            identity::add(&root, &root_details, &third, added(3), Asked::default()).await.unwrap();
+            let registered = Registered::new(Vec::new());
+
+            // Buckets reached from now on out of reach, the root among them, as their faults say:
+            // each request failing as a bucket out of service answers it.
+            let faults = dir.path().join("faults");
+            std::fs::write(&faults, "failing=unavailable").unwrap();
+            // SAFETY: nextest runs each test in a process of its own, whose other threads don't
+            // read the environment.
+            unsafe { std::env::set_var("CLADEFS_BUCKET_FAULTS", &faults) };
+            let found = registered.entry(&second, 3).await.map(|entry| entry.number);
+            let unread = |found: &Result<u16, crate::Error>| match found {
+                Err(crate::Error::Read(why)) => why.starts_with(layout::IDENTITY),
+                _ => false,
+            };
+            assert!(unread(&found), "{found:?}");
+
+            std::fs::write(&faults, "").unwrap();
+            let found = registered.entry(&second, 3).await.map(|entry| entry.number);
+            assert_eq!(found, Ok(3));
+        });
     }
 
     /// board 5861, TASK-572: a sweep over a bucket refusing its requests, as one whose credentials
