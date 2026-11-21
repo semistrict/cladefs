@@ -10,7 +10,7 @@ use extent_files::testing::CopyingWindow;
 use rand::rngs::StdRng;
 use rand::{RngExt as _, SeedableRng as _};
 use rusqlite::{Connection, OpenFlags, params};
-use sqlite_extents::{FileSet, Options, Registration, register};
+use sqlite_cladefs::{FileSet, Options, Registration, register};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

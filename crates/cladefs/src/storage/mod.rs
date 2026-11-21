@@ -312,7 +312,7 @@ impl Storage {
     }
 
     /// cladefs: the storage's device, for what keeps itself on a device in place of Fxfs, as a
-    /// SQLite cell does (crates/sqlite_extents, TASK-296). Its user closes it: an image's
+    /// SQLite cell does (crates/sqlite_cladefs, TASK-296). Its user closes it: an image's
     /// close waits for its commits to be uploaded.
     pub fn into_device(self) -> DeviceHolder {
         self.device

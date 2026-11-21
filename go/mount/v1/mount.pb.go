@@ -10,7 +10,7 @@
 // MOUNTPOINT/TENANT/CELL, TENANT and CELL in base 32, 13 digits (Crockford's, lower case,
 // zero-padded), as the bucket's keys have them; Detach writes it back, so that another host may
 // take the cell. A cell of another kind is attached but not shown: a SQLite cell's database opens
-// through sqlite_extents' VFS alone, and a VM's cells are its VM process's, in the same daemon.
+// through sqlite_cladefs' VFS alone, and a VM's cells are its VM process's, in the same daemon.
 //
 // It is served on the daemon's control socket (CLADEFSD_GRPC), beside the extent service
 // (cladefs/cladefsd/v1/cladefsd.proto), the daemon's user's alone, mode 0600 whatever its umask, as

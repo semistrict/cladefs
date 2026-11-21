@@ -25,7 +25,7 @@
 
 use cladefs::Storage;
 use rusqlite::{Connection, OpenFlags, params};
-use sqlite_extents::{FileSet, Options, register};
+use sqlite_cladefs::{FileSet, Options, register};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -238,7 +238,7 @@ fn main() {
         for (config, pragmas) in [("daemon", ""), ("daemon-mmap", "PRAGMA mmap_size = 1073741824")]
         {
             let (store, before) = (root.join(config), bucket_bytes(&root));
-            let file_set = sqlite_extents::daemon::open(
+            let file_set = sqlite_cladefs::daemon::open(
                 &socket,
                 &store,
                 64 << 30,

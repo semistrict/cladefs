@@ -680,7 +680,7 @@ impl OpenCell {
     }
 
     /// cladefs: a new store at `path`, as [`OpenCell::create_with`] makes, a cell of `kind`,
-    /// its cell (TASK-364): a SQLite one, which the sqlite_extents VFS alone opens, as a
+    /// its cell (TASK-364): a SQLite one, which the sqlite_cladefs VFS alone opens, as a
     /// store a database is made in through the daemon is.
     pub async fn create_kind_with(
         path: impl AsRef<Path>,

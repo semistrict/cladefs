@@ -40,7 +40,7 @@ choice. *Undo:* `Drained::call` awaiting `self.0.call(request)` itself; the cont
 The first arm64 test host (16 KiB pages, SELinux) failed three ways. A window maps a store's 4 KiB
 blocks, and mmap maps only whole host pages at whole-page offsets in an extent, so on such a host
 a memory cell's window is refused as it is made (`cladefs::pages::window_fits_host`), and
-sqlite_extents' daemon file set opens with no window, reading copies. Supporting it instead would
+sqlite_cladefs' daemon file set opens with no window, reading copies. Supporting it instead would
 mean blocks (or extents' layout) of the host's page size, a format change; arm64 servers mostly run
 4 KiB pages. cladefs-mount stores no SELinux label: the FUSE differential leaves the host's label
 out. Undoing: blocks of the host's page size for memory and SQLite cells, then drop the refusal; or

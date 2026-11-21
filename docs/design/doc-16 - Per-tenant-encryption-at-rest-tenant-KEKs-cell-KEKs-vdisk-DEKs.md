@@ -85,7 +85,7 @@ say of the clear:
   per process, which cladefs's unit tests fall back to and `extent_remote::testing`'s readers
   (`ring_of`, `read`) unwrap under. `extent_keys::testing::KnownKms` keeps every tenant's KEK one
   known key, so that a test's process and those it starts agree with nothing shared: cladefs's
-  `tests-kms` feature, which cladefs's and sqlite_extents' tests turn on and a release build refuses,
+  `tests-kms` feature, which cladefs's and sqlite_cladefs' tests turn on and a release build refuses,
   has a host given no KMS seal under it (`cladefs::remote::testing`); a bench seals under it unless
   its environment names a KMS (`cladefs::remote::testing::sealed`). Stores kept in no bucket seal
   under a fixed DEK (`extent_store`'s `unkept` feature: `Store::create`, `Store::open`,

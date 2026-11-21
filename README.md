@@ -73,7 +73,7 @@ Four abstractions carry the whole design ([CONTEXT.md](CONTEXT.md) defines every
   and mapped read-only into guests via DAX.
 - **Cell:** a tenant's independent unit of storage, concurrency, placement, fencing and encryption:
   one writer at a time, its own log, head, key and versions. A cell has one kind—an Fxfs
-  filesystem, a SQLite database (`crates/sqlite_extents`) or a VM's memory image. Any host can
+  filesystem, a SQLite database (`crates/sqlite_cladefs`) or a VM's memory image. Any host can
   take any cell whole.
 - **Version:** a named read-only state of a cell in its past, made by a single local commit on the
   cell's writer and uploaded in the background.
@@ -133,7 +133,7 @@ See [docs/architecture.md](docs/architecture.md) for the full mechanics.
 
 ### Storage, branching and snapshots
 
-- **Three cell kinds:** Fxfs filesystems, SQLite databases (`crates/sqlite_extents`), and VM memory
+- **Three cell kinds:** Fxfs filesystems, SQLite databases (`crates/sqlite_cladefs`), and VM memory
   images (`crates/extent_files`).
 - **Host-local versions and O(1) forks:** make a version of a cell locally and fork it in constant
   time on any number of hosts.
@@ -263,7 +263,7 @@ read [docs/integrator-guide.md](docs/integrator-guide.md).
 | `crates/local_cell`, `crates/bucket_cell` | An extent store on local disk, and cells in the bucket (including replication and `cladefs-gc`). |
 | `crates/physmem` | The daemon's physical memory: arenas of shared memory (`memfd`), relief and quarantine. |
 | `crates/virtio_extent` | The extent store device, transport-independent, for a VMM to host. |
-| `crates/sqlite_extents`, `crates/extent_files` | SQLite over extents and file sets (used for SQLite and VM memory-image cells). |
+| `crates/sqlite_cladefs`, `crates/extent_files` | SQLite over extents and file sets (used for SQLite and VM memory-image cells). |
 | `crates/fxfs`, `crates/fxfs-posix` | Fxfs, copied from Fuchsia, and the POSIX layer the guest and the host both call. |
 | `crates/` (the rest) | Fuchsia's libraries, copied, and stand-ins for what only Fuchsia's build has ([docs/code.md](docs/code.md)). |
 | `guest/` | Fxfs in the guest's kernel: its C glue, its Rust, the kernel patches and the guest tests. |

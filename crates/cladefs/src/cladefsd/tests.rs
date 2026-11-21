@@ -2477,7 +2477,7 @@ fn stores_are_deleted_while_their_forks_are_open() {
 }
 
 /// TASK-364, doc-20: a store a connection makes is a new cell's: an Fxfs one, or,
-/// made through `OPEN_SQLITE` as sqlite_extents makes its databases, a SQLite one, which a host's
+/// made through `OPEN_SQLITE` as sqlite_cladefs makes its databases, a SQLite one, which a host's
 /// FUSE mount of the cell leaves be; or, through `OPEN_MEMORY`, a VM's memory (TASK-456.2). The
 /// cell's object, under its tenant's prefix in the bucket, says so; and the store's cell's head
 /// was taken with the cell's epoch.

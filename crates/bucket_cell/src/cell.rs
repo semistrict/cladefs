@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 pub enum Kind {
     /// An Fxfs filesystem.
     Fxfs,
-    /// A database of `sqlite_extents`.
+    /// A database of `sqlite_cladefs`.
     Sqlite,
     /// A VM's memory: an `extent_files` file set of one file, its image (TASK-456).
     Memory,

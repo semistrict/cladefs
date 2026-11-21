@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! For tests, here and in sqlite_extents': a window of memory of its own.
+//! For tests, here and in sqlite_cladefs': a window of memory of its own.
 
 use std::alloc::Layout;
 use std::ptr::NonNull;

@@ -189,7 +189,7 @@ fn code_of(result: Result<(), Error>, code: c_int) -> c_int {
     match result {
         Ok(()) => ffi::SQLITE_OK,
         Err(error) => {
-            log::error!("sqlite_extents: {error:#}");
+            log::error!("sqlite_cladefs: {error:#}");
             match error.is::<NotFound>() {
                 true => ffi::SQLITE_CANTOPEN,
                 false if error.is::<Failed>() => ffi::SQLITE_IOERR,
@@ -212,7 +212,7 @@ unsafe extern "C" fn x_open(
     unsafe { (*file).pMethods = std::ptr::null() };
     let opened = match name {
         _ if flags & ffi::SQLITE_OPEN_WAL != 0 => {
-            log::warn!("sqlite_extents: WAL mode is refused: its log would be lost in a crash");
+            log::warn!("sqlite_cladefs: WAL mode is refused: its log would be lost in a crash");
             return ffi::SQLITE_CANTOPEN;
         }
         Some(name) if flags & ffi::SQLITE_OPEN_MAIN_DB != 0 => {

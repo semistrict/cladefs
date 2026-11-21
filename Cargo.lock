@@ -4874,7 +4874,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sqlite_extents"
+name = "sqlite_cladefs"
 version = "0.1.0"
 dependencies = [
  "anyhow",

@@ -11,7 +11,7 @@ mod common;
 
 use futures::executor::block_on;
 use rusqlite::{Connection, OpenFlags, params};
-use sqlite_extents::{FileSet, Options, Registration, daemon, register};
+use sqlite_cladefs::{FileSet, Options, Registration, daemon, register};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,7 +22,7 @@ use storage_device::DeviceHolder;
 /// directory, which lives as long as the one returned: a socket's path is short (SUN_LEN), and one
 /// under the target directory of a checkout deep in a host's scratch disk was not (TASK-344).
 fn serve() -> (tempfile::TempDir, PathBuf) {
-    serve_from("memory:///sqlite-extents")
+    serve_from("memory:///sqlite-cladefs")
 }
 
 /// A daemon as [`serve`] runs it, of the bucket at `url`.
@@ -123,7 +123,7 @@ fn reads_in_place_and_survives_reopening(name: &str) -> Vec<String> {
             connection.query_row("SELECT v FROM t WHERE k = 5000", [], |row| row.get(0)).unwrap();
         assert!(read == marker, "the row of noise reads back otherwise");
         // In place where the host maps the store's blocks into a window; a host of larger pages
-        // has none, its reads copied (sqlite_extents::daemon, board 5232).
+        // has none, its reads copied (sqlite_cladefs::daemon, board 5232).
         let fetched = file_set.fetched() - before;
         let in_place = file_set.is_mapped();
         assert_eq!(in_place, cladefs::pages::page_size() <= 4096, "a window where it fits");

@@ -17,7 +17,7 @@ use anyhow::Error;
 use async_trait::async_trait;
 use cladefs::Storage;
 use rusqlite::{Connection, OpenFlags, params};
-use sqlite_extents::{FileSet, Options, register};
+use sqlite_cladefs::{FileSet, Options, register};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -119,14 +119,14 @@ impl Device for Timing {
 
 /// A window whose requests are timed.
 #[cfg(target_os = "linux")]
-struct TimingWindow(sqlite_extents::daemon::DaemonWindow);
+struct TimingWindow(sqlite_cladefs::daemon::DaemonWindow);
 
 #[cfg(target_os = "linux")]
-impl sqlite_extents::FileSetWindow for TimingWindow {
+impl sqlite_cladefs::FileSetWindow for TimingWindow {
     fn memory(&self) -> (std::ptr::NonNull<u8>, u64) {
         self.0.memory()
     }
-    fn map(&self, device: &dyn Device, runs: &[sqlite_extents::Run]) -> Result<(), Error> {
+    fn map(&self, device: &dyn Device, runs: &[sqlite_cladefs::Run]) -> Result<(), Error> {
         let start = Instant::now();
         let mapped = self.0.map(device, runs);
         count(5, start);
@@ -300,7 +300,7 @@ fn main() {
         std::thread::spawn(move || cladefs::cladefsd::serve(listener));
         let store = cladefs::CellClient::connect(&socket, root.join("daemon"), 64 << 30).unwrap();
         let store = Arc::new(store);
-        let window = sqlite_extents::daemon::DaemonWindow::new(store.clone(), 1 << 30).unwrap();
+        let window = sqlite_cladefs::daemon::DaemonWindow::new(store.clone(), 1 << 30).unwrap();
         let device = DeviceHolder::new(Timing(DeviceHolder::new(
             cladefs::DaemonDevice::new(store).unwrap(),
         )));

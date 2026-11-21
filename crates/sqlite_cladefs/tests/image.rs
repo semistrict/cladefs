@@ -9,7 +9,7 @@ mod common;
 
 use cladefs::Storage;
 use rusqlite::{Connection, OpenFlags, params};
-use sqlite_extents::{FileSet, Options, Registration, register};
+use sqlite_cladefs::{FileSet, Options, Registration, register};
 use std::path::Path;
 use std::sync::Arc;
 

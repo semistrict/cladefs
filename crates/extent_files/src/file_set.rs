@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! A file set: files on an extent device, by name, each committed alone: a SQLite database's
-//! (sqlite_extents), or a VM's memory (TASK-456).
+//! (sqlite_cladefs), or a VM's memory (TASK-456).
 //!
 //! **Commits.** A file's changes are committed alone ([`FileSet::sync`]): its plan's extents are
 //! written, then the root, naming every file's tree as the last commit of each left it, is

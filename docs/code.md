@@ -176,7 +176,7 @@ Each crate's `Cargo.toml` says in its first lines what it is. cladefs's own, bes
 | `extent_keys` | The keys a tenant's data is encrypted under at rest, the KMS backends, and the primitives that use them (backlog doc-16). |
 | `virtio_extent` | The extent store device but its virtio transport (backlog doc-4), which every VMM hosting it shares; its `README.md` says what a VMM's adapter does. |
 | `extent_files` | Named files kept straight on an extent device, with no filesystem between: file sets. |
-| `sqlite_extents` | SQLite databases kept so, each transaction one commit of the device. |
+| `sqlite_cladefs` | SQLite databases kept so, each transaction one commit of the device. |
 | `fxfs-automount` | A guest's automounter of shared volumes (backlog doc-10), and `git-remote-fxfs`. |
 | `follower`, `follower_sim`, `follower_history` | Live read-only followers' concurrency protocol, its deterministic simulation and its history checker (backlog doc-8). |
 | `fxfs-sim-diff` | `guest/sim`'s model of Fxfs run beside Fxfs on the same operations, each file compared after each. |

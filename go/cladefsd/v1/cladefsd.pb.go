@@ -148,7 +148,7 @@ type CellKind int32
 const (
 	// An Fxfs filesystem: a VM's disk, or a host's mount's.
 	CellKind_CELL_KIND_FXFS CellKind = 0
-	// A database of sqlite_extents, which its VFS alone opens.
+	// A database of sqlite_cladefs, which its VFS alone opens.
 	CellKind_CELL_KIND_SQLITE CellKind = 1
 	// A VM's memory: an extent_files file set of one file, its image (TASK-456).
 	CellKind_CELL_KIND_MEMORY CellKind = 2

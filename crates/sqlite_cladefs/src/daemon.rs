@@ -44,7 +44,7 @@ pub fn open(
     let device = DeviceHolder::new(DaemonDevice::new(store.clone())?);
     let block = device.block_size() as u64;
     if let Err(error) = cladefs::pages::window_fits_host(block, cladefs::pages::page_size()) {
-        log::info!("sqlite_extents: a file set with no window, reading from the daemon: {error:#}");
+        log::info!("sqlite_cladefs: a file set with no window, reading from the daemon: {error:#}");
         return FileSet::open(device, options);
     }
     let window = DaemonWindow::new(store, window)?;
@@ -133,7 +133,7 @@ impl Drop for DaemonWindow {
         match Arc::try_unwrap(self.store.take().expect("a store")) {
             Ok(store) => drop(store),
             Err(_) => {
-                log::warn!("sqlite_extents: a window's store outlives it: its memory stays mapped");
+                log::warn!("sqlite_cladefs: a window's store outlives it: its memory stays mapped");
                 return;
             }
         }

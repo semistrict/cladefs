@@ -1,5 +1,5 @@
 # cladefs's own: named files kept straight on an extent device, as pages in write-once extents,
-# each file's commit one commit of the device: SQLite's databases' (sqlite_extents) and VMs'
+# each file's commit one commit of the device: SQLite's databases' (sqlite_cladefs) and VMs'
 # memory (TASK-456).
 [package]
 name = "extent_files"
@@ -16,7 +16,7 @@ storage_device.workspace = true
 thiserror.workspace = true
 
 [features]
-# A window of memory of its own for tests, here and in sqlite_extents' (`testing`).
+# A window of memory of its own for tests, here and in sqlite_cladefs' (`testing`).
 testing = []
 
 [lints]

@@ -754,7 +754,7 @@ impl DaemonConnection {
     }
 
     /// cladefs: the store at `store`, as [`DaemonConnection::open`] has it, made, if it doesn't
-    /// exist, a SQLite cell, which the sqlite_extents VFS alone opens, rather
+    /// exist, a SQLite cell, which the sqlite_cladefs VFS alone opens, rather
     /// than an Fxfs one (TASK-364).
     pub fn open_sqlite(self, store: impl AsRef<Path>, capacity: u64) -> Result<CellClient, Error> {
         self.opening(store.as_ref(), Opening::Create(capacity, Kind::Sqlite))

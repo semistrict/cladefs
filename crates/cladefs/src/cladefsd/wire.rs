@@ -380,7 +380,7 @@ pub(crate) const OPEN_CREATE: u32 = 1 << 0;
 pub(crate) const OPEN_FORK: u32 = 1 << 1;
 pub(crate) const OPEN_READ_ONLY: u32 = 1 << 2;
 /// cladefs: with [`OPEN_CREATE`], the store made is a SQLite cell, which the
-/// sqlite_extents VFS alone opens, not an Fxfs one (TASK-364).
+/// sqlite_cladefs VFS alone opens, not an Fxfs one (TASK-364).
 pub(crate) const OPEN_SQLITE: u32 = 1 << 3;
 /// cladefs: with [`OPEN_CREATE`], the store made is a memory cell, a VM's memory
 /// (TASK-456.2), not an Fxfs one.

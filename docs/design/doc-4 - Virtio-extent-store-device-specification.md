@@ -357,7 +357,7 @@ in any window.
 - cladefs: the extent daemon's wire has a third level, which no guest's device asks for:
   `COMMIT_LOCAL` (`WRITE_LOCAL` for a write's commit), which completes once everything before it is
   local, synced to the host's disk, not waiting for the bucket: what a database on the daemon
-  commits with, as SQLite's own on a local filesystem does (crates/sqlite_extents, the user's
+  commits with, as SQLite's own on a local filesystem does (crates/sqlite_cladefs, the user's
   decision of 2026-11-09, TASK-301).
 
 ### `ROOT`
