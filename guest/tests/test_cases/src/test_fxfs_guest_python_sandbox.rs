@@ -36,6 +36,12 @@
 //! `traces/NN-SANDBOX-WORKLOAD.reads`, in the order the sandboxes ran, for
 //! `scripts/read_prediction.py`.
 //!
+//! With CLADEFS_PYSANDBOX_COLD set, two sandboxes more follow the rounds, each a cold host's first
+//! boot of the version, which the read evidence the rounds' sandboxes recorded predicts, fetched
+//! into its part cache as it boots (TASK-702.3): host-b's, every host restarted, its memory and
+//! part cache empty, so that its peers are cold too (`cold_peers`); then host-c's, it alone
+//! restarted, its peers warm (`warm_peers`).
+//!
 //! Each sandbox is timed by phase, on the host's clock from just before its fork: the fork, the VM
 //! process started, the guest's boot to its agent (the guest's own clock, from its kernel's
 //! start), marimo serving (the notebook's alone), and the answers, each as the guest says it on its
@@ -210,13 +216,56 @@ RUN find / -xdev -name '*.pyc' -delete
     /// VM's connection goes.
     const TRACE_SETTLE: Duration = Duration::from_secs(10);
 
-    /// A host of the run: its extent daemon, where it is reached, and where it writes the traces of
-    /// its VMs' reads.
+    /// A host of the run: its extent daemon, where it is reached, where it writes the traces of
+    /// its VMs' reads, what its daemon is started with, and how often it was restarted.
     struct Host {
         name: &'static str,
         daemon: std::process::Child,
         socket: PathBuf,
         traces: PathBuf,
+        env: Vec<(&'static str, std::ffi::OsString)>,
+        restarts: u32,
+    }
+
+    impl Host {
+        /// What its daemon is named, its log, part cache and stats file after it: a daemon
+        /// restarted has them new.
+        fn daemon_name(&self) -> String {
+            match self.restarts {
+                0 => self.name.to_owned(),
+                restarts => format!("{}-r{restarts}", self.name),
+            }
+        }
+
+        /// Starts its daemon, as [`Host::daemon_name`] names it.
+        fn spawn(
+            test_setup: &TestSetup,
+            name: &str,
+            socket: &Path,
+            env: &[(&'static str, std::ffi::OsString)],
+        ) -> anyhow::Result<std::process::Child> {
+            let env: Vec<(&str, &std::ffi::OsStr)> =
+                env.iter().map(|(var, value)| (*var, value.as_os_str())).collect();
+            crate::common::spawn_daemon(test_setup, socket, name, &env, Some(DAEMON_MEMORY))
+        }
+
+        /// Restarts its daemon cold: its memory, and its part cache, a new one, empty.
+        fn restart(&mut self, test_setup: &TestSetup) -> anyhow::Result<()> {
+            crate::common::say_daemon_stats(test_setup, &self.daemon_name());
+            self.daemon.kill()?;
+            self.daemon.wait()?;
+            // Its sockets, which a daemon killed leaves, and a daemon refuses to bind over.
+            for socket in [self.socket.clone(), self.socket.with_extension("control")] {
+                if let Err(err) = std::fs::remove_file(&socket)
+                    && err.kind() != std::io::ErrorKind::NotFound
+                {
+                    return Err(anyhow::Error::new(err).context(format!("{}", socket.display())));
+                }
+            }
+            self.restarts += 1;
+            self.daemon = Self::spawn(test_setup, &self.daemon_name(), &self.socket, &self.env)?;
+            Ok(())
+        }
     }
 
     /// What the hosts' daemons had done, as their stats files say, by host and counter.
@@ -254,7 +303,7 @@ RUN find / -xdev -name '*.pyc' -delete
     /// Every host's counters, once their stats files have settled.
     fn all_counts(dir: &Path, hosts: &[Host]) -> anyhow::Result<Counts> {
         std::thread::sleep(STATS_SETTLE);
-        hosts.iter().map(|host| host_counts(dir, host.name)).collect()
+        hosts.iter().map(|host| host_counts(dir, &host.daemon_name())).collect()
     }
 
     /// What the hosts did between `before` and `after`, a line of the counters this case reports,
@@ -407,16 +456,15 @@ RUN find / -xdev -name '*.pyc' -delete
             let others = others.join(",");
             let traces = test_setup.tmp_dir.join(format!("{name}-reads"));
             std::fs::create_dir_all(&traces)?;
-            let env: [(&str, &std::ffi::OsStr); 5] = [
-                ("CLADEFSD_TOKEN", token.as_ref()),
-                ("AWS_ENDPOINT", endpoint.as_ref()),
-                ("CLADEFSD_PEER_ADDRESS", addresses[at].as_ref()),
-                ("CLADEFSD_PEERS", others.as_ref()),
-                ("CLADEFSD_READ_TRACES", traces.as_ref()),
+            let env = vec![
+                ("CLADEFSD_TOKEN", token.into()),
+                ("AWS_ENDPOINT", endpoint.into()),
+                ("CLADEFSD_PEER_ADDRESS", addresses[at].clone().into()),
+                ("CLADEFSD_PEERS", others.into()),
+                ("CLADEFSD_READ_TRACES", traces.clone().into()),
             ];
-            let daemon =
-                crate::common::spawn_daemon(test_setup, &socket, name, &env, Some(DAEMON_MEMORY))?;
-            hosts.push(Host { name, daemon, socket, traces });
+            let daemon = Host::spawn(test_setup, name, &socket, &env)?;
+            hosts.push(Host { name, daemon, socket, traces, env, restarts: 0 });
         }
         Ok(hosts)
     }
@@ -525,6 +573,79 @@ RUN find / -xdev -name '*.pyc' -delete
             .collect()
     }
 
+    /// The sandboxes run so far, and what they need: the guests' root, the version they fork,
+    /// where their traces are kept, how they failed, and the hosts' counters after the last.
+    struct Run<'a> {
+        root: &'a Path,
+        version: cladefs::CellVersion,
+        kept: &'a Path,
+        failed: Vec<String>,
+        counts: Counts,
+        ran: usize,
+    }
+
+    impl Run<'_> {
+        /// Runs a sandbox on `host`, of `hosts`, running `workload`, `case` the case it is of
+        /// (`r1`, the first round; `cold_peers`): says how long its phases took in `measured`, and
+        /// what it cost the hosts, and keeps its trace; or says how it failed.
+        fn sandbox(
+            &mut self,
+            test_setup: &TestSetup,
+            measured: &mut Measured,
+            hosts: &[Host],
+            host: &Host,
+            case: &str,
+            workload: Workload,
+        ) -> anyhow::Result<()> {
+            let letter = &host.name["host-".len()..];
+            let name = match case.strip_prefix('r') {
+                Some(round) if round.parse::<usize>().is_ok() => format!("sandbox-{letter}{round}"),
+                _ => format!("sandbox-{letter}-{case}"),
+            };
+            self.ran += 1;
+            let ran = sandbox(test_setup, self.root, host, &name, workload, self.version)?;
+            let trace = format!("{:02}-{name}-{}.reads", self.ran, workload.name());
+            if let Err(err) = keep_trace(host, &self.kept.join(&trace)) {
+                self.failed.push(format!("{name}'s trace: {err:#}"));
+            }
+            let after = all_counts(&test_setup.tmp_dir, hosts)?;
+            let (cost, summed) = cost(&self.counts, &after);
+            self.counts = after;
+            let Some(phases) = ran.phases() else {
+                let (status, said) = (ran.status, &ran.said);
+                self.failed.push(format!("{name} exited {status}, saying {said:?}"));
+                return Ok(());
+            };
+            let (answers, expected) = (ran.said(SAID_ANSWERS), workload.answers());
+            if answers != Some(expected) {
+                self.failed.push(format!("{name} answered {answers:?}, not {expected}"));
+            }
+            let serving =
+                phases.serving.map_or("-".to_owned(), |serving| format!("{serving:.0}ms"));
+            eprintln!(
+                "pysandbox: {name} on {} running {}: fork={:.0}ms vm_started={:.0}ms \
+                 boot={}ms serving={serving} answered={:.0}ms compiled={} | {cost}",
+                host.name,
+                workload.name(),
+                phases.fork,
+                phases.vm_started,
+                phases.boot,
+                phases.answered,
+                ran.said(COMPILED).unwrap_or("?"),
+            );
+            let metric = |phase: &str| format!("pysandbox.{letter}.{case}.{phase}");
+            measured.lower(metric("fork"), "ms", phases.fork);
+            measured.lower(metric("vm_started"), "ms", phases.vm_started);
+            measured.lower(metric("boot"), "ms", phases.boot as f64);
+            if let Some(serving) = phases.serving {
+                measured.lower(metric("serving"), "ms", serving);
+            }
+            measured.lower(metric("answered"), "ms", phases.answered);
+            measured.lower(metric("bucket_gets"), "count", summed["bucket_gets"] as f64);
+            Ok(())
+        }
+    }
+
     impl TestFxfsGuestPythonSandbox {
         /// Runs the sandboxes, saying what it measured in `measured` and why they failed, if they
         /// did.
@@ -560,60 +681,38 @@ RUN find / -xdev -name '*.pyc' -delete
             let kept = dir.join("traces");
             std::fs::create_dir_all(&kept)?;
             // host-a's import, which opened its base through no VM, traced nothing.
-            let mut failed = Vec::new();
-            let mut counts = all_counts(dir, &hosts)?;
-            let mut ran_so_far = 0;
+            let counts = all_counts(dir, &hosts)?;
+            let mut run =
+                Run { root: &root, version, kept: &kept, failed: Vec::new(), counts, ran: 0 };
             for round in 1..=rounds {
                 for host in &hosts {
-                    // host-a's first is sandbox-a1.
-                    let letter = &host.name["host-".len()..];
-                    let name = format!("sandbox-{letter}{round}");
-                    let workload = workloads[ran_so_far % workloads.len()];
-                    ran_so_far += 1;
-                    let ran = sandbox(test_setup, &root, host, &name, workload, version)?;
-                    let trace = format!("{ran_so_far:02}-{name}-{}.reads", workload.name());
-                    if let Err(err) = keep_trace(host, &kept.join(&trace)) {
-                        failed.push(format!("{name}'s trace: {err:#}"));
-                    }
-                    let after = all_counts(dir, &hosts)?;
-                    let (cost, summed) = cost(&counts, &after);
-                    counts = after;
-                    let Some(phases) = ran.phases() else {
-                        let (status, said) = (ran.status, &ran.said);
-                        failed.push(format!("{name} exited {status}, saying {said:?}"));
-                        continue;
-                    };
-                    let (answers, expected) = (ran.said(SAID_ANSWERS), workload.answers());
-                    if answers != Some(expected) {
-                        failed.push(format!("{name} answered {answers:?}, not {expected}"));
-                    }
-                    let serving =
-                        phases.serving.map_or("-".to_owned(), |serving| format!("{serving:.0}ms"));
-                    eprintln!(
-                        "pysandbox: {name} on {} running {}: fork={:.0}ms vm_started={:.0}ms \
-                         boot={}ms serving={serving} answered={:.0}ms compiled={} | {cost}",
-                        host.name,
-                        workload.name(),
-                        phases.fork,
-                        phases.vm_started,
-                        phases.boot,
-                        phases.answered,
-                        ran.said(COMPILED).unwrap_or("?"),
-                    );
-                    let metric = |phase: &str| format!("pysandbox.{letter}.r{round}.{phase}");
-                    measured.lower(metric("fork"), "ms", phases.fork);
-                    measured.lower(metric("vm_started"), "ms", phases.vm_started);
-                    measured.lower(metric("boot"), "ms", phases.boot as f64);
-                    if let Some(serving) = phases.serving {
-                        measured.lower(metric("serving"), "ms", serving);
-                    }
-                    measured.lower(metric("answered"), "ms", phases.answered);
-                    let gets = summed["bucket_gets"] as f64;
-                    measured.lower(metric("bucket_gets"), "count", gets);
+                    let workload = workloads[run.ran % workloads.len()];
+                    run.sandbox(
+                        test_setup,
+                        measured,
+                        &hosts,
+                        host,
+                        &format!("r{round}"),
+                        workload,
+                    )?;
                 }
             }
+            // A cold host's first boot of the version, predicted, with cold peers, then warm ones.
+            if std::env::var_os("CLADEFS_PYSANDBOX_COLD").is_some() {
+                for (case, restarted, on) in
+                    [("cold_peers", &[0, 1, 2][..], 1), ("warm_peers", &[2], 2)]
+                {
+                    for at in restarted {
+                        hosts[*at].restart(test_setup)?;
+                    }
+                    run.counts = all_counts(dir, &hosts)?;
+                    let workload = workloads[run.ran % workloads.len()];
+                    run.sandbox(test_setup, measured, &hosts, &hosts[on], case, workload)?;
+                }
+            }
+            let failed = run.failed;
             for host in &mut hosts {
-                crate::common::say_daemon_stats(test_setup, host.name);
+                crate::common::say_daemon_stats(test_setup, &host.daemon_name());
                 host.daemon.kill()?;
                 host.daemon.wait()?;
             }

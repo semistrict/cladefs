@@ -24,7 +24,6 @@ use crate::dax::{Origin, Source, Window};
 use crate::error::{Errno, Result};
 use crate::open_cell::PublicReach;
 use crate::pages::{ArenaId, page_size};
-use crate::profile::Recorder;
 use crate::stats::{self, Counter};
 use bucket_cell::trace;
 use futures::future::BoxFuture;
@@ -166,8 +165,7 @@ node_local::node_local! {
 }
 
 /// How many threads the cache's pager reads extents' pages on: a read of the store, and the
-/// decompression of a part, keep one busy, while page-ins of other extents, and of what a fork's
-/// boot profile names, wait for theirs.
+/// decompression of a part, keep one busy, while page-ins of other extents wait for theirs.
 pub(crate) const PAGER_THREADS: usize = 6;
 
 /// How many parts after those a reader reading on asks for are read ahead of its requests.
@@ -318,18 +316,17 @@ impl CachedIn {
 }
 
 /// The sealed `extent`, of `len` bytes, in the cache, of `cached_in`'s arena, cached from `store` if it isn't:
-/// read from it, or from `fetcher`, with its page-ins recorded by `recorder`, if any; and from any
+/// read from it, or from `fetcher`; and from any
 /// other store that asked for it, which `store` is one of from now on (TASK-79.7). cladefs: a copy of
 /// it a tenant's arena held, moved here, has its pages brought in awaited (doc-24, step 5).
 pub(crate) async fn cached(
     store: &Arc<LocalCell<HostDir>>,
     cached_in: CachedIn,
     fetcher: Option<Arc<crate::bucket::HostFetcher>>,
-    recorder: Option<Arc<Recorder>>,
     extent: ExtentId,
     len: u64,
 ) -> Result<Arc<CachedExtent>> {
-    let (found, moved) = cache_now(store, cached_in, fetcher, recorder, extent, len);
+    let (found, moved) = cache_now(store, cached_in, fetcher, extent, len);
     if let Some(from) = moved {
         // What of it the tenant's arena holds, moved before the caller maps it, so that its MAP
         // maps those pages: moved as asked for, each was a fault of the guest's, and the first
@@ -351,7 +348,6 @@ fn cache_now(
     store: &Arc<LocalCell<HostDir>>,
     cached_in: CachedIn,
     fetcher: Option<Arc<crate::bucket::HostFetcher>>,
-    recorder: Option<Arc<Recorder>>,
     extent: ExtentId,
     len: u64,
 ) -> (Arc<CachedExtent>, Option<Arc<CachedExtent>>) {
@@ -361,7 +357,7 @@ fn cache_now(
     let mut moved = None;
     if !extents.contains_key(&key) {
         let holders = Arc::new(Holders::default());
-        let stored = StoredExtent::new(holders.clone(), store, extent, recorder);
+        let stored = StoredExtent::new(holders.clone(), store, extent);
         let mut contents: Box<dyn Contents> = Box::new(stored);
         if let CachedIn::Public(reach) = &cached_in {
             // A tenant's copy, which moves here (TASK-234): of this extent alone.
@@ -548,18 +544,11 @@ struct StoredExtent {
     /// Where the parts of the object its data is in begin in it: its offset in the object, in
     /// whole pages, which page-ins are.
     phase: u64,
-    /// What records its page-ins for its base's boot profile, if anything does.
-    recorder: Option<Arc<Recorder>>,
 }
 
 impl StoredExtent {
     /// `extent`, read through `holders`, laid out as `store` holds it.
-    fn new(
-        holders: Arc<Holders>,
-        store: &LocalCell<HostDir>,
-        extent: ExtentId,
-        recorder: Option<Arc<Recorder>>,
-    ) -> Self {
+    fn new(holders: Arc<Holders>, store: &LocalCell<HostDir>, extent: ExtentId) -> Self {
         // Its offset in the data of the object it is in: a segment's, its own file's, or the one
         // object storage holds it in.
         let offset = match store.place(extent) {
@@ -568,7 +557,7 @@ impl StoredExtent {
             _ => 0,
         };
         let phase = offset % extent_frame::PART / page_size() * page_size();
-        Self { holders, extent, phase, recorder }
+        Self { holders, extent, phase }
     }
 }
 
@@ -581,9 +570,6 @@ impl Contents for StoredExtent {
         buf: &'a mut [u8],
     ) -> BoxFuture<'a, std::result::Result<(), anyhow::Error>> {
         stats::add(Counter::PageIns, 1);
-        if let Some(recorder) = &self.recorder {
-            recorder.record(self.extent, offset, buf.len() as u64);
-        }
         let id = self.extent;
         // Through the first of the stores that asked for it that holds it still (TASK-79.7).
         let mut failed = anyhow::Error::new(NoExtent(id));

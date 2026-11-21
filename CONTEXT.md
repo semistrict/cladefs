@@ -296,7 +296,7 @@ What forks of a version read of it as they opened, each tenant's apart: a **reco
 _Avoid_: working set, boot profile (TASK-38's per-host file, which it replaces)
 
 **Prediction**:
-What a version's next fork will read, as its tenant's newest recordings say: every unit any of them read, the earliest read first.
+What a version's next fork will read, as its tenant's newest recordings say: every unit any of them read, the earliest read first. A host fetches it into its part cache as the fork opens, behind the guest's reads, and counts how well each boot was predicted (TASK-702.3).
 
 **Head**:
 A cell's one record that changes: what made it, its keys, who writes it, the commit it ends at, and its versions, kept in its head slots. Taking it is taking the cell.

@@ -35,7 +35,8 @@ pub struct Stats {
     /// and followers'. Sealed extents' are read through the extent cache, whose page-ins count what
     /// it reads of them (TASK-32).
     pub read_stored_bytes: u64,
-    /// Units of boot profiles read into the extent cache ahead of forks, once read.
+    /// cladefs: parts of extents fetched into the host's cache ahead of forks' guests, as their
+    /// versions' read evidence predicted them, not found kept (TASK-702.3).
     pub prefetches: u64,
     /// The parts of extents stored compressed decompressed (`local_cell::unpacks`).
     pub unpacks: u64,
@@ -106,6 +107,13 @@ pub struct Stats {
     pub vm_private_requests: u64,
     /// The nanoseconds they waited for those replies.
     pub vm_private_request_ns: u64,
+    /// cladefs: of the units of their versions forks' guests read in their boots' first seconds
+    /// (`evidence::RECORDED_FOR`), those their versions' evidence predicted (TASK-702.3).
+    pub predicted_read: u64,
+    /// The units predicted that they did not read in them.
+    pub predicted_unread: u64,
+    /// The units they read that were not predicted.
+    pub read_unpredicted: u64,
 }
 
 /// The counters, in the order of [`Stats`]' fields.
@@ -143,10 +151,13 @@ pub(crate) enum Counter {
     StagePrivateNs,
     VmPrivateRequests,
     VmPrivateRequestNs,
+    PredictedRead,
+    PredictedUnread,
+    ReadUnpredicted,
 }
 
 /// The counters [`Counter`] names, which this module keeps.
-const COUNTED: usize = 32;
+const COUNTED: usize = 35;
 
 /// The counters a reading holds: those it keeps, and the extent store's.
 const COUNTERS: usize = COUNTED + 3;
@@ -208,6 +219,9 @@ pub fn stats() -> Stats {
         stage_private_ns: count(Counter::StagePrivateNs),
         vm_private_requests: count(Counter::VmPrivateRequests),
         vm_private_request_ns: count(Counter::VmPrivateRequestNs),
+        predicted_read: count(Counter::PredictedRead),
+        predicted_unread: count(Counter::PredictedUnread),
+        read_unpredicted: count(Counter::ReadUnpredicted),
     }
 }
 
@@ -250,6 +264,9 @@ impl Stats {
             self.stage_private_ns,
             self.vm_private_requests,
             self.vm_private_request_ns,
+            self.predicted_read,
+            self.predicted_unread,
+            self.read_unpredicted,
         ]
     }
 
@@ -292,6 +309,9 @@ impl Stats {
             stage_private_ns: word(32),
             vm_private_requests: word(33),
             vm_private_request_ns: word(34),
+            predicted_read: word(35),
+            predicted_unread: word(36),
+            read_unpredicted: word(37),
         }
     }
 
@@ -341,6 +361,9 @@ impl Stats {
             "stage-private-ns",
             "vm-private-requests",
             "vm-private-request-ns",
+            "predicted-read",
+            "predicted-unread",
+            "read-unpredicted",
         ];
         std::array::from_fn(|at| (names[at], words[at]))
     }

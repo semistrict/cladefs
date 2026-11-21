@@ -66,7 +66,7 @@ pub fn arena_memory(arena: ArenaId) -> Option<std::sync::Arc<std::os::fd::OwnedF
 
 /// An arena of physical memory of its own (TASK-43), a tenant's, held by what allocates in it: its
 /// tenant, the stores opened in it ([`OpenCell::open_in`]), and what reads into the extent cache
-/// for them, as a fork's boot profile does (TASK-79.36). Once none of them holds it, the extents
+/// for them (TASK-79.36). Once none of them holds it, the extents
 /// cached in it go, and it goes, its memory once the pages of it still allocated, those page-ins in
 /// flight hold, are freed: nothing allocates in it after, which would fail.
 ///

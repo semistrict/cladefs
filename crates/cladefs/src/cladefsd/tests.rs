@@ -3994,36 +3994,35 @@ fn a_restored_vms_reads_are_its_versions_evidence() {
     drop((again, store));
 }
 
-/// TASK-79.17: a store the daemon opens to work on, as no VM process has it open, boots no guest:
-/// the boot profile of the base it is a fork of is not read into the extent cache, as its pages
-/// would be the default arena's, which every VM process holds, a tenant's base's too. Here the
-/// fork is synced.
-#[tokio::test(flavor = "multi_thread")]
-async fn stores_worked_on_here_read_no_boot_profile() {
+/// TASK-79.17, TASK-702.3: a store the daemon opens to work on, as no VM process has it open,
+/// boots no guest: its version's read evidence is not read, nor anything fetched ahead for it. Here
+/// a fork of a version is synced; a VM opening it reads the evidence.
+#[test]
+fn stores_worked_on_here_fetch_nothing_ahead() {
     host();
     let ps = page_size() as usize;
     let dir = tempfile::tempdir().unwrap();
-    let (base, fork) = (dir.path().join("base"), dir.path().join("fork"));
-    let store = OpenCell::create(&base, 1 << 24).await.unwrap();
-    let extent = ExtentId { cell: store.cell().id, sequence: 1 };
-    store.write(extent, 0, &[VolatileSlice::from(&pattern(7, ps)[..])]).await.unwrap();
-    store.commit(None).await.unwrap();
-    store.fork_to(&fork, crate::host_cell::fork_child(store.cell())).await.unwrap();
-    drop(store);
-    // The base's profile, as its first fork to boot recorded it.
-    let profile = crate::profile::path(&base.canonicalize().unwrap(), extent.cell);
-    let recorder = crate::profile::Recorder::new(profile, cell_at(&fork).id);
-    recorder.record(extent, 0, ps as u64);
-    recorder.write().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let store = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let extent = ExtentId { cell: store.cell(), sequence: 1 };
+    write(&store, extent, 0, &pattern(7, ps)).unwrap();
+    store.commit(None).unwrap();
+    let version = store.make_version().unwrap();
+    let path = dir.path().join("fork");
+    // Forked by the daemon, not by a VM's connection, which no VM has open, nor had.
+    let cell = crate::CellId { tenant: version.tenant, id: version.cell };
+    control(super::cells::fork_version((cell, version.version), 1 << 24, (&path, None))).unwrap();
 
+    crate::evidence::forget();
     let before = crate::stats::stats();
-    wait_uploaded(&fork).unwrap();
-    // A profile's replay is done once its threads are.
-    while thread_comms().any(|comm| comm == "cladefs replay") {
-        std::thread::yield_now();
-    }
-    let counted = crate::stats::stats().since(&before);
-    assert_eq!((counted.prefetches, counted.page_ins), (0, 0));
+    wait_uploaded(&path).unwrap();
+    assert_eq!(crate::evidence::kept(), 0);
+    assert_eq!(crate::stats::stats().since(&before).prefetches, 0);
+    let again = CellClient::connect(&socket, &path, 1 << 24).unwrap();
+    assert_eq!(crate::evidence::kept(), 1);
+    drop((again, store));
 }
 
 /// TASK-79.34: a store the daemon synced, opened here as no connection had it open, is closed

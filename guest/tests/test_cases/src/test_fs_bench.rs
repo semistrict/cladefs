@@ -53,9 +53,10 @@
 // and boots a VM on the fork, which mounts it, reads the tree whole, and starts PostgreSQL on the
 // database and runs pgbench's read-only transactions. The fork is served by the daemon that served
 // the base, whose extent cache holds the base's data (warm), or by a daemon of its own, started
-// for it, whose cache holds nothing (cold): CLADEFSD_BIN names the daemon's binary; or by a
-// daemon of its own that reads the base's boot profile, which a fork before the iterations
-// recorded, into its cache as the fork boots (profiled). The host reports the daemon's counters of
+// for it, whose cache holds nothing (cold): CLADEFSD_BIN names the daemon's binary; or, the forks
+// those of one version of the base, by a daemon of its own that fetches what the version's read
+// evidence, which a fork before the iterations recorded, predicts into its cache as the fork boots
+// (predicted, TASK-702.3). The host reports the daemon's counters of
 // what serving the fork cost, as observations. cladefs: so too a fork without a DAX window, its
 // files read through the guest's page cache; and, against them, a base on ext4 on virtio-pmem,
 // with DAX and without, each iteration's VM booted on a copy of the base's image, which the host's
@@ -93,9 +94,9 @@ pub enum Backend {
     /// cladefs: as `FxfsGuestDaxForkWarm`, but served by a daemon of its own, which has nothing of
     /// the base's in memory.
     FxfsGuestDaxForkCold,
-    /// cladefs: as `FxfsGuestDaxForkCold`, with the base's boot profile, which a fork recorded,
-    /// read into the daemon's cache as the fork boots.
-    FxfsGuestDaxForkProfiled,
+    /// cladefs: as `FxfsGuestDaxForkCold`, the forks of one version of the base, whose read
+    /// evidence, which a fork recorded, the daemon fetches ahead as the fork boots (TASK-702.3).
+    FxfsGuestDaxForkPredicted,
     /// cladefs: as `FxfsGuestDaxForkWarm`, without a DAX window: the fork's files read through the
     /// guest's page cache, which each VM fills with a copy of its own (TASK-112.2).
     FxfsGuestForkWarm,
@@ -126,7 +127,7 @@ impl Backend {
             self,
             Backend::FxfsGuestDaxForkWarm
                 | Backend::FxfsGuestDaxForkCold
-                | Backend::FxfsGuestDaxForkProfiled
+                | Backend::FxfsGuestDaxForkPredicted
                 | Backend::FxfsGuestForkWarm
         )
     }
@@ -340,42 +341,48 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             std::fs::create_dir_all(&stores)?;
             let base = stores.join("base");
             role(test_setup, "base", &base, &cladefsd, None)?;
-            let cell = opened(&cladefsd, &base)?.cell();
-            // The base's boot profile, which a fork records (cladefs's `profile`).
-            let profile = base.join("profiles").join(base32_id::Padded(cell).to_string());
             let iterations = iterations().unwrap_or(1);
-            if backend == Backend::FxfsGuestDaxForkProfiled {
-                // A fork, before the iterations, which records the profile: its output is not
-                // the case's.
-                let fork = stores.join("fork-profile");
-                opened(&cladefsd, &base)?
-                    .fork(&fork)
-                    .map_err(|errno| anyhow::anyhow!("forking the base: {errno}"))?;
+            // The version the forks are of, if they are of one (predicted).
+            let version = match backend {
+                Backend::FxfsGuestDaxForkPredicted => {
+                    Some(opened(&cladefsd, &base)?.make_version()?)
+                }
+                _ => None,
+            };
+            let fork_to = |fork: &Path| -> anyhow::Result<()> {
+                match version {
+                    Some(version) => {
+                        drop(crate::common::control(&cladefsd)?.fork_version(version, fork)?)
+                    }
+                    None => drop(
+                        opened(&cladefsd, &base)?
+                            .fork(fork)
+                            .map_err(|errno| anyhow::anyhow!("forking the base: {errno}"))?,
+                    ),
+                }
+                Ok(())
+            };
+            if backend == Backend::FxfsGuestDaxForkPredicted {
+                // A fork, before the iterations, whose boot is the version's evidence: its output
+                // is not the case's.
+                let fork = stores.join("fork-recorded");
+                fork_to(&fork)?;
                 let sockets = tempdir::TempDir::new("cladefs-fork")?;
                 let (socket, mut daemon) = daemon(test_setup, sockets.path(), iterations)?;
-                let output = std::fs::File::create(test_setup.tmp_dir.join("profile-fork.txt"))?;
+                let output = std::fs::File::create(test_setup.tmp_dir.join("recorded-fork.txt"))?;
                 role(test_setup, "fork", &fork, &socket, Some(output))?;
-                // Written once the daemon has seen the fork's VM go.
-                let deadline = Instant::now() + Duration::from_secs(30);
-                while !profile.exists() && Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                anyhow::ensure!(profile.exists(), "the fork recorded no profile");
+                // Written as the daemon closes the fork's store, once it has seen its VM go.
+                drop(opened(&socket, &fork)?);
                 daemon.kill()?;
                 daemon.wait()?;
             }
             for i in 0..iterations {
                 let fork = stores.join(format!("fork-{i}"));
-                {
-                    let store = opened(&cladefsd, &base)?;
-                    store
-                        .fork(&fork)
-                        .map_err(|errno| anyhow::anyhow!("forking the base: {errno}"))?;
-                }
+                fork_to(&fork)?;
                 // A socket's path is short: the daemon's directory is a temporary one of its own.
                 let sockets = tempdir::TempDir::new("cladefs-fork")?;
                 let (socket, daemon) = match backend {
-                    Backend::FxfsGuestDaxForkCold | Backend::FxfsGuestDaxForkProfiled => {
+                    Backend::FxfsGuestDaxForkCold | Backend::FxfsGuestDaxForkPredicted => {
                         let (socket, daemon) = daemon(test_setup, sockets.path(), i)?;
                         (socket, Some(daemon))
                     }
@@ -391,10 +398,6 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                 if let Some(mut daemon) = daemon {
                     daemon.kill()?;
                     daemon.wait()?;
-                }
-                // A cold fork reads no profile: none of the forks before it may leave one.
-                if backend == Backend::FxfsGuestDaxForkCold && profile.exists() {
-                    std::fs::remove_file(&profile)?;
                 }
             }
             println!("DONE");
@@ -686,7 +689,7 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                 Backend::FxfsGuestDaxUnsafe => "fxfs-guest-dax-unsafe",
                 Backend::FxfsGuestDaxForkWarm => "fxfs-guest-dax-fork-warm",
                 Backend::FxfsGuestDaxForkCold => "fxfs-guest-dax-fork-cold",
-                Backend::FxfsGuestDaxForkProfiled => "fxfs-guest-dax-fork-profiled",
+                Backend::FxfsGuestDaxForkPredicted => "fxfs-guest-dax-fork-predicted",
                 Backend::FxfsGuestForkWarm => "fxfs-guest-fork-warm",
                 Backend::Ext4DaxPmemFork => "ext4-dax-pmem-fork",
                 Backend::Ext4PmemFork => "ext4-pmem-fork",
@@ -709,7 +712,7 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             }
             if matches!(
                 self.backend,
-                Backend::FxfsGuestDaxForkCold | Backend::FxfsGuestDaxForkProfiled
+                Backend::FxfsGuestDaxForkCold | Backend::FxfsGuestDaxForkPredicted
             ) && std::env::var_os("CLADEFSD_BIN").is_none()
             {
                 return ShouldRun::No("CLADEFSD_BIN does not name the extent daemon's binary");
@@ -720,7 +723,7 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                 | Backend::FxfsGuestDaxUnsafe
                 | Backend::FxfsGuestDaxForkWarm
                 | Backend::FxfsGuestDaxForkCold
-                | Backend::FxfsGuestDaxForkProfiled
+                | Backend::FxfsGuestDaxForkPredicted
                 | Backend::FxfsGuestForkWarm
                 | Backend::FxfsGuestDaxFollowed
                 | Backend::FxfsGuestDaxFollowedIdle => cladefs_guest_should_run(),
@@ -807,7 +810,7 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                 // The base's store, new, or a fork of it.
                 Backend::FxfsGuestDaxForkWarm
                 | Backend::FxfsGuestDaxForkCold
-                | Backend::FxfsGuestDaxForkProfiled
+                | Backend::FxfsGuestDaxForkPredicted
                 | Backend::FxfsGuestForkWarm => {
                     let store = std::env::var_os(STORE).context("no store for a fork case")?;
                     let window = if self.backend == Backend::FxfsGuestForkWarm {
@@ -2465,7 +2468,7 @@ mod guest {
                 }
                 Backend::FxfsGuestDaxForkWarm
                 | Backend::FxfsGuestDaxForkCold
-                | Backend::FxfsGuestDaxForkProfiled
+                | Backend::FxfsGuestDaxForkPredicted
                 | Backend::FxfsGuestForkWarm
                 | Backend::Ext4DaxPmemFork
                 | Backend::Ext4PmemFork => {

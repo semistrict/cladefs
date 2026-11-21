@@ -4,8 +4,7 @@
 
 //! cladefs: what cladefs keeps of its own in a store's directory, beside the store's files
 //! (TASK-160.13): what is attached to it ([`attached`]), what it was forked from ([`ancestry`]),
-//! the cells marked public ([`public_cells`]), and the boot profiles of bases
-//! (`crate::profile`). Each record is written one way, durably ([`write`], [`mark`]): whole or not
+//! and the cells marked public ([`public_cells`]). Each record is written one way, durably ([`write`], [`mark`]): whole or not
 //! at all, the file and its directory synced. And each is read by one rule ([`read`]): missing, it
 //! is none; unreadable, or not what it says, the store's opening fails with `EIO`, logged, rather
 //! than going on as if there were none, as a public base opening private would (TASK-160.10).

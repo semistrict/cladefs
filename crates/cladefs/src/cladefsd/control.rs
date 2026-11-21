@@ -736,6 +736,10 @@ impl Cladefsd for Control {
             stage_private_ns: _,
             vm_private_requests: _,
             vm_private_request_ns: _,
+            // How well forks' boots were predicted, which its stats file and metrics report.
+            predicted_read: _,
+            predicted_unread: _,
+            read_unpredicted: _,
         } = crate::stats::stats();
         use bucket_cell::object_bucket::{Request, Upload};
         let bucket = cells::daemon_bucket().map_err(status)?.stats();
@@ -1400,6 +1404,9 @@ impl Client {
             stage_private_ns: 0,
             vm_private_requests: 0,
             vm_private_request_ns: 0,
+            predicted_read: 0,
+            predicted_unread: 0,
+            read_unpredicted: 0,
         })
     }
 

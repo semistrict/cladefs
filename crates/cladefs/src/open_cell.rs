@@ -34,7 +34,6 @@ use crate::halt::{CellGuard, CellMutex, Halt, StoreRwLock};
 use crate::host_cell::{self, CellOf};
 use crate::memory::{VolatileSlice, VolatileSliceMut, gather, scatter};
 use crate::pages::{Arena, ArenaId, page_size};
-use crate::profile::{self, Recorder};
 use crate::stats::{self, Counter};
 use bucket_cell::cell::Kind;
 use bucket_cell::layout::CellId;
@@ -45,7 +44,7 @@ use local_cell::{
 };
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, MutexGuard, OnceLock, PoisonError};
 use storage_device::{ExtentId, NoExtent, OtherCell, SealedExtent};
 
 /// What a store holds, as doc-4's `INFO` reports it.
@@ -210,12 +209,9 @@ pub struct OpenCell {
     /// cladefs: of an ephemeral cell's store, its keys held among the host's while it is open, as an
     /// uploader holds a bucket cell's (doc-25, TASK-698.7).
     keys: Option<bucket_cell::keys::RingHold>,
-    /// cladefs: what records the store's page-ins for its base's boot profile, if it is a fork of a
-    /// base that has none yet, and what writes it at the window's end, which closing stops early.
-    profiling: Option<(Arc<Recorder>, tokio::sync::oneshot::Sender<()>)>,
     /// cladefs: of a store opened for a guest, a fork of a version, its version's read evidence of
-    /// its tenant's: what predicts its reads, and a recording of them, if it records
-    /// (`crate::evidence`, TASK-702.2).
+    /// its tenant's: what predicts its reads, fetched ahead, and its guest's boot, measured against
+    /// it, and recorded, if it records (`crate::evidence`, TASK-702.2, TASK-702.3).
     evidence: Option<crate::evidence::Evidence>,
     /// cladefs: held, shared, by writes, which open extents, and alone by a fork only once nothing
     /// is open, which none comes between ([`OpenCell::fork_quiescent`]).
@@ -270,9 +266,10 @@ pub struct VersionInfo {
 pub struct Opening {
     /// The arena of physical memory its own extents' pages are of; the default arena's if none.
     pub arena: Option<Arc<Arena>>,
-    /// Whether its base's boot profile is read into the extent cache, or recorded
-    /// ([`OpenCell::profile`]).
-    pub profiled: bool,
+    /// Whether a guest boots from it: of a fork of a version, what its version's read evidence
+    /// predicts its guest reads is fetched ahead, and what it reads measured and recorded
+    /// (`crate::evidence`, TASK-702.3).
+    pub guest: bool,
     /// How its uploader keeps its cell in its bucket, taking its head.
     pub keeping: local_cell::upload::Options,
 }
@@ -280,11 +277,11 @@ pub struct Opening {
 impl Opening {
     /// As this process opens stores where no host's daemon serves them, as [`crate::Storage`]
     /// does: a copy never placed taking its cell with this host's token, or the first
-    /// placement's (`host_cell::keeping`); its pages the default arena's, its profile read or
-    /// recorded.
+    /// placement's (`host_cell::keeping`); its pages the default arena's, a guest booting from
+    /// it.
     pub fn here() -> Result<Self, Error> {
         let keeping = host_cell::keeping()?;
-        Ok(Self { arena: None, profiled: true, keeping })
+        Ok(Self { arena: None, guest: true, keeping })
     }
 }
 
@@ -567,14 +564,7 @@ impl Drop for OpenCell {
                 self.path.display()
             );
         }
-        // cladefs: what the fork recorded, its base's profile, if the window is not over yet.
-        if let Some((recorder, _)) = self.profiling.take()
-            && let Err(err) = recorder.write()
-        {
-            log::warn!("cladefs: writing a boot profile: {err}");
-        }
-        // cladefs: its recording of what its guest read of its version, written behind it as its
-        // evidence goes.
+        // cladefs: its guest's boot, measured and written behind it as its evidence goes.
         drop(self.evidence.take());
         // cladefs: its uploader first, which closes its open segment, uploads what it made local
         // and stops (TASK-192); then the store. A follower's store is its writer's. Closing from
@@ -602,23 +592,14 @@ impl OpenCell {
     /// again at once (TASK-685.3). Holds no thread while it waits for its uploader, as the daemon
     /// closes its stores; dropped unclosed, it blocks.
     pub async fn close(mut self) {
-        // cladefs: its recording of what its guest read of its version, written first.
+        // cladefs: its guest's boot, measured and written first.
         if let Some(evidence) = self.evidence.take() {
             evidence.close().await;
         }
-        let profiling = self.profiling.take();
         let following = self.following.is_some();
-        local_cell::upload::blocking(|| {
-            // cladefs: what the fork recorded, its base's profile, if the window is not over yet.
-            if let Some((recorder, _)) = profiling
-                && let Err(err) = recorder.write()
-            {
-                log::warn!("cladefs: writing a boot profile: {err}");
-            }
-            if !following {
-                self.store.closing();
-            }
-        });
+        if !following {
+            local_cell::upload::blocking(|| self.store.closing());
+        }
         if !following {
             fail::fail_point!("open_cell::closing");
         }
@@ -817,8 +798,7 @@ impl OpenCell {
     }
 
     /// cladefs: the store at `path`, a fork attached to other stores (backlog doc-10), to read
-    /// through to: no guest boots from it, so that, as [`OpenCell::open_without_profile`] says,
-    /// it reads no boot profile. Its pages are of `arena`, or the default arena if it is public,
+    /// through to: no guest boots from it ([`Opening::guest`]). Its pages are of `arena`, or the default arena if it is public,
     /// as a public base's are, which every tenant's VM processes hold read-only.
     pub async fn open_base(
         path: impl AsRef<Path>,
@@ -839,16 +819,15 @@ impl OpenCell {
             Ok((cell_dir::public_cells(path)?, local_cell::host_cell(path).map_err(Error::new)?))
         })?;
         let arena = arena.filter(|_| !public.contains(&cell.id));
-        Self::open_with(path, Opening { arena, profiled: false, keeping }).await
+        Self::open_with(path, Opening { arena, guest: false, keeping }).await
     }
 
     /// cladefs: the store at `path`, as [`OpenCell::open`] has it, for work on it that boots no
-    /// guest, as the extent daemon's forks, syncs and resizes of stores no VM has open: the boot
-    /// profile of the base it is a fork of is neither read into the extent cache, which would put
-    /// the pages of what it names, tenants' too, in the default arena, which every VM process
-    /// holds, nor recorded (TASK-79.17).
-    pub async fn open_without_profile(path: impl AsRef<Path>) -> Result<Self, Error> {
-        Self::open_with(path, Opening { profiled: false, ..Opening::here()? }).await
+    /// guest, as the extent daemon's forks, syncs and resizes of stores no VM has open: nothing is
+    /// fetched ahead for it, nor its reads taken for its version's evidence ([`Opening::guest`],
+    /// TASK-79.17).
+    pub async fn open_for_host(path: impl AsRef<Path>) -> Result<Self, Error> {
+        Self::open_with(path, Opening { guest: false, ..Opening::here()? }).await
     }
 
     /// The store `opened` at `path`, opened as `opening` says, of whose cell and those it was
@@ -891,17 +870,16 @@ impl OpenCell {
                 return Err(err);
             }
         };
-        let Opening { arena, profiled, keeping: _ } = opening;
+        let Opening { arena, guest, keeping: _ } = opening;
         let arenas = Arenas { own: arena, public: Arc::new(public) };
-        let profiling = profiled.then(|| Self::profile(&store, &arenas, &forked_from, &fetcher));
         let cell = store.description().cell;
         // cladefs: a guest's boot of a fork of a version, whose reads its version's evidence
-        // predicts, and records (TASK-702.2).
-        let evidence = (forked.filter(|_| profiled)).map(|forked| {
-            crate::evidence::Evidence::opened(forked, cell, bucket.clone(), fetcher.runtime())
+        // predicts, fetched ahead, and records (TASK-702.2, TASK-702.3).
+        let evidence = (forked.filter(|_| guest)).map(|forked| {
+            let (store, bucket, fetcher) = (store.clone(), bucket.clone(), fetcher.clone());
+            crate::evidence::Evidence::opened(forked, cell, store, bucket, fetcher)
         });
         Ok(Self {
-            profiling: profiling.flatten(),
             evidence,
             arenas,
             forked_from,
@@ -932,7 +910,6 @@ impl OpenCell {
         let view = CellMutex::new("view", self.store.view());
         let following = Following { writer: self.clone(), view };
         Self {
-            profiling: None,
             evidence: None,
             arenas: self.arenas.clone(),
             forked_from: self.forked_from.clone(),
@@ -1113,55 +1090,6 @@ impl OpenCell {
     /// (TASK-165.8): a follower's, its writer's.
     fn fetcher(&self) -> Arc<crate::bucket::HostFetcher> {
         self.fetcher.clone()
-    }
-
-    /// cladefs: for a fork of a base, reads the base's boot profile into the extent cache, behind
-    /// the fork, if there is one; or records the fork's page-ins as the base's profile, and writes
-    /// it once the window is over.
-    fn profile(
-        store: &Arc<LocalCell<HostDir>>,
-        arenas: &Arenas,
-        forked_from: &[(u64, std::path::PathBuf)],
-        fetcher: &Arc<crate::bucket::HostFetcher>,
-    ) -> Option<(Arc<Recorder>, tokio::sync::oneshot::Sender<()>)> {
-        let (base, dir) = forked_from.first()?;
-        // A base deleted since has no profile, and records none.
-        if !host_fs::exists(&dir) {
-            return None;
-        }
-        let path = profile::path(dir, *base);
-        match profile::read(&path) {
-            Ok(units) => {
-                replay(store.clone(), arenas.clone(), fetcher.clone(), units);
-                return None;
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => {
-                log::warn!("cladefs: reading the boot profile at {}: {err}", path.display());
-                return None;
-            }
-        }
-        // One fork of the base records it, of those that start before it is written: not a
-        // recorder and a thread each of a few hundred starting at once (TASK-34).
-        static RECORDING: Mutex<std::collections::BTreeSet<std::path::PathBuf>> =
-            Mutex::new(std::collections::BTreeSet::new());
-        if !RECORDING.lock().unwrap().insert(path.clone()) {
-            return None;
-        }
-        let recorder = Arc::new(Recorder::new(path.clone(), store.description().cell.id));
-        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-        let writer = recorder.clone();
-        // cladefs: a task, its write off the runtime's threads (doc-24, step 5).
-        drop(fetcher.spawn(async move {
-            // At the window's end, or the store's closing, which writes it itself.
-            if tokio::time::timeout(profile::WINDOW, stopped).await.is_err()
-                && let Err(err) = local_cell::upload::blocking(|| writer.write())
-            {
-                log::warn!("cladefs: writing a boot profile: {err}");
-            }
-            RECORDING.lock().unwrap().remove(&path);
-        }));
-        Some((recorder, stop))
     }
 
     /// cladefs: forks the store, as of its last commit, made uploaded first, and returns the fork's
@@ -1430,15 +1358,15 @@ impl OpenCell {
         self.store.shares_extents_with(&other.store).unwrap()
     }
 
-    /// cladefs: whether what its guest reads now is recorded, as its version's read evidence
-    /// ([`OpenCell::guest_read`], TASK-702.2).
+    /// cladefs: whether what its guest reads now is its boot's, which its version's read evidence
+    /// measures, and may record ([`OpenCell::guest_read`], TASK-702.2, TASK-702.3).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn records_reads(&self) -> bool {
         self.evidence.as_ref().is_some_and(crate::evidence::Evidence::records)
     }
 
     /// cladefs: says its guest read `len` bytes at `offset` in `extent`, begun at `began`, by a
-    /// `READ`, a `MAP` or a fault, which its version's read evidence records, if it records
+    /// `READ`, a `MAP` or a fault, which its boot takes, if it is within it
     /// ([`OpenCell::records_reads`], TASK-702.2).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn guest_read(
@@ -1462,9 +1390,16 @@ impl OpenCell {
 
     /// cladefs: of a store opened for a guest, a fork of a version, what its version's read evidence
     /// predicts it reads (TASK-702.2).
-    #[cfg_attr(not(test), expect(dead_code, reason = "TASK-702.3 prefetches what it predicts"))]
+    #[cfg(test)]
     pub(crate) fn predicted(&self) -> Option<crate::evidence::Predicted> {
         self.evidence.as_ref().map(crate::evidence::Evidence::predicted)
+    }
+
+    /// cladefs: of a store opened for a guest, a fork of a version, its version's read evidence:
+    /// for tests of what it does.
+    #[cfg(test)]
+    pub(crate) fn evidence(&self) -> Option<&crate::evidence::Evidence> {
+        self.evidence.as_ref()
     }
 
     /// cladefs: `extent`'s length, and whether it is open, if its store holds it, as reads ask
@@ -2463,12 +2398,11 @@ impl OpenCell {
     /// has it cached.
     async fn cached(&self, extent: ExtentId, len: u64) -> Result<Arc<CachedExtent>> {
         let fetcher = Some(self.fetcher());
-        let recorder = self.profiling.as_ref().map(|(recorder, _)| recorder.clone());
         let cached_in = match self.public_reach(extent) {
             Some(reach) => CachedIn::Public(reach),
             None => CachedIn::Arena(self.arenas.of(extent)),
         };
-        cache::cached(&self.store, cached_in, fetcher, recorder, extent, len).await
+        cache::cached(&self.store, cached_in, fetcher, extent, len).await
     }
 
     /// cladefs: that `extent` is reachable from a published generation, if it is: the store is
@@ -2695,45 +2629,6 @@ impl Bases {
     }
 }
 
-/// How many tasks read a boot profile's units into the cache at once.
-const REPLAY_TASKS: usize = 4;
-
-/// cladefs: reads `units`, a base's boot profile, into the extent cache from `store`, a fork of the
-/// base, or from the bucket, through `fetcher`, for what it holds there, as a fork holds what it
-/// inherited (TASK-165.7), in tasks of their own, on the fetcher's runtime (doc-24, step 5): those
-/// of the extents the store holds, sealed, by a read of each unit's first byte, which pages in the
-/// unit.
-fn replay(
-    store: Arc<LocalCell<HostDir>>,
-    arenas: Arenas,
-    fetcher: Arc<crate::bucket::HostFetcher>,
-    units: Vec<profile::Unit>,
-) {
-    let units = Arc::new(units);
-    for first in 0..REPLAY_TASKS {
-        let (store, arenas, units) = (store.clone(), arenas.clone(), units.clone());
-        let fetching = fetcher.clone();
-        drop(fetcher.spawn(async move {
-            for unit in units.iter().skip(first).step_by(REPLAY_TASKS) {
-                let Ok(Some((len, false))) = store.extent(unit.extent) else { continue };
-                let arena = arenas.of(unit.extent);
-                let fetcher = Some(fetching.clone());
-                let cached_in = CachedIn::Arena(arena);
-                let extent = cache::cached(&store, cached_in, fetcher, None, unit.extent, len);
-                let Ok(extent) = extent.await else { continue };
-                match extent.read(unit.offset, &mut [0; 1]).await {
-                    Ok(()) => stats::add(Counter::Prefetches, 1),
-                    Err(errno) => log::debug!(
-                        "cladefs: reading {:?} at {} ahead: {errno:?}",
-                        unit.extent,
-                        unit.offset
-                    ),
-                }
-            }
-        }));
-    }
-}
-
 #[cfg(test)]
 mod errno_tests {
     use super::{Errno, errno};
@@ -2755,6 +2650,7 @@ mod tests {
     use crate::dax::{Access, SecondStage};
     use crate::pages::PhysLocation;
     use futures::executor::block_on;
+    use std::sync::Mutex;
     use std::sync::atomic::Ordering;
 
     /// An error of a read of `extent`, whose data is in the bucket.
@@ -3968,7 +3864,7 @@ mod tests {
         base.commit(None).await.unwrap();
         let at = dir.path().join("version");
         base.uploaded_version_at(&at).await.unwrap();
-        let version = OpenCell::open_without_profile(&at).await.unwrap();
+        let version = OpenCell::open_for_host(&at).await.unwrap();
         let fork = async |name: &str, tenant| {
             let path = dir.path().join(name);
             version.fork_to(&path, host_cell::named(tenant)).await.unwrap();
@@ -3986,7 +3882,9 @@ mod tests {
         // Reads after the openings, in order: the first 5 ms on, the next 9.
         let now = std::time::Instant::now();
         let at = |ms| now + std::time::Duration::from_millis(ms);
-        assert!(one.records_reads() && !two.records_reads());
+        assert!(one.records_reads() && two.records_reads());
+        let recorded = |store: &OpenCell| store.evidence().unwrap().recorded();
+        assert!(recorded(&one) && !recorded(&two));
         assert!(one.predicted().unwrap().ptr_eq(&two.predicted().unwrap()));
         assert_eq!(*predicted(&one).await, Prediction::default());
         one.guest_read(extent, 2 * UNIT, 1, at(5));
@@ -3994,7 +3892,7 @@ mod tests {
         one.guest_read(id(&one, 1), 0, 4096, at(1));
         two.guest_read(extent, UNIT, 1, at(1));
         let other = open(&theirs).await;
-        assert!(other.records_reads());
+        assert!(recorded(&other));
         other.guest_read(extent, UNIT, 1, at(1));
         let (version_cell, origin) = (base.cell(), one.forked_from());
         drop(base);
@@ -4030,50 +3928,65 @@ mod tests {
         assert_eq!(tenants, [5, 6]);
     }
 
-    /// cladefs: a fork of a base records the units of the base's extents its page-ins read, as the
-    /// base's boot profile, which closing it writes; the forks opened after it read them into the
-    /// cache, and record nothing.
+    /// TASK-702.3: a fork of a version opened for a guest fetches what its tenant's evidence of the
+    /// version predicts into the host's cache, ahead of its guest: the parts of the extents its
+    /// store holds alone, not those of one the version holds and the fork freed. Its guest's boot
+    /// is measured against the prediction.
     #[tokio::test(flavor = "multi_thread")]
-    async fn forks_record_and_replay_their_bases_boot_profile() {
+    async fn forks_of_a_version_fetch_their_prediction_ahead() {
+        use bucket_cell::evidence::UNIT;
         let (base, dir) = store(64 << 20).await;
-        let ps = page_size();
         let extent = id(&base, 1);
-        let part = extent_frame::PART;
-        let len = 4 * part as usize;
-        write(&base, extent, 0, &pattern(5, len)).await.unwrap();
+        write(&base, extent, 0, &pattern(5, 4 * UNIT as usize)).await.unwrap();
+        // An extent the version holds, which the second fork frees.
+        let freed = id(&base, 2);
+        write(&base, freed, 0, &pattern(6, UNIT as usize)).await.unwrap();
         base.commit(None).await.unwrap();
-        let (first, second) = (dir.path().join("first"), dir.path().join("second"));
-        base.fork_to(&first, crate::host_cell::fork_child(base.cell())).await.unwrap();
-        base.fork_to(&second, crate::host_cell::fork_child(base.cell())).await.unwrap();
-        let profile = profile::path(&dir.path().join("store"), base.cell().id);
+        let at = dir.path().join("version");
+        base.uploaded_version_at(&at).await.unwrap();
         drop(base);
+        let version = OpenCell::open_for_host(&at).await.unwrap();
+        let fork = async |name: &str| {
+            let path = dir.path().join(name);
+            version.fork_to(&path, host_cell::named(5)).await.unwrap();
+            path
+        };
+        let (first, second) = (fork("first").await, fork("second").await);
 
-        // The first fork reads two of the extent's parts, from its end.
-        let fork = OpenCell::open(&first).await.unwrap();
-        let window = fork.create_dax_window(len as u64, None).unwrap();
-        fork.map(extent, 0, len as u64, 0).await.unwrap();
-        block_on(async {
-            window.fault(3 * part + ps, Access::Read).await.unwrap();
-            window.fault(part, Access::Read).await.unwrap();
-        });
-        assert!(!host_fs::exists(&profile));
-        drop(window);
-        drop(fork);
-        let units = profile::read(&profile).unwrap();
-        let at = |offset| profile::Unit { extent, offset, len: part };
-        assert_eq!(units, [at(3 * part), at(part)]);
+        // The first boot reads two of the extent's units, and the other extent's.
+        let one = OpenCell::open(&first).await.unwrap();
+        let now = std::time::Instant::now();
+        let at = |ms| now + std::time::Duration::from_millis(ms);
+        one.guest_read(extent, 3 * UNIT, 1, at(1));
+        one.guest_read(extent, UNIT, 1, at(2));
+        one.guest_read(freed, 0, 1, at(3));
+        one.close().await;
+        let worked_on = OpenCell::open_for_host(&second).await.unwrap();
+        worked_on.free(freed).unwrap();
+        worked_on.commit(None).await.unwrap();
+        worked_on.close().await;
 
-        // The second reads them ahead of its guest, and records nothing.
+        // The next, opened where the host keeps the parts it fetches, fetches the two ahead.
+        crate::evidence::forget();
+        let cache = bucket_cell::cache::Cache::open(&dir.path().join("cache"), 1 << 30).unwrap();
+        let cache = Arc::new(cache);
+        let here = Opening::here().unwrap();
+        let keeping = local_cell::upload::Options { cache: Some(cache.clone()), ..here.keeping };
+        let opening = Opening { keeping, ..here };
         let before = stats::stats();
-        let fork = OpenCell::open(&second).await.unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while stats::stats().since(&before).prefetches < 2 && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        let two = OpenCell::open_with(&second, opening).await.unwrap();
+        two.evidence().unwrap().prefetched().await;
         assert_eq!(stats::stats().since(&before).prefetches, 2);
-        assert!(fork.profiling.is_none());
-        drop(fork);
-        assert_eq!(profile::read(&profile).unwrap(), units);
+        assert_ne!(cache.bytes(), 0);
+
+        // Its boot reads one of them, and a unit not predicted.
+        two.guest_read(extent, 3 * UNIT, 1, at(1));
+        two.guest_read(extent, 2 * UNIT, 1, at(2));
+        two.close().await;
+        let counted = stats::stats().since(&before);
+        let measured = (counted.predicted_read, counted.predicted_unread, counted.read_unpredicted);
+        assert_eq!(measured, (1, 2, 1));
+        version.close().await;
     }
 
     /// cladefs: a read fault on a sealed extent maps the pages its page-in supplied after it, a part
@@ -4578,7 +4491,7 @@ mod tests {
         for sequence in 2..=20 {
             let extent = id(&store, sequence);
             let cached_in = CachedIn::Arena(ArenaId::DEFAULT);
-            let cached = cache::cached(&store.store, cached_in, None, None, extent, ps);
+            let cached = cache::cached(&store.store, cached_in, None, extent, ps);
             drop(cached.await.unwrap());
         }
         let mut kept: Vec<u64> = cache::keys().iter().map(|(_, extent)| extent.sequence).collect();
@@ -4611,7 +4524,7 @@ mod tests {
         for sequence in mapped + 1..=mapped + looked_up {
             let extent = id(&store, sequence);
             let cached_in = CachedIn::Arena(ArenaId::DEFAULT);
-            let cached = cache::cached(&store.store, cached_in, None, None, extent, ps);
+            let cached = cache::cached(&store.store, cached_in, None, extent, ps);
             drop(cached.await.unwrap());
         }
         let trims = stats::stats().since(&before).cache_trims;
@@ -4969,7 +4882,7 @@ mod tests {
         write(&store, other, 0, &[1; BLOCK]).await.unwrap();
         store.commit(None).await.unwrap();
         let cached_in = CachedIn::Public(PublicReach(reached));
-        let cached = cache::cached(&store.store, cached_in, None, None, other, BLOCK as u64);
+        let cached = cache::cached(&store.store, cached_in, None, other, BLOCK as u64);
         drop(cached.await);
     }
 
@@ -5095,7 +5008,7 @@ mod tests {
         let opened = [
             OpenCell::open(&path).await.map(|store| store.is_public()),
             OpenCell::open_base(&path, None).await.map(|store| store.is_public()),
-            OpenCell::open_without_profile(&path).await.map(|store| store.is_public()),
+            OpenCell::open_for_host(&path).await.map(|store| store.is_public()),
         ];
         fail::remove("extents::public_cells");
         for opened in opened {

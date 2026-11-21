@@ -531,7 +531,7 @@ pub(super) async fn open_store(
     let arena = arena.cloned();
     let own = arena.clone();
     let store = attached(path, async |keeping| {
-        let opening = Opening { arena: own, profiled: true, keeping };
+        let opening = Opening { arena: own, guest: true, keeping };
         match new {
             Some(New { capacity, kind, tenant }) if !host_fs::exists(&path) => {
                 let of = CellOf::New(tenant);
@@ -689,10 +689,10 @@ fn upload_interval() -> std::time::Duration {
 }
 
 /// The store at `path` as the daemon opens it to work on it, not a VM: its pages of the default
-/// arena, which reads no boot profile into the cache ([`OpenCell::open_without_profile`]).
+/// arena, booting no guest ([`OpenCell::open_for_host`]).
 async fn open_here(path: &Path) -> Result<OpenCell, Errno> {
     attached(path, async |keeping| {
-        OpenCell::open_with(path, Opening { arena: None, profiled: false, keeping }).await
+        OpenCell::open_with(path, Opening { arena: None, guest: false, keeping }).await
     })
     .await
 }
@@ -814,7 +814,7 @@ async fn take_store(path: &Path, cell: Option<CellId>, capacity: u64) -> Result<
         None => local_cell::host_cell(path).map_err(|_| Errno::ENOENT)?,
     };
     attached(path, async |keeping| {
-        let opening = Opening { arena: None, profiled: false, keeping };
+        let opening = Opening { arena: None, guest: false, keeping };
         OpenCell::take_with(path, (capacity, cell, None), opening).await
     })
     .await

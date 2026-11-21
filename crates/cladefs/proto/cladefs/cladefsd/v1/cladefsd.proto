@@ -677,7 +677,8 @@ message GetCountersResponse {
   // Of those, the bytes read straight from local stores or object storage: of open extents, and
   // followers'. Sealed extents' are read through the extent cache, whose page-ins count them.
   uint64 read_stored_bytes = 10;
-  // Units of boot profiles read into memory ahead of forks.
+  // Parts of extents fetched into the host's cache ahead of forks' guests, as their versions' read
+  // evidence predicted them, not found kept there.
   uint64 prefetches = 11;
   // Parts of extents stored compressed, decompressed.
   uint64 unpacks = 12;

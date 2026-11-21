@@ -44,7 +44,7 @@ class Registry(unittest.TestCase):
                 "fxfs-guest-dax-unsafe",
                 "fxfs-guest-dax-fork-warm",
                 "fxfs-guest-dax-fork-cold",
-                "fxfs-guest-dax-fork-profiled",
+                "fxfs-guest-dax-fork-predicted",
                 "fxfs-guest-fork-warm",
                 "ext4-dax-pmem-fork",
                 "ext4-pmem-fork",

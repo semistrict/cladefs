@@ -2,39 +2,49 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: what a host keeps of the read evidence of the versions its stores are forks of
-//! (TASK-702.2; `bucket_cell::evidence`, which says what evidence is).
+//! cladefs: what a host does with the read evidence of the versions its stores are forks of
+//! (TASK-702.2, TASK-702.3; `bucket_cell::evidence`, which says what evidence is).
 //!
 //! A store opened for a guest, a fork of a version, has its version's evidence of its tenant's
-//! ([`Evidence::opened`]): the prediction it makes, which the host reads once an interval
-//! ([`EVERY`]) for all the forks of the version it opens, not for each; and, for the first fork it
-//! opens of the version in an interval, a recording of what its guest reads of the version in its
-//! first [`RECORDED_FOR`]: every `READ`, `MAP` and fault of the version's extents the daemon serves
-//! it ([`Evidence::read`]), as TASK-702.1 found a warm host's guest faults on none of what its
-//! `MAP`s install. The recording is written once, by a task of its own on the host's bucket runtime,
-//! never in the guest's way: at the window's end, or as the store closes or drops, if that comes
-//! first, which a close waits for.
+//! ([`Evidence::opened`]). Its prediction, which the host reads once an interval ([`EVERY`]) for
+//! all the forks of the version it opens, not for each, is fetched into the host's cache as soon
+//! as it is read, as read-ahead: behind the guests' reads, from the peers that own its parts
+//! first, many at once ([`prefetch`]). Its guest's boot is what the guest reads of the version in
+//! its first [`RECORDED_FOR`]: every `READ`, `MAP` and fault of the version's extents the daemon
+//! serves it ([`Evidence::read`]), as TASK-702.1 found a warm host's guest faults on none of what
+//! its `MAP`s install. At the window's end, or as the store closes or drops, if that comes first,
+//! which a close waits for, the boot is measured against the prediction (`stats`), and, the first
+//! fork the host opens of the version in an interval, written as a recording: by a task of its own
+//! on the host's bucket runtime, never in the guest's way.
 
 use crate::ExtentId;
+use crate::bucket::HostFetcher;
+use crate::stats::{self, Counter};
 use bucket_cell::evidence::{Of, Prediction, UNIT, Unit};
 use bucket_cell::keys::Ring;
 use bucket_cell::layout::CellId;
 use bucket_cell::object_bucket::ObjectBucket;
-use futures::FutureExt as _;
 use futures::future::{BoxFuture, Shared};
+use futures::{FutureExt as _, StreamExt as _};
 use local_cell::upload::Forked;
-use std::collections::HashMap;
+use local_cell::{LocalCell, Place};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// How long after a fork's store opens what its guest reads is recorded: what a boot reads, as
+/// How long after a fork's store opens what its guest reads is its boot: what a boot reads, as
 /// TASK-702.1 measured it.
 pub(crate) const RECORDED_FOR: Duration = Duration::from_secs(10);
 
 /// How often a host records a fork of a version of a tenant's, and reads the tenant's evidence of
 /// it again: at most once each an interval.
 pub(crate) const EVERY: Duration = Duration::from_secs(600);
+
+/// How many of a prediction's parts a fork fetches ahead at once, under the host's budget, which
+/// bounds them all: TASK-702.1 modelled 16.5 s of a boot's waiting left at 32 at once, 7.4 s at
+/// 64, none at 128.
+const PREFETCHED_AT_ONCE: usize = 128;
 
 /// A prediction, read once for the forks a host opens of a version in an interval: none if it
 /// could not be read, which the next fork the host opens of the version reads again.
@@ -61,29 +71,41 @@ pub(crate) fn forget() {
     HOST.get().lock().unwrap().clear();
 }
 
+/// How many versions' evidence of a tenant's the host keeps: for tests of which stores read it.
+#[cfg(test)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn kept() -> usize {
+    HOST.get().lock().unwrap().len()
+}
+
 /// What a store opened for a guest, a fork of a version, has of its version's evidence.
 pub(crate) struct Evidence {
-    #[cfg_attr(not(test), expect(dead_code, reason = "TASK-702.3 prefetches what it predicts"))]
+    #[cfg(test)]
     predicted: Predicted,
-    recording: Option<Arc<Recording>>,
-    /// What writes the recording, at the window's end or once told, by the sender's going.
-    writing: Option<(tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<()>)>,
+    boot: Arc<Boot>,
+    /// What ends the boot, at the window's end or once told, by the sender's going.
+    ending: Option<(tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<()>)>,
+    /// What fetches the prediction ahead of the guest, done, and what stops it as the store goes.
+    prefetching: (Shared<BoxFuture<'static, ()>>, futures::future::AbortHandle),
 }
 
 impl Evidence {
-    /// The evidence of the store of `own`, `forked`'s fork, its cell kept in `bucket`, opened now,
-    /// whose tasks run on `runtime`: its version's prediction, read now if the host read it not in
-    /// the interval; and a recording, if no fork here began one of the version in the interval.
+    /// The evidence of `store`, the store of `own`, `forked`'s fork, its cell kept in `bucket`,
+    /// read through `fetcher`, opened now: its version's prediction, read now if the host read it
+    /// not in the interval, and fetched ahead; and its guest's boot, recorded if no fork here began
+    /// a recording of the version in the interval.
     pub(crate) fn opened(
         forked: Forked,
         own: CellId,
+        store: Arc<LocalCell<local_cell::HostDir>>,
         bucket: Arc<ObjectBucket>,
-        runtime: &tokio::runtime::Handle,
+        fetcher: Arc<HostFetcher>,
     ) -> Self {
         let Forked { origin, ring } = forked;
         let of = Of { origin, tenant: own.tenant };
         let now = Instant::now();
         let fresh = |at: &Instant| now.saturating_duration_since(*at) < EVERY;
+        let runtime = fetcher.runtime().clone();
         let mut host = HOST.get().lock().unwrap();
         // What it read or recorded an interval ago or more it keeps no more, but for `of`.
         host.retain(|kept, Kept { recorded, predicted }| {
@@ -96,59 +118,86 @@ impl Evidence {
         let predicted = match &kept.predicted {
             Some((at, predicted)) if fresh(at) && read(predicted) => predicted.clone(),
             _ => {
-                let predicted = predict(runtime, bucket.clone(), of, ring.clone());
+                let predicted = predict(&runtime, bucket.clone(), of, ring.clone());
                 kept.predicted = Some((now, predicted.clone()));
                 predicted
             }
         };
-        let recording = match kept.recorded {
-            Some(at) if fresh(&at) => None,
+        let recorded = match kept.recorded {
+            Some(at) if fresh(&at) => false,
             _ => {
                 kept.recorded = Some(now);
-                Some(Arc::new(Recording::new(of, own.id, bucket, ring)))
+                true
             }
         };
         drop(host);
-        let writing = recording.clone().map(|recording| {
-            let (stop, stopped) = tokio::sync::oneshot::channel();
-            let writing = runtime.spawn(async move {
-                // The window's end, or the store's close or drop, which lets `stop` go.
-                drop(tokio::time::timeout(RECORDED_FOR, stopped).await);
-                recording.write().await;
-            });
-            (stop, writing)
+        let (prefetch, stop_prefetching) =
+            futures::future::abortable(prefetch(predicted.clone(), store, fetcher));
+        let prefetched = runtime.spawn(prefetch).map(drop).boxed().shared();
+        let recorded = recorded.then_some(Recorded { bucket, ring });
+        let boot = Arc::new(Boot::new(of, own.id, recorded));
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let (ended, predicting) = (boot.clone(), predicted.clone());
+        let ending = runtime.spawn(async move {
+            // The window's end, or the store's close or drop, which lets `stop` go.
+            drop(tokio::time::timeout(RECORDED_FOR, stopped).await);
+            ended.end(predicting.peek().cloned().flatten().as_deref()).await;
         });
-        Self { predicted, recording, writing }
+        let prefetching = (prefetched, stop_prefetching);
+        let ending = Some((stop, ending));
+        Self {
+            #[cfg(test)]
+            predicted,
+            boot,
+            ending,
+            prefetching,
+        }
     }
 
     /// The prediction of what the fork will read of its version.
-    #[cfg_attr(not(test), expect(dead_code, reason = "TASK-702.3 prefetches what it predicts"))]
+    #[cfg(test)]
     pub(crate) fn predicted(&self) -> Predicted {
         self.predicted.clone()
     }
 
-    /// Whether it records what the guest reads now: it has a recording, within its window.
+    /// Whether its boot is written as a recording of its version's.
+    #[cfg(test)]
+    pub(crate) fn recorded(&self) -> bool {
+        self.boot.recorded.is_some()
+    }
+
+    /// Its prefetch, done: all it predicted fetched ahead, or stopped.
+    #[cfg(test)]
+    pub(crate) fn prefetched(&self) -> Shared<BoxFuture<'static, ()>> {
+        self.prefetching.0.clone()
+    }
+
+    /// Whether it takes what the guest reads now into its boot: within its window.
     pub(crate) fn records(&self) -> bool {
-        self.recording.as_ref().is_some_and(|recording| recording.within(Instant::now()))
+        self.boot.within(Instant::now())
     }
 
-    /// Records the guest's read of `len` bytes at `offset` in `extent`, begun at `began`, if it
-    /// records: of the version's extents alone, within the window.
+    /// Takes the guest's read of `len` bytes at `offset` in `extent`, begun at `began`, into its
+    /// boot: of the version's extents alone, within the window.
     pub(crate) fn read(&self, extent: ExtentId, offset: u64, len: u64, began: Instant) {
-        if let Some(recording) = &self.recording {
-            recording.read(extent, offset, len, began);
-        }
+        self.boot.read(extent, offset, len, began);
     }
 
-    /// Has its recording written, if it has one not written yet, and waits for it: as its store
-    /// closes. Dropped, it has it written behind it, waiting for nothing.
+    /// Ends its boot, if it is not over yet, and waits for it to be measured and written: as its
+    /// store closes. Dropped, it has it ended behind it, waiting for nothing.
     pub(crate) async fn close(mut self) {
-        if let Some((stop, writing)) = self.writing.take() {
+        if let Some((stop, ending)) = self.ending.take() {
             drop(stop);
-            if let Err(err) = writing.await {
-                log::warn!("cladefs: writing a read evidence: {err}");
+            if let Err(err) = ending.await {
+                log::warn!("cladefs: ending a boot: {err}");
             }
         }
+    }
+}
+
+impl Drop for Evidence {
+    fn drop(&mut self) {
+        self.prefetching.1.abort();
     }
 }
 
@@ -167,33 +216,78 @@ fn predict(
     reading.map(|read| read.ok().flatten()).boxed().shared()
 }
 
-/// What a fork's guest read of its version in its first [`RECORDED_FOR`], to be written once.
-struct Recording {
+/// Fetches what `predicted` predicts the guest of `store`, a fork of its version, reads into the
+/// host's cache, once it is read, through `fetcher`, in its order, [`PREFETCHED_AT_ONCE`] units at once,
+/// behind the guests' reads: the parts of the extents `store` holds whose data is in the bucket,
+/// not kept already.
+async fn prefetch(
+    predicted: Predicted,
+    store: Arc<LocalCell<local_cell::HostDir>>,
+    fetcher: Arc<HostFetcher>,
+) {
+    let Some(prediction) = predicted.await else { return };
+    let units = futures::stream::iter(prediction.units.iter().copied());
+    let fetches = units.map(|unit| fetch_ahead(&store, &fetcher, unit));
+    let fetches = fetches.buffer_unordered(PREFETCHED_AT_ONCE);
+    let fetched = fetches.fold(0, |all, fetched| std::future::ready(all + fetched)).await;
+    log::debug!("cladefs: {fetched} parts of {} predicted fetched ahead", prediction.units.len());
+}
+
+/// Fetches the parts holding `unit` into the host's cache through `fetcher` ahead of the guest of
+/// `store`, if the store holds its extent, its data in the bucket: how many it fetched itself.
+async fn fetch_ahead(
+    store: &LocalCell<local_cell::HostDir>,
+    fetcher: &HostFetcher,
+    unit: Unit,
+) -> u64 {
+    let Ok(Some(Place::Bucket(location))) = store.place(unit.extent) else { return 0 };
+    let offset = unit.mib * UNIT;
+    match fetcher.fetch_ahead(unit.extent, &location, offset, UNIT).await {
+        Ok(fetched) => {
+            stats::add(Counter::Prefetches, fetched);
+            fetched
+        }
+        Err(err) => {
+            log::debug!("cladefs: fetching {:?} at {offset} ahead: {err}", unit.extent);
+            0
+        }
+    }
+}
+
+/// What writes a boot as a recording of its version's.
+struct Recorded {
+    bucket: Arc<ObjectBucket>,
+    ring: Arc<Ring>,
+}
+
+/// What a fork's guest read of its version in its first [`RECORDED_FOR`]: measured against the
+/// prediction once, and written, if it is recorded.
+struct Boot {
     of: Of,
     /// The fork's own cell, whose extents are none of its version's.
     own: u64,
     opened: Instant,
     /// Each unit read, and when first, in milliseconds after the opening.
     units: Mutex<HashMap<(ExtentId, u64), u32>>,
-    bucket: Arc<ObjectBucket>,
-    ring: Arc<Ring>,
-    /// Whether it is being written, and records no more.
-    written: AtomicBool,
+    /// Where it is written, if it is.
+    recorded: Option<Recorded>,
+    /// Whether it is over, and takes no more reads.
+    ended: AtomicBool,
 }
 
-impl Recording {
-    fn new(of: Of, own: u64, bucket: Arc<ObjectBucket>, ring: Arc<Ring>) -> Self {
-        let (opened, units, written) = (Instant::now(), Mutex::default(), AtomicBool::new(false));
-        Self { of, own, opened, units, bucket, ring, written }
+impl Boot {
+    fn new(of: Of, own: u64, recorded: Option<Recorded>) -> Self {
+        let (opened, units, ended) = (Instant::now(), Mutex::default(), AtomicBool::new(false));
+        Self { of, own, opened, units, recorded, ended }
     }
 
-    /// Whether it records what was read at `at`: within its window, and not written yet.
+    /// Whether it takes what was read at `at`: within its window, and not over.
     fn within(&self, at: Instant) -> bool {
-        !self.written.load(Ordering::Relaxed)
+        !self.ended.load(Ordering::Relaxed)
             && at.saturating_duration_since(self.opened) <= RECORDED_FOR
     }
 
-    /// Records a read of `len` bytes at `offset` in `extent`, begun at `began`: each unit of the
+    /// Takes a read of `len` bytes at `offset` in `extent`, begun at `began`: each unit of the
     /// version's it covers, first read then, if not before, within the window, and
     /// [`bucket_cell::evidence::MOST_UNITS`].
     fn read(&self, extent: ExtentId, offset: u64, len: u64, began: Instant) {
@@ -213,24 +307,26 @@ impl Recording {
         }
     }
 
-    /// Writes it, if it holds any unit, under the version's cell's newest DEK its fork holds: once,
-    /// by its writing task alone, letting go of its units.
-    async fn write(&self) {
-        self.written.store(true, Ordering::Relaxed);
+    /// Ends it, by its ending task alone, letting go of its units: measured against `predicted`,
+    /// the prediction its fork had then, if any; and written, if it is recorded and holds any
+    /// unit, under the version's cell's newest DEK its fork holds.
+    async fn end(&self, predicted: Option<&Prediction>) {
+        self.ended.store(true, Ordering::Relaxed);
         let mut units: Vec<Unit> = (std::mem::take(&mut *self.units.lock().unwrap()).into_iter())
             .map(|((extent, mib), first)| Unit { extent, mib, first })
             .collect();
+        measure(predicted, &units);
+        let Some(Recorded { bucket, ring }) = &self.recorded else { return };
         if units.is_empty() {
             return;
         }
         units.sort_by_key(|unit| (unit.first, unit.extent, unit.mib));
         let cell = self.of.cell();
-        let Some(encrypting) = self.ring.encrypting_as(cell.id) else {
+        let Some(encrypting) = ring.encrypting_as(cell.id) else {
             log::warn!("cladefs: writing the read evidence of {cell}: its fork holds no key of it");
             return;
         };
-        let written = bucket_cell::evidence::write(&*self.bucket, self.of, &units, encrypting);
-        match written.await {
+        match bucket_cell::evidence::write(&**bucket, self.of, &units, encrypting).await {
             Ok(key) => {
                 log::debug!("cladefs: read evidence written at {key}: {} units", units.len())
             }
@@ -239,26 +335,56 @@ impl Recording {
     }
 }
 
+/// Counts how well `predicted`, if a prediction was read, predicted `read`, a boot's units
+/// ([`measured`]).
+fn measure(predicted: Option<&Prediction>, read: &[Unit]) {
+    let [hits, unread, unpredicted] = measured(predicted, read);
+    stats::add(Counter::PredictedRead, hits);
+    stats::add(Counter::PredictedUnread, unread);
+    stats::add(Counter::ReadUnpredicted, unpredicted);
+}
+
+/// How well `predicted`, if a prediction was read, predicted `read`, a boot's units: how many of
+/// them were predicted and read, predicted and unread, and read unpredicted (TASK-702.3).
+fn measured(predicted: Option<&Prediction>, read: &[Unit]) -> [u64; 3] {
+    let predicted: HashSet<(ExtentId, u64)> = (predicted.iter())
+        .flat_map(|predicted| &predicted.units)
+        .map(|unit| (unit.extent, unit.mib))
+        .collect();
+    let hits = read.iter().filter(|unit| predicted.contains(&(unit.extent, unit.mib))).count();
+    [hits, predicted.len() - hits, read.len() - hits].map(|count| count as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use bucket_cell::layout::{Origin, test_cell};
 
-    /// A recording takes each unit of its version's a read covers, first read when it was first,
+    /// A boot takes each unit of its version's a read covers, first read when it was first,
     /// within its window; none of its fork's own extents.
     #[test]
-    fn recordings_take_the_versions_units_first_read() {
-        let objects = Arc::new(object_store::memory::InMemory::new());
-        let bucket = Arc::new(ObjectBucket::new(objects, ""));
+    fn boots_take_the_versions_units_first_read() {
         let of = Of { origin: Origin { parent: test_cell(3), at: 7 }, tenant: 1 };
-        let recording = Recording::new(of, 9, bucket, bucket_cell::testing::ring([test_cell(3)]));
-        let opened = recording.opened;
+        let boot = Boot::new(of, 9, None);
+        let opened = boot.opened;
         let extent = ExtentId { cell: 3, sequence: 1 };
-        recording.read(extent, UNIT - 4096, 8192, opened + Duration::from_millis(5));
-        recording.read(extent, 0, 4096, opened + Duration::from_millis(2));
-        recording.read(ExtentId { cell: 9, sequence: 1 }, 0, 4096, opened);
-        recording.read(extent, 3 * UNIT, 1, opened + RECORDED_FOR + Duration::from_millis(1));
-        let units = recording.units.lock().unwrap().clone();
+        boot.read(extent, UNIT - 4096, 8192, opened + Duration::from_millis(5));
+        boot.read(extent, 0, 4096, opened + Duration::from_millis(2));
+        boot.read(ExtentId { cell: 9, sequence: 1 }, 0, 4096, opened);
+        boot.read(extent, 3 * UNIT, 1, opened + RECORDED_FOR + Duration::from_millis(1));
+        let units = boot.units.lock().unwrap().clone();
         assert_eq!(units, HashMap::from([((extent, 0), 2), ((extent, 1), 5)]));
+    }
+
+    /// A boot is measured by the units it read that were predicted, those predicted it did not
+    /// read, and those it read unpredicted; with no prediction, all it read were unpredicted.
+    #[test]
+    fn boots_are_measured_against_their_predictions() {
+        let extent = ExtentId { cell: 3, sequence: 1 };
+        let unit = |mib| Unit { extent, mib, first: 0 };
+        let prediction = Prediction { units: vec![unit(0), unit(1), unit(2)], recordings: 1 };
+        let read = [unit(1), unit(2), unit(5), unit(6)];
+        assert_eq!(measured(Some(&prediction), &read), [2, 1, 2]);
+        assert_eq!(measured(None, &read), [0, 0, 4]);
     }
 }

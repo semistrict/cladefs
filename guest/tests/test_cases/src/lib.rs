@@ -966,9 +966,9 @@ pub fn test_cases() -> Vec<TestCase> {
             Box::new(TestFsBench { backend: BenchBackend::Ext4PmemFork }),
         ),
         TestCase::new(
-            "bench-fork-fxfs-guest-dax-profiled",
+            "bench-fork-fxfs-guest-dax-predicted",
             &[Tag::Manual],
-            Box::new(TestFsBench { backend: BenchBackend::FxfsGuestDaxForkProfiled }),
+            Box::new(TestFsBench { backend: BenchBackend::FxfsGuestDaxForkPredicted }),
         ),
     ]
 }

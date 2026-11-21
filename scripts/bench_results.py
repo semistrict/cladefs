@@ -32,7 +32,7 @@ ORDER = [
     "fxfs-guest-dax-followed",
     "fxfs-guest-dax-followed-idle",
     "fxfs-guest-dax-fork-cold",
-    "fxfs-guest-dax-fork-profiled",
+    "fxfs-guest-dax-fork-predicted",
     "fxfs-guest-dax-fork-warm",
     "fxfs-guest-fork-warm",
     "ext4-dax-pmem-fork",
@@ -59,8 +59,9 @@ BASELINES = {
     # A fork booted with its base's data in the extent daemon's memory, against one without.
     "fxfs-guest-dax-fork-warm": ["fxfs-guest-dax-fork-cold"],
     "fxfs-guest-dax-fork-cold": [],
-    # A cold fork with its base's boot profile read ahead, against one with the base's data in memory.
-    "fxfs-guest-dax-fork-profiled": ["fxfs-guest-dax-fork-warm"],
+    # A cold fork of a version with its read evidence fetched ahead, against one with the base's data
+    # in memory (TASK-702.3).
+    "fxfs-guest-dax-fork-predicted": ["fxfs-guest-dax-fork-warm"],
     # Forks without cladefs's DAX: Fxfs through the page cache, and ext4 on copies of the base's image
     # on virtio-pmem, with DAX, as a static DAX device's base layer, and without; each against a
     # warm fork with DAX (TASK-112.2).

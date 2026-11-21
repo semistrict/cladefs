@@ -617,20 +617,10 @@ impl HostFetcher {
         Ok(Arc::new(Self { runtime, parts: Arc::new(parts.reading_ahead(spawn)) }))
     }
 
-    /// cladefs: the runtime its reads run on, which what reads ahead for a store, or writes behind
-    /// it, runs on too ([`HostFetcher::spawn`]).
+    /// cladefs: the runtime its reads run on, which what fetches ahead for a store, and writes its
+    /// guest's boot behind it, runs on too (doc-24, step 5; `crate::evidence`).
     pub(crate) fn runtime(&self) -> &tokio::runtime::Handle {
         &self.runtime
-    }
-
-    /// cladefs: runs `future` in a task of its own on the runtime its reads run on: what reads
-    /// ahead for a store, or writes behind it (doc-24, step 5).
-    pub(crate) fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
-    where
-        F: std::future::Future + Send + 'static,
-        F::Output: Send + 'static,
-    {
-        self.runtime.spawn(future)
     }
 
     /// `len` bytes at `offset` in `extent`, whose data is at `location` in the bucket: as many as
@@ -652,6 +642,20 @@ impl HostFetcher {
         });
         let read = self.runtime.spawn(crate::request::within(crate::request::current(), reading));
         async move { read.await.map_err(|err| Failure::local(err, "fetching"))? }
+    }
+
+    /// cladefs: fetches the parts holding the `len` bytes at `offset` in `extent`, whose data is
+    /// at `location` in the bucket, into the host's cache, as read-ahead, behind reads waiting for
+    /// theirs (`Fetcher::fetch_ahead`, TASK-702.3): how many it fetched itself. On the runtime its
+    /// reads run on, as the caller is.
+    pub(crate) async fn fetch_ahead(
+        &self,
+        extent: ExtentId,
+        location: &Location,
+        offset: u64,
+        len: u64,
+    ) -> Result<u64, Failure> {
+        Ok(self.parts.fetch_ahead(extent, location, offset, len).await?)
     }
 }
 
@@ -1497,8 +1501,7 @@ mod tests {
         let (freeing, writing) = (paths.pop().unwrap(), paths.pop().unwrap());
         drop(parent);
         let open = async |path: &std::path::PathBuf| {
-            let opening =
-                crate::open_cell::Opening { arena: None, profiled: false, keeping: idle() };
+            let opening = crate::open_cell::Opening { arena: None, guest: false, keeping: idle() };
             OpenCell::open_with(path, opening).await.unwrap()
         };
         let name = if version { "version" } else { "live" };
