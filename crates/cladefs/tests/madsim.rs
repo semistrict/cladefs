@@ -128,9 +128,15 @@ async fn connect(
     panic!("host {host}'s control API never answered: {failed:?}");
 }
 
+/// Where the hosts' roots are: on their own disks, simulated, each simulation's own (`host_fs`),
+/// the same every run. Board 5471: a temporary directory of the real host's named them before,
+/// its name drawn from the test's thread's ID, which libtest gives its threads in the order the
+/// real host ran them: something outside the simulation, a seed's outcome changing with it.
+const ROOTS: &str = "/hosts";
+
 /// What every test's hosts share: their logger, their KMS's master key, and a bucket in memory,
 /// its requests delayed and failed as the seed says, and what heals it.
-fn world() -> (tempfile::TempDir, Arc<ObjectBucket>, Arc<bucket_cell::faults::Seeded>) {
+fn world() -> (Arc<ObjectBucket>, Arc<bucket_cell::faults::Seeded>) {
     // Once a process: a determinism check runs the test twice in it.
     let _ = cladefs::cladefsd::logging::to_stderr();
     // SAFETY: the simulation's one thread, before any node reads the environment.
@@ -145,28 +151,27 @@ fn world() -> (tempfile::TempDir, Arc<ObjectBucket>, Arc<bucket_cell::faults::Se
     let objects = Arc::new(object_store::memory::InMemory::new());
     let seeded = Arc::new(bucket_cell::faults::Seeded::new(objects, madsim::rand::random(), odds));
     let backend = bucket_cell::faults::SeededBackend(seeded.clone());
-    (tempfile::tempdir().unwrap(), Arc::new(ObjectBucket::new(Arc::new(backend), "")), seeded)
+    (Arc::new(ObjectBucket::new(Arc::new(backend), "")), seeded)
 }
 
-/// Hosts 1 to `count`, booted, their cell directories under `dir`'s `hostN`, their cells in
+/// Hosts 1 to `count`, booted, their cell directories under [`ROOTS`]' `hostN`, their cells in
 /// `bucket`: their nodes, and their roots.
 fn hosts(
     count: u8,
-    dir: &Path,
     bucket: &Arc<ObjectBucket>,
 ) -> (Vec<madsim::runtime::NodeHandle>, Vec<PathBuf>) {
-    hosts_keeping(count, dir, bucket, Kept::NONE)
+    hosts_keeping(count, bucket, Kept::NONE)
 }
 
 /// Hosts as [`hosts`] makes them, keeping what `kept` says.
 fn hosts_keeping(
     count: u8,
-    dir: &Path,
     bucket: &Arc<ObjectBucket>,
     kept: Kept,
 ) -> (Vec<madsim::runtime::NodeHandle>, Vec<PathBuf>) {
     let handle = madsim::runtime::Handle::current();
-    let roots: Vec<PathBuf> = (1..=count).map(|host| dir.join(format!("host{host}"))).collect();
+    let roots: Vec<PathBuf> =
+        (1..=count).map(|host| Path::new(ROOTS).join(format!("host{host}"))).collect();
     let nodes = (1..=count)
         .zip(&roots)
         .map(|(host, root)| {
@@ -202,8 +207,8 @@ fn manager() -> madsim::runtime::NodeHandle {
 
 #[madsim::test]
 async fn two_daemons_boot_as_hosts_and_one_takes_the_others_cell() {
-    let (dir, bucket, _) = world();
-    let (_nodes, roots) = hosts(2, dir.path(), &bucket);
+    let (bucket, _) = world();
+    let (_nodes, roots) = hosts(2, &bucket);
     let client = manager();
     let (first, second) = (roots[0].join("store"), roots[1].join("store"));
     client
@@ -250,11 +255,12 @@ async fn an_image_imported_through_the_control_api_reads_back() {
     use cladefs::cladefsd::control::proto::ImportImageRequest;
     use cladefs::import::testing::{Entry, Kind, layer};
     const HOSTNAME: &[u8] = b"simulated\n";
-    let (dir, bucket, _) = world();
-    let (nodes, roots) = hosts(1, dir.path(), &bucket);
+    let (bucket, _) = world();
+    let (nodes, roots) = hosts(1, &bucket);
     // The image, on the daemon's host, as its caller has it there: outside its disk (host_fs), as
-    // the import reads it.
-    let image = dir.path().join("image.tar");
+    // the import reads it, on the real host's, in a directory of its own.
+    let images = tempfile::tempdir().unwrap();
+    let image = images.path().join("image.tar");
     let entries = [
         Entry::new("etc", Kind::Dir),
         Entry::new("etc/hostname", Kind::File(HOSTNAME)),
@@ -304,8 +310,8 @@ async fn an_image_imported_through_the_control_api_reads_back() {
 /// daemons' own handling of a VM process's requests, its connection in memory.
 #[madsim::test]
 async fn a_guests_commit_uploaded_on_one_host_reads_back_on_another() {
-    let (dir, bucket, _) = world();
-    let (nodes, roots) = hosts(2, dir.path(), &bucket);
+    let (bucket, _) = world();
+    let (nodes, roots) = hosts(2, &bucket);
     let (first, second) = (roots[0].join("store"), roots[1].join("store"));
     let block: Vec<u8> = (0..4096u32).map(|at| (at * 7 % 251) as u8).collect();
     let written = block.clone();
@@ -632,8 +638,8 @@ async fn attrition(Profile { kept, partitions, versions, disk }: Profile) -> Res
     use madsim::rand::Rng as _;
     const ROUNDS: u64 = 5;
     const WRITES: u64 = 6;
-    let (dir, bucket, faults) = world();
-    let (nodes, roots) = hosts_keeping(3, dir.path(), &bucket, kept);
+    let (bucket, faults) = world();
+    let (nodes, roots) = hosts_keeping(3, &bucket, kept);
     let handle = madsim::runtime::Handle::current();
     let told = Arc::new(Told { versioning: versions, ..Told::default() });
     let manager = manager();
@@ -800,8 +806,8 @@ async fn ephemeral_attrition(disk: bool) -> Result<(), String> {
     use madsim::rand::Rng as _;
     const ROUNDS: u64 = 6;
     const WRITES: u64 = 5;
-    let (dir, bucket, faults) = world();
-    let (nodes, roots) = hosts_keeping(3, dir.path(), &bucket, Kept::ephemeral(3));
+    let (bucket, faults) = world();
+    let (nodes, roots) = hosts_keeping(3, &bucket, Kept::ephemeral(3));
     let handle = madsim::runtime::Handle::current();
     let manager = manager();
     let node = |host: usize| handle.get_node(nodes[host].id()).unwrap();
