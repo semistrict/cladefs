@@ -6535,6 +6535,12 @@ const PANIC_HOLDING: &str = "CLADEFSD_TEST_PANIC_HOLDING";
 #[ignore = "run by a_panic_holding_a_shared_lock_stops_the_daemon, in a process of its own"]
 fn child_panics_holding() {
     let Ok(lock) = std::env::var(PANIC_HOLDING) else { return };
+    // Its abort is what its parent looks for, no crash to keep: no core dump, which a host's
+    // systemd-coredump took 5 s to write for each child, its parent's twelve past its minute
+    // (asahimbp, board 2944).
+    let none = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: setrlimit reads `none` alone.
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_CORE, &none) }, 0);
     local_cell::shared::abort_on_panics();
     host();
     let ps = page_size() as usize;
