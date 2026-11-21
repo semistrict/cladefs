@@ -39,9 +39,9 @@ fn child_in(tenant: u64, id: u64) -> Child {
 }
 
 /// What the tests' hosts share: a bucket, its objects as object storage holds them, and a KMS,
-/// counting its calls, holding [`TENANT`]'s KEK: a [`LocalKms`], or another (TASK-411.16).
+/// counting its calls, holding [`TENANT`]'s KEK: a [`LocalKms`], or another (TASK-411.16). Its
+/// hosts run on the test's runtime.
 struct World<K: Kms = LocalKms> {
-    runtime: tokio::runtime::Runtime,
     objects: Arc<object_store::memory::InMemory>,
     bucket: Arc<ObjectBucket>,
     kms: Arc<Counted<K>>,
@@ -67,10 +67,9 @@ impl World {
 impl<K: Kms> World<K> {
     /// A world whose KMS is `kms`, which holds [`TENANT`]'s KEK.
     fn with_kms(kms: K) -> Self {
-        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         let objects = Arc::new(object_store::memory::InMemory::new());
         let bucket = Arc::new(ObjectBucket::new(objects.clone(), ""));
-        Self { runtime, objects, bucket, kms: Arc::new(Counted::new(kms)), _kms: None }
+        Self { objects, bucket, kms: Arc::new(Counted::new(kms)), _kms: None }
     }
 
     /// A host of placement `token`, its KMS this world's, unwrapping anew what it asks.
@@ -80,7 +79,7 @@ impl<K: Kms> World<K> {
         let keys = keys::Host::new(keys::CachingKms::new(kms), memory.keys().clone());
         let uploads = Budget::new(Limits::UNBOUNDED);
         Host {
-            runtime: Runtime { handle: self.runtime.handle().clone(), uploads, keys },
+            runtime: Runtime { handle: tokio::runtime::Handle::current(), uploads, keys },
             memory,
             token,
         }
@@ -91,11 +90,11 @@ impl<K: Kms> World<K> {
     fn pooled_host(&self, token: u64) -> Host {
         let memory = Memory::new();
         let kms: extent_keys::kms::Shared = self.kms.clone();
-        let pooling = keys::Pooling { low: 2, batch: 4, handle: self.runtime.handle().clone() };
+        let pooling = keys::Pooling { low: 2, batch: 4, handle: tokio::runtime::Handle::current() };
         let keys = keys::Host::new(keys::CachingKms::pooled(kms, pooling), memory.keys().clone());
         let uploads = Budget::new(Limits::UNBOUNDED);
         Host {
-            runtime: Runtime { handle: self.runtime.handle().clone(), uploads, keys },
+            runtime: Runtime { handle: tokio::runtime::Handle::current(), uploads, keys },
             memory,
             token,
         }
@@ -107,8 +106,8 @@ impl<K: Kms> World<K> {
     }
 
     /// Every object's key and bytes.
-    fn objects(&self) -> Vec<(String, Vec<u8>)> {
-        self.runtime.block_on(async {
+    async fn objects(&self) -> Vec<(String, Vec<u8>)> {
+        (async {
             let listed: Vec<_> = self.objects.list(None).try_collect().await.unwrap();
             let mut objects = Vec::new();
             for meta in listed {
@@ -119,33 +118,34 @@ impl<K: Kms> World<K> {
             objects.sort();
             objects
         })
+        .await
     }
 
     /// The bytes of the object at `key`.
-    fn object(&self, key: &str) -> Vec<u8> {
-        let got = self.runtime.block_on(bucket_cell::bucket::get(&*self.bucket, key));
+    async fn object(&self, key: &str) -> Vec<u8> {
+        let got = bucket_cell::bucket::get(&*self.bucket, key).await;
         got.unwrap_or_else(|| panic!("no object at {key}")).bytes.to_vec()
     }
 
     /// Puts `bytes` at `key`, in place of what is there: one who can write the bucket.
-    fn put(&self, key: &str, bytes: Vec<u8>) {
+    async fn put(&self, key: &str, bytes: Vec<u8>) {
         let put = self.bucket.put(key, bytes.into(), PutMode::Overwrite);
-        self.runtime.block_on(put).unwrap();
+        put.await.unwrap();
     }
 
     /// `cell`'s head.
-    fn head(&self, cell: CellId) -> Head {
-        self.head_of(cell).unwrap()
+    async fn head(&self, cell: CellId) -> Head {
+        self.head_of(cell).await.unwrap()
     }
 
     /// `cell`'s head, if it has one.
-    fn head_of(&self, cell: CellId) -> Option<Head> {
-        self.runtime.block_on(bucket_cell::head::get(&*self.bucket, cell)).unwrap()
+    async fn head_of(&self, cell: CellId) -> Option<Head> {
+        bucket_cell::head::get(&*self.bucket, cell).await.unwrap()
     }
 
     /// `wrapped`, unwrapped by `tenant`'s KEK, asked of the KMS uncounted.
-    fn unwrapped(&self, tenant: u64, wrapped: &extent_keys::Wrapped) -> Secret {
-        futures::executor::block_on(self.kms.inner().unwrap(tenant, wrapped)).unwrap()
+    async fn unwrapped(&self, tenant: u64, wrapped: &extent_keys::Wrapped) -> Secret {
+        self.kms.inner().unwrap(tenant, wrapped).await.unwrap()
     }
 }
 
@@ -167,17 +167,17 @@ fn made_at_version(cell: CellId, id: u64) -> MemDir {
 }
 
 /// The store in `dir`, opened by `host`, made whole if it was unmade; checkpointed each segment.
-fn open_on<K: Kms>(
+async fn open_on<K: Kms>(
     world: &World<K>,
     host: &Host,
     dir: &MemDir,
 ) -> Result<(Arc<LocalCell<MemDir>>, Uploader<MemDir>), Failure> {
-    open_with(world, host, dir, Options { checkpoint_every: 1, ..Options::default() })
+    open_with(world, host, dir, Options { checkpoint_every: 1, ..Options::default() }).await
 }
 
 /// The store in `dir`, opened by `host` as [`open_on`] opens it, its uploader's options `options`
 /// but for its placement's token, `host`'s.
-fn open_with<K: Kms>(
+async fn open_with<K: Kms>(
     world: &World<K>,
     host: &Host,
     dir: &MemDir,
@@ -190,10 +190,10 @@ fn open_with<K: Kms>(
         Err(err) if err.is::<crate::Unmade>() => {
             let recovering = LocalCell::recover_unmade(dir.clone())?;
             let cell = recovering.cell();
-            if world.head_of(cell).is_none() {
+            if world.head_of(cell).await.is_none() {
                 let making =
                     keys::make(&*world.bucket, &host.runtime.keys.kms, cell, rand::random());
-                world.runtime.block_on(making)?;
+                making.await?;
             }
             recovering
         }
@@ -201,13 +201,9 @@ fn open_with<K: Kms>(
     };
     let options = Options { token: host.token, ..options };
     let holding = (rand::random(), options);
-    let opened = crate::upload::wait_on(open(
-        recovering,
-        crate::Options::default(),
-        world.bucket.clone(),
-        holding,
-        &host.runtime,
-    ))?;
+    let opened =
+        open(recovering, crate::Options::default(), world.bucket.clone(), holding, &host.runtime)
+            .await?;
     opened.0.made()?;
     Ok(opened)
 }
@@ -226,15 +222,20 @@ fn noise(seed: u64, len: usize) -> Vec<u8> {
 }
 
 /// Writes `data` to `extent`, commits and waits for its upload.
-fn written(store: &LocalCell<MemDir>, uploader: &Uploader<MemDir>, extent: ExtentId, data: &[u8]) {
-    store.write(extent, 0, data).unwrap();
-    store.commit(None).unwrap();
-    crate::upload::wait_on(uploader.uploaded(store.last_commit().unwrap())).unwrap();
+async fn written(
+    store: &LocalCell<MemDir>,
+    uploader: &Uploader<MemDir>,
+    extent: ExtentId,
+    data: &[u8],
+) {
+    store.write(extent, 0, data).await.unwrap();
+    store.commit(None).await.unwrap();
+    uploader.uploaded(store.last_commit().unwrap()).await.unwrap();
 }
 
 /// The data of `extent`, `len` bytes, as `store` reads it: through `host`'s fetchers, if its data
 /// is in the bucket.
-fn read<K: Kms>(
+async fn read<K: Kms>(
     world: &World<K>,
     host: &Host,
     store: &LocalCell<MemDir>,
@@ -249,11 +250,11 @@ fn read<K: Kms>(
             None => panic!("{err:#}"),
         },
     };
-    fetched(world, &host.memory, extent, &location)
+    fetched(world, &host.memory, extent, &location).await
 }
 
 /// `extent`'s data at `location`, read by a fetcher keeping what it reads in `memory`.
-fn fetched<K: Kms>(
+async fn fetched<K: Kms>(
     world: &World<K>,
     memory: &Arc<Memory>,
     extent: ExtentId,
@@ -261,7 +262,7 @@ fn fetched<K: Kms>(
 ) -> Result<Vec<u8>, bucket_cell::Error> {
     let budget = Budget::new(Limits::UNBOUNDED);
     let fetcher = Fetcher::new(world.bucket.clone(), budget, memory.clone(), None);
-    world.runtime.block_on(fetcher.read(extent, location, 0, location.len, Priority::Demand))
+    fetcher.read(extent, location, 0, location.len, Priority::Demand).await
 }
 
 /// Where `extent`'s data is in the bucket, as `store` names it.
@@ -292,8 +293,8 @@ fn segment_key(key: &str, bytes: &[u8]) -> KeyId {
 /// DEK by it, each kept only so, no plaintext of either nor of their data in any object; their
 /// segments encrypted under their own cell's DEK, their checkpoints authenticated. A host making a
 /// cell unwraps nothing; one taking it after unwraps its KEK once, and reads what the first wrote.
-#[test]
-fn cells_keep_keys_wrapped_and_one_unwrap_takes_a_cell() {
+#[tokio::test(flavor = "multi_thread")]
+async fn cells_keep_keys_wrapped_and_one_unwrap_takes_a_cell() {
     let world = World::new();
     let first = world.host(5);
     let cells = [(test_cell(7), "a"), (test_cell(8), "b"), (test_cell(9), "c")];
@@ -301,10 +302,10 @@ fn cells_keep_keys_wrapped_and_one_unwrap_takes_a_cell() {
     let mut deks = Vec::new();
     let mut data = Vec::new();
     for (at, dir) in dirs.iter().enumerate() {
-        let (store, uploader) = open_on(&world, &first, dir).unwrap();
+        let (store, uploader) = open_on(&world, &first, dir).await.unwrap();
         let cell = cells[at].0;
         let written_data = noise(at as u64 + 1, 4 * 4096);
-        written(&store, &uploader, ExtentId::new(cell.id, 1), &written_data);
+        written(&store, &uploader, ExtentId::new(cell.id, 1), &written_data).await;
         let (dek, id) = store.keys().encrypting();
         assert_eq!(id, KeyId { cell: cell.id, generation: 1 });
         deks.push(Secret::from_bytes(dek.expose()));
@@ -313,16 +314,16 @@ fn cells_keep_keys_wrapped_and_one_unwrap_takes_a_cell() {
     // One wrap a cell made; none unwrapped: the cells were made here.
     assert_eq!(world.calls(), (3, 0));
 
-    let objects = world.objects();
+    let objects = world.objects().await;
     let mut keks = Vec::new();
     for ((cell, _), dek) in cells.iter().zip(&deks) {
-        let object = world.head_of(*cell).unwrap();
+        let object = world.head_of(*cell).await.unwrap();
         let [kek] = &object.keks[..] else { panic!("{:?}", object.keks) };
         assert_eq!(kek.generation, 1);
-        let unwrapped = futures::executor::block_on(world.kms.inner().unwrap(TENANT, &kek.wrapped));
+        let unwrapped = world.kms.inner().unwrap(TENANT, &kek.wrapped).await;
         let kek_bytes = *unwrapped.unwrap().expose();
         keks.push(kek_bytes);
-        let record = world.head(*cell);
+        let record = world.head(*cell).await;
         let [wrapped] = &record.deks[..] else { panic!("{:?}", record.deks) };
         assert_eq!((wrapped.generation, wrapped.kek), (1, 1));
         let unwrapped = keys::unwrap_dek(&Secret::from_bytes(&kek_bytes), *cell, wrapped);
@@ -363,13 +364,13 @@ fn cells_keep_keys_wrapped_and_one_unwrap_takes_a_cell() {
     let second = world.host(6);
     let mut opened = Vec::new();
     for (dir, (cell, _)) in dirs.iter().zip(&cells) {
-        opened.push(open_on(&world, &second, &dir.crash(0)).unwrap());
-        assert_eq!(world.head_of(*cell).unwrap().epoch, 2);
+        opened.push(open_on(&world, &second, &dir.crash(0)).await.unwrap());
+        assert_eq!(world.head_of(*cell).await.unwrap().epoch, 2);
     }
     assert_eq!(world.calls(), (0, 3));
     for (at, (store, _)) in opened.iter().enumerate() {
         let extent = ExtentId::new(cells[at].0.id, 1);
-        assert_eq!(read(&world, &second, store, extent, 4 * 4096), Ok(data[at].clone()));
+        assert_eq!(read(&world, &second, store, extent, 4 * 4096).await, Ok(data[at].clone()));
     }
     assert_eq!(world.calls(), (0, 3));
 }
@@ -377,84 +378,82 @@ fn cells_keep_keys_wrapped_and_one_unwrap_takes_a_cell() {
 /// TASK-411.28, AC #3: a store of a tenant the host's KMS has no KEK of opens not, refused as
 /// destroyed, naming the tenant: no cell made, nothing of it in the bucket. Asked again, the KMS
 /// is asked again: no answer is believed for a while (TASK-411.10's went with the clear).
-#[test]
-fn stores_of_tenants_with_no_kek_open_not() {
+#[tokio::test(flavor = "multi_thread")]
+async fn stores_of_tenants_with_no_kek_open_not() {
     let world = World::new();
     let host = world.host(5);
     let cell = CellId { tenant: 2, id: 7 };
     let refused = Failure::Bucket(bucket_cell::Error::Kms("tenant 2: no KEK in the KMS".into()));
     for calls in 1..=2 {
-        let opened = open_on(&world, &host, &made(cell)).map(drop);
+        let opened = open_on(&world, &host, &made(cell)).await.map(drop);
         assert_eq!(opened, Err(refused.clone()));
         assert_eq!(world.calls(), (calls, 0));
     }
-    assert_eq!(world.head_of(cell), None);
-    assert!(!world.head_of(cell).is_some());
-    assert_eq!(world.objects(), Vec::<(String, Vec<u8>)>::new());
+    assert_eq!(world.head_of(cell).await, None);
+    assert!(!world.head_of(cell).await.is_some());
+    assert_eq!(world.objects().await, Vec::<(String, Vec<u8>)>::new());
 }
 
 /// AC #3: a store whose tenant's KEK is revoked opens on no host taking its cell, the error naming
 /// the tenant; its KEK given back, it opens.
-#[test]
-fn stores_of_revoked_tenants_open_not() {
+#[tokio::test(flavor = "multi_thread")]
+async fn stores_of_revoked_tenants_open_not() {
     let world = World::new();
     let dir = made(test_cell(7));
-    let (store, uploader) = open_on(&world, &world.host(5), &dir).unwrap();
-    written(&store, &uploader, ExtentId::new(7, 1), &noise(1, 4096));
+    let (store, uploader) = open_on(&world, &world.host(5), &dir).await.unwrap();
+    written(&store, &uploader, ExtentId::new(7, 1), &noise(1, 4096)).await;
     drop((store, uploader));
     world.kms.inner().revoke(TENANT).unwrap();
-    let refused = open_on(&world, &world.host(6), &dir.crash(0)).map(drop).unwrap_err();
+    let refused = open_on(&world, &world.host(6), &dir.crash(0)).await.map(drop).unwrap_err();
     assert_eq!(refused.to_string(), "tenant 1: its KEK is revoked");
     assert_eq!(refused, Failure::Bucket(bucket_cell::Error::Kms(refused.to_string())));
     world.kms.inner().unrevoke(TENANT).unwrap();
     let host = world.host(6);
-    let (store, _uploader) = open_on(&world, &host, &dir.crash(0)).unwrap();
-    assert_eq!(read(&world, &host, &store, ExtentId::new(7, 1), 4096), Ok(noise(1, 4096)));
+    let (store, _uploader) = open_on(&world, &host, &dir.crash(0)).await.unwrap();
+    assert_eq!(read(&world, &host, &store, ExtentId::new(7, 1), 4096).await, Ok(noise(1, 4096)));
 }
 
 /// AC #4: a generation of a cell's DEK added, the store's next opening encrypts its new objects
 /// under it, what was encrypted under the one before read as before. The cell's KEK rotated, its
 /// record's DEKs are rewrapped under the new one, the same DEKs, by one conditional update, and its
 /// store opens and reads as before.
-#[test]
-fn generations_encrypt_new_objects_and_rotations_rewrap() {
+#[tokio::test(flavor = "multi_thread")]
+async fn generations_encrypt_new_objects_and_rotations_rewrap() {
     let world = World::new();
     let host = world.host(5);
     let dir = made(CELL);
-    let (store, uploader) = open_on(&world, &host, &dir).unwrap();
-    written(&store, &uploader, ExtentId::new(7, 1), &noise(1, 4096));
+    let (store, uploader) = open_on(&world, &host, &dir).await.unwrap();
+    written(&store, &uploader, ExtentId::new(7, 1), &noise(1, 4096)).await;
     let kms = host.runtime.keys.kms.clone();
-    let cell_keys = CellKeys::of(CELL, &world.head(CELL), kms.clone());
-    let added = world.runtime.block_on(keys::add_generation(&*world.bucket, &cell_keys, CELL));
+    let cell_keys = CellKeys::of(CELL, &world.head(CELL).await, kms.clone());
+    let added = keys::add_generation(&*world.bucket, &cell_keys, CELL).await;
     assert_eq!(added, Ok(2));
     assert_eq!(store.keys().generations(7), [1]);
     drop((store, uploader));
-    let (store, uploader) = open_on(&world, &host, &dir.crash(0)).unwrap();
+    let (store, uploader) = open_on(&world, &host, &dir.crash(0)).await.unwrap();
     assert_eq!(store.keys().generations(7), [1, 2]);
     assert_eq!(store.keys().encrypting().1, KeyId { cell: 7, generation: 2 });
-    written(&store, &uploader, ExtentId::new(7, 2), &noise(2, 4096));
+    written(&store, &uploader, ExtentId::new(7, 2), &noise(2, 4096)).await;
     let first = location(&store, ExtentId::new(7, 2)).key;
-    assert_eq!(segment_key(&first, &world.object(&first)), KeyId { cell: 7, generation: 2 });
-    assert_eq!(read(&world, &host, &store, ExtentId::new(7, 1), 4096), Ok(noise(1, 4096)));
-    assert_eq!(read(&world, &host, &store, ExtentId::new(7, 2), 4096), Ok(noise(2, 4096)));
-    let before = world.head(CELL).deks;
+    assert_eq!(segment_key(&first, &world.object(&first).await), KeyId { cell: 7, generation: 2 });
+    assert_eq!(read(&world, &host, &store, ExtentId::new(7, 1), 4096).await, Ok(noise(1, 4096)));
+    assert_eq!(read(&world, &host, &store, ExtentId::new(7, 2), 4096).await, Ok(noise(2, 4096)));
+    let before = world.head(CELL).await.deks;
     drop((store, uploader));
 
     // The cell's KEK rotated.
-    let rotated = world.runtime.block_on(keys::rotate(&*world.bucket, &kms, CELL));
+    let rotated = keys::rotate(&*world.bucket, &kms, CELL).await;
     assert_eq!(rotated, Ok((2, true)));
-    assert_eq!(world.head(CELL).keks.iter().map(|kek| kek.generation).collect::<Vec<_>>(), [1, 2]);
-    let new = futures::executor::block_on(
-        world.kms.inner().unwrap(TENANT, &world.head(CELL).keks[1].wrapped),
+    assert_eq!(
+        world.head(CELL).await.keks.iter().map(|kek| kek.generation).collect::<Vec<_>>(),
+        [1, 2]
     );
+    let new = world.kms.inner().unwrap(TENANT, &world.head(CELL).await.keks[1].wrapped).await;
     let (old, new) = (
-        futures::executor::block_on(
-            world.kms.inner().unwrap(TENANT, &world.head(CELL).keks[0].wrapped),
-        )
-        .unwrap(),
+        world.kms.inner().unwrap(TENANT, &world.head(CELL).await.keks[0].wrapped).await.unwrap(),
         new.unwrap(),
     );
-    let after = world.head(CELL).deks;
+    let after = world.head(CELL).await.deks;
     assert_eq!(after.len(), before.len());
     for (before, after) in before.iter().zip(&after) {
         assert_eq!((after.generation, after.kek), (before.generation, 2));
@@ -466,23 +465,23 @@ fn generations_encrypt_new_objects_and_rotations_rewrap() {
     // Another placement takes the cell after the rotation, unwrapping the new KEK: both
     // generations read.
     let other = world.host(6);
-    let (store, _uploader) = open_on(&world, &other, &dir.crash(0)).unwrap();
-    assert_eq!(read(&world, &other, &store, ExtentId::new(7, 1), 4096), Ok(noise(1, 4096)));
-    assert_eq!(read(&world, &other, &store, ExtentId::new(7, 2), 4096), Ok(noise(2, 4096)));
+    let (store, _uploader) = open_on(&world, &other, &dir.crash(0)).await.unwrap();
+    assert_eq!(read(&world, &other, &store, ExtentId::new(7, 1), 4096).await, Ok(noise(1, 4096)));
+    assert_eq!(read(&world, &other, &store, ExtentId::new(7, 2), 4096).await, Ok(noise(2, 4096)));
 }
 
 /// AC #5, as TASK-411.28 left it: an object of a cell put at its key in the clear, its encryption's
 /// kind made 0 as one who can write the bucket would (a downgrade): refused by the cell's readers
 /// and by a reader holding no key, as the collector reads, as corrupt, whether its tail was kept
 /// before or not. Its newest checkpoint so: its store's recovery refuses it.
-#[test]
-fn objects_of_encrypted_cells_unencrypted_are_refused() {
+#[tokio::test(flavor = "multi_thread")]
+async fn objects_of_encrypted_cells_unencrypted_are_refused() {
     let world = World::new();
     let host = world.host(5);
     let dir = made(test_cell(7));
-    let (store, uploader) = open_on(&world, &host, &dir).unwrap();
+    let (store, uploader) = open_on(&world, &host, &dir).await.unwrap();
     let extent = ExtentId::new(7, 1);
-    written(&store, &uploader, extent, &noise(1, 4096));
+    written(&store, &uploader, extent, &noise(1, 4096)).await;
     let at = location(&store, extent);
     // Its trailer's encryption's kind, after the lengths of its data, parts and footer, and the
     // footer's CRC: 0, in the clear.
@@ -492,62 +491,62 @@ fn objects_of_encrypted_cells_unencrypted_are_refused() {
         assert!(extent_frame::in_the_clear(&bytes));
         bytes
     };
-    world.put(&at.key, downgraded(world.object(&at.key)));
+    world.put(&at.key, downgraded(world.object(&at.key).await)).await;
     let clear = "an object's trailer: an encryption in the clear, which no object has";
     let corrupt = bucket_cell::Error::Corrupt(clear.into());
     // A host's fetchers, holding the store's keys, of no tail kept.
-    assert_eq!(read(&world, &host, &store, extent, 4096), Err(corrupt.clone()));
+    assert_eq!(read(&world, &host, &store, extent, 4096).await, Err(corrupt.clone()));
     // And a reader holding none, as the collector reads.
-    assert_eq!(fetched(&world, &Memory::new(), extent, &at), Err(corrupt.clone()));
+    assert_eq!(fetched(&world, &Memory::new(), extent, &at).await, Err(corrupt.clone()));
     // Its newest checkpoint so: its store's recovery refuses it.
     drop((store, uploader));
-    let objects = world.objects();
+    let objects = world.objects().await;
     let mut checkpoints = objects.iter().filter(|(key, _)| {
         matches!(layout::kind(key), layout::Kind::Checkpoint { cell, .. } if cell.id == 7)
     });
     let (key, bytes) = checkpoints.next_back().unwrap();
-    world.put(key, downgraded(bytes.clone()));
-    let refused = open_on(&world, &world.host(6), &dir.crash(0)).map(drop).unwrap_err();
+    world.put(key, downgraded(bytes.clone())).await;
+    let refused = open_on(&world, &world.host(6), &dir.crash(0)).await.map(drop).unwrap_err();
     assert_eq!(refused, Failure::Bucket(corrupt));
 }
 
 /// AC #6: the object of an extent stored on its own, copied whole to another extent's key of the
 /// same cell, is refused there: its footer, which its MAC covers, names the extent it is of. The
 /// moves of an object, copied to another's moves, likewise.
-#[test]
-fn own_extents_copied_to_another_key_are_refused() {
+#[tokio::test(flavor = "multi_thread")]
+async fn own_extents_copied_to_another_key_are_refused() {
     let world = World::new();
     let host = world.host(5);
     let dir = made(test_cell(7));
-    let (store, uploader) = open_on(&world, &host, &dir).unwrap();
+    let (store, uploader) = open_on(&world, &host, &dir).await.unwrap();
     let large = crate::Options::default().large_extent as usize;
     let (one, other) = (ExtentId::new(7, 1), ExtentId::new(7, 2));
-    store.write(one, 0, &noise(1, large)).unwrap();
-    store.write(other, 0, &noise(2, large)).unwrap();
-    store.commit(None).unwrap();
-    crate::upload::wait_on(uploader.uploaded(store.last_commit().unwrap())).unwrap();
+    store.write(one, 0, &noise(1, large)).await.unwrap();
+    store.write(other, 0, &noise(2, large)).await.unwrap();
+    store.commit(None).await.unwrap();
+    uploader.uploaded(store.last_commit().unwrap()).await.unwrap();
     let (at_one, at_other) = (location(&store, one), location(&store, other));
     assert!(matches!(layout::kind(&at_one.key), layout::Kind::Extent { .. }), "{}", at_one.key);
-    assert_eq!(read(&world, &host, &store, other, large), Ok(noise(2, large)));
-    world.put(&at_other.key, world.object(&at_one.key));
+    assert_eq!(read(&world, &host, &store, other, large).await, Ok(noise(2, large)));
+    world.put(&at_other.key, world.object(&at_one.key).await).await;
     let refused = bucket_cell::Error::Corrupt(format!("{} holds extent {one:?}", at_other.key));
-    assert_eq!(fetched(&world, &Memory::new(), other, &at_other), Err(refused.clone()));
+    assert_eq!(fetched(&world, &Memory::new(), other, &at_other).await, Err(refused.clone()));
     let host = world.host(5);
     let _held = host.memory.keys().hold(store.keys().clone());
-    assert_eq!(fetched(&world, &host.memory, other, &at_other), Err(refused));
+    assert_eq!(fetched(&world, &host.memory, other, &at_other).await, Err(refused));
 }
 
 /// AC #7: a host's fetchers open what they keep under the keys of the stores the host serves, not
 /// a store's own: an encrypted part read before the host holds its key is unread, and read once it
 /// holds it, by the tail and part kept; and served to a peer as stored, holding none.
-#[test]
-fn hosts_fetchers_open_parts_under_the_keys_of_the_stores_they_serve() {
+#[tokio::test(flavor = "multi_thread")]
+async fn hosts_fetchers_open_parts_under_the_keys_of_the_stores_they_serve() {
     let world = World::new();
     let host = world.host(5);
     let dir = made(test_cell(7));
-    let (store, uploader) = open_on(&world, &host, &dir).unwrap();
+    let (store, uploader) = open_on(&world, &host, &dir).await.unwrap();
     let extent = ExtentId::new(7, 1);
-    written(&store, &uploader, extent, &noise(1, 4096));
+    written(&store, &uploader, extent, &noise(1, 4096)).await;
     let at = location(&store, extent);
     // Another host's memory, of no store yet, which keeps what it reads in a cache.
     let cache_dir = tempfile::tempdir().unwrap();
@@ -555,21 +554,21 @@ fn hosts_fetchers_open_parts_under_the_keys_of_the_stores_they_serve() {
     let memory = Memory::new();
     let budget = Budget::new(Limits::UNBOUNDED);
     let fetcher = Fetcher::new(world.bucket.clone(), budget, memory.clone(), Some(cache));
-    let reading = || world.runtime.block_on(fetcher.read(extent, &at, 0, 4096, Priority::Demand));
+    let reading = async || fetcher.read(extent, &at, 0, 4096, Priority::Demand).await;
     let key = KeyId { cell: 7, generation: 1 };
-    assert_eq!(reading(), Err(bucket_cell::Error::NoKey(key)));
+    assert_eq!(reading().await, Err(bucket_cell::Error::NoKey(key)));
     // Served to a peer as stored, encrypted.
-    let tail = world.runtime.block_on(bucket_cell::object::tail(&*world.bucket, &at.key));
+    let tail = bucket_cell::object::tail(&*world.bucket, &at.key).await;
     let stored = tail.unwrap().unwrap().parts.stored[0];
-    let served = world.runtime.block_on(fetcher.stored_part(&at.key, 0)).unwrap();
+    let served = fetcher.stored_part(&at.key, 0).await.unwrap();
     assert_eq!(
         served.as_deref(),
-        Some(&world.object(&at.key)[stored.range().start as usize..][..stored.len as usize])
+        Some(&world.object(&at.key).await[stored.range().start as usize..][..stored.len as usize])
     );
     // The store's keys held among the host's: read, by what it kept, with no GET more.
     let held = memory.keys().hold(store.keys().clone());
-    world.runtime.block_on(world.bucket.delete(&at.key)).unwrap();
-    assert_eq!(reading(), Ok(noise(1, 4096)));
+    world.bucket.delete(&at.key).await.unwrap();
+    assert_eq!(reading().await, Ok(noise(1, 4096)));
     drop(held);
 }
 
@@ -577,23 +576,23 @@ fn hosts_fetchers_open_parts_under_the_keys_of_the_stores_they_serve() {
 /// inherits asked for first; then, of a store at no version, a version of that commit made and
 /// uploaded, and a store at it opened on `host`, which forks; then the fork in the bucket, its
 /// child's record and checkpoint, and its keys.
-fn forked<K: Kms>(
+async fn forked<K: Kms>(
     (world, host): (&World<K>, &Host),
     store: &LocalCell<MemDir>,
     uploader: &Uploader<MemDir>,
     child: Child,
 ) -> Result<(), Failure> {
-    let inheriting = crate::upload::wait_on(uploader.inheriting(child))?;
+    let inheriting = uploader.inheriting(child).await?;
     if uploader.is_at_version() {
-        return crate::upload::wait_on(uploader.forked(child, inheriting));
+        return uploader.forked(child, inheriting).await;
     }
     let id = rand::random::<u64>().max(1);
     let version = extent_frame::segment::NewVersion { id, keep_last: None };
-    crate::upload::wait_on(uploader.uploaded(store.commit_version(version, false).unwrap()))?;
-    crate::upload::wait_on(uploader.share_version(id, true))?;
+    uploader.uploaded(store.commit_version(version, false).await.unwrap()).await?;
+    uploader.share_version(id, true).await?;
     let dir = made_at_version(store.description().cell, id);
-    let (_at, at_version) = open_on(world, host, &dir)?;
-    crate::upload::wait_on(at_version.forked(child, inheriting))
+    let (_at, at_version) = open_on(world, host, &dir).await?;
+    at_version.forked(child, inheriting).await
 }
 
 /// TASK-411.4 AC #2, #3, #4: a fork into a cell of another tenant's, and its fork into a third
@@ -604,29 +603,30 @@ fn forked<K: Kms>(
 /// The parent's tenant's KEK destroyed, another host opens the child and the grandchild, reading
 /// every extent they inherited, with only their own tenant's KEK unwrapped, one call a cell; the
 /// parent opens no more.
-#[test]
-fn forks_into_other_cells_keep_what_they_inherit_rewrapped_and_outlive_their_parents_tenant() {
+#[tokio::test(flavor = "multi_thread")]
+async fn forks_into_other_cells_keep_what_they_inherit_rewrapped_and_outlive_their_parents_tenant()
+{
     let world = World::new();
     world.kms.inner().create(OTHER).unwrap();
     let host = world.pooled_host(5);
     let kms = host.runtime.keys.kms.clone();
     let parent = test_cell(7);
     let parent_dir = made(parent);
-    let (store, uploader) = open_on(&world, &host, &parent_dir).unwrap();
+    let (store, uploader) = open_on(&world, &host, &parent_dir).await.unwrap();
     let a = ExtentId::new(7, 1);
-    written(&store, &uploader, a, &noise(1, 4096));
+    written(&store, &uploader, a, &noise(1, 4096)).await;
     // The host serves the other tenant too: its pool filled, as a store of its opening fills it.
     kms.refill(CellId { tenant: OTHER, id: 1 });
-    world.runtime.block_on(kms.filled(OTHER));
-    world.runtime.block_on(kms.filled(TENANT));
+    kms.filled(OTHER).await;
+    kms.filled(TENANT).await;
     assert_eq!(kms.in_pool(OTHER), 4);
     world.kms.reset();
 
     let child = child_in(OTHER, 8);
-    forked((&world, &host), &store, &uploader, child).unwrap();
+    forked((&world, &host), &store, &uploader, child).await.unwrap();
     assert_eq!(world.calls(), (0, 0));
     assert_eq!(kms.in_pool(OTHER), 3);
-    let record = world.head(child.cell);
+    let record = world.head(child.cell).await;
     assert_eq!(record.deks.len(), 1);
     let inherited = |record: &Head| {
         let had = record.inherited.iter();
@@ -635,9 +635,9 @@ fn forks_into_other_cells_keep_what_they_inherit_rewrapped_and_outlive_their_par
     assert_eq!(inherited(&record), [(parent, 1, 1)]);
     // Its cell, made at the fork with a KEK of the pool, held by no placement: the parent's DEK
     // unwraps under it, for the child alone.
-    let made_cell = world.head_of(child.cell).unwrap();
+    let made_cell = world.head_of(child.cell).await.unwrap();
     assert_eq!((made_cell.epoch, made_cell.token, made_cell.kind), (0, 0, None));
-    let kek = world.unwrapped(OTHER, &made_cell.keks[0].wrapped);
+    let kek = world.unwrapped(OTHER, &made_cell.keks[0].wrapped).await;
     let dek = keys::unwrap_inherited(&kek, child.cell, &record.inherited[0]).unwrap();
     assert_eq!(dek.expose(), store.keys().encrypting().0.expose());
     assert!(keys::unwrap_inherited(&kek, test_cell(8), &record.inherited[0]).is_err());
@@ -645,29 +645,30 @@ fn forks_into_other_cells_keep_what_they_inherit_rewrapped_and_outlive_their_par
 
     // Opened here: no call either, the cell's KEK kept from its making for its first taking.
     let child_dir = made(child.cell);
-    let (child_store, child_uploader) = open_on(&world, &host, &child_dir).unwrap();
+    let (child_store, child_uploader) = open_on(&world, &host, &child_dir).await.unwrap();
     assert_eq!(world.calls(), (0, 0));
-    assert_eq!(world.head_of(child.cell).unwrap().epoch, 1);
-    assert_eq!(read(&world, &host, &child_store, a, 4096), Ok(noise(1, 4096)));
+    assert_eq!(world.head_of(child.cell).await.unwrap().epoch, 1);
+    assert_eq!(read(&world, &host, &child_store, a, 4096).await, Ok(noise(1, 4096)));
     let b = ExtentId::new(8, child_uploader.next_sequence().max(1));
-    written(&child_store, &child_uploader, b, &noise(2, 4096));
+    written(&child_store, &child_uploader, b, &noise(2, 4096)).await;
 
     // Its fork into a third cell keeps both its parents' DEKs: the child's, and the parent's the
     // child kept.
     let grandchild = child_in(OTHER, 9);
-    forked((&world, &host), &child_store, &child_uploader, grandchild).unwrap();
+    forked((&world, &host), &child_store, &child_uploader, grandchild).await.unwrap();
     assert_eq!(world.calls(), (0, 0));
-    assert_eq!(inherited(&world.head(grandchild.cell)), [(parent, 1, 1), (child.cell, 1, 1)]);
+    assert_eq!(inherited(&world.head(grandchild.cell).await), [(parent, 1, 1), (child.cell, 1, 1)]);
     let grandchild_dir = made(grandchild.cell);
-    let (grandchild_store, _grandchild_uploader) = open_on(&world, &host, &grandchild_dir).unwrap();
+    let (grandchild_store, _grandchild_uploader) =
+        open_on(&world, &host, &grandchild_dir).await.unwrap();
     assert_eq!(world.calls(), (0, 0));
     for (extent, data) in [(a, noise(1, 4096)), (b, noise(2, 4096))] {
-        assert_eq!(read(&world, &host, &grandchild_store, extent, 4096), Ok(data));
+        assert_eq!(read(&world, &host, &grandchild_store, extent, 4096).await, Ok(data));
     }
     // A take leaving the pool low refills it: a batch of wraps, once the fork took its KEK.
     assert_eq!(kms.in_pool(OTHER), 2);
-    forked((&world, &host), &child_store, &child_uploader, child_in(OTHER, 10)).unwrap();
-    world.runtime.block_on(kms.filled(OTHER));
+    forked((&world, &host), &child_store, &child_uploader, child_in(OTHER, 10)).await.unwrap();
+    kms.filled(OTHER).await;
     assert_eq!((world.calls(), kms.in_pool(OTHER)), ((4, 0), 5));
     drop((store, uploader, child_store, child_uploader, grandchild_store, _grandchild_uploader));
 
@@ -675,14 +676,14 @@ fn forks_into_other_cells_keep_what_they_inherit_rewrapped_and_outlive_their_par
     world.kms.inner().destroy(TENANT).unwrap();
     world.kms.reset();
     let other = world.host(6);
-    let refused = open_on(&world, &other, &parent_dir.crash(0)).map(drop).unwrap_err();
+    let refused = open_on(&world, &other, &parent_dir.crash(0)).await.map(drop).unwrap_err();
     assert_eq!(refused.to_string(), "tenant 1: its KEK is destroyed");
     assert_eq!(world.calls(), (0, 1));
     for (dir, name) in [(&child_dir, "child"), (&grandchild_dir, "grandchild")] {
-        let (store, _uploader) = open_on(&world, &other, &dir.crash(0)).unwrap();
+        let (store, _uploader) = open_on(&world, &other, &dir.crash(0)).await.unwrap();
         for (extent, data) in [(a, noise(1, 4096)), (b, noise(2, 4096))] {
             let at = location(&store, extent).key;
-            assert_eq!(read(&world, &other, &store, extent, 4096), Ok(data), "{name}: {at}");
+            assert_eq!(read(&world, &other, &store, extent, 4096).await, Ok(data), "{name}: {at}");
         }
     }
     // One unwrap a cell of the other tenant's; none of the parent's tenant's.
@@ -696,26 +697,26 @@ fn forks_into_other_cells_keep_what_they_inherit_rewrapped_and_outlive_their_par
 /// version's tenant's KEK is revoked, refuses forks of it: no record made either way, no KEK taken
 /// from the pool. The version's tenant's KEK destroyed, the clone reads all it inherited; the
 /// version forks no more.
-#[test]
-fn versions_fork_into_other_tenants_cells_rewrapped_unless_their_keys_are_refused() {
+#[tokio::test(flavor = "multi_thread")]
+async fn versions_fork_into_other_tenants_cells_rewrapped_unless_their_keys_are_refused() {
     let world = World::new();
     world.kms.inner().create(OTHER).unwrap();
     let host = world.pooled_host(5);
     let parent_dir = made(test_cell(7));
-    let (store, uploader) = open_on(&world, &host, &parent_dir).unwrap();
+    let (store, uploader) = open_on(&world, &host, &parent_dir).await.unwrap();
     let a = ExtentId::new(7, 1);
-    written(&store, &uploader, a, &noise(1, 4096));
+    written(&store, &uploader, a, &noise(1, 4096)).await;
     let id = 0xa;
     let epoch =
-        store.commit_version(extent_frame::segment::NewVersion { id, keep_last: None }, true);
-    crate::upload::wait_on(uploader.uploaded(epoch.unwrap())).unwrap();
-    crate::upload::wait_on(uploader.share_version(id, true)).unwrap();
+        store.commit_version(extent_frame::segment::NewVersion { id, keep_last: None }, true).await;
+    uploader.uploaded(epoch.unwrap()).await.unwrap();
+    uploader.share_version(id, true).await.unwrap();
     drop((store, uploader));
     let point_dir = made_at_version(test_cell(7), id);
 
     // A host whose KMS refuses the version's tenant: no copy, no fork.
     world.kms.inner().revoke(TENANT).unwrap();
-    let refused = open_on(&world, &world.pooled_host(6), &point_dir.crash(0)).map(drop);
+    let refused = open_on(&world, &world.pooled_host(6), &point_dir.crash(0)).await.map(drop);
     assert_eq!(refused.unwrap_err().to_string(), "tenant 1: its KEK is revoked");
     world.kms.inner().unrevoke(TENANT).unwrap();
 
@@ -723,15 +724,15 @@ fn versions_fork_into_other_tenants_cells_rewrapped_unless_their_keys_are_refuse
     // before anything of it is made.
     let forker = world.pooled_host(7);
     let kms = forker.runtime.keys.kms.clone();
-    let (copy, version_uploader) = open_on(&world, &forker, &point_dir.crash(0)).unwrap();
+    let (copy, version_uploader) = open_on(&world, &forker, &point_dir.crash(0)).await.unwrap();
     kms.refill(CellId { tenant: OTHER, id: 1 });
-    world.runtime.block_on(kms.filled(OTHER));
+    kms.filled(OTHER).await;
     kms.revoked(TENANT, "tenant 1: its KEK is revoked");
     let clone = child_in(OTHER, 10);
-    let refused = forked((&world, &forker), &copy, &version_uploader, clone).unwrap_err();
+    let refused = forked((&world, &forker), &copy, &version_uploader, clone).await.unwrap_err();
     let revoked = bucket_cell::Error::Kms("tenant 1: its KEK is revoked".into());
     assert_eq!(refused, Failure::Bucket(revoked));
-    assert_eq!(world.head_of(clone.cell), None);
+    assert_eq!(world.head_of(clone.cell).await, None);
     assert_eq!(kms.in_pool(OTHER), 4);
     drop((copy, version_uploader));
 
@@ -740,27 +741,29 @@ fn versions_fork_into_other_tenants_cells_rewrapped_unless_their_keys_are_refuse
     let forker = world.pooled_host(8);
     let kms = forker.runtime.keys.kms.clone();
     world.kms.reset();
-    let (copy, version_uploader) = open_on(&world, &forker, &point_dir.crash(0)).unwrap();
+    let (copy, version_uploader) = open_on(&world, &forker, &point_dir.crash(0)).await.unwrap();
     assert_eq!(world.calls(), (0, 1));
     kms.refill(CellId { tenant: OTHER, id: 1 });
-    world.runtime.block_on(kms.filled(OTHER));
+    kms.filled(OTHER).await;
     world.kms.reset();
-    forked((&world, &forker), &copy, &version_uploader, clone).unwrap();
+    forked((&world, &forker), &copy, &version_uploader, clone).await.unwrap();
     assert_eq!(world.calls(), (0, 0));
-    let record = world.head(clone.cell);
+    let record = world.head(clone.cell).await;
     let inherited: Vec<_> = record.inherited.iter().map(|had| had.cell).collect();
     assert_eq!(inherited, [test_cell(7)]);
     assert_eq!(record.origin(), Some(layout::Origin { parent: test_cell(7), at: 1 }));
     let clone_dir = made(clone.cell);
-    let (clone_store, _clone_uploader) = open_on(&world, &forker, &clone_dir).unwrap();
-    assert_eq!(read(&world, &forker, &clone_store, a, 4096), Ok(noise(1, 4096)));
+    let (clone_store, _clone_uploader) = open_on(&world, &forker, &clone_dir).await.unwrap();
+    assert_eq!(read(&world, &forker, &clone_store, a, 4096).await, Ok(noise(1, 4096)));
     drop((copy, version_uploader, clone_store, _clone_uploader));
 
     world.kms.inner().destroy(TENANT).unwrap();
     let other = world.host(9);
-    let (clone_store, _clone_uploader) = open_on(&world, &other, &clone_dir.crash(0)).unwrap();
-    assert_eq!(read(&world, &other, &clone_store, a, 4096), Ok(noise(1, 4096)));
-    let refused = open_on(&world, &world.host(10), &point_dir.crash(0)).map(drop).unwrap_err();
+    let (clone_store, _clone_uploader) =
+        open_on(&world, &other, &clone_dir.crash(0)).await.unwrap();
+    assert_eq!(read(&world, &other, &clone_store, a, 4096).await, Ok(noise(1, 4096)));
+    let refused =
+        open_on(&world, &world.host(10), &point_dir.crash(0)).await.map(drop).unwrap_err();
     assert_eq!(refused.to_string(), "tenant 1: its KEK is destroyed");
 }
 
@@ -769,16 +772,16 @@ fn versions_fork_into_other_tenants_cells_rewrapped_unless_their_keys_are_refuse
 /// a fork asks for a KEK once and refills the pool. Destroyed, unheard, the KEKs the pool wrapped
 /// before make cells still, until a refill's wraps are refused: the pool goes with them, and the
 /// next fork is refused.
-#[test]
-fn revoked_tenants_pools_go_and_forks_into_their_new_cells_are_refused() {
+#[tokio::test(flavor = "multi_thread")]
+async fn revoked_tenants_pools_go_and_forks_into_their_new_cells_are_refused() {
     let world = World::new();
     world.kms.inner().create(OTHER).unwrap();
     let host = world.pooled_host(5);
     let kms = host.runtime.keys.kms.clone();
-    let (store, uploader) = open_on(&world, &host, &made(test_cell(7))).unwrap();
-    written(&store, &uploader, ExtentId::new(7, 1), &noise(1, 4096));
+    let (store, uploader) = open_on(&world, &host, &made(test_cell(7))).await.unwrap();
+    written(&store, &uploader, ExtentId::new(7, 1), &noise(1, 4096)).await;
     kms.refill(CellId { tenant: OTHER, id: 1 });
-    world.runtime.block_on(kms.filled(OTHER));
+    kms.filled(OTHER).await;
     assert_eq!(kms.in_pool(OTHER), 4);
 
     world.kms.inner().revoke(OTHER).unwrap();
@@ -786,46 +789,46 @@ fn revoked_tenants_pools_go_and_forks_into_their_new_cells_are_refused() {
     assert_eq!(kms.in_pool(OTHER), 0);
     world.kms.reset();
     let child = child_in(OTHER, 8);
-    let refused = forked((&world, &host), &store, &uploader, child).unwrap_err();
+    let refused = forked((&world, &host), &store, &uploader, child).await.unwrap_err();
     let revoked = bucket_cell::Error::Kms("tenant 2: its KEK is revoked".into());
     assert_eq!(refused, Failure::Bucket(revoked));
     assert_eq!(world.calls(), (1, 0));
-    assert_eq!(world.head_of(child.cell), None);
+    assert_eq!(world.head_of(child.cell).await, None);
 
     world.kms.inner().unrevoke(OTHER).unwrap();
-    forked((&world, &host), &store, &uploader, child).unwrap();
-    world.runtime.block_on(kms.filled(OTHER));
+    forked((&world, &host), &store, &uploader, child).await.unwrap();
+    kms.filled(OTHER).await;
     assert_eq!((world.calls(), kms.in_pool(OTHER)), ((1 + 1 + 4, 0), 4));
 
     world.kms.inner().destroy(OTHER).unwrap();
     for id in [9, 10, 11] {
-        forked((&world, &host), &store, &uploader, child_in(OTHER, id)).unwrap();
+        forked((&world, &host), &store, &uploader, child_in(OTHER, id)).await.unwrap();
     }
     // The last take left 1: its refill, refused, dropped the pool.
-    world.runtime.block_on(kms.filled(OTHER));
+    kms.filled(OTHER).await;
     assert_eq!(kms.in_pool(OTHER), 0);
     let last = child_in(OTHER, 12);
-    let refused = forked((&world, &host), &store, &uploader, last).unwrap_err();
+    let refused = forked((&world, &host), &store, &uploader, last).await.unwrap_err();
     let destroyed = bucket_cell::Error::Kms("tenant 2: its KEK is destroyed".into());
     assert_eq!(refused, Failure::Bucket(destroyed.clone()));
     assert_eq!(kms.refuses(CellId { tenant: OTHER, id: 1 }), Some(destroyed));
-    assert_eq!(world.head_of(last.cell), None);
+    assert_eq!(world.head_of(last.cell).await, None);
 }
 
 /// TASK-411.4, as TASK-411.28 left it: an encrypted store forks into no cell of a tenant the KMS has no
 /// KEK of: refused before anything is made, as destroyed, naming the tenant; no cell is made in the
 /// clear.
-#[test]
-fn forks_into_cells_of_tenants_with_no_kek_are_refused() {
+#[tokio::test(flavor = "multi_thread")]
+async fn forks_into_cells_of_tenants_with_no_kek_are_refused() {
     let world = World::new();
     let host = world.host(5);
-    let (store, uploader) = open_on(&world, &host, &made(test_cell(7))).unwrap();
-    written(&store, &uploader, ExtentId::new(7, 1), &noise(1, 4096));
+    let (store, uploader) = open_on(&world, &host, &made(test_cell(7))).await.unwrap();
+    written(&store, &uploader, ExtentId::new(7, 1), &noise(1, 4096)).await;
     let child = child_in(3, 8);
-    let refused = forked((&world, &host), &store, &uploader, child).unwrap_err();
+    let refused = forked((&world, &host), &store, &uploader, child).await.unwrap_err();
     let none = bucket_cell::Error::Kms("tenant 3: no KEK in the KMS".into());
     assert_eq!(refused, Failure::Bucket(none));
-    assert_eq!(world.head_of(child.cell), None);
+    assert_eq!(world.head_of(child.cell).await, None);
 }
 
 /// TASK-411.19, as TASK-411.28 left it: a tenant whose KEK the KMS forgot (a real KMS's key
@@ -833,15 +836,15 @@ fn forks_into_cells_of_tenants_with_no_kek_are_refused() {
 /// gets no cell: a store opening on another host, of a new cell or of a new volume of its encrypted
 /// cell, and a fork of its open store into a new cell, are each refused, naming the tenant,
 /// nothing made. No marker is needed for it, nor written: no cell is ever made in the clear.
-#[test]
-fn tenants_whose_kek_the_kms_forgot_get_no_cell() {
+#[tokio::test(flavor = "multi_thread")]
+async fn tenants_whose_kek_the_kms_forgot_get_no_cell() {
     let dir = tempfile::tempdir().unwrap();
     let local = LocalKms::open(dir.path().join("kms")).unwrap();
     local.create(TENANT).unwrap();
     let world = World::with_kms(extent_keys::testing::Forgetting::new(local));
     let first = world.host(5);
-    let (store, remote) = open_on(&world, &first, &made(test_cell(7))).unwrap();
-    written(&store, &remote, ExtentId::new(7, 1), &noise(1, 4096));
+    let (store, remote) = open_on(&world, &first, &made(test_cell(7))).await.unwrap();
+    written(&store, &remote, ExtentId::new(7, 1), &noise(1, 4096)).await;
 
     world.kms.inner().inner().destroy(TENANT).unwrap();
     let none = "tenant 1: no KEK in the KMS";
@@ -849,18 +852,18 @@ fn tenants_whose_kek_the_kms_forgot_get_no_cell() {
     let second = world.host(6);
     let elsewhere = CellId { tenant: TENANT, id: 9 };
     for cell in [elsewhere, test_cell(8)] {
-        let opened = open_on(&world, &second, &made(cell)).map(drop);
+        let opened = open_on(&world, &second, &made(cell)).await.map(drop);
         assert_eq!(opened, Err(refused.clone()), "{cell}");
     }
-    assert_eq!(world.head_of(elsewhere), None);
-    assert_eq!(world.head(CELL).kind, None);
+    assert_eq!(world.head_of(elsewhere).await, None);
+    assert_eq!(world.head(CELL).await.kind, None);
     // The first host's open store forks into a new cell of the tenant's: refused before anything
     // of the fork is made.
     let child = child_in(TENANT, 10);
-    assert_eq!(forked((&world, &first), &store, &remote, child), Err(refused));
-    assert_eq!(world.head_of(child.cell), None);
+    assert_eq!(forked((&world, &first), &store, &remote, child).await, Err(refused));
+    assert_eq!(world.head_of(child.cell).await, None);
     drop((store, remote));
-    let objects: Vec<String> = world.objects().into_iter().map(|(key, _)| key).collect();
+    let objects: Vec<String> = world.objects().await.into_iter().map(|(key, _)| key).collect();
     assert!(objects.iter().all(|key| !key.ends_with("/encrypted")), "{objects:?}");
 }
 
@@ -888,8 +891,8 @@ fn in_the_clear(files: Vec<(String, Vec<u8>)>, data: &[u8]) -> Vec<String> {
 /// clear at any point of any of them; the store opened reads it, as it was before the crash
 /// (TASK-411.5, AC #3), and its segment closed again is encrypted, in its directory and in the
 /// bucket.
-#[test]
-fn segments_closed_again_are_never_in_the_clear() {
+#[tokio::test(flavor = "multi_thread")]
+async fn segments_closed_again_are_never_in_the_clear() {
     let world = World::new();
     let host = world.host(5);
     let cell = test_cell(7);
@@ -899,9 +902,9 @@ fn segments_closed_again_are_never_in_the_clear() {
     let extent = ExtentId::new(cell.id, 1);
     let data = noise(1, 8 * 4096);
     let crashed = {
-        let (store, uploader) = open_with(&world, &host, &dir, quiet.clone()).unwrap();
-        store.write(extent, 0, &data).unwrap();
-        store.commit(None).unwrap();
+        let (store, uploader) = open_with(&world, &host, &dir, quiet.clone()).await.unwrap();
+        store.write(extent, 0, &data).await.unwrap();
+        store.commit(None).await.unwrap();
         let crashed = dir.crash(0);
         uploader.cut_short()();
         crashed
@@ -913,7 +916,7 @@ fn segments_closed_again_are_never_in_the_clear() {
         attempt.fail_after(Some(attempts));
         let opened = open_with(&world, &host, &attempt, quiet.clone());
         assert_eq!(clear_files(&attempt, &data), Vec::<String>::new(), "budget {attempts}");
-        match opened {
+        match opened.await {
             Ok(opened) if !attempt.has_failed() => break opened,
             Ok((_, uploader)) => uploader.cut_short()(),
             Err(_) => {}
@@ -921,10 +924,10 @@ fn segments_closed_again_are_never_in_the_clear() {
         attempts += 1;
     };
     assert!(attempts > 10, "the opening took {attempts} operations");
-    assert_eq!(read(&world, &host, &store, extent, data.len()), Ok(data.clone()));
-    crate::upload::wait_on(uploader.uploaded(store.last_commit().unwrap())).unwrap();
+    assert_eq!(read(&world, &host, &store, extent, data.len()).await, Ok(data.clone()));
+    uploader.uploaded(store.last_commit().unwrap()).await.unwrap();
     let mut segments = 0;
-    for (key, bytes) in world.objects() {
+    for (key, bytes) in world.objects().await {
         assert!(!holds(&bytes, &data[..64]), "{key} holds the data");
         if let layout::Kind::Segment { .. } = layout::kind(&key) {
             let encryption = extent_frame::Frame::of(&bytes).unwrap().encryption;
@@ -950,20 +953,20 @@ fn files_of(dir: &MemDir, kind: &str) -> Vec<(String, Vec<u8>)> {
 /// [`crate::on_disk`], holding no key, finds none of its framed files and logs in the clear; and
 /// copies of them made as stores wrote them in the clear before TASK-411.28, a framed file's encryption
 /// of kind 0 and a log headed `FXLOG\0\0\x02`, all so.
-#[test]
-fn encrypted_stores_raw_files_and_logs_hold_no_plaintext() {
+#[tokio::test(flavor = "multi_thread")]
+async fn encrypted_stores_raw_files_and_logs_hold_no_plaintext() {
     let world = World::new();
     let host = world.host(5);
     let cell = test_cell(7);
     let dir = made(cell);
     let quiet = Options { interval: Duration::from_secs(3600), ..Options::default() };
-    let (store, uploader) = open_with(&world, &host, &dir, quiet).unwrap();
+    let (store, uploader) = open_with(&world, &host, &dir, quiet).await.unwrap();
     assert!(store.keys().encrypts());
     let (small, large) = (ExtentId::new(cell.id, 1), ExtentId::new(cell.id, 2));
     let small_data = noise(1, 8 * 4096);
     let large_data = noise(2, crate::Options::default().large_extent as usize);
-    store.write(small, 0, &small_data).unwrap();
-    store.write(large, 0, &large_data).unwrap();
+    store.write(small, 0, &small_data).await.unwrap();
+    store.write(large, 0, &large_data).await.unwrap();
     let check = |when: &str| {
         for (extent, data) in [(small, &small_data), (large, &large_data)] {
             let mut buf = vec![0; data.len()];
@@ -975,11 +978,11 @@ fn encrypted_stores_raw_files_and_logs_hold_no_plaintext() {
         assert_eq!(found, Vec::<String>::new(), "{when}");
     };
     check("written");
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     check("committed");
     store.close_segment().unwrap();
-    store.commit(None).unwrap();
-    store.closed(usize::MAX).unwrap();
+    store.commit(None).await.unwrap();
+    store.closed(usize::MAX).await.unwrap();
     check("framed");
     let logs = files_of(&dir, "logs/");
     assert!(!logs.is_empty());
@@ -1021,8 +1024,8 @@ fn encrypted_stores_raw_files_and_logs_hold_no_plaintext() {
 /// read back as written. Both on a directory whose I/O is its callers' alone, which packs ahead
 /// then and there, so that what is held is known at the commit. Before, an encrypted store held
 /// nothing and read all its parts back (TASK-411.5).
-#[test]
-fn encrypted_stores_hold_parts_packed_ahead_and_encrypt_them_framing() {
+#[tokio::test(flavor = "multi_thread")]
+async fn encrypted_stores_hold_parts_packed_ahead_and_encrypt_them_framing() {
     const MIB: usize = 1 << 20;
     // Letters at random, sixteen of them: compresses by about half, framed in a copy.
     let text = |seed: u64, len: usize| -> Vec<u8> {
@@ -1040,18 +1043,18 @@ fn encrypted_stores_hold_parts_packed_ahead_and_encrypt_them_framing() {
         let held = crate::HeldParts::new();
         let interval = Duration::from_secs(3600);
         let options = Options { interval, held: Some(held.clone()), ..Options::default() };
-        let (store, uploader) = open_with(&world, &host, &dir, options).unwrap();
+        let (store, uploader) = open_with(&world, &host, &dir, options).await.unwrap();
         assert!(store.keys().encrypts());
         for sequence in 1..=7 {
-            store.write(ExtentId::new(cell.id, sequence), 0, &data(sequence)).unwrap();
+            store.write(ExtentId::new(cell.id, sequence), 0, &data(sequence)).await.unwrap();
         }
-        store.commit(None).unwrap();
+        store.commit(None).await.unwrap();
         let holding = held.counts();
         assert!(holding.bytes > 2 * MIB as u64, "held {holding:?}");
         let before = crate::framing_reads().0;
         store.close_segment().unwrap();
-        store.commit(None).unwrap();
-        store.closed(usize::MAX).unwrap();
+        store.commit(None).await.unwrap();
+        store.closed(usize::MAX).await.unwrap();
         let read_back = crate::framing_reads().0 - before;
         assert_eq!(read_back, 4096, "the last part alone read back");
         assert_eq!(held.counts().bytes, 0, "taken");
@@ -1081,8 +1084,8 @@ fn encryptions_of(dir: &MemDir, kind: &str) -> Vec<(String, extent_frame::Encryp
 /// once, raw, none copied, the segment's tail alone framed. Before, an encrypted store framed every segment and large extent in a copy, writing
 /// its data twice. Nothing of the data is in the clear in the encrypted store's directory nor its
 /// bucket, and all of it reads back, here and fetched.
-#[test]
-fn encrypted_stores_frame_in_place_writing_what_clear_stores_write() {
+#[tokio::test(flavor = "multi_thread")]
+async fn encrypted_stores_frame_in_place_writing_what_clear_stores_write() {
     const MIB: usize = 1 << 20;
     let text = |seed: u64, len: usize| -> Vec<u8> {
         noise(seed, len).into_iter().map(|byte| b'a' + byte % 16).collect()
@@ -1102,16 +1105,16 @@ fn encrypted_stores_frame_in_place_writing_what_clear_stores_write() {
         let cell = test_cell(7);
         let dir = made(cell);
         let quiet = Options { interval: Duration::from_secs(3600), ..Options::default() };
-        let (store, uploader) = open_with(&world, &host, &dir, quiet).unwrap();
+        let (store, uploader) = open_with(&world, &host, &dir, quiet).await.unwrap();
         assert!(store.keys().encrypts());
         let before = (crate::written(), crate::segments_framed_in_place());
         for sequence in 1..=10 {
-            store.write(ExtentId::new(cell.id, sequence), 0, &data(sequence)).unwrap();
+            store.write(ExtentId::new(cell.id, sequence), 0, &data(sequence)).await.unwrap();
         }
-        store.commit(None).unwrap();
+        store.commit(None).await.unwrap();
         store.close_segment().unwrap();
-        store.commit(None).unwrap();
-        store.wait_framed().unwrap();
+        store.commit(None).await.unwrap();
+        store.wait_framed().await.unwrap();
         let (after, in_place) = (crate::written(), crate::segments_framed_in_place() - before.1);
         assert_eq!(in_place, 1, "the segment framed in place");
         let delta = |of: fn(&crate::Written) -> u64| of(&after) - of(&before.0);
@@ -1148,21 +1151,21 @@ fn encrypted_stores_frame_in_place_writing_what_clear_stores_write() {
             store.read(extent, 0, &mut buf).unwrap();
             assert!(buf == data, "{extent:?} read back");
         }
-        crate::upload::wait_on(uploader.uploaded(store.last_commit().unwrap())).unwrap();
+        uploader.uploaded(store.last_commit().unwrap()).await.unwrap();
         {
             assert_eq!(clear_files(&dir, &all), Vec::<String>::new());
-            assert_eq!(in_the_clear(world.objects(), &all), Vec::<String>::new());
+            assert_eq!(in_the_clear(world.objects().await, &all), Vec::<String>::new());
             for sequence in [1, 8] {
                 let extent = ExtentId::new(cell.id, sequence);
                 let at = location(&store, extent);
                 let encryption =
-                    extent_frame::Frame::of(&world.object(&at.key)).unwrap().encryption;
+                    extent_frame::Frame::of(&world.object(&at.key).await).unwrap().encryption;
                 assert!(
                     matches!(encryption, extent_frame::Encryption::Sectors { .. }),
                     "{}: {encryption:?}",
                     at.key
                 );
-                let fetched = fetched(&world, &host.memory, extent, &at).unwrap();
+                let fetched = fetched(&world, &host.memory, extent, &at).await.unwrap();
                 assert!(fetched == data(sequence), "{extent:?} fetched");
             }
         }
@@ -1178,8 +1181,8 @@ fn encrypted_stores_frame_in_place_writing_what_clear_stores_write() {
 /// opens, no file holding its data in the clear at any point; it reads back. Crashed once its
 /// framing is durable, the store reads the segment from its framed file, the object of its raw
 /// file's sectors, framed in place.
-#[test]
-fn segments_framed_in_place_encrypted_recover_from_crashes() {
+#[tokio::test(flavor = "multi_thread")]
+async fn segments_framed_in_place_encrypted_recover_from_crashes() {
     use std::sync::Mutex;
     use std::sync::mpsc::channel;
     let world = World::new();
@@ -1189,10 +1192,10 @@ fn segments_framed_in_place_encrypted_recover_from_crashes() {
     let quiet = Options { interval: Duration::from_secs(3600), ..Options::default() };
     let extent = ExtentId::new(cell.id, 1);
     let data = noise(1, (2 << 20) + 8 * 4096);
-    let (store, remote) = open_with(&world, &host, &dir, quiet.clone()).unwrap();
-    store.write(extent, 0, &data).unwrap();
-    store.commit(None).unwrap();
-    store.flush().unwrap();
+    let (store, remote) = open_with(&world, &host, &dir, quiet.clone()).await.unwrap();
+    store.write(extent, 0, &data).await.unwrap();
+    store.commit(None).await.unwrap();
+    store.flush().await.unwrap();
     let (framing, framed) = channel();
     let framing = Mutex::new(framing);
     let framing = fail::FailGuard::with_callback("segments::framing", move || {
@@ -1209,22 +1212,23 @@ fn segments_framed_in_place_encrypted_recover_from_crashes() {
     .unwrap();
     let before = crate::segments_framed_in_place();
     store.close_segment().unwrap();
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     framed.recv().unwrap();
     held.recv().unwrap();
     assert_eq!(crate::segments_framed_in_place() - before, 1, "framed in place");
     let torn = (0..4).map(|seed| dir.crash(seed)).collect::<Vec<_>>();
     drop((framing, durable, go));
-    store.wait_framed().unwrap();
+    store.wait_framed().await.unwrap();
     let whole = dir.crash(0);
     remote.cut_short()();
     drop(store);
 
     for (seed, crashed) in torn.iter().enumerate() {
         assert_eq!(clear_files(crashed, &data), Vec::<String>::new(), "seed {seed}");
-        let (store, remote) = open_with(&world, &host, &crashed.crash(0), quiet.clone()).unwrap();
+        let (store, remote) =
+            open_with(&world, &host, &crashed.crash(0), quiet.clone()).await.unwrap();
         assert_eq!(
-            read(&world, &host, &store, extent, data.len()),
+            read(&world, &host, &store, extent, data.len()).await,
             Ok(data.clone()),
             "seed {seed}"
         );
@@ -1240,7 +1244,7 @@ fn segments_framed_in_place_encrypted_recover_from_crashes() {
         attempt.fail_after(Some(attempts));
         let opened = open_with(&world, &host, &attempt, quiet.clone());
         assert_eq!(clear_files(&attempt, &data), Vec::<String>::new(), "budget {attempts}");
-        match opened {
+        match opened.await {
             Ok(opened) if !attempt.has_failed() => break opened,
             Ok((_, remote)) => remote.cut_short()(),
             Err(_) => {}
@@ -1248,7 +1252,7 @@ fn segments_framed_in_place_encrypted_recover_from_crashes() {
         attempts += 1;
     };
     assert!(attempts > 10, "the opening took {attempts} operations");
-    assert_eq!(read(&world, &host, &store, extent, data.len()), Ok(data.clone()));
+    assert_eq!(read(&world, &host, &store, extent, data.len()).await, Ok(data.clone()));
     remote.cut_short()();
     drop(store);
 
@@ -1256,8 +1260,8 @@ fn segments_framed_in_place_encrypted_recover_from_crashes() {
     let segments = encryptions_of(&whole, "segments/");
     let [(_, encryption)] = &segments[..] else { panic!("{segments:?}") };
     assert!(matches!(encryption, extent_frame::Encryption::Sectors { .. }), "{encryption:?}");
-    let (store, remote) = open_with(&world, &host, &whole, quiet).unwrap();
-    assert_eq!(read(&world, &host, &store, extent, data.len()), Ok(data.clone()));
+    let (store, remote) = open_with(&world, &host, &whole, quiet).await.unwrap();
+    assert_eq!(read(&world, &host, &store, extent, data.len()).await, Ok(data.clone()));
     assert_eq!(clear_files(&whole, &data), Vec::<String>::new());
     remote.cut_short()();
 }
@@ -1266,8 +1270,8 @@ fn segments_framed_in_place_encrypted_recover_from_crashes() {
 /// ([`crate::Write::stored`]), are encrypted for the file it names, at the offset it names, and
 /// read back as written; a write of a large extent that is not whole sectors is refused (TASK-411.8
 /// refuses such writes to segments).
-#[test]
-fn writes_stored_by_callers_are_encrypted_and_large_extents_take_whole_sectors() {
+#[tokio::test(flavor = "multi_thread")]
+async fn writes_stored_by_callers_are_encrypted_and_large_extents_take_whole_sectors() {
     let world = World::new();
     let host = world.host(5);
     let cell = test_cell(7);
@@ -1275,10 +1279,10 @@ fn writes_stored_by_callers_are_encrypted_and_large_extents_take_whole_sectors()
     let description = Description { block_size: 512, capacity: 1 << 30, cell };
     let kind = cell::Kind::Fxfs;
     LocalCell::make(&dir, description, Some("memory:///encrypted"), Some(kind)).unwrap();
-    let (store, remote) = open_on(&world, &host, &dir).unwrap();
+    let (store, remote) = open_on(&world, &host, &dir).await.unwrap();
     let extent = ExtentId::new(cell.id, 1);
     let data = noise(3, 4 * 4096);
-    let write = store.begin_write(extent, 0, data.len() as u64).unwrap();
+    let write = store.begin_write(extent, 0, data.len() as u64).await.unwrap();
     let mut bytes = crate::Aligned::new(data.len());
     bytes.as_mut_slice().copy_from_slice(&data);
     let stored = write.stored(bytes).unwrap();
@@ -1290,7 +1294,7 @@ fn writes_stored_by_callers_are_encrypted_and_large_extents_take_whole_sectors()
     assert!(buf == data, "read back");
     assert_eq!(clear_files(&dir, &data), Vec::<String>::new());
     let large = crate::Options::default().large_extent;
-    let written = store.write(ExtentId::new(cell.id, 2), large, &data[..512]);
+    let written = store.write(ExtentId::new(cell.id, 2), large, &data[..512]).await;
     assert_eq!(
         written.unwrap_err().downcast::<crate::Unsectored>().unwrap(),
         crate::Unsectored { offset: large, len: 512 }
@@ -1302,8 +1306,8 @@ fn writes_stored_by_callers_are_encrypted_and_large_extents_take_whole_sectors()
 /// host's disk changed, each record's hash made anew so that recovery, holding no key, takes it,
 /// is refused as the store opens holding its keys, naming the segment, before anything is framed
 /// from it.
-#[test]
-fn encrypted_logs_changed_are_refused() {
+#[tokio::test(flavor = "multi_thread")]
+async fn encrypted_logs_changed_are_refused() {
     let world = World::new();
     let host = world.host(5);
     let cell = test_cell(7);
@@ -1311,9 +1315,9 @@ fn encrypted_logs_changed_are_refused() {
     let quiet = Options { interval: Duration::from_secs(3600), ..Options::default() };
     let extent = ExtentId::new(cell.id, 1);
     let crashed = {
-        let (store, uploader) = open_with(&world, &host, &dir, quiet.clone()).unwrap();
-        store.write(extent, 0, &noise(1, 4096)).unwrap();
-        store.commit(None).unwrap();
+        let (store, uploader) = open_with(&world, &host, &dir, quiet.clone()).await.unwrap();
+        store.write(extent, 0, &noise(1, 4096)).await.unwrap();
+        store.commit(None).await.unwrap();
         let crashed = dir.crash(0);
         uploader.cut_short()();
         crashed
@@ -1353,7 +1357,8 @@ fn encrypted_logs_changed_are_refused() {
         attempt.open(&path, false).unwrap().write_at(&changed, 0).unwrap();
         // Recovery holds no key, and takes the log as it is.
         assert_eq!(LocalCell::recover(attempt.clone()).unwrap().cell(), cell);
-        let refused = open_with(&world, &host, &attempt, quiet.clone()).map(drop).unwrap_err();
+        let refused =
+            open_with(&world, &host, &attempt, quiet.clone()).await.map(drop).unwrap_err();
         assert!(format!("{refused:#}").contains(refusal), "{refused:#}");
         let segments = files_of(&attempt, "segments/");
         assert_eq!(segments, Vec::new(), "framed from a log changed");
@@ -1372,14 +1377,13 @@ fn caching_fetcher(
 }
 
 /// What `fetcher` reads of `extent`, `len` bytes, at `location`.
-fn fetched_by(
-    world: &World,
+async fn fetched_by(
     fetcher: &Fetcher<ObjectBucket>,
     extent: ExtentId,
     location: &Location,
     len: u64,
 ) -> Result<Vec<u8>, bucket_cell::Error> {
-    world.runtime.block_on(fetcher.read(extent, location, 0, len, Priority::Demand))
+    fetcher.read(extent, location, 0, len, Priority::Demand).await
 }
 
 /// The paths of the files under `dir`, on the host's disk, that hold any of `data`'s sectors' first
@@ -1424,21 +1428,21 @@ fn files_under(dir: &std::path::Path) -> usize {
 /// the shredded store into another tenant's cell, whose record keeps the DEK it inherited
 /// rewrapped under its own cell's KEK, keeps it in host 5's memory and reads on, there and on a
 /// host opening it afresh: shredding a parent leaves its children what they inherited.
-#[test]
-fn shredded_tenants_leave_none_of_their_cells_readable_on_any_host() {
+#[tokio::test(flavor = "multi_thread")]
+async fn shredded_tenants_leave_none_of_their_cells_readable_on_any_host() {
     let world = World::new();
     world.kms.inner().create(OTHER).unwrap();
     let (writer, reader) = (world.host(5), world.host(6));
     // A segment the guest fills is closed by a commit waiting for its upload alone.
     let filling = Options { filling_wait: Duration::from_secs(3600), ..Options::default() };
     let dir = made(test_cell(7));
-    let (store, uploader) = open_with(&world, &writer, &dir, filling).unwrap();
+    let (store, uploader) = open_with(&world, &writer, &dir, filling).await.unwrap();
     let (uploaded, open) = (ExtentId::new(7, 1), ExtentId::new(7, 2));
     const LEN: usize = 8 * 4096;
     let (uploaded_data, open_data) = (noise(1, LEN), noise(2, LEN));
-    written(&store, &uploader, uploaded, &uploaded_data);
-    store.write(open, 0, &open_data).unwrap();
-    store.commit(None).unwrap();
+    written(&store, &uploader, uploaded, &uploaded_data).await;
+    store.write(open, 0, &open_data).await.unwrap();
+    store.commit(None).await.unwrap();
     for kind in ["open-segments/", "logs/"] {
         assert!(!files_of(&dir, kind).is_empty(), "{kind}: {:?}", dir.files());
     }
@@ -1446,24 +1450,24 @@ fn shredded_tenants_leave_none_of_their_cells_readable_on_any_host() {
 
     // Another tenant's store, and a fork of the shredded tenant's into a cell of the other's.
     let theirs = CellId { tenant: OTHER, id: 9 };
-    let (their_store, their_uploader) = open_on(&world, &writer, &made(theirs)).unwrap();
+    let (their_store, their_uploader) = open_on(&world, &writer, &made(theirs)).await.unwrap();
     let (their_extent, their_data) = (ExtentId::new(9, 1), noise(3, 4096));
-    written(&their_store, &their_uploader, their_extent, &their_data);
+    written(&their_store, &their_uploader, their_extent, &their_data).await;
     let their_at = location(&their_store, their_extent);
     let child = child_in(OTHER, 8);
-    forked((&world, &writer), &store, &uploader, child).unwrap();
+    forked((&world, &writer), &store, &uploader, child).await.unwrap();
     let child_dir = made(child.cell);
-    let (child_store, _child_uploader) = open_on(&world, &writer, &child_dir).unwrap();
+    let (child_store, _child_uploader) = open_on(&world, &writer, &child_dir).await.unwrap();
     let first = uploaded_data[..4096].to_vec();
-    assert_eq!(read(&world, &writer, &child_store, uploaded, LEN), Ok(uploaded_data.clone()));
+    assert_eq!(read(&world, &writer, &child_store, uploaded, LEN).await, Ok(uploaded_data.clone()));
 
     // Host 6 serves the shredded tenant's store and the other's, reading into its part cache.
     let cache_dir = tempfile::tempdir().unwrap();
     let fetcher = caching_fetcher(&world, &reader.memory, cache_dir.path());
     let _held =
         [store.keys(), their_store.keys()].map(|keys| reader.memory.keys().hold(keys.clone()));
-    assert_eq!(fetched_by(&world, &fetcher, uploaded, &at, 4096), Ok(first.clone()));
-    assert_eq!(fetched_by(&world, &fetcher, their_extent, &their_at, 4096), Ok(their_data.clone()));
+    assert_eq!(fetched_by(&fetcher, uploaded, &at, 4096).await, Ok(first.clone()));
+    assert_eq!(fetched_by(&fetcher, their_extent, &their_at, 4096).await, Ok(their_data.clone()));
     assert!(files_under(cache_dir.path()) >= 2, "{}", files_under(cache_dir.path()));
 
     // Shredded: its KEK destroyed, then each host told.
@@ -1480,9 +1484,9 @@ fn shredded_tenants_leave_none_of_their_cells_readable_on_any_host() {
     assert_eq!(writer.memory.keys().ring().cells(), BTreeSet::from([7, 8, 9]));
     assert_eq!(reader.memory.keys().ring().cells(), BTreeSet::from([9]));
     let refused = bucket_cell::Error::NoKey(KeyId { cell: 7, generation: 1 });
-    assert_eq!(fetched_by(&world, &fetcher, uploaded, &at, 4096), Err(refused));
-    assert_eq!(fetched_by(&world, &fetcher, their_extent, &their_at, 4096), Ok(their_data.clone()));
-    assert_eq!(read(&world, &writer, &child_store, uploaded, LEN), Ok(uploaded_data.clone()));
+    assert_eq!(fetched_by(&fetcher, uploaded, &at, 4096).await, Err(refused));
+    assert_eq!(fetched_by(&fetcher, their_extent, &their_at, 4096).await, Ok(their_data.clone()));
+    assert_eq!(read(&world, &writer, &child_store, uploaded, LEN).await, Ok(uploaded_data.clone()));
 
     // No file of either host holds its data; the store opens nowhere, its error naming the tenant.
     for data in [&uploaded_data, &open_data] {
@@ -1490,12 +1494,13 @@ fn shredded_tenants_leave_none_of_their_cells_readable_on_any_host() {
         assert_eq!(clear_files_on_disk(cache_dir.path(), data), Vec::<String>::new());
     }
     for host in [&writer, &reader, &world.host(7)] {
-        let refused = open_on(&world, host, &dir.crash(0)).map(drop).unwrap_err();
+        let refused = open_on(&world, host, &dir.crash(0)).await.map(drop).unwrap_err();
         assert_eq!(refused.to_string(), why, "host {}", host.token);
     }
     let third = world.host(8);
-    let (child_store, _child_uploader) = open_on(&world, &third, &child_dir.crash(0)).unwrap();
-    assert_eq!(read(&world, &third, &child_store, uploaded, LEN), Ok(uploaded_data.clone()));
+    let (child_store, _child_uploader) =
+        open_on(&world, &third, &child_dir.crash(0)).await.unwrap();
+    assert_eq!(read(&world, &third, &child_store, uploaded, LEN).await, Ok(uploaded_data.clone()));
     drop((store, uploader));
 }
 
@@ -1507,8 +1512,8 @@ fn shredded_tenants_leave_none_of_their_cells_readable_on_any_host() {
 /// objects uncompacted, not failing. The cell's object as it was before, put back, as a bucket
 /// keeping non-current versions would let someone do, opens the store again: why a cell's
 /// shredding needs non-current versions of its object expired, or versioning off.
-#[test]
-fn shredded_cells_leave_their_cells_unreadable_and_the_tenants_others_readable() {
+#[tokio::test(flavor = "multi_thread")]
+async fn shredded_cells_leave_their_cells_unreadable_and_the_tenants_others_readable() {
     let world = World::new();
     let (writer, reader) = (world.host(5), world.host(6));
     let ours = test_cell(7);
@@ -1519,17 +1524,17 @@ fn shredded_cells_leave_their_cells_unreadable_and_the_tenants_others_readable()
     let mut opened = Vec::new();
     let mut at = Vec::new();
     for (dir, cell) in dirs.iter().zip([ours, sibling]) {
-        let (store, uploader) = open_on(&world, &writer, dir).unwrap();
+        let (store, uploader) = open_on(&world, &writer, dir).await.unwrap();
         // Two extents, one freed: a segment the collector would compact.
         let (kept, freed) = (ExtentId::new(cell.id, 1), ExtentId::new(cell.id, 2));
-        store.write(freed, 0, &noise(9, 4096)).unwrap();
-        written(&store, &uploader, kept, &noise(cell.id, 4096));
+        store.write(freed, 0, &noise(9, 4096)).await.unwrap();
+        written(&store, &uploader, kept, &noise(cell.id, 4096)).await;
         store.free(freed).unwrap();
-        store.commit(None).unwrap();
-        crate::upload::wait_on(uploader.uploaded(store.last_commit().unwrap())).unwrap();
+        store.commit(None).await.unwrap();
+        uploader.uploaded(store.last_commit().unwrap()).await.unwrap();
         let location = location(&store, kept);
         let _held = reader.memory.keys().hold(store.keys().clone());
-        assert_eq!(fetched_by(&world, &fetcher, kept, &location, 4096), Ok(noise(cell.id, 4096)));
+        assert_eq!(fetched_by(&fetcher, kept, &location, 4096).await, Ok(noise(cell.id, 4096)));
         drop(_held);
         at.push((kept, location));
         opened.push((store, uploader));
@@ -1540,14 +1545,15 @@ fn shredded_cells_leave_their_cells_unreadable_and_the_tenants_others_readable()
     let slots: Vec<String> = (0..bucket_cell::identity::DEFAULT_HEAD_SLOTS)
         .map(|slot| layout::head(ours, slot))
         .collect();
-    let before: Vec<Vec<u8>> = slots.iter().map(|key| world.object(key)).collect();
+    let before: Vec<Vec<u8>> =
+        futures::future::join_all(slots.iter().map(|key| world.object(key))).await;
 
-    assert_eq!(world.runtime.block_on(keys::shred(&*world.bucket, ours)), Ok(1));
-    let object = world.head(CELL);
+    assert_eq!(keys::shred(&*world.bucket, ours).await, Ok(1));
+    let object = world.head(CELL).await;
     assert_eq!((object.keks, object.shredded), (Vec::new(), true));
     let why = "tenant 1: cell 1/7 is shredded, its KEK gone";
     let untold = world.host(7);
-    let refused = open_on(&world, &untold, &dirs[0].crash(0)).map(drop).unwrap_err();
+    let refused = open_on(&world, &untold, &dirs[0].crash(0)).await.map(drop).unwrap_err();
     assert_eq!(refused, Failure::Bucket(bucket_cell::Error::Kms(why.into())));
 
     for host in [&writer, &reader] {
@@ -1557,17 +1563,17 @@ fn shredded_cells_leave_their_cells_unreadable_and_the_tenants_others_readable()
     }
     let (ours_extent, ours_at) = &at[0];
     let key = KeyId { cell: 7, generation: 1 };
-    let unread = fetched_by(&world, &fetcher, *ours_extent, ours_at, 4096);
+    let unread = fetched_by(&fetcher, *ours_extent, ours_at, 4096).await;
     assert_eq!(unread, Err(bucket_cell::Error::NoKey(key)));
     let (sibling_extent, sibling_at) = &at[1];
-    assert_eq!(fetched_by(&world, &fetcher, *sibling_extent, sibling_at, 4096), Ok(noise(8, 4096)));
+    assert_eq!(fetched_by(&fetcher, *sibling_extent, sibling_at, 4096).await, Ok(noise(8, 4096)));
     drop((held, opened));
     for host in [&writer, &reader, &untold] {
-        let refused = open_on(&world, host, &dirs[0].crash(0)).map(drop).unwrap_err();
+        let refused = open_on(&world, host, &dirs[0].crash(0)).await.map(drop).unwrap_err();
         assert_eq!(refused.to_string(), why, "host {}", host.token);
     }
-    let (store, _uploader) = open_on(&world, &untold, &dirs[1].crash(0)).unwrap();
-    assert_eq!(read(&world, &untold, &store, *sibling_extent, 4096), Ok(noise(8, 4096)));
+    let (store, _uploader) = open_on(&world, &untold, &dirs[1].crash(0)).await.unwrap();
+    assert_eq!(read(&world, &untold, &store, *sibling_extent, 4096).await, Ok(noise(8, 4096)));
     for data in [noise(7, 4096), noise(9, 4096)] {
         assert_eq!(clear_files(&dirs[0], &data), Vec::<String>::new());
         assert_eq!(clear_files_on_disk(cache_dir.path(), &data), Vec::<String>::new());
@@ -1578,31 +1584,31 @@ fn shredded_cells_leave_their_cells_unreadable_and_the_tenants_others_readable()
     let kms: extent_keys::kms::Shared = world.kms.clone();
     let mut collector = bucket_cell::collector::Collector::new(options).kms(Some(kms));
     let pass = collector.collect_cell(&*world.bucket, ours, 0x51);
-    let report = world.runtime.block_on(pass).unwrap();
+    let report = pass.await.unwrap();
     assert_eq!((report.locked, report.uncompacted, report.compacted), (1, 1, 0), "{report:?}");
 
     // Its object as it was before, put back: the store opens.
     for (key, bytes) in slots.iter().zip(before) {
-        world.put(key, bytes);
+        world.put(key, bytes).await;
     }
     let host = world.host(8);
-    let (store, _uploader) = open_on(&world, &host, &dirs[0].crash(0)).unwrap();
-    assert_eq!(read(&world, &host, &store, *ours_extent, 4096), Ok(noise(7, 4096)));
+    let (store, _uploader) = open_on(&world, &host, &dirs[0].crash(0)).await.unwrap();
+    assert_eq!(read(&world, &host, &store, *ours_extent, 4096).await, Ok(noise(7, 4096)));
 }
 
 /// A host of placement `token` as [`World::host`] makes one, but its KMS the one `url` names, as
 /// `CLADEFS_KMS` names a host's: made anew, as another process's would be.
-fn host_of_kms(world: &World, url: &str, token: u64) -> Host {
-    host_over(world, extent_keys::kms::from_url(url).unwrap(), token)
+fn host_of_kms(url: &str, token: u64) -> Host {
+    host_over(extent_keys::kms::from_url(url).unwrap(), token)
 }
 
 /// A host of placement `token` as [`World::host`] makes one, but its KMS `kms`, its own.
-fn host_over(world: &World, kms: extent_keys::kms::Shared, token: u64) -> Host {
+fn host_over(kms: extent_keys::kms::Shared, token: u64) -> Host {
     let memory = Memory::new();
     let keys = keys::Host::new(keys::CachingKms::new(kms), memory.keys().clone());
     let uploads = Budget::new(Limits::UNBOUNDED);
     Host {
-        runtime: Runtime { handle: world.runtime.handle().clone(), uploads, keys },
+        runtime: Runtime { handle: tokio::runtime::Handle::current(), uploads, keys },
         memory,
         token,
     }
@@ -1617,8 +1623,8 @@ fn host_over(world: &World, kms: extent_keys::kms::Shared, token: u64) -> Host {
 /// data. A collector's sweep of every cell leaves the KEK object as it was. The tenant shredded (a
 /// tombstone), no host opens its store, the second told (`Kms::forget`), a third reading the
 /// tombstone; a sweep leaves the tombstone too.
-#[test]
-fn encrypted_stores_open_through_the_bucket_kms_on_two_hosts() {
+#[tokio::test(flavor = "multi_thread")]
+async fn encrypted_stores_open_through_the_bucket_kms_on_two_hosts() {
     use bucket_cell::bucket_kms::{BucketKms, Destroyed};
     use extent_keys::kms::master::MasterKeys;
     let world = World::new();
@@ -1628,25 +1634,24 @@ fn encrypted_stores_open_through_the_bucket_kms_on_two_hosts() {
         Arc::new(BucketKms::new(world.bucket.clone(), keys))
     };
     let (first_kms, second_kms) = (bucket_kms(), bucket_kms());
-    let (first, second) =
-        (host_over(&world, first_kms.clone(), 5), host_over(&world, second_kms, 6));
+    let (first, second) = (host_over(first_kms.clone(), 5), host_over(second_kms, 6));
     let cell = test_cell(7);
     let extent = ExtentId::new(cell.id, 1);
     let dir = made(cell);
     let kek_key = layout::kek(TENANT);
-    assert!(world.objects().is_empty());
-    let (store, remote) = open_on(&world, &first, &dir).unwrap();
+    assert!(world.objects().await.is_empty());
+    let (store, remote) = open_on(&world, &first, &dir).await.unwrap();
     let data = noise(1, 4 * 4096);
-    written(&store, &remote, extent, &data);
+    written(&store, &remote, extent, &data).await;
     assert_eq!(store.keys().encrypting().1, KeyId { cell: cell.id, generation: 1 });
     drop((store, remote));
-    let kek_object = world.object(&kek_key);
+    let kek_object = world.object(&kek_key).await;
     assert_eq!(kek_object.len(), extent_keys::kms::bucket::KEK_OBJECT_LEN);
-    let object = world.head(CELL);
+    let object = world.head(CELL).await;
     let [kek] = &object.keks[..] else { panic!("{:?}", object.keks) };
     assert_eq!(&kek.wrapped.0[..13], b"fxkb\x02\0\0\0\0\0\0\0\x01");
-    let cell_kek = futures::executor::block_on(first_kms.unwrap(TENANT, &kek.wrapped)).unwrap();
-    let objects = world.objects();
+    let cell_kek = first_kms.unwrap(TENANT, &kek.wrapped).await.unwrap();
+    let objects = world.objects().await;
     let segments: Vec<_> =
         objects.iter().filter(|(key, _)| key.starts_with(&layout::segments(cell))).collect();
     assert!(!segments.is_empty(), "no segment of {cell}");
@@ -1666,9 +1671,9 @@ fn encrypted_stores_open_through_the_bucket_kms_on_two_hosts() {
         assert!(!holds(bytes, &data[..64]), "{key} holds the data");
     }
 
-    let (store, remote) = open_on(&world, &second, &dir.crash(0)).unwrap();
-    assert_eq!(world.head(CELL).epoch, 2);
-    assert_eq!(read(&world, &second, &store, extent, 4 * 4096), Ok(data.clone()));
+    let (store, remote) = open_on(&world, &second, &dir.crash(0)).await.unwrap();
+    assert_eq!(world.head(CELL).await.epoch, 2);
+    assert_eq!(read(&world, &second, &store, extent, 4 * 4096).await, Ok(data.clone()));
     drop((store, remote));
     let sweep = bucket_cell::sweep::Sweep {
         options: bucket_cell::collector::Options { compact_below: 1.0, grace: 0 },
@@ -1679,24 +1684,24 @@ fn encrypted_stores_open_through_the_bucket_kms_on_two_hosts() {
         spawned: false,
         kms: Some(bucket_kms()),
     };
-    let swept = world.runtime.block_on(sweep.run(&world.bucket, |_| {}));
+    let swept = sweep.run(&world.bucket, |_| {}).await;
     assert_eq!(swept.visited, 1);
-    assert_eq!(world.object(&kek_key), kek_object);
+    assert_eq!(world.object(&kek_key).await, kek_object);
 
-    assert_eq!(world.runtime.block_on(first_kms.destroy(TENANT)), Destroyed::Now);
+    assert_eq!(first_kms.destroy(TENANT).await, Destroyed::Now);
     let tombstone = extent_keys::kms::bucket::KekObject::tombstone(TENANT);
-    assert_eq!(world.object(&kek_key), tombstone);
+    assert_eq!(world.object(&kek_key).await, tombstone);
     let destroyed =
         Failure::Bucket(bucket_cell::Error::Kms("tenant 1: its KEK is destroyed".into()));
     second.runtime.keys.forget(keys::Scope::Tenant(TENANT), "tenant 1: its KEK is destroyed");
-    let third = host_over(&world, bucket_kms(), 7);
+    let third = host_over(bucket_kms(), 7);
     for host in [&first, &second, &third] {
-        let refused = open_on(&world, host, &dir.crash(0)).map(drop);
+        let refused = open_on(&world, host, &dir.crash(0)).await.map(drop);
         assert_eq!(refused, Err(destroyed.clone()), "host {}", host.token);
     }
-    let swept = world.runtime.block_on(sweep.run(&world.bucket, |_| {}));
+    let swept = sweep.run(&world.bucket, |_| {}).await;
     assert_eq!(swept.visited, 1);
-    assert_eq!(world.object(&kek_key), tombstone);
+    assert_eq!(world.object(&kek_key).await, tombstone);
 }
 
 /// TASK-411.17 AC #4: a store of an encrypted cell opened end to end through AWS KMS, as
@@ -1705,9 +1710,9 @@ fn encrypted_stores_open_through_the_bucket_kms_on_two_hosts() {
 /// KMS key, its header naming the backend and the key; its segments encrypted; another host taking
 /// the cell unwraps it there and reads; the key disabled, no host opens it (revoked) until it is
 /// enabled again; scheduled for deletion, none does (destroyed).
-#[test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs local-kms: scripts/test-local-kms.sh, CI's object-stores job"]
-fn local_kms_encrypted_stores_open_through_aws_kms() {
+async fn local_kms_encrypted_stores_open_through_aws_kms() {
     let world = World::new();
     let emulator = extent_keys::testing::LocalAwsKms::start();
     let key_id = emulator.create_key();
@@ -1716,18 +1721,18 @@ fn local_kms_encrypted_stores_open_through_aws_kms() {
     let cell = test_cell(7);
     let extent = ExtentId::new(cell.id, 1);
     let dir = made(cell);
-    let first = host_of_kms(&world, &url, 5);
-    let (store, remote) = open_on(&world, &first, &dir).unwrap();
+    let first = host_of_kms(&url, 5);
+    let (store, remote) = open_on(&world, &first, &dir).await.unwrap();
     let data = noise(1, 4 * 4096);
-    written(&store, &remote, extent, &data);
+    written(&store, &remote, extent, &data).await;
     assert_eq!(store.keys().encrypting().1, KeyId { cell: cell.id, generation: 1 });
     drop((store, remote));
 
-    let object = world.head(CELL);
+    let object = world.head(CELL).await;
     let [kek] = &object.keks[..] else { panic!("{:?}", object.keks) };
     assert_eq!(&kek.wrapped.0[..29], b"fxka\x01\x00\x16alias/cladefs-tenant-1");
     // Every segment of the cell encrypted, whatever its number and its writer's epoch (TASK-407).
-    let objects = world.objects();
+    let objects = world.objects().await;
     let segments: Vec<_> =
         objects.iter().filter(|(key, _)| key.starts_with(&layout::segments(cell))).collect();
     assert!(!segments.is_empty(), "no segment of {cell}");
@@ -1738,27 +1743,27 @@ fn local_kms_encrypted_stores_open_through_aws_kms() {
         assert!(!holds(&bytes, &data[..64]), "{key} holds the data");
     }
 
-    let second = host_of_kms(&world, &url, 6);
-    let (store, _remote) = open_on(&world, &second, &dir.crash(0)).unwrap();
-    assert_eq!(world.head(CELL).epoch, 2);
-    assert_eq!(read(&world, &second, &store, extent, 4 * 4096), Ok(data.clone()));
+    let second = host_of_kms(&url, 6);
+    let (store, _remote) = open_on(&world, &second, &dir.crash(0)).await.unwrap();
+    assert_eq!(world.head(CELL).await.epoch, 2);
+    assert_eq!(read(&world, &second, &store, extent, 4 * 4096).await, Ok(data.clone()));
     drop((store, _remote));
 
     emulator.disable(&key_id);
-    let refused = open_on(&world, &host_of_kms(&world, &url, 7), &dir.crash(0)).map(drop);
+    let refused = open_on(&world, &host_of_kms(&url, 7), &dir.crash(0)).await.map(drop);
     let refused = refused.unwrap_err();
     assert_eq!(
         refused,
         Failure::Bucket(bucket_cell::Error::Kms("tenant 1: its KEK is revoked".into()))
     );
     emulator.enable(&key_id);
-    let third = host_of_kms(&world, &url, 8);
-    let (store, _remote) = open_on(&world, &third, &dir.crash(0)).unwrap();
-    assert_eq!(read(&world, &third, &store, extent, 4 * 4096), Ok(data));
+    let third = host_of_kms(&url, 8);
+    let (store, _remote) = open_on(&world, &third, &dir.crash(0)).await.unwrap();
+    assert_eq!(read(&world, &third, &store, extent, 4 * 4096).await, Ok(data));
     drop((store, _remote));
 
     emulator.schedule_deletion(&key_id);
-    let refused = open_on(&world, &host_of_kms(&world, &url, 9), &dir.crash(0)).map(drop);
+    let refused = open_on(&world, &host_of_kms(&url, 9), &dir.crash(0)).await.map(drop);
     let refused = refused.unwrap_err();
     assert_eq!(
         refused,
@@ -1772,8 +1777,8 @@ fn local_kms_encrypted_stores_open_through_aws_kms() {
 /// OpenBao, the tenant and the key; one unwrap for a host taking the cell, which reads what was
 /// written; a host taking it once cladefs's token may use the key no more refused, naming the
 /// tenant, and opening once it may again; a tenant with no Transit key's store refused, no cell made.
-#[test]
-fn sealed_stores_open_through_openbao() {
+#[tokio::test(flavor = "multi_thread")]
+async fn sealed_stores_open_through_openbao() {
     use extent_keys::kms::openbao::{OpenBao, Token};
     use extent_keys::testing::openbao::DevServer;
     let Some(bao) = DevServer::start() else { return };
@@ -1785,13 +1790,13 @@ fn sealed_stores_open_through_openbao() {
     let world = World::with_kms(OpenBao::new(&url, Token::Value(bao.token("cladefs"))).unwrap());
 
     let dir = made(test_cell(7));
-    let (store, remote) = open_on(&world, &world.host(5), &dir).unwrap();
+    let (store, remote) = open_on(&world, &world.host(5), &dir).await.unwrap();
     let data = noise(1, 4 * 4096);
-    written(&store, &remote, ExtentId::new(7, 1), &data);
+    written(&store, &remote, ExtentId::new(7, 1), &data).await;
     assert_eq!(store.keys().encrypting().1, KeyId { cell: 7, generation: 1 });
     assert_eq!(world.calls(), (1, 0));
     drop((store, remote));
-    let object = world.head(CELL);
+    let object = world.head(CELL).await;
     let [kek] = &object.keks[..] else { panic!("{:?}", object.keks) };
     let header = [&b"fxkm\x01\x07openbao"[..], &TENANT.to_be_bytes(), b"\0\x10cladefs-tenant-1"];
     assert!(kek.wrapped.0.starts_with(&header.concat()), "{:?}", kek.wrapped);
@@ -1799,22 +1804,25 @@ fn sealed_stores_open_through_openbao() {
 
     world.kms.reset();
     let host = world.host(6);
-    let (store, _remote) = open_on(&world, &host, &dir.crash(0)).unwrap();
+    let (store, _remote) = open_on(&world, &host, &dir.crash(0)).await.unwrap();
     assert_eq!(world.calls(), (0, 1));
-    assert_eq!(read(&world, &host, &store, ExtentId::new(7, 1), data.len()), Ok(data.clone()));
+    assert_eq!(
+        read(&world, &host, &store, ExtentId::new(7, 1), data.len()).await,
+        Ok(data.clone())
+    );
     drop(store);
 
     bao.policy("cladefs", &DevServer::cladefs_policy("transit", "others-*"));
-    let refused = open_on(&world, &world.host(7), &dir.crash(0)).map(drop).unwrap_err();
+    let refused = open_on(&world, &world.host(7), &dir.crash(0)).await.map(drop).unwrap_err();
     assert_eq!(refused.to_string(), "tenant 1: its KEK is revoked");
     bao.policy("cladefs", &policy);
     let host = world.host(8);
-    let (store, _remote) = open_on(&world, &host, &dir.crash(0)).unwrap();
-    assert_eq!(read(&world, &host, &store, ExtentId::new(7, 1), data.len()), Ok(data));
+    let (store, _remote) = open_on(&world, &host, &dir.crash(0)).await.unwrap();
+    assert_eq!(read(&world, &host, &store, ExtentId::new(7, 1), data.len()).await, Ok(data));
 
     // A tenant with no key in OpenBao: its store opens not, refused (TASK-411.28).
     let keyless = CellId { tenant: OTHER, id: 9 };
-    let refused = open_on(&world, &host, &made(keyless)).map(drop).unwrap_err();
+    let refused = open_on(&world, &host, &made(keyless)).await.map(drop).unwrap_err();
     assert_eq!(refused.to_string(), "tenant 2: no KEK in the KMS");
-    assert_eq!(world.head_of(keyless), None);
+    assert_eq!(world.head_of(keyless).await, None);
 }

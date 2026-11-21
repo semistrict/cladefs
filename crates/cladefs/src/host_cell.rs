@@ -150,14 +150,14 @@ pub(crate) fn bucket(url: &str) -> anyhow::Result<Arc<ObjectBucket>> {
 /// (TASK-633.3, backlog doc-23): `home` itself, if of that number; else the bucket its requests of
 /// that number's cells go to ([`ObjectBucket::numbered`]): the registry in `home`'s root, or the
 /// root bucket's, records it; opened with its own options, and refused unless its identity is the
-/// one recorded (`Error::Mismatched`). `NoBucket` if no registry records it. It blocks.
-pub(crate) fn bucket_numbered(home: &str, number: u16) -> Result<Arc<ObjectBucket>, Failure> {
+/// one recorded (`Error::Mismatched`). `NoBucket` if no registry records it.
+pub(crate) async fn bucket_numbered(home: &str, number: u16) -> Result<Arc<ObjectBucket>, Failure> {
     let ours = bucket(home)?;
-    let identity = upload::block_on(bucket_cell::identity::get(&*ours))??;
+    let identity = bucket_cell::identity::get(&*ours).await?;
     if identity.is_some_and(|identity| identity.number == number) {
         return Ok(ours);
     }
-    Ok(upload::block_on(ours.numbered(number))??)
+    Ok(ours.numbered(number).await?)
 }
 
 /// cladefs: what the decoded states of the cells this process's buckets keep, or its stores hold
@@ -875,27 +875,22 @@ mod tests {
 
     /// TASK-196: a store its maker never made whole is no store: it refuses to open, and
     /// [`unmade`] says so, which deleting it, or making it anew, goes by; once made, it opens.
-    #[test]
-    fn stores_unmade_open_not() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stores_unmade_open_not() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
-        let made = local_cell::upload::wait_on(create_unmade(
-            &path,
-            MIB,
-            new(),
-            cell::Kind::Fxfs,
-            None,
-            keeping().unwrap(),
-        ));
+        let made =
+            create_unmade(&path, MIB, new(), cell::Kind::Fxfs, None, keeping().unwrap()).await;
         let cell = made.unwrap().store.description().cell;
         assert!(unmade(&path));
-        let refused = local_cell::upload::wait_on(open(&path, keeping().unwrap())).err().unwrap();
+        let refused = open(&path, keeping().unwrap()).await.err().unwrap();
         let Failure::Local(refused) = refused else { panic!("{refused}") };
         assert_eq!(refused.downcast_ref::<local_cell::Unmade>(), Some(&local_cell::Unmade));
         local_cell::made_host(&path).unwrap();
         assert!(!unmade(&path));
         assert_eq!(
-            local_cell::upload::wait_on(open(&path, keeping().unwrap()))
+            open(&path, keeping().unwrap())
+                .await
                 .map(|opened| opened.store.description().cell)
                 .ok(),
             Some(cell)
@@ -905,8 +900,8 @@ mod tests {
     /// TASK-633.3: a host finds each bucket by its number: its own; others by the registry in its
     /// bucket's root; one its copy lacks by the root bucket's; and refuses one whose URL reaches
     /// another bucket, and a number no registry records.
-    #[test]
-    fn hosts_find_buckets_by_number() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hosts_find_buckets_by_number() {
         use bucket_cell::identity::{self, Details, Entry};
         let dir = tempfile::tempdir().unwrap();
         let url = |name: &str| {
@@ -914,9 +909,8 @@ mod tests {
             format!("file://{}", dir.path().join(name).display())
         };
         let (root, home, other, late) = (url("root"), url("home"), url("other"), url("late"));
-        let number = |bucket: &ObjectBucket| {
-            upload::block_on(identity::get(bucket)).unwrap().unwrap().unwrap().number
-        };
+        let number =
+            async |bucket: &ObjectBucket| identity::get(bucket).await.unwrap().unwrap().number;
         crate::bucket::format_bucket(&root, Details::default(), Default::default()).unwrap();
         assert_eq!(
             crate::bucket::add_bucket(&root, &home, Details::default(), Default::default())
@@ -930,24 +924,24 @@ mod tests {
                 .number,
             3
         );
-        assert_eq!(number(&bucket_numbered(&home, 2).unwrap()), 2);
-        assert_eq!(number(&bucket_numbered(&home, 3).unwrap()), 3);
-        assert_eq!(number(&bucket_numbered(&home, 1).unwrap()), 1);
+        assert_eq!(number(&bucket_numbered(&home, 2).await.unwrap()).await, 2);
+        assert_eq!(number(&bucket_numbered(&home, 3).await.unwrap()).await, 3);
+        assert_eq!(number(&bucket_numbered(&home, 1).await.unwrap()).await, 1);
 
         // Added, its registry copied to the root and to it alone: home's copy lacks it.
         let (root_bucket, late_bucket) = (bucket(&root).unwrap(), bucket(&late).unwrap());
         let late_details = Details { url: Some(late.clone()), ..Details::default() };
-        let (_, registry) = upload::block_on(identity::add(
+        let (_, registry) = identity::add(
             &*root_bucket,
             &Details::default(),
             &*late_bucket,
             late_details,
             bucket_cell::identity::Asked::default(),
-        ))
-        .unwrap()
+        )
+        .await
         .unwrap();
-        upload::block_on(identity::spread(&registry, &*late_bucket)).unwrap().unwrap();
-        assert_eq!(number(&bucket_numbered(&home, 4).unwrap()), 4);
+        identity::spread(&registry, &*late_bucket).await.unwrap();
+        assert_eq!(number(&bucket_numbered(&home, 4).await.unwrap()).await, 4);
 
         // A copy recording bucket 5 at another's URL: that bucket refused as it.
         let mut wrong = registry.clone();
@@ -959,54 +953,50 @@ mod tests {
             details: at_other,
             settings: Default::default(),
         });
-        upload::block_on(identity::spread(&wrong, &*bucket(&home).unwrap())).unwrap().unwrap();
-        let refused = bucket_numbered(&home, 5).map(drop);
+        identity::spread(&wrong, &*bucket(&home).unwrap()).await.unwrap();
+        let refused = bucket_numbered(&home, 5).await.map(drop);
         assert_eq!(
             refused,
             Err(bucket_cell::Error::Mismatched { number: 5, found: Some(3) }.into())
         );
-        let refused = bucket_numbered(&home, 9).map(drop);
+        let refused = bucket_numbered(&home, 9).await.map(drop);
         assert_eq!(refused, Err(bucket_cell::Error::NoBucket(9).into()));
     }
 
     /// TASK-364: a new store's cell's ID is its bucket's to give, one of a block this process
     /// took there, the next store's the next of it; a store of a cell the bucket has not is
     /// refused (`NoCell`), and leaves nothing.
-    #[test]
-    fn new_cells_ids_are_their_buckets() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn new_cells_ids_are_their_buckets() {
         let dir = tempfile::tempdir().unwrap();
         let (one, two) = (dir.path().join("one"), dir.path().join("two"));
         let url = format!("memory:///new-cells-{}", std::process::id());
-        let made = |path: &Path, of| {
-            let made = local_cell::upload::wait_on(create_unmade(
-                path,
-                MIB,
-                of,
-                cell::Kind::Fxfs,
-                Some(&url),
-                keeping().unwrap(),
-            ));
+        let made = async |path: &Path, of| {
+            let made =
+                create_unmade(path, MIB, of, cell::Kind::Fxfs, Some(&url), keeping().unwrap())
+                    .await;
             made.unwrap().store.description().cell
         };
-        let first = made(&one, new());
-        let second = made(&two, new());
+        let first = made(&one, new()).await;
+        let second = made(&two, new()).await;
         assert_eq!(second.id, first.id + 1);
         assert_eq!((first.id, second.id), (first.id, second.id));
         let block = first.id / bucket_cell::objectid::ID_BLOCK;
         let bucket = bucket(&url).unwrap();
         let taken = bucket_cell::layout::objectid_block(block);
-        assert!(upload::block_on(bucket_cell::bucket::get(&*bucket, &taken)).unwrap().is_some());
+        assert!(bucket_cell::bucket::get(&*bucket, &taken).await.is_some());
 
         let absent = CellId { tenant: DEFAULT_TENANT, id: second.id + 1 };
         let path = dir.path().join("absent");
-        let refused = local_cell::upload::wait_on(create_unmade(
+        let refused = create_unmade(
             &path,
             MIB,
             CellOf::Taken(absent),
             cell::Kind::Fxfs,
             Some(&url),
             keeping().unwrap(),
-        ));
+        )
+        .await;
         let Err(Failure::Bucket(refused)) = refused.map(drop) else { panic!("made") };
         assert_eq!(refused, bucket_cell::Error::NoCell);
         assert!(!host_fs::exists(&path), "a store of no cell was left");
@@ -1016,8 +1006,8 @@ mod tests {
     /// elsewhere, a file bucket of its own, beside its directory, where its cell is kept: its
     /// forks' too, which name it. Beside it, not in it, so that it outlives the store, its forks'
     /// cells living on (TASK-165.7).
-    #[test]
-    fn stores_name_their_hosts_bucket_or_one_of_their_own() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stores_name_their_hosts_bucket_or_one_of_their_own() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
         host_fs::create_dir(&path).unwrap();
@@ -1029,32 +1019,13 @@ mod tests {
 
         // Where no host's bucket is, as in this test's process.
         let (made, fork) = (dir.path().join("made"), dir.path().join("fork"));
-        let Opened { store, bucket, uploader } = local_cell::upload::wait_on(create(
-            &made,
-            MIB,
-            new(),
-            cell::Kind::Fxfs,
-            keeping().unwrap(),
-        ))
-        .unwrap();
-        let forked =
-            local_cell::upload::wait_on(new_cell(&bucket, store.description().cell.tenant))
-                .unwrap();
+        let Opened { store, bucket, uploader } =
+            create(&made, MIB, new(), cell::Kind::Fxfs, keeping().unwrap()).await.unwrap();
+        let forked = new_cell(&bucket, store.description().cell.tenant).await.unwrap();
         let child = Child { cell: forked, owner: 1 };
         let version = bucket_cell::layout::NewVersion { id: 1, keep_last: None };
-        local_cell::upload::wait_on(
-            uploader.uploaded(store.commit_version(version, false).unwrap()),
-        )
-        .unwrap();
-        local_cell::upload::wait_on(fork_through(
-            &store,
-            &uploader,
-            version.id,
-            &fork,
-            child,
-            |_| Ok(()),
-        ))
-        .unwrap();
+        uploader.uploaded(store.commit_version(version, false).await.unwrap()).await.unwrap();
+        fork_through(&store, &uploader, version.id, &fork, child, |_| Ok(())).await.unwrap();
         let own = host_fs::canonicalize(&dir.path()).unwrap().join("made.bucket");
         let url = format!("file://{}/", own.display());
         for named in [&made, &fork] {
@@ -1069,7 +1040,7 @@ mod tests {
         // The store deleted, its fork's cell lives on in it.
         drop(uploader);
         drop(store);
-        local_cell::upload::wait_on(delete(&made, Some(&bucket), || Ok(1))).unwrap();
+        delete(&made, Some(&bucket), || Ok(1)).await.unwrap();
         assert!(!host_fs::exists(&made) && host_fs::exists(&own));
         let record = futures::executor::block_on(bucket_cell::head::get(&*bucket, forked));
         assert_eq!(record.unwrap().map(|record| record.deleted()), Some(false));
@@ -1077,20 +1048,11 @@ mod tests {
 
     /// TASK-165.6: a store made by older code, of an older format, is refused by its format,
     /// opened or deleted: nothing reads it.
-    #[test]
-    fn older_stores_are_refused_by_their_format() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn older_stores_are_refused_by_their_format() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
-        drop(
-            local_cell::upload::wait_on(create(
-                &path,
-                MIB,
-                new(),
-                cell::Kind::Fxfs,
-                keeping().unwrap(),
-            ))
-            .unwrap(),
-        );
+        drop(create(&path, MIB, new(), cell::Kind::Fxfs, keeping().unwrap()).await.unwrap());
         let description = path.join("store");
         let text = host_fs::read_to_string(&description).unwrap();
         let older: String = std::iter::once("cladefs extent store 5")
@@ -1100,7 +1062,7 @@ mod tests {
         host_fs::write(&description, older).unwrap();
 
         let format = local_cell::Format { found: "cladefs extent store 5".to_owned() };
-        let refused = local_cell::upload::wait_on(open(&path, keeping().unwrap())).err().unwrap();
+        let refused = open(&path, keeping().unwrap()).await.err().unwrap();
         let Failure::Local(refused) = refused else { panic!("{refused}") };
         assert_eq!(refused.downcast_ref::<local_cell::Format>(), Some(&format), "{refused:#}");
         let refused = crate::Storage::open(&path).err().unwrap();
@@ -1112,27 +1074,27 @@ mod tests {
 
     /// A store's directory whose deletion stopped once its description was gone, or whose making
     /// stopped before it began, empty, is removed by deleting it again.
-    #[test]
-    fn deleting_an_emptied_store_finishes_it() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deleting_an_emptied_store_finishes_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fork");
         host_fs::create_dir(&path).unwrap();
         assert!(unmade(&path));
-        local_cell::upload::wait_on(delete(&path, None, token)).unwrap();
+        delete(&path, None, token).await.unwrap();
         assert!(!host_fs::exists(&path));
     }
 
     /// TASK-79.20: a store whose description was never put in place, its host crashing as its
     /// making, or a fork's, wrote what goes before it, is no store, and is removed by deleting it,
     /// as cladefsd and cladefsctl delete it.
-    #[test]
-    fn deleting_a_store_never_described_removes_it() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deleting_a_store_never_described_removes_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fork");
         host_fs::create_dir_all(path.join("segments")).unwrap();
         host_fs::write(path.join("ancestry"), "3 /elsewhere\n").unwrap();
         assert!(unmade(&path));
-        local_cell::upload::wait_on(delete(&path, None, token)).unwrap();
+        delete(&path, None, token).await.unwrap();
         assert!(!host_fs::exists(&path));
     }
 }

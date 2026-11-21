@@ -14,9 +14,9 @@ use bucket_cell::object_bucket::ObjectBucket;
 use std::time::{Duration, Instant};
 
 /// The newest checkpoint of `cell` that `bucket` lists, by its sequence number.
-pub(crate) fn newest(bucket: &ObjectBucket, cell: crate::CellId) -> Option<u64> {
+pub(crate) async fn newest(bucket: &ObjectBucket, cell: crate::CellId) -> Option<u64> {
     let prefix = bucket_cell::layout::checkpoints(cell);
-    let listed = futures::executor::block_on(bucket_cell::Bucket::list(bucket, &prefix));
+    let listed = bucket_cell::Bucket::list(bucket, &prefix).await;
     (listed.unwrap().iter())
         .filter_map(|meta| match bucket_cell::layout::kind(&meta.key) {
             bucket_cell::layout::Kind::Checkpoint { segment, .. } => Some(segment),
@@ -27,26 +27,27 @@ pub(crate) fn newest(bucket: &ObjectBucket, cell: crate::CellId) -> Option<u64> 
 
 /// Runs `commits`, which commit `store` into a checkpoint, and waits for its writer's checkpoint
 /// past the newest before them to be in `bucket`, 60 s at most.
-pub(crate) fn after(store: &OpenCell, bucket: &ObjectBucket, commits: impl FnOnce()) {
-    let before = newest(bucket, store.cell());
-    commits();
+pub(crate) async fn after(store: &OpenCell, bucket: &ObjectBucket, commits: impl AsyncFnOnce()) {
+    let before = newest(bucket, store.cell()).await;
+    commits().await;
     let deadline = Instant::now() + Duration::from_secs(60);
-    while newest(bucket, store.cell()) <= before {
+    while newest(bucket, store.cell()).await <= before {
         assert!(
             Instant::now() < deadline,
             "cell {}'s writer checkpointed nothing past {before:?} within 60 s",
             store.cell()
         );
-        std::thread::sleep(Duration::from_millis(10));
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
 /// Commits `store` [`local_cell::upload::CHECKPOINT_EVERY`] times, a segment each, and waits for
 /// the checkpoint they make to be in `bucket` ([`after`]).
-pub(crate) fn checkpointed(store: &OpenCell, bucket: &ObjectBucket) {
-    after(store, bucket, || {
+pub(crate) async fn checkpointed(store: &OpenCell, bucket: &ObjectBucket) {
+    after(store, bucket, async || {
         for _ in 0..local_cell::upload::CHECKPOINT_EVERY {
-            local_cell::upload::wait_on(store.commit(None)).unwrap();
+            store.commit(None).await.unwrap();
         }
-    });
+    })
+    .await;
 }

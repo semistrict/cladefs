@@ -37,9 +37,68 @@ pub fn prepare_thread() {
     HELD.with(|held| held.borrow_mut().reserve(4));
 }
 
-/// The shared locks the calling thread holds, by name.
+/// The shared locks the calling thread holds, by name: those it took, and those awaited the task it
+/// polls holds ([`Awaited`]).
 pub fn held() -> Vec<&'static str> {
-    HELD.with(|held| held.borrow().clone())
+    let mut held = HELD.with(|held| held.borrow().clone());
+    let holder = Holder::current();
+    let awaited = AWAITED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    held.extend(awaited.iter().filter(|(by, _)| *by == holder).map(|(_, name)| *name));
+    held
+}
+
+/// cladefs: who holds a shared lock taken by awaiting it, which it holds across its awaits
+/// (TASK-685.17): the task, which any of its runtime's threads may poll from one await to the next;
+/// or, polled by no tokio task's, the thread, as a store's drop's close waits on it. Under madsim,
+/// whose tasks name no ids, the simulation's one thread.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Holder {
+    #[cfg(not(madsim))]
+    Task(tokio::task::Id),
+    Thread(std::thread::ThreadId),
+}
+
+impl Holder {
+    fn current() -> Self {
+        #[cfg(not(madsim))]
+        if let Some(task) = tokio::task::try_id() {
+            return Self::Task(task);
+        }
+        Self::Thread(std::thread::current().id())
+    }
+}
+
+/// The shared locks awaited, by their holders ([`Awaited`]).
+static AWAITED: std::sync::Mutex<Vec<(Holder, &'static str)>> = std::sync::Mutex::new(Vec::new());
+
+/// cladefs: a holding of a shared lock taken by awaiting it, as a store's commit's and flush's are
+/// (`AsyncMutex`, TASK-685.17), by its holder: what the panic hook sees held by the task it panics
+/// in, wherever it was polled, from its making to its drop. A thread's [`Holding`] cannot say so,
+/// as the task moves between threads, holding it, at its awaits.
+pub struct Awaited {
+    holder: Holder,
+    name: &'static str,
+}
+
+impl Awaited {
+    pub fn new(name: &'static str) -> Self {
+        let holder = Holder::current();
+        AWAITED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((holder, name));
+        let awaited = Self { holder, name };
+        #[cfg(any(test, feature = "testing"))]
+        testing::panic_if_asked(name);
+        awaited
+    }
+}
+
+impl Drop for Awaited {
+    fn drop(&mut self) {
+        let mut awaited = AWAITED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let held = (self.holder, self.name);
+        if let Some(at) = awaited.iter().rposition(|each| *each == held) {
+            awaited.remove(at);
+        }
+    }
 }
 
 /// What the process says as it aborts, before the locks held, in parentheses, by name.
@@ -216,6 +275,26 @@ mod tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
     use std::sync::{Condvar, Mutex};
+
+    /// cladefs: a shared lock taken by awaiting it is its task's, which the panic hook sees it hold
+    /// whichever thread polls the task, across its awaits, and not once its guard is dropped
+    /// (TASK-685.17): another task's, the same threads polling it, holds none.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn awaited_locks_are_their_tasks_across_awaits() {
+        let mutex = std::sync::Arc::new(crate::sync::AsyncMutex::new("awaited", ()));
+        let guard = mutex.lock().await;
+        let others = tokio::spawn(async {
+            tokio::task::yield_now().await;
+            held()
+        });
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+            assert_eq!(held(), ["awaited"]);
+        }
+        assert_eq!(others.await.unwrap(), Vec::<&str>::new());
+        drop(guard);
+        assert_eq!(held(), Vec::<&str>::new());
+    }
 
     /// What [`child_panics`] does, as its parent says: `holding`, panic holding a shared lock;
     /// `let-go`, panic having let it go.

@@ -17,6 +17,7 @@
 //! cell is taken and the store opened again (TASK-291.2). Once it was, passes run alone, and
 //! leave nothing they should have collected (TASK-390).
 
+use super::host_runtime::HostRuntime;
 use super::rounds::{BLOCK, CELL, Model, OPTIONS, workload};
 use bucket_cell::bucket::{ByteRange, Error as BucketError, Meta, Object, PutMode, Version};
 use bucket_cell::collector;
@@ -46,18 +47,14 @@ const URL: &str = "memory:///kept";
 /// A host's: its stores' uploaders' runtime, and the bucket their cells are kept in, as it
 /// reaches it: since its last crash, a copy of what the bucket held then ([`Host::crash`]).
 struct Host {
-    runtime: tokio::runtime::Runtime,
+    runtime: HostRuntime,
     bucket: RefCell<Arc<ObjectBucket>>,
     memory: RefCell<Arc<InMemory>>,
 }
 
 impl Host {
     fn new() -> Self {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap();
+        let runtime = HostRuntime::new();
         let memory = Arc::new(InMemory::new());
         let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
         Self { runtime, bucket: RefCell::new(bucket), memory: RefCell::new(memory) }
@@ -82,7 +79,7 @@ impl Host {
 
     /// The store `recovering` recovered, opened by an uploader uploading every `interval`, as
     /// holder `holder` of its cell's head.
-    fn open(
+    async fn open(
         &self,
         recovering: Recovering<MemDir>,
         holder: u64,
@@ -97,17 +94,11 @@ impl Host {
         // which they compact.
         let options =
             upload::Options { interval, checkpoint_every: 4, ..upload::Options::default() };
-        local_cell::upload::wait_on(upload::open(
-            recovering,
-            OPTIONS,
-            self.bucket(),
-            (holder, options),
-            &runtime,
-        ))
+        upload::open(recovering, OPTIONS, self.bucket(), (holder, options), &runtime).await
     }
 
     /// What `store` holds, its extents whose data is in the bucket read there.
-    fn contents(&self, store: &LocalCell<MemDir>) -> Model {
+    async fn contents(&self, store: &LocalCell<MemDir>) -> Model {
         let mut extents = BTreeMap::new();
         for (extent, len) in store.extents().unwrap() {
             let mut data = vec![0; len as usize];
@@ -116,7 +107,7 @@ impl Host {
                     err.downcast_ref::<BucketData>().cloned().unwrap_or_else(|| panic!("{err:#}"));
                 let bucket = self.bucket();
                 let read = bucket_cell::testing::read(&bucket, extent, &location);
-                data = self.runtime.block_on(read).unwrap();
+                data = read.await.unwrap();
             }
             extents.insert(extent, data);
         }
@@ -275,13 +266,13 @@ const DESCRIPTION: Description =
 
 /// A store made on `host`, kept in its bucket, its uploader uploading every `interval`, crashing
 /// in a random workload, as `rng` says, as its file system fails from a random version on.
-fn crashed(host: &Host, round: u64, rng: &mut StdRng, interval: Duration) -> Crashed {
+async fn crashed(host: &Host, round: u64, rng: &mut StdRng, interval: Duration) -> Crashed {
     let dir = MemDir::new();
     LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
     let bucket = host.bucket();
-    host.runtime.block_on(bucket_cell::lifecycle::create(&*bucket, CELL, 1)).unwrap();
+    bucket_cell::lifecycle::create(&*bucket, CELL, 1).await.unwrap();
     let (store, uploader) =
-        host.open(LocalCell::recover_unmade(dir.clone()).unwrap(), 1, interval).unwrap();
+        host.open(LocalCell::recover_unmade(dir.clone()).unwrap(), 1, interval).await.unwrap();
     store.made().unwrap();
     // The commits opening it made, the cell's capacity set, hold nothing.
     let first = store.last_commit().unwrap() as usize;
@@ -291,7 +282,7 @@ fn crashed(host: &Host, round: u64, rng: &mut StdRng, interval: Duration) -> Cra
     let cut = Arc::new(Cut { bucket: host.bucket(), left: rng.random_range(0..most).into() });
     let passes = Passes::start(cut.clone(), interval);
     dir.fail_after(Some(rng.random_range(0..600)));
-    let (durable, _) = workload(rng, &store, &mut epochs, Model::default(), first);
+    let (durable, _) = workload(rng, &store, &mut epochs, Model::default(), first).await;
     let acknowledged = uploader.last_uploaded() as usize;
     let dir = dir.crash(round);
     let collected = passes.abort().unwrap_or_else(|err| panic!("round {round}: {err}"));
@@ -305,7 +296,7 @@ fn crashed(host: &Host, round: u64, rng: &mut StdRng, interval: Duration) -> Cra
 
 /// Opens the store `crashed` left on `host`, as holder `holder`, and checks it holds a prefix of
 /// its commits at least as late as `least`: returns that commit's epoch.
-fn reopened(
+async fn reopened(
     host: &Host,
     round: u64,
     crashed: &Crashed,
@@ -317,6 +308,7 @@ fn reopened(
         .unwrap_or_else(|err| panic!("round {round}: the store doesn't recover: {err:#}"));
     let (store, uploader) = host
         .open(recovering, holder, HOUR)
+        .await
         .unwrap_or_else(|err| panic!("round {round}: the store doesn't open: {err}"));
     let epochs = &crashed.epochs;
     let epoch = store.last_commit().unwrap() as usize;
@@ -327,7 +319,7 @@ fn reopened(
          {acknowledged} acknowledged",
         epochs.len()
     );
-    assert_eq!(host.contents(&store), epochs[epoch], "round {round}: at epoch {epoch}");
+    assert_eq!(host.contents(&store).await, epochs[epoch], "round {round}: at epoch {epoch}");
     drop(uploader);
     drop(store);
     epoch
@@ -349,23 +341,23 @@ pub struct Found {
 }
 
 /// Round `round` of the kept rounds (see the module's docs).
-pub fn kept(round: u64) -> Found {
+pub async fn kept(round: u64) -> Found {
     let host = Host::new();
     let mut rng = StdRng::seed_from_u64(round);
     let interval = Duration::from_millis(rng.random_range(1..=20));
-    let crashed = crashed(&host, round, &mut rng, interval);
+    let crashed = crashed(&host, round, &mut rng, interval).await;
     let Crashed { epochs, acknowledged, durable, first, cut, collected, .. } = &crashed;
 
     // A pass after the crash, over what it left, completes, as the next host's collector's would.
     let bucket = host.bucket();
     let pass = collector::collect(&*bucket, 1 << 20, &COLLECTING);
-    host.runtime.block_on(pass).unwrap_or_else(|err| panic!("round {round}: the pass: {err}"));
+    pass.await.unwrap_or_else(|err| panic!("round {round}: the pass: {err}"));
 
     // Its disk lost, a store of the cell's on another host takes it from the bucket.
     let elsewhere = MemDir::new();
     LocalCell::make(&elsewhere, DESCRIPTION, Some(URL), None).unwrap();
     let recovering = LocalCell::recover_unmade(elsewhere).unwrap();
-    let (taken, uploader) = host.open(recovering, 2, interval).unwrap();
+    let (taken, uploader) = host.open(recovering, 2, interval).await.unwrap();
     taken.made().unwrap();
     let epoch = taken.last_commit().unwrap() as usize;
     assert!(
@@ -373,14 +365,15 @@ pub fn kept(round: u64) -> Found {
         "round {round}: taken at epoch {epoch}, of {acknowledged}..{}",
         epochs.len()
     );
-    assert_eq!(host.contents(&taken), epochs[epoch], "round {round}: taken at epoch {epoch}");
+    assert_eq!(host.contents(&taken).await, epochs[epoch], "round {round}: taken at epoch {epoch}");
     drop(uploader);
     drop(taken);
 
     // Its disk kept, the store opens again: its log follows the cell, which the taking fenced
     // past no commit, and what it made durable it holds.
-    let reopened = reopened(&host, round, &crashed, crashed.dir.clone(), 3, (*durable).max(epoch));
-    collected_alone(&host, round);
+    let reopened =
+        reopened(&host, round, &crashed, crashed.dir.clone(), 3, (*durable).max(epoch)).await;
+    collected_alone(&host, round).await;
     let (compacted, deleted) = (collected.0 > 0, collected.1 > 0);
     Found {
         acknowledged: acknowledged > first,
@@ -397,17 +390,20 @@ const PASSES_ALONE: u64 = 8;
 /// Runs passes over `host`'s bucket, alone, every store gone, until one does nothing, and checks
 /// they left nothing they should have collected, garbage or objects mostly freed, uncompacted: the
 /// space the round's commits freed comes back, not only what they hold stays (TASK-390).
-fn collected_alone(host: &Host, round: u64) {
+async fn collected_alone(host: &Host, round: u64) {
     let bucket = host.bucket();
-    let quiet = (0..PASSES_ALONE).any(|pass| {
+    let mut quiet = false;
+    for pass in 0..PASSES_ALONE {
         let pass = collector::collect(&*bucket, (2 << 20) + pass, &COLLECTING);
-        let report =
-            host.runtime.block_on(pass).unwrap_or_else(|err| panic!("round {round}: {err}"));
-        report == collector::Report::default()
-    });
+        let report = pass.await.unwrap_or_else(|err| panic!("round {round}: {err}"));
+        if report == collector::Report::default() {
+            quiet = true;
+            break;
+        }
+    }
     assert!(quiet, "round {round}: {PASSES_ALONE} passes alone each did something");
     let left = bucket_cell::testing::uncollected(&*bucket, COLLECTING.compact_below);
-    assert_eq!(host.runtime.block_on(left), Vec::<String>::new(), "round {round}");
+    assert_eq!(left.await, Vec::<String>::new(), "round {round}");
 }
 
 /// Round `round` of the cut openings: the store a kept round's first crash left opened again, its
@@ -416,25 +412,28 @@ fn collected_alone(host: &Host, round: u64) {
 /// opening wrote: a segment closed again from its log, the WAL's start moved on past what the
 /// bucket acknowledged, the files that left for the bucket, a capacity restated. Returns how many
 /// writes the opening made.
-pub fn cut(round: u64) -> u64 {
+pub async fn cut(round: u64) -> u64 {
     let host = Host::new();
     let mut rng = StdRng::seed_from_u64(round);
     let interval = Duration::from_millis(rng.random_range(1..=20));
-    let crashed = crashed(&host, round, &mut rng, interval);
+    let crashed = crashed(&host, round, &mut rng, interval).await;
     let mut holder = 10;
     for writes in 0.. {
         // A copy of what the crash left, which the opening cut at its write `writes` changes.
         let dir = crashed.dir.crash(0);
         dir.fail_after(Some(writes));
         let opening = LocalCell::recover(dir.clone()).map_err(upload::Failure::from);
-        let opened = opening.and_then(|recovering| host.open(recovering, holder, HOUR));
+        let opened = match opening {
+            Ok(recovering) => host.open(recovering, holder, HOUR).await,
+            Err(err) => Err(err),
+        };
         let whole = opened.is_ok() && !dir.has_failed();
         drop(opened);
         if whole {
             return writes;
         }
         let epoch =
-            reopened(&host, round, &crashed, dir.crash(writes), holder + 1, crashed.durable);
+            reopened(&host, round, &crashed, dir.crash(writes), holder + 1, crashed.durable).await;
         assert!(epoch >= crashed.acknowledged, "round {round}: cut at {writes}");
         holder += 2;
     }

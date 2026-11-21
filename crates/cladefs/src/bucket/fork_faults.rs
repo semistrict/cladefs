@@ -104,18 +104,13 @@ fn mint(store: &OpenCell, count: u64) -> Vec<ExtentId> {
     (first..first + count).map(|sequence| ExtentId { cell: store.cell().id, sequence }).collect()
 }
 
-fn write(store: &OpenCell, extent: ExtentId, data: &[u8]) {
-    store.write(extent, 0, &[VolatileSlice::from(data)]).unwrap();
+async fn write(store: &OpenCell, extent: ExtentId, data: &[u8]) {
+    store.write(extent, 0, &[VolatileSlice::from(data)]).await.unwrap();
 }
 
-pub(super) fn read(store: &OpenCell, extent: ExtentId, len: usize) -> Vec<u8> {
+pub(super) async fn read(store: &OpenCell, extent: ExtentId, len: usize) -> Vec<u8> {
     let mut data = vec![0; len];
-    local_cell::upload::wait_on(store.read(
-        extent,
-        0,
-        &mut [VolatileSliceMut::from(&mut data[..])],
-    ))
-    .unwrap();
+    store.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).await.unwrap();
     data
 }
 
@@ -126,7 +121,7 @@ pub(super) fn options() -> local_cell::upload::Options {
 
 /// Mints `extents` of `store`'s, of those lengths, with data from `seed`, and commits them, the
 /// root `root`: returns them.
-pub(super) fn commit(
+pub(super) async fn commit(
     store: &OpenCell,
     seed: u8,
     lens: &[usize],
@@ -138,9 +133,9 @@ pub(super) fn commit(
         .map(|(at, (extent, &len))| (extent, pattern(seed + at as u8, len)))
         .collect();
     for (extent, data) in &extents {
-        write(store, *extent, data);
+        write(store, *extent, data).await;
     }
-    local_cell::upload::wait_on(store.commit(Some(root))).unwrap();
+    store.commit(Some(root)).await.unwrap();
     extents
 }
 
@@ -153,7 +148,7 @@ pub(super) fn host() {
 
 impl World {
     /// A new world, the parent's second writer's commits uploaded: the sequence floor jumped.
-    fn new() -> Self {
+    async fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let host = temp.path().join("host");
         std::fs::create_dir(&host).unwrap();
@@ -163,20 +158,20 @@ impl World {
         let reached = Arc::new(ObjectBucket::new(gated.clone(), ""));
 
         let other =
-            kept_in(temp.path().join("other"), (1 << 30, None), &bucket, options()).unwrap();
-        let other_held = commit(&other, 9, &[BLOCK], b"other");
+            kept_in(temp.path().join("other"), (1 << 30, None), &bucket, options()).await.unwrap();
+        let other_held = commit(&other, 9, &[BLOCK], b"other").await;
 
         let path = host.join("parent");
-        let parent = kept_in(&path, (1 << 30, None), &reached, options()).unwrap();
+        let parent = kept_in(&path, (1 << 30, None), &reached, options()).await.unwrap();
         let cell = parent.cell();
-        let mut held = commit(&parent, 1, &[BLOCK], b"first");
-        local_cell::upload::wait_on(parent.wait_uploaded()).unwrap();
+        let mut held = commit(&parent, 1, &[BLOCK], b"first").await;
+        parent.wait_uploaded().await.unwrap();
         let floor = parent.info().unwrap().sequence_floor;
         drop(parent);
-        let parent = reopened(&path, options()).unwrap();
+        let parent = reopened(&path, options()).await.unwrap();
         assert!(parent.info().unwrap().sequence_floor > floor, "a writer's floor jumps");
-        held.extend(commit(&parent, 2, &[2 * BLOCK, 4 << 20], b"root"));
-        local_cell::upload::wait_on(parent.wait_uploaded()).unwrap();
+        held.extend(commit(&parent, 2, &[2 * BLOCK, 4 << 20], b"root").await);
+        parent.wait_uploaded().await.unwrap();
         Self {
             temp,
             host,
@@ -244,10 +239,10 @@ impl World {
 
     /// Forks the parent to `child`, its store at `child` in the host's disk, with `faults`
     /// happening; and lets go of the parent, whatever its uploader has left to do.
-    fn fork(&mut self, faults: &[Fault]) -> Result<(), crate::Error> {
+    async fn fork(&mut self, faults: &[Fault]) -> Result<(), crate::Error> {
         let guards: Vec<_> = faults.iter().filter_map(|fault| self.arm(*fault)).collect();
         let forked = self.parent.as_ref().unwrap().fork_to(self.path("child"), self.child);
-        let forked = local_cell::upload::wait_on(forked);
+        let forked = forked.await;
         self.parent = None;
         drop(guards);
         if self.dead.load(Ordering::SeqCst) {
@@ -266,26 +261,29 @@ impl World {
     }
 
     /// Opens the store at `path`, and takes its cell.
-    fn open(&self, path: &Path) -> Result<OpenCell, String> {
+    async fn open(&self, path: &Path) -> Result<OpenCell, String> {
         naming(path, &self.bucket);
-        reopened(path, options()).map_err(|err| err.to_string())
+        reopened(path, options()).await.map_err(|err| err.to_string())
     }
 
     /// Whether `store`, a fork of the parent, reads what the parent held at the fork, whose root
     /// was `root`, and goes on committing, its writer's floor its own.
-    fn check_fork(&self, store: &OpenCell, root: &[u8], case: &str) {
+    async fn check_fork(&self, store: &OpenCell, root: &[u8], case: &str) {
         assert_eq!(store.root(), Ok(root.to_vec()), "{case}");
         for (extent, data) in &self.held {
-            assert!(read(store, *extent, data.len()) == *data, "{case}: {extent:?} of a fork");
+            assert!(
+                read(store, *extent, data.len()).await == *data,
+                "{case}: {extent:?} of a fork"
+            );
         }
-        let own = commit(store, 5, &[BLOCK], b"child");
-        assert_eq!(local_cell::upload::wait_on(store.wait_uploaded()), Ok(()), "{case}");
-        assert!(read(store, own[0].0, BLOCK) == own[0].1, "{case}");
+        let own = commit(store, 5, &[BLOCK], b"child").await;
+        assert_eq!(store.wait_uploaded().await, Ok(()), "{case}");
+        assert!(read(store, own[0].0, BLOCK).await == own[0].1, "{case}");
     }
 
     /// Deletes the fork at `path`, as the control API does.
-    fn delete(&self, path: &Path, case: &str) {
-        let deleted = local_cell::upload::wait_on(OpenCell::delete(path, Some(&self.bucket)));
+    async fn delete(&self, path: &Path, case: &str) {
+        let deleted = OpenCell::delete(path, Some(&self.bucket)).await;
         assert_eq!(deleted.map_err(|err| err.to_string()), Ok(()), "{case}: deleting it");
         assert!(!path.exists(), "{case}: it is there still");
     }
@@ -325,7 +323,7 @@ impl World {
 
     /// What must hold whatever came of the fork, `forked`, `case` saying what went wrong. The
     /// collector's passes go first, then between each step, as nothing keeps them away.
-    fn settle(self, forked: Result<(), crate::Error>, leftover: Leftover, case: &str) {
+    async fn settle(self, forked: Result<(), crate::Error>, leftover: Leftover, case: &str) {
         let path = self.path("child");
         let mut children = Vec::new();
         // Those to check, once the parent's next writer took its cell.
@@ -343,16 +341,16 @@ impl World {
                 children.push(path.clone());
                 unchecked.push((path.clone(), b"root"));
             } else if leftover == Leftover::Opened {
-                match self.open(&path) {
+                match self.open(&path).await {
                     Ok(store) => {
                         assert!(!self.taken.load(Ordering::SeqCst), "{case}: it took another's");
-                        self.check_fork(&store, b"root", case);
+                        self.check_fork(&store, b"root", case).await;
                         children.push(path.clone());
                     }
-                    Err(_) => self.delete(&path, case),
+                    Err(_) => self.delete(&path, case).await,
                 }
             } else {
-                self.delete(&path, case);
+                self.delete(&path, case).await;
             }
         } else {
             assert!(!made, "{case}: a fork made left no store");
@@ -362,14 +360,17 @@ impl World {
         // The parent's next writer takes its cell, and it holds what it held.
         let parent_path = self.path("parent");
         let parent =
-            self.open(&parent_path).unwrap_or_else(|err| panic!("{case}: the parent: {err}"));
+            self.open(&parent_path).await.unwrap_or_else(|err| panic!("{case}: the parent: {err}"));
         self.gated.land_late();
         assert_eq!(parent.root(), Ok(b"root".to_vec()), "{case}");
         for (extent, data) in &self.held {
-            assert!(read(&parent, *extent, data.len()) == *data, "{case}: the parent's {extent:?}");
+            assert!(
+                read(&parent, *extent, data.len()).await == *data,
+                "{case}: the parent's {extent:?}"
+            );
         }
-        let later = commit(&parent, 7, &[BLOCK], b"later");
-        assert_eq!(local_cell::upload::wait_on(parent.wait_uploaded()), Ok(()), "{case}");
+        let later = commit(&parent, 7, &[BLOCK], b"later").await;
+        assert_eq!(parent.wait_uploaded().await, Ok(()), "{case}");
         let (mut extents, root) = uploaded(&self.bucket, self.cell);
         extents.sort();
         let mut all: Vec<_> = (self.held.iter().chain(&later))
@@ -396,8 +397,7 @@ impl World {
         // to it again, finds it given up on (TASK-691).
         let failed = self.failed(self.child);
         let spent = self.record(self.child).is_some() || !children.is_empty() || failed;
-        let again = local_cell::upload::wait_on(parent.fork_to(&path, self.child))
-            .map_err(|err| err.errno());
+        let again = parent.fork_to(&path, self.child).await.map_err(|err| err.errno());
         let expected = match (failed, spent) {
             (true, _) => Err(Some(Errno::ENOENT)),
             (false, true) => Err(Some(Errno::EEXIST)),
@@ -410,41 +410,38 @@ impl World {
         }
         let retried = crate::host_cell::new_alone();
         assert_eq!(
-            local_cell::upload::wait_on(parent.fork_to(self.path("retried"), retried))
-                .map_err(|err| err.to_string()),
+            parent.fork_to(self.path("retried"), retried).await.map_err(|err| err.to_string()),
             Ok(()),
             "{case}: a fork to a new child"
         );
         children.push(self.path("retried"));
         unchecked.push((self.path("retried"), b"later"));
         for (child, root) in unchecked {
-            let opened = self.open(&child).unwrap_or_else(|err| panic!("{case}: a fork: {err}"));
-            self.check_fork(&opened, root, case);
+            let opened =
+                self.open(&child).await.unwrap_or_else(|err| panic!("{case}: a fork: {err}"));
+            self.check_fork(&opened, root, case).await;
         }
 
         // No cell lives that no store holds, none another's was harmed, and it goes on.
         let mut live = self.live();
         live.sort();
         let mut named = vec![self.cell, self.other.cell()];
-        named.extend(
-            children
-                .iter()
-                .map(|child| local_cell::upload::wait_on(OpenCell::open(child)).unwrap().cell()),
-        );
+        for child in &children {
+            named.push(OpenCell::open(child).await.unwrap().cell());
+        }
         if taken {
             named.push(self.child);
         }
         named.sort();
         assert_eq!(live, named, "{case}: cells no store holds, or lost");
         for (extent, data) in &self.other_held {
-            assert!(read(&self.other, *extent, data.len()) == *data, "{case}: another's extent");
+            assert!(
+                read(&self.other, *extent, data.len()).await == *data,
+                "{case}: another's extent"
+            );
         }
-        commit(&self.other, 8, &[BLOCK], b"other, later");
-        assert_eq!(
-            local_cell::upload::wait_on(self.other.wait_uploaded()),
-            Ok(()),
-            "{case}: another's cell"
-        );
+        commit(&self.other, 8, &[BLOCK], b"other, later").await;
+        assert_eq!(self.other.wait_uploaded().await, Ok(()), "{case}: another's cell");
         if taken {
             let writer =
                 bucket_cell::Writer::open(self.bucket.clone(), self.child, rand::random(), TOKEN);
@@ -453,10 +450,10 @@ impl World {
 
         // Everything but the other's deleted, nothing is left of it, in the bucket or here.
         for child in &children {
-            self.delete(child, case);
+            self.delete(child, case).await;
         }
         drop(parent);
-        self.delete(&parent_path, case);
+        self.delete(&parent_path, case).await;
         self.collect(case);
         let keys = block_on(bucket_cell::Bucket::list(&*self.bucket, "")).unwrap();
         let kept = |cell| cell == self.other.cell() || taken && cell == self.child;
@@ -508,20 +505,23 @@ impl World {
 
 /// Runs `faults` in a world of their own, checking what must hold ([`World::settle`]), and gives
 /// the fork's result.
-fn run(faults: &[Fault], leftover: Leftover) -> Result<(), Option<Errno>> {
-    let mut world = World::new();
-    let forked = world.fork(faults);
+async fn run(faults: &[Fault], leftover: Leftover) -> Result<(), Option<Errno>> {
+    let mut world = World::new().await;
+    let forked = world.fork(faults).await;
     let errno = forked.as_ref().map(drop).map_err(crate::Error::errno);
-    world.settle(forked, leftover, &format!("{faults:?}, {leftover:?}"));
+    world.settle(forked, leftover, &format!("{faults:?}, {leftover:?}")).await;
     errno
 }
 
 /// Runs `cases`, going on past those that fail, then fails with them all: or gives what each fork
 /// gave.
-fn all(cases: impl IntoIterator<Item = (Vec<Fault>, Leftover)>) -> Vec<Result<(), Option<Errno>>> {
+async fn all(
+    cases: impl IntoIterator<Item = (Vec<Fault>, Leftover)>,
+) -> Vec<Result<(), Option<Errno>>> {
     let (mut failed, mut forked) = (Vec::new(), Vec::new());
     for (faults, leftover) in cases {
-        match std::panic::catch_unwind(|| run(&faults, leftover)) {
+        let running = std::panic::AssertUnwindSafe(run(&faults, leftover));
+        match futures::FutureExt::catch_unwind(running).await {
             Ok(result) => forked.push(result),
             Err(panic) => {
                 let said = panic.downcast_ref::<String>().cloned().unwrap_or_default();
@@ -534,20 +534,20 @@ fn all(cases: impl IntoIterator<Item = (Vec<Fault>, Leftover)>) -> Vec<Result<()
 }
 
 /// A fork with nothing going wrong forks, and what must hold holds.
-#[test]
-fn forks_with_nothing_going_wrong() {
+#[tokio::test(flavor = "multi_thread")]
+async fn forks_with_nothing_going_wrong() {
     host();
-    assert_eq!(run(&[], Leftover::Deleted), Ok(()));
+    assert_eq!(run(&[], Leftover::Deleted).await, Ok(()));
 }
 
 /// A fork's steps come in the order [`FORK_STEPS`] says, each passed; and a failed one's cleanup's
 /// in the order [`CLEANUP_STEPS`] says.
-#[test]
-fn forks_take_their_steps_in_order() {
+#[tokio::test(flavor = "multi_thread")]
+async fn forks_take_their_steps_in_order() {
     use std::sync::Mutex;
     host();
     // Each step, in the order passed, once.
-    let traced = |faults: &[Fault]| {
+    let traced = async |faults: &[Fault]| {
         let steps = Arc::new(Mutex::new(Vec::new()));
         let guards: Vec<_> = (FORK_STEPS.into_iter().chain(CLEANUP_STEPS))
             .filter(|step| !faults.contains(&Fault::Fails(step)))
@@ -562,85 +562,89 @@ fn forks_take_their_steps_in_order() {
                 .unwrap()
             })
             .collect();
-        let mut world = World::new();
+        let mut world = World::new().await;
         steps.lock().unwrap().clear();
-        let _ = world.fork(faults);
+        let _ = world.fork(faults).await;
         drop(guards);
         Arc::try_unwrap(steps).unwrap().into_inner().unwrap()
     };
-    assert_eq!(traced(&[]), FORK_STEPS);
-    let cleanup = traced(&[Fault::Fails("upload::forked")]);
+    assert_eq!(traced(&[]).await, FORK_STEPS);
+    let cleanup = traced(&[Fault::Fails("upload::forked")]).await;
     let cleaned: Vec<_> = cleanup.into_iter().filter(|step| !FORK_STEPS.contains(step)).collect();
     assert_eq!(cleaned, ["lifecycle::head_ended"]);
 }
 
 /// A step of a fork that fails fails the fork, and what must hold holds: but its version's drop,
 /// past its child made, which the fork's caller is told of (TASK-609).
-#[test]
-fn forks_failing_at_each_step() {
+#[tokio::test(flavor = "multi_thread")]
+async fn forks_failing_at_each_step() {
     host();
-    let forked = all(FORK_STEPS.map(|step| (vec![Fault::Fails(step)], Leftover::Deleted)));
+    let forked = all(FORK_STEPS.map(|step| (vec![Fault::Fails(step)], Leftover::Deleted))).await;
     let made = (FORK_STEPS.iter().zip(forked)).filter(|(_, forked)| forked.is_ok());
     let made: Vec<_> = made.map(|(step, _)| *step).collect();
     assert_eq!(made, ["upload::drop_versions"], "forks made though these steps failed");
 }
 
 /// What a host dying at a step of a fork leaves, deleted or opened, breaks nothing.
-#[test]
-fn hosts_dying_at_each_step_of_a_fork() {
+#[tokio::test(flavor = "multi_thread")]
+async fn hosts_dying_at_each_step_of_a_fork() {
     host();
     all(FORK_STEPS.into_iter().flat_map(|step| {
         [Leftover::Deleted, Leftover::Opened].map(|leftover| (vec![Fault::Dies(step)], leftover))
-    }));
+    }))
+    .await;
 }
 
 /// Another cell taking the child's ID, as a guest may name one that was free, whichever step of
 /// the fork it comes at, keeps it, and the parent goes on.
-#[test]
-fn cells_taking_the_childs_id_at_each_step() {
+#[tokio::test(flavor = "multi_thread")]
+async fn cells_taking_the_childs_id_at_each_step() {
     host();
-    all(FORK_STEPS.map(|step| (vec![Fault::Taken(step)], Leftover::Deleted)));
+    all(FORK_STEPS.map(|step| (vec![Fault::Taken(step)], Leftover::Deleted))).await;
 }
 
 /// So does it whose host dies later in the fork, whatever is done with what it left.
-#[test]
-fn cells_taking_the_id_of_a_fork_whose_host_dies() {
+#[tokio::test(flavor = "multi_thread")]
+async fn cells_taking_the_id_of_a_fork_whose_host_dies() {
     host();
     let taken = "fork::uploaded";
     let after = FORK_STEPS.iter().position(|step| *step == taken).unwrap();
     all(FORK_STEPS[after + 1..].iter().flat_map(|&step| {
         [Leftover::Deleted, Leftover::Opened]
             .map(|leftover| (vec![Fault::Taken(taken), Fault::Dies(step)], leftover))
-    }));
+    }))
+    .await;
 }
 
 /// How many writes the fork that `faults` go wrong in makes.
-fn writes(faults: &[Fault]) -> usize {
-    let mut world = World::new();
+async fn writes(faults: &[Fault]) -> usize {
+    let mut world = World::new().await;
     world.gated.arm(usize::MAX, Mishap::Refused, Arc::new(|| {}));
-    let _ = world.fork(faults);
+    let _ = world.fork(faults).await;
     world.gated.writes()
 }
 
 /// A write of a fork's going wrong, its answer lost or the host dying as it goes, a dead host's
 /// PUT landing late, breaks nothing.
-#[test]
-fn each_write_of_a_fork_going_wrong() {
+#[tokio::test(flavor = "multi_thread")]
+async fn each_write_of_a_fork_going_wrong() {
     host();
-    let count = writes(&[]);
+    let count = writes(&[]).await;
     assert!(count >= 3, "a fork's segment, its child's record, its checkpoint: {count}");
     all((0..count).flat_map(|write| {
         MISHAPS.map(|mishap| (vec![Fault::Write(write, mishap)], Leftover::Deleted))
-    }));
+    }))
+    .await;
 }
 
 /// TASK-150.1: a pass of the collector, which nothing keeps away from any step of a fork, just
 /// before each of the fork's writes takes nothing a cell holds, or is about to.
-#[test]
-fn each_write_of_a_fork_meeting_the_collector() {
+#[tokio::test(flavor = "multi_thread")]
+async fn each_write_of_a_fork_meeting_the_collector() {
     host();
-    all((0..writes(&[]))
-        .map(|write| (vec![Fault::Write(write, Mishap::Collected)], Leftover::Deleted)));
+    all((0..writes(&[]).await)
+        .map(|write| (vec![Fault::Write(write, Mishap::Collected)], Leftover::Deleted)))
+    .await;
 }
 
 /// Where a fork may fail for what its cleanup finds: nothing of it in object storage, its version
@@ -651,8 +655,8 @@ const FAILING_FOR_CLEANUPS: [&str; 5] =
 
 /// A failed fork's cleanup failing, or its host dying, at each step, or a write of it going wrong,
 /// leaves nothing here, and in the bucket what stands, as an orphan, which an operator deletes.
-#[test]
-fn cleanups_of_failed_forks_going_wrong_at_each_step() {
+#[tokio::test(flavor = "multi_thread")]
+async fn cleanups_of_failed_forks_going_wrong_at_each_step() {
     host();
     all(FAILING_FOR_CLEANUPS.into_iter().flat_map(|first| {
         CLEANUP_STEPS.into_iter().flat_map(move |step| {
@@ -662,19 +666,24 @@ fn cleanups_of_failed_forks_going_wrong_at_each_step() {
                 (vec![first, Fault::Dies(step)], Leftover::Deleted),
             ]
         })
-    }));
+    }))
+    .await;
 }
 
 /// So does a write of the cleanup's going wrong.
-#[test]
-fn each_write_of_a_failed_forks_cleanup_going_wrong() {
+#[tokio::test(flavor = "multi_thread")]
+async fn each_write_of_a_failed_forks_cleanup_going_wrong() {
     host();
-    all(FAILING_FOR_CLEANUPS.into_iter().flat_map(|first| {
+    let mut cases = Vec::new();
+    for first in FAILING_FOR_CLEANUPS {
         let first = Fault::Fails(first);
-        (0..writes(&[first])).flat_map(move |write| {
-            MISHAPS.map(|mishap| (vec![first, Fault::Write(write, mishap)], Leftover::Deleted))
-        })
-    }));
+        for write in 0..writes(&[first]).await {
+            let mishaps =
+                MISHAPS.map(|mishap| (vec![first, Fault::Write(write, mishap)], Leftover::Deleted));
+            cases.extend(mishaps);
+        }
+    }
+    all(cases).await;
 }
 
 /// TASK-79.78: a fork whose host was lost with its disk once its child's record was made, before
@@ -683,16 +692,17 @@ fn each_write_of_a_failed_forks_cleanup_going_wrong() {
 /// tell it from a cell held idle; an operator finds it among the live cells, as `cladefs-gc
 /// --cells` does, and deletes it, whichever placement took it last, as `--delete-cell` does;
 /// and once the version it was forked from is dropped too, the next pass frees what only they held.
-#[test]
-fn forks_orphaned_by_a_lost_host_keep_what_they_inherited_until_deleted() {
+#[tokio::test(flavor = "multi_thread")]
+async fn forks_orphaned_by_a_lost_host_keep_what_they_inherited_until_deleted() {
     host();
-    let mut world = World::new();
+    let mut world = World::new().await;
     let large = world.held.last().unwrap().0;
-    let _ = world.fork(&[Fault::Dies("fork::recorded")]);
+    let _ = world.fork(&[Fault::Dies("fork::recorded")]).await;
     assert!(world.dead.load(Ordering::SeqCst), "the host lives");
 
     let moved = world.temp.path().join("moved");
-    let parent = kept_in(&moved, (1 << 30, Some(world.cell)), &world.bucket, options()).unwrap();
+    let parent =
+        kept_in(&moved, (1 << 30, Some(world.cell)), &world.bucket, options()).await.unwrap();
     let reopen = moved.clone();
     assert!(world.record(world.child).is_some_and(|record| !record.deleted()), "no orphan");
     let state = block_on(bucket_cell::recover(&*world.bucket, world.cell, None));
@@ -701,8 +711,8 @@ fn forks_orphaned_by_a_lost_host_keep_what_they_inherited_until_deleted() {
     for (extent, _) in &world.held {
         parent.free(*extent).unwrap();
     }
-    local_cell::upload::wait_on(parent.commit(None)).unwrap();
-    assert_eq!(local_cell::upload::wait_on(parent.wait_uploaded()), Ok(()));
+    parent.commit(None).await.unwrap();
+    assert_eq!(parent.wait_uploaded().await, Ok(()));
     drop(parent);
     let stored = || {
         let listed = block_on(bucket_cell::Bucket::list(&*world.bucket, "")).unwrap();
@@ -719,13 +729,10 @@ fn forks_orphaned_by_a_lost_host_keep_what_they_inherited_until_deleted() {
     // until it is dropped.
     world.collect("deleted");
     assert!(stored(), "the origin went while the fork's version names it");
-    let parent = world.open(&reopen).unwrap();
-    let versions = local_cell::upload::wait_on(parent.versions())
-        .into_iter()
-        .map(|version| version.id)
-        .collect();
-    local_cell::upload::wait_on(parent.drop_versions(&versions)).unwrap();
-    crate::test_checkpoints::checkpointed(&parent, &world.bucket);
+    let parent = world.open(&reopen).await.unwrap();
+    let versions = parent.versions().await.into_iter().map(|version| version.id).collect();
+    parent.drop_versions(&versions).await.unwrap();
+    crate::test_checkpoints::checkpointed(&parent, &world.bucket).await;
     drop(parent);
     world.collect("dropped");
     assert!(!stored(), "what the fork inherited stayed once it was deleted");
@@ -744,8 +751,8 @@ fn seeded(seed: u64) -> (Vec<Fault>, Leftover) {
 
 /// Faults a seed picks, several to a fork, its cleanup and the daemon's steps among them: a failure
 /// says the seed; CLADEFS_FAULT_SEED says which to run alone.
-#[test]
-fn faults_a_seed_picks() {
+#[tokio::test(flavor = "multi_thread")]
+async fn faults_a_seed_picks() {
     host();
     let seeds = match std::env::var("CLADEFS_FAULT_SEED") {
         Ok(seed) => {
@@ -754,5 +761,5 @@ fn faults_a_seed_picks() {
         }
         Err(_) => 0..64,
     };
-    all(seeds.map(seeded));
+    all(seeds.map(seeded)).await;
 }

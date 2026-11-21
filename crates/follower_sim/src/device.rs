@@ -82,7 +82,7 @@ impl<D: Dir + 'static> Device for CellDevice<D> {
         buffer: BufferRef<'_>,
         write_opts: WriteOptions<'_>,
     ) -> Result<(), Error> {
-        self.store.write(extent, offset, &buffer.to_vec())?;
+        self.store.write(extent, offset, &buffer.to_vec()).await?;
         if write_opts.flags.contains(WriteFlags::POST_BARRIER) {
             match write_opts.root {
                 Some(root) => self.commit_root(root).await?,
@@ -109,7 +109,7 @@ impl<D: Dir + 'static> Device for CellDevice<D> {
     }
 
     async fn commit_root(&self, root: &[u8]) -> Result<(), Error> {
-        self.store.commit(Some(root))
+        self.store.commit(Some(root)).await
     }
 
     async fn close(&self) -> Result<(), Error> {
@@ -117,7 +117,7 @@ impl<D: Dir + 'static> Device for CellDevice<D> {
     }
 
     async fn flush(&self) -> Result<(), Error> {
-        self.store.commit(None)
+        self.store.commit(None).await
     }
 
     fn is_read_only(&self) -> bool {

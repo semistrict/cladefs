@@ -139,9 +139,9 @@ pub fn bucket_registry(url: &str) -> Result<Option<Registry>, crate::Error> {
 /// by the registry of buckets in its root, or the root bucket's, opened with its own options and
 /// checked to be the one recorded (TASK-633.3). `ENOENT` if no registry records it, `ESTALE` if the
 /// bucket at its URL is another.
-pub fn bucket_numbered(number: u16) -> Result<Arc<ObjectBucket>, crate::Error> {
+pub async fn bucket_numbered(number: u16) -> Result<Arc<ObjectBucket>, crate::Error> {
     let home = Host::from_env().map_err(|err| crate::Error::new(anyhow::anyhow!(err)))?.bucket;
-    Ok(crate::host_cell::bucket_numbered(&home, number)?)
+    Ok(crate::host_cell::bucket_numbered(&home, number).await?)
 }
 
 /// The errno of `failure`, as doc-4 and doc-7 have them: a cell this writer lost, to another
@@ -764,20 +764,14 @@ mod tests {
 
     /// A new store at `path`, of `capacity` bytes, of `cell`, a new one if none, its cell kept
     /// in `bucket`, its uploader uploading as `keeping` says.
-    pub(super) fn kept_in(
+    pub(super) async fn kept_in(
         path: impl AsRef<std::path::Path>,
         (capacity, cell): (u64, Option<crate::CellId>),
         bucket: &Arc<ObjectBucket>,
         keeping: local_cell::upload::Options,
     ) -> Result<OpenCell, crate::Error> {
         let cell = cell.unwrap_or_else(crate::host_cell::new_alone);
-        local_cell::upload::wait_on(OpenCell::create_kept_with(
-            path,
-            capacity,
-            cell,
-            &url_of(bucket),
-            keeping,
-        ))
+        OpenCell::create_kept_with(path, capacity, cell, &url_of(bucket), keeping).await
     }
 
     /// Has the store at `path` name `bucket` as the bucket its cell is kept in: a host restarted
@@ -799,14 +793,15 @@ mod tests {
     }
 
     /// The store at `path`, opened, its uploader uploading as `keeping` says.
-    pub(super) fn reopened(
+    pub(super) async fn reopened(
         path: impl AsRef<std::path::Path>,
         keeping: local_cell::upload::Options,
     ) -> Result<OpenCell, crate::Error> {
-        local_cell::upload::wait_on(OpenCell::open_with(
+        OpenCell::open_with(
             path,
             crate::open_cell::Opening { keeping, ..crate::open_cell::Opening::here()? },
-        ))
+        )
+        .await
     }
 
     /// Uploads only when a commit waits.
@@ -821,9 +816,9 @@ mod tests {
         (0..len).map(|i| seed ^ (i % 251) as u8).collect()
     }
 
-    fn write(store: &OpenCell, sequence: u64, data: &[u8]) -> ExtentId {
+    async fn write(store: &OpenCell, sequence: u64, data: &[u8]) -> ExtentId {
         let extent = ExtentId { cell: store.cell().id, sequence };
-        store.write(extent, 0, &[VolatileSlice::from(data)]).unwrap();
+        store.write(extent, 0, &[VolatileSlice::from(data)]).await.unwrap();
         extent
     }
 
@@ -844,15 +839,16 @@ mod tests {
 
     /// A store's extents, its root, and its commits made durable are uploaded; extents written and
     /// freed between two uploads never are.
-    #[test]
-    fn uploads_what_the_store_makes_durable() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn uploads_what_the_store_makes_durable() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "cells"));
-        let store =
-            kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
+        let store = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
+            .await
+            .unwrap();
         let cell = store.cell();
-        write(&store, 1, &pattern(1, BLOCK));
-        local_cell::upload::wait_on(store.commit(Some(b"first"))).unwrap();
+        write(&store, 1, &pattern(1, BLOCK)).await;
+        store.commit(Some(b"first")).await.unwrap();
         // What it held before is uploaded on attaching.
         assert_eq!(
             uploaded(&bucket, cell),
@@ -860,13 +856,13 @@ mod tests {
         );
 
         let large = pattern(3, 4 << 20);
-        write(&store, 2, &pattern(2, 2 * BLOCK));
-        write(&store, 3, &large);
-        write(&store, 4, &pattern(4, BLOCK));
-        local_cell::upload::wait_on(store.commit_ordered(None)).unwrap();
+        write(&store, 2, &pattern(2, 2 * BLOCK)).await;
+        write(&store, 3, &large).await;
+        write(&store, 4, &pattern(4, BLOCK)).await;
+        store.commit_ordered(None).await.unwrap();
         store.free(ExtentId { cell: cell.id, sequence: 1 }).unwrap();
         store.free(ExtentId { cell: cell.id, sequence: 4 }).unwrap();
-        local_cell::upload::wait_on(store.commit(Some(b"second"))).unwrap();
+        store.commit(Some(b"second")).await.unwrap();
         assert_eq!(
             uploaded(&bucket, cell),
             (vec![(2, pattern(2, 2 * BLOCK)), (3, large.clone())], Some(b"second".to_vec()))
@@ -894,7 +890,7 @@ mod tests {
 
         // Opened again, the store's uploader finds the cell as it left it.
         drop(store);
-        let store = reopened(dir.path().join("store"), idle()).unwrap();
+        let store = reopened(dir.path().join("store"), idle()).await.unwrap();
         // Its guest mints from the second writer's range.
         let info = store.info().unwrap();
         assert_eq!(info.sequence_floor, 2 << bucket_cell::EPOCH_SHIFT);
@@ -911,8 +907,8 @@ mod tests {
                 .count(),
             segments
         );
-        write(&store, 5, &pattern(5, BLOCK));
-        local_cell::upload::wait_on(store.commit(None)).unwrap();
+        write(&store, 5, &pattern(5, BLOCK)).await;
+        store.commit(None).await.unwrap();
         let (extents, root) = uploaded(&bucket, cell);
         assert_eq!(extents.iter().map(|(sequence, _)| *sequence).collect::<Vec<_>>(), [2, 3, 5]);
         assert_eq!(root, Some(b"second".to_vec()));
@@ -923,8 +919,8 @@ mod tests {
     /// store's never are, and its head swap fails (`Fenced`): what it wrote, no head names, and the
     /// store keeps its head. Before (TASK-407), its late segment landed where the store's first
     /// went, and the store took the cell again.
-    #[test]
-    fn takeovers_of_writers_still_uploading_keep_their_guests() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn takeovers_of_writers_still_uploading_keep_their_guests() {
         use bucket_cell::{Commit, SegmentBuilder, Writer};
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
@@ -945,7 +941,7 @@ mod tests {
         // A store takes the cell over, opening, its fence after the writer's.
         let path = dir.path().join("store");
         made_for(&path, cell, &bucket);
-        let store = reopened(&path, idle()).unwrap();
+        let store = reopened(&path, idle()).await.unwrap();
         // Both land, the second first, at keys of the writer's epoch; its head swap fails.
         futures::executor::block_on(async {
             before.upload(segments[1]).await.unwrap();
@@ -953,9 +949,9 @@ mod tests {
             assert_eq!(before.acknowledge().await, Err(bucket_cell::Error::Fenced));
         });
         // The store's commit is the cell's, its head as it was.
-        write(&store, 1, &pattern(1, BLOCK));
+        write(&store, 1, &pattern(1, BLOCK)).await;
         let epoch = store.uploader().unwrap().status().unwrap().taking.unwrap().epoch;
-        let committed = local_cell::upload::wait_on(store.commit(Some(b"after")));
+        let committed = store.commit(Some(b"after")).await;
         let uploader = store.uploader().unwrap();
         assert_eq!((committed, uploader.failed()), (Ok(()), None));
         assert_eq!(uploader.status().unwrap().taking.unwrap().epoch, epoch);
@@ -970,10 +966,10 @@ mod tests {
     /// of moves, the segment goes, and the first moves. Before, the store named it in the segment
     /// as long as it held it: gone, and its moves gone, the guest's read failed (`EIO`) on a live
     /// cell, which a recovery read through the moves of moves.
-    #[test]
-    fn extents_compacted_twice_read_where_the_store_names_them() {
-        compacted_twice(false);
-        compacted_twice(true);
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extents_compacted_twice_read_where_the_store_names_them() {
+        compacted_twice(false).await;
+        compacted_twice(true).await;
     }
 
     /// TASK-217: a store whose host died, its disk as the death left it and the host's cache lost
@@ -984,8 +980,8 @@ mod tests {
     /// the segment the collector had taken, and the checking VM's reads failed EIO (`lost: ... in
     /// segments/<cell>/<segment>`); TASK-165.9 removed the index, and the opening recovers the
     /// cell.
-    #[test]
-    fn extents_compacted_read_once_their_host_died_and_its_cache_went() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extents_compacted_read_once_their_host_died_and_its_cache_went() {
         const EXTENT: usize = 64 * BLOCK;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
@@ -1002,20 +998,20 @@ mod tests {
         let cache = Some(Arc::new(Cache::open(&dir.path().join("cache"), 1 << 30).unwrap()));
         let keeping = local_cell::upload::Options { cache, ..idle() };
         // One segment, of extents 1 to 16, which don't compress, freed but 1 to 3.
-        let store = kept_in(&path, (16 * EXTENT as u64, None), &reached, keeping).unwrap();
+        let store = kept_in(&path, (16 * EXTENT as u64, None), &reached, keeping).await.unwrap();
         let cell = store.cell();
         for sequence in 1..=16 {
-            write(&store, sequence, &noise(sequence, EXTENT));
+            write(&store, sequence, &noise(sequence, EXTENT)).await;
         }
-        local_cell::upload::wait_on(store.commit(None)).unwrap();
+        store.commit(None).await.unwrap();
         for sequence in 4..=16 {
             store.free(ExtentId { cell: cell.id, sequence }).unwrap();
         }
-        checkpointed(&store, &bucket);
+        checkpointed(&store, &bucket).await;
         // The segment compacted, 1 to 3 into its moves; the writer's checkpoint follows them; the
         // segment goes.
         assert_eq!(collect(1).compacted, 1);
-        checkpointed(&store, &bucket);
+        checkpointed(&store, &bucket).await;
         collect(2);
         let keys: Vec<String> =
             futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, ""))
@@ -1032,13 +1028,15 @@ mod tests {
         restart(&path, &restarted);
         gated.sever();
         naming(&restarted, &bucket);
-        let opened = reopened(&restarted, idle()).unwrap();
+        let opened = reopened(&restarted, idle()).await.unwrap();
         let mut data = vec![0; EXTENT];
-        let read = local_cell::upload::wait_on(opened.read(
-            ExtentId { cell: cell.id, sequence: 1 },
-            0,
-            &mut [crate::VolatileSliceMut::from(&mut data[..])],
-        ));
+        let read = opened
+            .read(
+                ExtentId { cell: cell.id, sequence: 1 },
+                0,
+                &mut [crate::VolatileSliceMut::from(&mut data[..])],
+            )
+            .await;
         assert_eq!(read.map(|()| data == noise(1, EXTENT)), Ok(true));
         drop(store);
     }
@@ -1051,9 +1049,9 @@ mod tests {
     /// hold that state's extents, are compacted no further, as they were when the collector went
     /// by the fork's state (`extents_compacted_twice_read_where_the_store_names_them` shows a
     /// cell's own compacted twice).
-    #[test]
-    fn forks_read_what_they_inherited_compacted_twice() {
-        inherited_compacted_twice();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn forks_read_what_they_inherited_compacted_twice() {
+        inherited_compacted_twice().await;
     }
 
     /// TASK-339: [`forks_read_what_they_inherited_compacted_twice`] with the fork's checkpoint
@@ -1061,15 +1059,15 @@ mod tests {
     /// the collector frees the segment and the first moves by, and the collections waited for
     /// nothing of it (moves/segments/ still listed after collect(4), main's macOS CI); now they
     /// wait for it ([`checkpointed`](crate::test_checkpoints::checkpointed)).
-    #[test]
-    fn forks_read_what_they_inherited_compacted_twice_their_checkpoint_late() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn forks_read_what_they_inherited_compacted_twice_their_checkpoint_late() {
         let scenario = fail::FailScenario::setup();
         fail::cfg("upload::checkpointing", "sleep(1000)").unwrap();
-        inherited_compacted_twice();
+        inherited_compacted_twice().await;
         scenario.teardown();
     }
 
-    fn inherited_compacted_twice() {
+    async fn inherited_compacted_twice() {
         const EXTENT: usize = 64 * BLOCK;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
@@ -1081,34 +1079,29 @@ mod tests {
         // The parent's segment, of extents 1 to 16, which don't compress, freed but 1 to 3; its
         // fork, which inherits them there; and the parent deleted.
         let path = dir.path().join("parent");
-        let parent = kept_in(&path, (16 * EXTENT as u64, None), &bucket, idle()).unwrap();
+        let parent = kept_in(&path, (16 * EXTENT as u64, None), &bucket, idle()).await.unwrap();
         let cell = parent.cell();
         for sequence in 1..=16 {
-            write(&parent, sequence, &noise(sequence, EXTENT));
+            write(&parent, sequence, &noise(sequence, EXTENT)).await;
         }
-        local_cell::upload::wait_on(parent.commit(None)).unwrap();
+        parent.commit(None).await.unwrap();
         for sequence in 4..=16 {
             parent.free(ExtentId { cell: cell.id, sequence }).unwrap();
         }
-        local_cell::upload::wait_on(parent.commit(None)).unwrap();
+        parent.commit(None).await.unwrap();
         let child = dir.path().join("child");
         let forked = crate::host_cell::fork_child(cell);
         assert_ne!(forked, cell, "a fork in a cell of its own");
-        local_cell::upload::wait_on(parent.fork_to(&child, forked)).unwrap();
+        parent.fork_to(&child, forked).await.unwrap();
         drop(parent);
-        local_cell::upload::wait_on(crate::host_cell::delete(
-            &path,
-            Some(&bucket),
-            crate::host_cell::token,
-        ))
-        .unwrap();
+        crate::host_cell::delete(&path, Some(&bucket), crate::host_cell::token).await.unwrap();
         // The fork's store, open all along: the segment compacted, 1 to 3 in its moves.
-        let child = reopened(&child, idle()).unwrap();
+        let child = reopened(&child, idle()).await.unwrap();
         assert_eq!(collect(1).compacted, 1);
         // It frees 2 and 3, and its writer checkpoints, naming 1 in the moves.
         child.free(ExtentId { cell: cell.id, sequence: 2 }).unwrap();
         child.free(ExtentId { cell: cell.id, sequence: 3 }).unwrap();
-        checkpointed(&child, &bucket);
+        checkpointed(&child, &bucket).await;
         // The segment goes, no state naming it there; the moves stay as they are, the origin
         // holding 1 to 3 in them.
         collect(3);
@@ -1138,17 +1131,13 @@ mod tests {
         assert!(!keys.iter().any(|key| key.starts_with(&twice)), "{keys:?}");
         let mut data = vec![0; EXTENT];
         let extent = ExtentId { cell: cell.id, sequence: 1 };
-        let read = local_cell::upload::wait_on(child.read(
-            extent,
-            0,
-            &mut [crate::VolatileSliceMut::from(&mut data[..])],
-        ));
+        let read = child.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).await;
         assert_eq!(read.map(|()| data == noise(1, EXTENT)), Ok(true));
     }
 
     /// [`extents_compacted_twice_read_where_the_store_names_them`], with the host's cache if
     /// `cached`.
-    fn compacted_twice(cached: bool) {
+    async fn compacted_twice(cached: bool) {
         const EXTENT: usize = 64 * BLOCK;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
@@ -1162,25 +1151,25 @@ mod tests {
             cached.then(|| Arc::new(Cache::open(&dir.path().join("cache"), 1 << 30).unwrap()));
         let keeping = local_cell::upload::Options { cache, ..idle() };
         // One segment, of extents 1 to 16, which don't compress, freed but 1 to 3.
-        let store = kept_in(&path, (16 * EXTENT as u64, None), &bucket, keeping).unwrap();
+        let store = kept_in(&path, (16 * EXTENT as u64, None), &bucket, keeping).await.unwrap();
         let store = Arc::new(store);
         let cell = store.cell();
         for sequence in 1..=16 {
-            write(&store, sequence, &noise(sequence, EXTENT));
+            write(&store, sequence, &noise(sequence, EXTENT)).await;
         }
-        local_cell::upload::wait_on(store.commit(None)).unwrap();
+        store.commit(None).await.unwrap();
         for sequence in 4..=16 {
             store.free(ExtentId { cell: cell.id, sequence }).unwrap();
         }
         // Its writer checkpoints, as every so many segments, each commit here one.
-        checkpointed(&store, &bucket);
+        checkpointed(&store, &bucket).await;
         // The segment compacted: 1 to 3 in its moves.
         assert_eq!(collect(1).compacted, 1);
         // The store frees 2 and 3, and its writer checkpoints, as every so many segments, naming 1
         // in the moves, which hold a third of what they did.
         store.free(ExtentId { cell: cell.id, sequence: 2 }).unwrap();
         store.free(ExtentId { cell: cell.id, sequence: 3 }).unwrap();
-        checkpointed(&store, &bucket);
+        checkpointed(&store, &bucket).await;
         // A follower of the store, which reads what the store names.
         let follower = store.follow();
         // The segment goes, no state naming it there; the moves are compacted, then go too.
@@ -1205,16 +1194,17 @@ mod tests {
         assert!(!keys.iter().any(|key| key.starts_with(&once)), "{keys:?}");
         // The store, open all along, reads it there, and so does its follower.
         let extent = ExtentId { cell: cell.id, sequence: 1 };
-        let reads = |store: &OpenCell| {
+        let reads = async |store: &OpenCell| {
             let mut data = vec![0; EXTENT];
-            let read = local_cell::upload::wait_on(store.read(
-                extent,
-                0,
-                &mut [crate::VolatileSliceMut::from(&mut data[..])],
-            ));
+            let read =
+                store.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).await;
             read.map(|()| data == noise(1, EXTENT))
         };
-        assert_eq!([reads(&store), reads(&follower)], [Ok(true), Ok(true)], "cached: {cached}");
+        assert_eq!(
+            [reads(&store).await, reads(&follower).await],
+            [Ok(true), Ok(true)],
+            "cached: {cached}"
+        );
     }
 
     /// The footers of `cell`'s segments in `bucket`, in order.
@@ -1234,30 +1224,28 @@ mod tests {
     /// TASK-165.9: a store whose bucket was out of reach holds its commits in its write-ahead log,
     /// segments the commits closed, which upload once it is in reach again, in order, each the
     /// object its file is; what the commits made, and the root, the cell has then. (Before, a store attaching uploaded what its cell lacked in batches.)
-    #[test]
-    fn logs_caught_up_upload_in_order() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn logs_caught_up_upload_in_order() {
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
         let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
-        let store = kept_in(dir.path().join("store"), (1 << 30, None), &bucket, idle()).unwrap();
+        let store =
+            kept_in(dir.path().join("store"), (1 << 30, None), &bucket, idle()).await.unwrap();
         let cell = store.cell();
         gated.shut.store(true, std::sync::atomic::Ordering::Relaxed);
         let mut written = Vec::new();
         for sequence in 1..=3 {
             let data = pattern(sequence as u8, 2 * BLOCK);
-            write(&store, sequence, &data);
+            write(&store, sequence, &data).await;
             written.push((sequence, data));
-            local_cell::upload::wait_on(
-                store.commit_ordered(Some(format!("root {sequence}").as_bytes())),
-            )
-            .unwrap();
+            store.commit_ordered(Some(format!("root {sequence}").as_bytes())).await.unwrap();
         }
-        store.flush().unwrap();
+        store.flush().await.unwrap();
         // Out of reach: the store holds what it committed, the bucket nothing of it.
         let behind = Arc::new(ObjectBucket::new(gated.store.clone(), ""));
         assert_eq!(uploaded(&behind, cell), (vec![], None));
         gated.shut.store(false, std::sync::atomic::Ordering::Relaxed);
-        local_cell::upload::wait_on(store.wait_uploaded()).unwrap();
+        store.wait_uploaded().await.unwrap();
         let footers = footers(&bucket, cell);
         let commits: Vec<_> = footers.iter().map(|footer| footer.contents.commits.len()).collect();
         assert_eq!(commits, [1], "the segment of the commits");
@@ -1267,30 +1255,31 @@ mod tests {
     /// A store whose commit, of more bytes than `options` let wait, is in a segment closed for want
     /// of room, as a closing that beats the uploader leaves it: with no commit to come, as one in
     /// the lag's wait holds its guest's seal, and holds back every other. And the commit's epoch.
-    fn closed_for_room(
+    async fn closed_for_room(
         options: local_cell::upload::Options,
     ) -> (tempfile::TempDir, crate::host_cell::Opened, u64) {
         const EXTENT: usize = 1 << 20;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let path = dir.path().join("store");
-        let opened = local_cell::upload::wait_on(crate::host_cell::create_unmade(
+        let opened = crate::host_cell::create_unmade(
             &path,
             1 << 30,
             crate::host_cell::CellOf::Named(bucket_cell::layout::test_cell(7)),
             bucket_cell::cell::Kind::Fxfs,
             Some(&url_of(&bucket)),
             options,
-        ));
+        )
+        .await;
         let opened = opened.unwrap();
         let store = &opened.store;
-        store.write(super::ExtentId::new(7, 1), 0, &pattern(1, EXTENT)).unwrap();
-        store.commit_ordered(None).unwrap();
+        store.write(super::ExtentId::new(7, 1), 0, &pattern(1, EXTENT)).await.unwrap();
+        store.commit_ordered(None).await.unwrap();
         let epoch = store.last_commit().unwrap();
         // The most a segment holds, its last extent past it, and no commit with them.
         for sequence in 2..98 {
             let extent = super::ExtentId::new(7, sequence);
-            store.write(extent, 0, &pattern(sequence as u8, EXTENT)).unwrap();
+            store.write(extent, 0, &pattern(sequence as u8, EXTENT)).await.unwrap();
         }
         (dir, opened, epoch)
     }
@@ -1298,29 +1287,26 @@ mod tests {
     /// TASK-150.2: a commit stalled on the bytes waiting (`Options::max_lag_bytes`) ends though
     /// what it waits for is in a segment closed for want of room, which only a commit's flush would
     /// end, as the commit, or its guest, have none to come: an uploader's own flush ends it.
-    #[test]
-    fn commits_stalled_on_the_lag_end_with_their_segment_closed_for_room() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn commits_stalled_on_the_lag_end_with_their_segment_closed_for_room() {
         let lag = local_cell::upload::Options { max_lag_bytes: BLOCK as u64, ..idle() };
-        let (_dir, crate::host_cell::Opened { store, uploader, .. }, epoch) = closed_for_room(lag);
+        let (_dir, crate::host_cell::Opened { store, uploader, .. }, epoch) =
+            closed_for_room(lag).await;
         let stalled = std::sync::Arc::new(uploader);
         let waiting = stalled.clone();
-        let (ended, end) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            ended.send(local_cell::upload::wait_on(waiting.lag(epoch))).unwrap()
-        });
-        assert_eq!(end.recv_timeout(Duration::from_secs(30)), Ok(Ok(())));
+        let lagged = tokio::time::timeout(Duration::from_secs(30), waiting.lag(epoch)).await;
+        assert_eq!(lagged.map_err(drop), Ok(Ok(())));
         assert_eq!(store.wal_bytes().unwrap(), 0);
     }
 
     /// TASK-150.2: so does a sync of the store's commits, or anything else waiting for their upload.
-    #[test]
-    fn uploads_waited_for_end_with_their_segment_closed_for_room() {
-        let (_dir, crate::host_cell::Opened { uploader, .. }, epoch) = closed_for_room(idle());
-        let (ended, end) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            ended.send(local_cell::upload::wait_on(uploader.uploaded(epoch))).unwrap()
-        });
-        assert_eq!(end.recv_timeout(Duration::from_secs(30)), Ok(Ok(())));
+    #[tokio::test(flavor = "multi_thread")]
+    async fn uploads_waited_for_end_with_their_segment_closed_for_room() {
+        let (_dir, crate::host_cell::Opened { uploader, .. }, epoch) =
+            closed_for_room(idle()).await;
+        let uploaded =
+            tokio::time::timeout(Duration::from_secs(30), uploader.uploaded(epoch)).await;
+        assert_eq!(uploaded.map_err(drop), Ok(Ok(())));
     }
 
     /// A store's uploader holds its directory taken until it stops, after the store closed: the
@@ -1328,8 +1314,8 @@ mod tests {
     /// stops, wrote the cell's marker in the directory after, while another process, a crash
     /// test's copy, had taken it, and the store at the version found the marker's new file gone (TASK-129, GCE, the
     /// DAX gate's second run).
-    #[test]
-    fn uploaders_hold_their_stores_directory_until_they_stop() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn uploaders_hold_their_stores_directory_until_they_stop() {
         use std::os::fd::AsRawFd;
         // Whether another process could take the directory at `path` now, as `Dir::take` does.
         let free = |path: &std::path::Path| {
@@ -1340,17 +1326,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
         let cell = crate::host_cell::new_alone();
-        let opened = local_cell::upload::wait_on(crate::host_cell::create(
+        let opened = crate::host_cell::create(
             &path,
             1 << 30,
             crate::host_cell::CellOf::Named(cell),
             bucket_cell::cell::Kind::Fxfs,
             idle(),
-        ))
+        )
+        .await
         .unwrap();
         let crate::host_cell::Opened { store, uploader, .. } = opened;
         assert!(!free(&path), "taken while the store is open");
-        store.close().unwrap();
+        store.close().await.unwrap();
         assert!(!free(&path), "taken while its uploader runs");
         drop(uploader);
         assert!(free(&path), "free once the uploader stopped");
@@ -1362,9 +1349,9 @@ mod tests {
     /// while the lag is past its bound, as the store's do; how long until it is all uploaded, at how
     /// many MB/s, and how long the commits waited for the lag, in all.
     /// `cargo nextest run -p cladefs --run-ignored only bench_sustained_uploads --no-capture`.
-    #[test]
+    #[tokio::test(flavor = "multi_thread")]
     #[ignore = "a benchmark: --run-ignored only, alone"]
-    fn bench_sustained_uploads() {
+    async fn bench_sustained_uploads() {
         use object_store::throttle::{ThrottleConfig, ThrottledStore};
         const WRITTEN: u64 = 4 << 30;
         const EXTENT: usize = 1 << 20;
@@ -1379,19 +1366,20 @@ mod tests {
             &bucket,
             local_cell::upload::Options::default(),
         )
+        .await
         .unwrap();
         let data = noise(1, EXTENT);
         let (started, mut waited) = (std::time::Instant::now(), Duration::ZERO);
         for sequence in 1..=WRITTEN / EXTENT as u64 {
-            write(&store, sequence, &data);
+            write(&store, sequence, &data).await;
             if sequence % 32 == 0 {
                 let committing = std::time::Instant::now();
-                local_cell::upload::wait_on(store.commit_ordered(None)).unwrap();
+                store.commit_ordered(None).await.unwrap();
                 waited += committing.elapsed();
             }
         }
         let written = started.elapsed();
-        local_cell::upload::wait_on(store.wait_uploaded()).unwrap();
+        store.wait_uploaded().await.unwrap();
         let took = started.elapsed();
         let stalls = store.uploader().unwrap().stalls();
         let rate = WRITTEN as f64 / took.as_secs_f64() / 1e6;
@@ -1419,9 +1407,9 @@ mod tests {
     /// failpoints, refuse to be (TASK-320): the bytes are any build's, the times this one's.
     /// `cargo nextest run -p cladefs --cargo-profile sim --run-ignored only
     /// bench_fork_extent_memory --no-capture`.
-    #[test]
+    #[tokio::test(flavor = "multi_thread")]
     #[ignore = "a benchmark (TASK-443.2): --run-ignored only, in the sim profile"]
-    fn bench_fork_extent_memory() {
+    async fn bench_fork_extent_memory() {
         let listed = |name: &str, default: &str| -> Vec<String> {
             let list = std::env::var(name).unwrap_or_else(|_| default.to_owned());
             list.split(',').map(|item| item.trim().to_owned()).collect()
@@ -1436,7 +1424,7 @@ mod tests {
                     "version" => true,
                     other => panic!("CLADEFS_BENCH_PARENTS: {other:?}, neither live nor version"),
                 };
-                fork_extent_memory(extents, forks, version);
+                fork_extent_memory(extents, forks, version).await;
             }
         }
     }
@@ -1473,46 +1461,45 @@ mod tests {
     /// more than an idle one does, counted too; and opened again, from its checkpoint, its map made
     /// of the base's, what the heap holds more than an idle fork the bucket's decoded states count
     /// more.
-    fn fork_extent_memory(extents: u64, forks: usize, version: bool) {
+    async fn fork_extent_memory(extents: u64, forks: usize, version: bool) {
         use crate::host_cell::fork_child;
         let held = || crate::heap::held() as u64;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let capacity = 2 * extents * BLOCK as u64 + (1 << 30);
-        let base = kept_in(dir.path().join("base"), (capacity, None), &bucket, idle()).unwrap();
+        let base =
+            kept_in(dir.path().join("base"), (capacity, None), &bucket, idle()).await.unwrap();
         let data = pattern(1, BLOCK);
         for sequence in 1..=extents {
-            write(&base, sequence, &data);
+            write(&base, sequence, &data).await;
             if sequence % 1024 == 0 {
-                local_cell::upload::wait_on(base.commit(None)).unwrap();
+                base.commit(None).await.unwrap();
             }
         }
-        local_cell::upload::wait_on(base.commit(None)).unwrap();
+        base.commit(None).await.unwrap();
         let base_cell = base.cell().id;
         let parent = match version {
             false => base,
             true => {
                 let path = dir.path().join("copy");
-                local_cell::upload::wait_on(base.uploaded_version_at(&path)).unwrap();
+                base.uploaded_version_at(&path).await.unwrap();
                 drop(base);
-                reopened(&path, idle()).unwrap()
+                reopened(&path, idle()).await.unwrap()
             }
         };
         // And two more, which write and free, open apart from the others.
-        let mut paths: Vec<_> = (0..forks + 2)
-            .map(|n| {
-                let path = dir.path().join(format!("fork-{n}"));
-                local_cell::upload::wait_on(parent.fork_to(&path, fork_child(parent.cell())))
-                    .unwrap();
-                path
-            })
-            .collect();
+        let mut paths = Vec::new();
+        for n in 0..forks + 2 {
+            let path = dir.path().join(format!("fork-{n}"));
+            parent.fork_to(&path, fork_child(parent.cell())).await.unwrap();
+            paths.push(path);
+        }
         let (freeing, writing) = (paths.pop().unwrap(), paths.pop().unwrap());
         drop(parent);
-        let open = |path: &std::path::PathBuf| {
+        let open = async |path: &std::path::PathBuf| {
             let opening =
                 crate::open_cell::Opening { arena: None, profiled: false, keeping: idle() };
-            local_cell::upload::wait_on(OpenCell::open_with(path, opening)).unwrap()
+            OpenCell::open_with(path, opening).await.unwrap()
         };
         let name = if version { "version" } else { "live" };
         // The heap once the page cache has let go of the files closed, and of the pages it holds:
@@ -1535,7 +1522,7 @@ mod tests {
         let before = held();
         let started = std::time::Instant::now();
         for (n, path) in paths.iter().enumerate() {
-            stores.push(open(path));
+            stores.push(open(path).await);
             if [1, 10, 20, 50, 100].contains(&(n + 1)) {
                 samples.push((n as u64 + 1, held() - before, started.elapsed()));
             }
@@ -1578,10 +1565,8 @@ mod tests {
         // A map of them sharing nothing, as the writer's of a base written live is, which a store
         // over it counts as its own.
         let cell = stores[0].cell();
-        let state = futures::executor::block_on(async {
-            let record = bucket_cell::head::get(&*bucket, cell).await.unwrap().unwrap();
-            recover(&*bucket, cell, record.origin()).await.unwrap().state
-        });
+        let record = bucket_cell::head::get(&*bucket, cell).await.unwrap().unwrap();
+        let state = recover(&*bucket, cell, record.origin()).await.unwrap().state;
         let keys: usize = state.extents.iter().map(|(_, at)| at.key.len()).sum();
         let weighed = held();
         let mut rebuilt = bucket_cell::State::new(cell).extents;
@@ -1596,7 +1581,9 @@ mod tests {
         // Closed, opened and closed again.
         stores.clear();
         let closed = settled();
-        stores.extend(paths.iter().map(open));
+        for path in &paths {
+            stores.push(open(path).await);
+        }
         stores.clear();
         let again = settled();
         println!(
@@ -1606,18 +1593,18 @@ mod tests {
 
         // One more writes, commits and uploads, beside an idle one.
         let writes = extents.min(4096);
-        let (idle, opened) = (open(&paths[0]), open(&writing));
+        let (idle, opened) = (open(&paths[0]).await, open(&writing).await);
         let writer = &opened;
         let floor = writer.info().unwrap().next_sequence.max(writer.info().unwrap().sequence_floor);
         let own_before = local_cell::own_held();
         for sequence in floor..floor + writes {
-            write(writer, sequence, &data);
+            write(writer, sequence, &data).await;
             if (sequence - floor + 1) % 1024 == 0 {
-                local_cell::upload::wait_on(writer.commit(None)).unwrap();
+                writer.commit(None).await.unwrap();
             }
         }
-        local_cell::upload::wait_on(writer.commit(None)).unwrap();
-        local_cell::upload::wait_on(writer.wait_uploaded()).unwrap();
+        writer.commit(None).await.unwrap();
+        writer.wait_uploaded().await.unwrap();
         let own_after = local_cell::own_held();
         let own_written = own_after.entries - own_before.entries;
         assert!(idle.shares_extents_with(writer), "its bucket's layer, written over");
@@ -1645,7 +1632,7 @@ mod tests {
         // One more frees every 32nd extent it inherited, beside an idle one, and checkpoints: its
         // writer's map, the base's shared, changed in as many places, each a path of its nodes
         // copied, as is the map its checkpoint decodes as made of the base's, opened again.
-        let (idle, opened) = (open(&paths[0]), open(&freeing));
+        let (idle, opened) = (open(&paths[0]).await, open(&freeing).await);
         let (counted_before, _) = extents_counted();
         let frees =
             (1..=extents).step_by(32).map(|sequence| ExtentId { cell: base_cell, sequence });
@@ -1653,9 +1640,9 @@ mod tests {
         for &extent in &frees {
             opened.free(extent).unwrap();
         }
-        local_cell::upload::wait_on(opened.commit(None)).unwrap();
-        crate::test_checkpoints::checkpointed(&opened, &bucket);
-        local_cell::upload::wait_on(opened.wait_uploaded()).unwrap();
+        opened.commit(None).await.unwrap();
+        crate::test_checkpoints::checkpointed(&opened, &bucket).await;
+        opened.wait_uploaded().await.unwrap();
         let (counted_after, _) = extents_counted();
         let counted = counted_after.bytes() - counted_before.bytes();
         let idle = closing(idle);
@@ -1668,10 +1655,10 @@ mod tests {
         );
         // Opened again, from its checkpoint, beside an idle fork holding the base's map: what
         // the heap holds more than an idle fork, its map made of the base's, counted.
-        let idle = open(&paths[0]);
+        let idle = open(&paths[0]).await;
         let decoded = || bucket_cell::Bucket::decoded(&*bucket).unwrap().held();
         let (heap_before, decoded_before) = (settled(), decoded());
-        let reopened = open(&freeing);
+        let reopened = open(&freeing).await;
         let (heap_after, decoded_after) = (settled(), decoded());
         let grown = (heap_after - heap_before).saturating_sub(IDLE_FORK_BYTES);
         let more = decoded_after.bytes().saturating_sub(decoded_before.bytes());
@@ -1694,38 +1681,43 @@ mod tests {
     /// from a version of it. Each reads the base's data; what one writes and frees, an inherited
     /// extent among them, is its own: the others, and a fork opened after, read the base's, and
     /// share its map still.
-    #[test]
-    fn forks_open_at_once_share_what_they_inherited() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn forks_open_at_once_share_what_they_inherited() {
         use crate::host_cell::fork_child;
         const EXTENTS: u64 = 64;
         const FORKS: usize = 4;
         for version in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-            let base = kept_in(dir.path().join("base"), (1 << 30, None), &bucket, idle()).unwrap();
+            let base =
+                kept_in(dir.path().join("base"), (1 << 30, None), &bucket, idle()).await.unwrap();
             for sequence in 1..=EXTENTS {
-                write(&base, sequence, &pattern(sequence as u8, BLOCK));
+                write(&base, sequence, &pattern(sequence as u8, BLOCK)).await;
             }
-            local_cell::upload::wait_on(base.commit(None)).unwrap();
+            base.commit(None).await.unwrap();
             let base_cell = base.cell().id;
             let inherited = |sequence| ExtentId { cell: base_cell, sequence };
             let parent = match version {
                 false => base,
                 true => {
                     let path = dir.path().join("copy");
-                    local_cell::upload::wait_on(base.uploaded_version_at(&path)).unwrap();
-                    reopened(&path, idle()).unwrap()
+                    base.uploaded_version_at(&path).await.unwrap();
+                    reopened(&path, idle()).await.unwrap()
                 }
             };
-            let fork = |n: usize| {
+            let fork = async |n: usize| {
                 let path = dir.path().join(format!("fork-{n}"));
-                local_cell::upload::wait_on(parent.fork_to(&path, fork_child(parent.cell())))
-                    .unwrap();
+                parent.fork_to(&path, fork_child(parent.cell())).await.unwrap();
                 path
             };
-            let paths: Vec<_> = (0..=FORKS).map(fork).collect();
-            let forks: Vec<_> = paths[..FORKS].iter().map(|path| reopened(path, idle())).collect();
-            let forks: Vec<_> = forks.into_iter().map(Result::unwrap).collect();
+            let mut paths = Vec::new();
+            for n in 0..=FORKS {
+                paths.push(fork(n).await);
+            }
+            let mut forks = Vec::new();
+            for path in &paths[..FORKS] {
+                forks.push(reopened(path, idle()).await.unwrap());
+            }
             let name = if version { "of a version" } else { "of the live store" };
             for other in &forks[1..] {
                 assert!(forks[0].shares_extents_with(other), "forks {name}: their maps");
@@ -1733,19 +1725,17 @@ mod tests {
             let one = bucket_cell::recovery::Held { states: 1, entries: EXTENTS as usize, runs: 0 };
             let decoded = || bucket_cell::Bucket::decoded(&*bucket).unwrap().held();
             assert_eq!(decoded(), one, "forks {name}: the states they share, decoded");
-            let read = |store: &OpenCell, extent: ExtentId| {
+            let read = async |store: &OpenCell, extent: ExtentId| {
                 let mut data = vec![0; BLOCK];
-                let read = local_cell::upload::wait_on(store.read(
-                    extent,
-                    0,
-                    &mut [crate::VolatileSliceMut::from(&mut data[..])],
-                ));
+                let read = store
+                    .read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])])
+                    .await;
                 read.map(|()| data).map_err(|err| err.to_string())
             };
             for store in &forks {
                 for sequence in 1..=EXTENTS {
                     let data = pattern(sequence as u8, BLOCK);
-                    assert_eq!(read(store, inherited(sequence)), Ok(data), "forks {name}");
+                    assert_eq!(read(store, inherited(sequence)).await, Ok(data), "forks {name}");
                 }
             }
 
@@ -1755,16 +1745,20 @@ mod tests {
                 info.next_sequence.max(info.sequence_floor)
             });
             forks[0].free(freed).unwrap();
-            let mine = write(&forks[0], own, &pattern(200, BLOCK));
-            local_cell::upload::wait_on(forks[0].commit(None)).unwrap();
+            let mine = write(&forks[0], own, &pattern(200, BLOCK)).await;
+            forks[0].commit(None).await.unwrap();
             // What a read of an extent a store holds not answers (`NoExtent`, as errno).
             let none = || Err("ENOENT (errno 2)".to_owned());
-            assert_eq!(read(&forks[0], freed), none());
-            assert_eq!(read(&forks[0], mine), Ok(pattern(200, BLOCK)));
-            let opened = reopened(&paths[FORKS], idle()).unwrap();
+            assert_eq!(read(&forks[0], freed).await, none());
+            assert_eq!(read(&forks[0], mine).await, Ok(pattern(200, BLOCK)));
+            let opened = reopened(&paths[FORKS], idle()).await.unwrap();
             for store in forks[1..].iter().chain([&opened]) {
-                assert_eq!(read(store, freed), Ok(pattern(7, BLOCK)), "forks {name}: the freed");
-                assert_eq!(read(store, mine), none(), "forks {name}: the first's own");
+                assert_eq!(
+                    read(store, freed).await,
+                    Ok(pattern(7, BLOCK)),
+                    "forks {name}: the freed"
+                );
+                assert_eq!(read(store, mine).await, none(), "forks {name}: the first's own");
                 assert!(forks[0].shares_extents_with(store), "forks {name}: their maps, after");
             }
             assert_eq!(decoded(), one, "forks {name}: the states they share, after");
@@ -1778,40 +1772,34 @@ mod tests {
     /// the extent store's audit recounts (`AUDITED_EXTENTS`, 4,096), which the builds of its own
     /// tests run at every lock of a store's state, as they build it for this crate's tests too
     /// when run with them: no build but a test's audits.
-    #[test]
-    fn reads_of_inherited_extents_allocate_nothing() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reads_of_inherited_extents_allocate_nothing() {
         use crate::heap::allocations_while;
         use crate::host_cell::fork_child;
         const EXTENTS: u64 = 4160;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let capacity = 2 * EXTENTS * BLOCK as u64 + (1 << 30);
-        let base = kept_in(dir.path().join("base"), (capacity, None), &bucket, idle()).unwrap();
+        let base =
+            kept_in(dir.path().join("base"), (capacity, None), &bucket, idle()).await.unwrap();
         for sequence in 1..=EXTENTS {
-            write(&base, sequence, &pattern(sequence as u8, BLOCK));
+            write(&base, sequence, &pattern(sequence as u8, BLOCK)).await;
             if sequence % 1024 == 0 {
-                local_cell::upload::wait_on(base.commit(None)).unwrap();
+                base.commit(None).await.unwrap();
             }
         }
-        local_cell::upload::wait_on(base.commit(None)).unwrap();
+        base.commit(None).await.unwrap();
         let base_cell = base.cell().id;
         let inherited = |sequence| ExtentId { cell: base_cell, sequence };
         let path = dir.path().join("fork");
-        local_cell::upload::wait_on(base.fork_to(&path, fork_child(base.cell()))).unwrap();
-        let fork = reopened(&path, idle()).unwrap();
+        base.fork_to(&path, fork_child(base.cell())).await.unwrap();
+        let fork = reopened(&path, idle()).await.unwrap();
         let held = Ok(Some((BLOCK as u64, false)));
         let mut data = vec![0; BLOCK];
         // Each read once: into the cache.
         for sequence in 1..=EXTENTS {
             assert_eq!(fork.stored_extent(inherited(sequence)), held);
-            assert_eq!(
-                local_cell::upload::wait_on(fork.read_from_cache(
-                    inherited(sequence),
-                    0,
-                    &mut data
-                )),
-                Ok(true)
-            );
+            assert_eq!(fork.read_from_cache(inherited(sequence), 0, &mut data).await, Ok(true));
             assert_eq!(data, pattern(sequence as u8, BLOCK), "{sequence}");
         }
         let (asked, ()) = allocations_while(|| {
@@ -1821,16 +1809,14 @@ mod tests {
         });
         assert_eq!(asked, 0, "allocations of {EXTENTS} asks of the store");
         let (read, ()) = allocations_while(|| {
-            for sequence in 1..=EXTENTS {
-                assert_eq!(
-                    local_cell::upload::wait_on(fork.read_from_cache(
-                        inherited(sequence),
-                        0,
-                        &mut data
-                    )),
-                    Ok(true)
-                );
-            }
+            futures::executor::block_on(async {
+                for sequence in 1..=EXTENTS {
+                    assert_eq!(
+                        fork.read_from_cache(inherited(sequence), 0, &mut data).await,
+                        Ok(true)
+                    );
+                }
+            })
         });
         assert_eq!(read, 0, "allocations of {EXTENTS} reads from the cache");
     }
@@ -1841,9 +1827,9 @@ mod tests {
     /// `CLADEFS_BENCH_ROUNDS` times (20 unless set), a block each: the time a read, and the
     /// allocations. In the sim profile: `cargo nextest run -p cladefs --cargo-profile sim
     /// --run-ignored only bench_inherited_cached_reads --no-capture`.
-    #[test]
+    #[tokio::test(flavor = "multi_thread")]
     #[ignore = "a benchmark (TASK-453): --run-ignored only, in the sim profile"]
-    fn bench_inherited_cached_reads() {
+    async fn bench_inherited_cached_reads() {
         use crate::host_cell::fork_child;
         let count = |name: &str, default: u64| -> u64 {
             std::env::var(name).map_or(default, |count| count.parse().expect("a count"))
@@ -1853,44 +1839,36 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let capacity = 2 * extents * BLOCK as u64 + (1 << 30);
-        let base = kept_in(dir.path().join("base"), (capacity, None), &bucket, idle()).unwrap();
+        let base =
+            kept_in(dir.path().join("base"), (capacity, None), &bucket, idle()).await.unwrap();
         let data = pattern(1, BLOCK);
         for sequence in 1..=extents {
-            write(&base, sequence, &data);
+            write(&base, sequence, &data).await;
             if sequence % 1024 == 0 {
-                local_cell::upload::wait_on(base.commit(None)).unwrap();
+                base.commit(None).await.unwrap();
             }
         }
-        local_cell::upload::wait_on(base.commit(None)).unwrap();
+        base.commit(None).await.unwrap();
         let base_cell = base.cell().id;
         let inherited = |sequence| ExtentId { cell: base_cell, sequence };
         let path = dir.path().join("fork");
-        local_cell::upload::wait_on(base.fork_to(&path, fork_child(base.cell()))).unwrap();
-        let fork = reopened(&path, idle()).unwrap();
+        base.fork_to(&path, fork_child(base.cell())).await.unwrap();
+        let fork = reopened(&path, idle()).await.unwrap();
         let mut read = vec![0; BLOCK];
         for sequence in 1..=extents {
-            assert_eq!(
-                local_cell::upload::wait_on(fork.read_from_cache(
-                    inherited(sequence),
-                    0,
-                    &mut read
-                )),
-                Ok(true)
-            );
+            assert_eq!(fork.read_from_cache(inherited(sequence), 0, &mut read).await, Ok(true));
         }
         assert_eq!(read, data);
         let started = std::time::Instant::now();
         let (allocations, ()) = crate::heap::allocations_while(|| {
-            for _ in 0..rounds {
-                for sequence in 1..=extents {
-                    let hit = local_cell::upload::wait_on(fork.read_from_cache(
-                        inherited(sequence),
-                        0,
-                        &mut read,
-                    ));
-                    assert_eq!(hit, Ok(true));
+            futures::executor::block_on(async {
+                for _ in 0..rounds {
+                    for sequence in 1..=extents {
+                        let hit = fork.read_from_cache(inherited(sequence), 0, &mut read).await;
+                        assert_eq!(hit, Ok(true));
+                    }
                 }
-            }
+            })
         });
         let took = started.elapsed();
         let reads = extents * rounds;
@@ -1928,22 +1906,23 @@ mod tests {
     /// are its extents stored on their own (doc-7, decision 1): the uploader puts its files; and
     /// once the bucket has acknowledged them, they leave the store whole, into the host's cache,
     /// as those objects, which the store's reads read there with the bucket's gone (TASK-165.8).
-    #[test]
-    fn uploaded_segments_are_the_stores_files() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn uploaded_segments_are_the_stores_files() {
         use bucket_cell::layout::{self, Footer};
         let dir = tempfile::tempdir().unwrap();
         let memory = Arc::new(InMemory::new());
         let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
         let cache = Arc::new(Cache::open(&dir.path().join("cache"), 1 << 30).unwrap());
         let options = local_cell::upload::Options { cache: Some(cache.clone()), ..idle() };
-        let store =
-            kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options).unwrap();
+        let store = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options)
+            .await
+            .unwrap();
         let cell = store.cell();
-        write(&store, 1, &pattern(1, BLOCK));
-        write(&store, 2, &pattern(2, 4 << 20));
-        local_cell::upload::wait_on(store.commit(Some(b"one"))).unwrap();
-        write(&store, 3, &pattern(3, 2 * BLOCK));
-        local_cell::upload::wait_on(store.commit(Some(b"two"))).unwrap();
+        write(&store, 1, &pattern(1, BLOCK)).await;
+        write(&store, 2, &pattern(2, 4 << 20)).await;
+        store.commit(Some(b"one")).await.unwrap();
+        write(&store, 3, &pattern(3, 2 * BLOCK)).await;
+        store.commit(Some(b"two")).await.unwrap();
 
         // The store's files of `kind`, by their contents.
         let files = |kind: &str| -> Vec<Vec<u8>> {
@@ -2001,12 +1980,10 @@ mod tests {
         for (sequence, data) in written {
             let extent = ExtentId { cell: cell.id, sequence };
             let mut read = vec![0; data.len()];
-            local_cell::upload::wait_on(store.read(
-                extent,
-                0,
-                &mut [crate::VolatileSliceMut::from(&mut read[..])],
-            ))
-            .unwrap();
+            store
+                .read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut read[..])])
+                .await
+                .unwrap();
             assert!(read == data, "extent {sequence} reads other data");
         }
     }
@@ -2014,17 +1991,18 @@ mod tests {
     /// cladefs: a byte the host's disk damaged in a file the uploader puts as it is, a sealed
     /// extent's own, fails the upload, and the commit waiting for it, rather than going to object
     /// storage under the CRC it fails (TASK-153.11).
-    #[test]
-    fn files_with_flipped_bytes_are_not_uploaded() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn files_with_flipped_bytes_are_not_uploaded() {
         use bucket_cell::layout;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let store =
-            kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
+        let store = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
+            .await
+            .unwrap();
         let cell = store.cell();
         // Stored on its own, raw, as it doesn't compress.
-        let extent = write(&store, 1, &noise(1, 4 << 20));
-        local_cell::upload::wait_on(store.commit_ordered(None)).unwrap();
+        let extent = write(&store, 1, &noise(1, 4 << 20)).await;
+        store.commit_ordered(None).await.unwrap();
         // On the disk, as the store's page cache holds it written (TASK-433).
         local_cell::pages::shared().write_back_all().unwrap();
         let path = dir.path().join(format!(
@@ -2040,7 +2018,7 @@ mod tests {
         // Damaged behind the store's back: what the store's page cache holds of it, clean, goes,
         // so that its reads read the disk (TASK-433).
         local_cell::pages::shared().evict_to(0);
-        assert_eq!(local_cell::upload::wait_on(store.commit(None)), Err(crate::error::Errno::EIO));
+        assert_eq!(store.commit(None).await, Err(crate::error::Errno::EIO));
         let listed = |prefix: String| -> Vec<String> {
             let listed = bucket_cell::Bucket::list(&*bucket, &prefix);
             futures::executor::block_on(listed).unwrap().into_iter().map(|meta| meta.key).collect()
@@ -2050,14 +2028,15 @@ mod tests {
 
     /// A commit waits for its upload no longer than it takes: once another writer has the cell,
     /// a durable commit fails.
-    #[test]
-    fn durable_commits_fail_once_another_takes_the_cell() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn durable_commits_fail_once_another_takes_the_cell() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let store =
-            kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
-        write(&store, 1, &pattern(1, BLOCK));
-        local_cell::upload::wait_on(store.commit(None)).unwrap();
+        let store = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
+            .await
+            .unwrap();
+        write(&store, 1, &pattern(1, BLOCK)).await;
+        store.commit(None).await.unwrap();
         let other = bucket_cell::Writer::open(
             bucket.clone(),
             store.cell(),
@@ -2065,42 +2044,42 @@ mod tests {
             crate::host_cell::token().unwrap(),
         );
         futures::executor::block_on(other).unwrap();
-        write(&store, 2, &pattern(2, BLOCK));
-        assert_eq!(local_cell::upload::wait_on(store.commit(None)), Err(crate::Errno::EROFS));
+        write(&store, 2, &pattern(2, BLOCK)).await;
+        assert_eq!(store.commit(None).await, Err(crate::Errno::EROFS));
     }
 
     /// TASK-39.7: a store's copy takes its cell with its placement's fencing token: a later
     /// placement's, higher, fences it, its commits failing, and it takes the cell back no more,
     /// though its store is as current as the cell; a placement later still takes it.
-    #[test]
-    fn later_placements_fence_earlier_ones() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn later_placements_fence_earlier_ones() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let (first_path, second_path) = (dir.path().join("first"), dir.path().join("second"));
-        let first = kept_in(&first_path, (1 << 30, None), &bucket.clone(), idle()).unwrap();
+        let first = kept_in(&first_path, (1 << 30, None), &bucket.clone(), idle()).await.unwrap();
         let cell = first.cell();
         OpenCell::place(&first_path, 1).unwrap();
-        write(&first, 1, &pattern(1, BLOCK));
-        local_cell::upload::wait_on(first.commit(Some(b"first"))).unwrap();
+        write(&first, 1, &pattern(1, BLOCK)).await;
+        first.commit(Some(b"first")).await.unwrap();
 
         // The cell moves to another host, a later placement, while the first still runs.
-        drop(kept_in(&second_path, (1 << 30, Some(cell)), &bucket, idle()).unwrap());
+        drop(kept_in(&second_path, (1 << 30, Some(cell)), &bucket, idle()).await.unwrap());
         OpenCell::place(&second_path, 2).unwrap();
-        let second = reopened(&second_path, idle()).unwrap();
+        let second = reopened(&second_path, idle()).await.unwrap();
         assert_eq!(second.root(), Ok(b"first".to_vec()));
-        write(&first, 2, &pattern(2, BLOCK));
-        assert_eq!(local_cell::upload::wait_on(first.commit(None)), Err(crate::Errno::EROFS));
+        write(&first, 2, &pattern(2, BLOCK)).await;
+        assert_eq!(first.commit(None).await, Err(crate::Errno::EROFS));
         drop((first, second));
 
         // The first, restarted, takes it back no more: its token is the earlier.
-        let refused = reopened(&first_path, idle()).err().and_then(|err| err.errno());
+        let refused = reopened(&first_path, idle()).await.err().and_then(|err| err.errno());
         assert_eq!(refused, Some(crate::Errno::ESTALE));
         let head = futures::executor::block_on(bucket_cell::head::get(&*bucket, cell));
         assert_eq!(head.unwrap().unwrap().token, 2);
 
         // Placed later still, it does.
         OpenCell::place(&first_path, 3).unwrap();
-        let later = reopened(&first_path, idle()).unwrap();
+        let later = reopened(&first_path, idle()).await.unwrap();
         assert_eq!(later.root(), Ok(b"first".to_vec()));
     }
 
@@ -2108,149 +2087,150 @@ mod tests {
     /// took its cell, changes nothing more: neither an ordered commit (a guest's fsync) nor a local
     /// one, nor a write, a free, a version or a resize, each `EROFS` as its durable commits are,
     /// rather than taken for what its cell will hold.
-    #[test]
-    fn fenced_stores_change_nothing() {
-        changes_nothing_once_lost(|bucket, dir, cell| {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fenced_stores_change_nothing() {
+        changes_nothing_once_lost(async |bucket, dir, cell| {
             let second = dir.join("second");
-            drop(kept_in(&second, (1 << 30, Some(cell)), bucket, idle()).unwrap());
+            drop(kept_in(&second, (1 << 30, Some(cell)), bucket, idle()).await.unwrap());
             OpenCell::place(&second, 2).unwrap();
-            drop(reopened(&second, idle()).unwrap());
-        });
+            drop(reopened(&second, idle()).await.unwrap());
+        })
+        .await;
     }
 
     /// TASK-550: as [`fenced_stores_change_nothing`], a store whose cell a later placement
     /// deleted.
-    #[test]
-    fn stores_of_deleted_cells_change_nothing() {
-        changes_nothing_once_lost(|bucket, dir, cell| {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stores_of_deleted_cells_change_nothing() {
+        changes_nothing_once_lost(async |bucket, dir, cell| {
             let second = dir.join("second");
-            drop(kept_in(&second, (1 << 30, Some(cell)), bucket, idle()).unwrap());
+            drop(kept_in(&second, (1 << 30, Some(cell)), bucket, idle()).await.unwrap());
             OpenCell::place(&second, 2).unwrap();
-            local_cell::upload::wait_on(OpenCell::delete(&second, Some(bucket))).unwrap();
-        });
+            OpenCell::delete(&second, Some(bucket)).await.unwrap();
+        })
+        .await;
     }
 
     /// A store, placed, its cell then lost to it as `lose` loses it, in `dir`, changes nothing
     /// more once its uploader finds it lost.
-    fn changes_nothing_once_lost(
-        lose: impl FnOnce(&Arc<ObjectBucket>, &std::path::Path, crate::CellId),
+    async fn changes_nothing_once_lost(
+        lose: impl AsyncFnOnce(&Arc<ObjectBucket>, &std::path::Path, crate::CellId),
     ) {
         const EROFS: crate::Errno = crate::Errno::EROFS;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let path = dir.path().join("first");
-        let store = kept_in(&path, (1 << 30, None), &bucket.clone(), idle()).unwrap();
+        let store = kept_in(&path, (1 << 30, None), &bucket.clone(), idle()).await.unwrap();
         let cell = store.cell();
         OpenCell::place(&path, 1).unwrap();
-        let kept = write(&store, 1, &pattern(1, BLOCK));
-        local_cell::upload::wait_on(store.commit(None)).unwrap();
-        lose(&bucket, dir.path(), cell);
+        let kept = write(&store, 1, &pattern(1, BLOCK)).await;
+        store.commit(None).await.unwrap();
+        lose(&bucket, dir.path(), cell).await;
         // Ordered before its uploader finds the cell lost, which its next upload does: a loss
         // doc-4 accepts.
-        write(&store, 2, &pattern(2, BLOCK));
-        local_cell::upload::wait_on(store.commit_ordered(None)).unwrap();
-        assert_eq!(local_cell::upload::wait_on(store.wait_uploaded()), Err(EROFS));
+        write(&store, 2, &pattern(2, BLOCK)).await;
+        store.commit_ordered(None).await.unwrap();
+        assert_eq!(store.wait_uploaded().await, Err(EROFS));
         assert!(store.uploader().unwrap().failed().is_some());
         let extent = ExtentId { cell: cell.id, sequence: 3 };
         let data = pattern(3, BLOCK);
-        assert_eq!(store.write(extent, 0, &[VolatileSlice::from(&data[..])]), Err(EROFS));
+        assert_eq!(store.write(extent, 0, &[VolatileSlice::from(&data[..])]).await, Err(EROFS));
         assert_eq!(store.free(kept), Err(EROFS));
-        assert_eq!(local_cell::upload::wait_on(store.commit_ordered(None)), Err(EROFS));
-        assert_eq!(local_cell::upload::wait_on(store.commit_local(None)), Err(EROFS));
-        assert_eq!(
-            local_cell::upload::wait_on(store.make_version(None)).err().and_then(|err| err.errno()),
-            Some(EROFS)
-        );
-        assert_eq!(store.set_capacity(2 << 30), Err(EROFS));
+        assert_eq!(store.commit_ordered(None).await, Err(EROFS));
+        assert_eq!(store.commit_local(None).await, Err(EROFS));
+        assert_eq!(store.make_version(None).await.err().and_then(|err| err.errno()), Some(EROFS));
+        assert_eq!(store.set_capacity(2 << 30).await, Err(EROFS));
     }
 
     /// TASK-570: a cell names [`bucket_cell::layout::MAX_VERSIONS`] versions at most (doc-18):
     /// one more, with no window, fails with `EMLINK`, making none, as every acknowledgement after
     /// would write it into the head; one with a window, which drops the oldest, is made.
-    #[test]
-    fn cells_make_so_many_versions_at_most() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cells_make_so_many_versions_at_most() {
         let most = bucket_cell::layout::MAX_VERSIONS;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let store =
-            kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
-        write(&store, 1, &pattern(1, BLOCK));
-        local_cell::upload::wait_on(store.commit(None)).unwrap();
+        let store = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
+            .await
+            .unwrap();
+        write(&store, 1, &pattern(1, BLOCK)).await;
+        store.commit(None).await.unwrap();
         for _ in 0..most {
-            local_cell::upload::wait_on(store.make_version(None)).unwrap();
+            store.make_version(None).await.unwrap();
         }
-        let refused =
-            local_cell::upload::wait_on(store.make_version(None)).err().and_then(|err| err.errno());
+        let refused = store.make_version(None).await.err().and_then(|err| err.errno());
         assert_eq!(refused, Some(crate::Errno::EMLINK));
-        assert_eq!(local_cell::upload::wait_on(store.versions()).len(), most);
-        local_cell::upload::wait_on(store.make_version(Some(1))).unwrap();
+        assert_eq!(store.versions().await.len(), most);
+        store.make_version(Some(1)).await.unwrap();
     }
 
     /// TASK-610: what this process made versions of it keeps for versions their cells name alone:
     /// those a later version's window dropped, and those dropped, it forgets, rather than one more
     /// for every version it ever made.
-    #[test]
-    fn versions_made_here_are_forgotten_once_dropped() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn versions_made_here_are_forgotten_once_dropped() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let store =
-            kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
-        write(&store, 1, &pattern(1, BLOCK));
-        local_cell::upload::wait_on(store.commit(None)).unwrap();
+        let store = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
+            .await
+            .unwrap();
+        write(&store, 1, &pattern(1, BLOCK)).await;
+        store.commit(None).await.unwrap();
         for _ in 0..20 {
-            local_cell::upload::wait_on(store.make_version(Some(1))).unwrap();
+            store.make_version(Some(1)).await.unwrap();
         }
-        local_cell::upload::wait_on(store.wait_uploaded()).unwrap();
-        let last = local_cell::upload::wait_on(store.make_version(Some(1))).unwrap();
-        let named = local_cell::upload::wait_on(store.versions()).len();
+        store.wait_uploaded().await.unwrap();
+        let last = store.make_version(Some(1)).await.unwrap();
+        let named = store.versions().await.len();
         assert!(named <= 2, "{named} versions named");
         assert_eq!(crate::host_cell::versions_made(), named);
-        local_cell::upload::wait_on(store.drop_versions(&[last].into())).unwrap();
+        store.drop_versions(&[last].into()).await.unwrap();
         assert_eq!(crate::host_cell::versions_made(), named - 1);
     }
 
     /// TASK-45.1: a placement cut off deletes no cell from under a later one: its delete fails
     /// (`ESTALE`), leaving the cell in the bucket, which the later placement goes on writing; the
     /// later placement's delete deletes it.
-    #[test]
-    fn earlier_placements_delete_nothing() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn earlier_placements_delete_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let (first_path, second_path) = (dir.path().join("first"), dir.path().join("second"));
-        let first = kept_in(&first_path, (1 << 30, None), &bucket.clone(), idle()).unwrap();
+        let first = kept_in(&first_path, (1 << 30, None), &bucket.clone(), idle()).await.unwrap();
         let cell = first.cell();
         OpenCell::place(&first_path, 1).unwrap();
-        write(&first, 1, &pattern(1, BLOCK));
-        local_cell::upload::wait_on(first.commit(Some(b"first"))).unwrap();
+        write(&first, 1, &pattern(1, BLOCK)).await;
+        first.commit(Some(b"first")).await.unwrap();
         drop(first);
         // The cell moves to another host, a later placement.
-        drop(kept_in(&second_path, (1 << 30, Some(cell)), &bucket, idle()).unwrap());
+        drop(kept_in(&second_path, (1 << 30, Some(cell)), &bucket, idle()).await.unwrap());
         OpenCell::place(&second_path, 2).unwrap();
-        let second = reopened(&second_path, idle()).unwrap();
+        let second = reopened(&second_path, idle()).await.unwrap();
 
-        let refused = local_cell::upload::wait_on(OpenCell::delete(&first_path, Some(&bucket)));
+        let refused = OpenCell::delete(&first_path, Some(&bucket)).await;
         assert_eq!(refused.err().and_then(|err| err.errno()), Some(crate::Errno::ESTALE));
-        write(&second, 2, &pattern(2, BLOCK));
-        local_cell::upload::wait_on(second.commit(Some(b"second"))).unwrap();
+        write(&second, 2, &pattern(2, BLOCK)).await;
+        second.commit(Some(b"second")).await.unwrap();
         drop(second);
         let state =
             futures::executor::block_on(bucket_cell::recover(&*bucket, cell, None)).unwrap().state;
         assert_eq!(state.root, Some(b"second".to_vec()));
 
-        local_cell::upload::wait_on(OpenCell::delete(&second_path, Some(&bucket))).unwrap();
+        OpenCell::delete(&second_path, Some(&bucket)).await.unwrap();
         let deleted = futures::executor::block_on(bucket_cell::head::get(&*bucket, cell));
         assert!(deleted.unwrap().unwrap().deleted(), "the cell lives");
     }
 
     /// TASK-39.7: a store's copy never placed takes its cell with its host's token, as a store
     /// restored or taken on a host is.
-    #[test]
-    fn unplaced_copies_take_their_hosts_token() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unplaced_copies_take_their_hosts_token() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let options = local_cell::upload::Options { token: 9, ..idle() };
-        let store =
-            kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options).unwrap();
+        let store = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options)
+            .await
+            .unwrap();
         let head = futures::executor::block_on(bucket_cell::head::get(&*bucket, store.cell()));
         let head = head.unwrap().unwrap();
         assert_eq!((head.token, head.epoch), (9, 1));
@@ -2259,37 +2239,38 @@ mod tests {
     /// TASK-165.9: a store whose bucket acknowledged commits of its cell, opened where the
     /// bucket has no such cell, deleted or another bucket, refuses (`ENOENT`), rather than make
     /// the cell anew without them.
-    #[test]
-    fn stores_whose_bucket_lacks_their_cell_refuse() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stores_whose_bucket_lacks_their_cell_refuse() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let path = dir.path().join("store");
-        let store = kept_in(&path, (1 << 30, None), &bucket, idle()).unwrap();
-        write(&store, 1, &pattern(1, BLOCK));
-        local_cell::upload::wait_on(store.commit(Some(b"acknowledged"))).unwrap();
+        let store = kept_in(&path, (1 << 30, None), &bucket, idle()).await.unwrap();
+        write(&store, 1, &pattern(1, BLOCK)).await;
+        store.commit(Some(b"acknowledged")).await.unwrap();
         drop(store);
         let other = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         naming(&path, &other);
-        let refused = reopened(&path, idle()).err().and_then(|err| err.errno());
+        let refused = reopened(&path, idle()).await.err().and_then(|err| err.errno());
         assert_eq!(refused, Some(crate::Errno::ENOENT));
         // Its own bucket named again, it opens as it was.
         naming(&path, &bucket);
-        assert_eq!(reopened(&path, idle()).unwrap().root(), Ok(b"acknowledged".to_vec()));
+        assert_eq!(reopened(&path, idle()).await.unwrap().root(), Ok(b"acknowledged".to_vec()));
     }
 
     /// TASK-192: a store dropped uploads what it committed, its open segment's commits too, as
     /// `local_cell::upload`'s docs say: its uploader closes the open segment, uploads it and
     /// stops, before the store closes. Before, the store closed first, and its uploader found the
     /// open segment's commits it could no longer close.
-    #[test]
-    fn dropped_stores_upload_their_open_segments_commits() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dropped_stores_upload_their_open_segments_commits() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let store =
-            kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
+        let store = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
+            .await
+            .unwrap();
         let cell = store.cell();
-        write(&store, 1, &pattern(1, BLOCK));
-        local_cell::upload::wait_on(store.commit_ordered(Some(b"ordered"))).unwrap();
+        write(&store, 1, &pattern(1, BLOCK)).await;
+        store.commit_ordered(Some(b"ordered")).await.unwrap();
         // Not uploaded yet: the uploader waits an hour, unless asked.
         assert_eq!(uploaded(&bucket, cell), (vec![], None));
         drop(store);
@@ -2300,17 +2281,18 @@ mod tests {
     }
 
     /// TASK-39.7: waiting for uploads returns once every commit so far is in the cell.
-    #[test]
-    fn waits_for_uploads() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn waits_for_uploads() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let store =
-            kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
-        write(&store, 1, &pattern(1, BLOCK));
-        local_cell::upload::wait_on(store.commit_ordered(Some(b"ordered"))).unwrap();
+        let store = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
+            .await
+            .unwrap();
+        write(&store, 1, &pattern(1, BLOCK)).await;
+        store.commit_ordered(Some(b"ordered")).await.unwrap();
         // Not uploaded yet: the uploader waits an hour, unless asked.
         assert_eq!(uploaded(&bucket, store.cell()).1, None);
-        local_cell::upload::wait_on(store.wait_uploaded()).unwrap();
+        store.wait_uploaded().await.unwrap();
         assert_eq!(
             uploaded(&bucket, store.cell()),
             (vec![(1, pattern(1, BLOCK))], Some(b"ordered".to_vec()))
@@ -2641,29 +2623,31 @@ mod tests {
     /// reaches its bound, as `options` set it, two commits of a block each, then wait, failing
     /// nothing, the bucket's failures counted (TASK-314): the third, of two blocks; they go on once
     /// it answers again, and every commit is uploaded.
-    fn waits_at_the_lag_bound(
+    async fn waits_at_the_lag_bound(
         options: local_cell::upload::Options,
         failing: fn(&Gated) -> &std::sync::atomic::AtomicBool,
-        commit: fn(&OpenCell) -> crate::error::Result<()>,
+        commit: fn(&OpenCell) -> futures::future::BoxFuture<'_, crate::error::Result<()>>,
     ) {
         use bucket_cell::object_bucket::Request;
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
         let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
         let store = Arc::new(
-            kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options).unwrap(),
+            kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options)
+                .await
+                .unwrap(),
         );
         let creates_failed = bucket.stats().failures(Request::Create);
         failing(&gated).store(true, std::sync::atomic::Ordering::Relaxed);
         for sequence in 1..=2 {
-            write(&store, sequence, &pattern(sequence as u8, BLOCK));
-            commit(&store).unwrap();
+            write(&store, sequence, &pattern(sequence as u8, BLOCK)).await;
+            commit(&store).await.unwrap();
         }
         let third = {
             let store = store.clone();
-            std::thread::spawn(move || {
-                write(&store, 3, &pattern(3, 2 * BLOCK));
-                commit(&store)
+            tokio::spawn(async move {
+                write(&store, 3, &pattern(3, 2 * BLOCK)).await;
+                commit(&store).await
             })
         };
         let uploader = store.uploader().unwrap();
@@ -2676,8 +2660,8 @@ mod tests {
         assert!(!third.is_finished(), "a commit past the lag bound went on");
         assert_eq!(uploader.failed(), None, "the uploader stopped");
         failing(&gated).store(false, std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(third.join().unwrap(), Ok(()));
-        local_cell::upload::wait_on(store.commit(None)).unwrap();
+        assert_eq!(third.await.unwrap(), Ok(()));
+        store.commit(None).await.unwrap();
         let (extents, _) = uploaded(&bucket, store.cell());
         assert_eq!(extents.iter().map(|(sequence, _)| *sequence).collect::<Vec<_>>(), [1, 2, 3]);
     }
@@ -2687,8 +2671,8 @@ mod tests {
     /// data, a MiB an extent, each closed by a commit waiting for its upload, twice as many as the
     /// store uploads at once, which the bucket holds unanswered. What waits is in the store's
     /// write-ahead log, on disk.
-    #[test]
-    fn uploads_a_bucket_takes_none_of_hold_no_more_than_their_budget() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn uploads_a_bucket_takes_none_of_hold_no_more_than_their_budget() {
         // Seven segments' room, of 32 MiB and their tails each: more than a framing holds.
         const BUDGET: u64 = 256 << 20;
         // What a store's framing holds besides, one segment at a time: its data, and its framed
@@ -2703,7 +2687,9 @@ mod tests {
         let options =
             local_cell::upload::Options { max_lag: u64::MAX, max_lag_bytes: u64::MAX, ..idle() };
         let store = Arc::new(
-            kept_in(dir.path().join("store"), (8 << 30, None), &bucket.clone(), options).unwrap(),
+            kept_in(dir.path().join("store"), (8 << 30, None), &bucket.clone(), options)
+                .await
+                .unwrap(),
         );
         // The writer's fence is in; the commits' segments are held.
         gated.hold.send_replace(Hold::Segments);
@@ -2711,32 +2697,32 @@ mod tests {
         let mut waiting = Vec::new();
         let data = noise(1, 1 << 20);
         let heap = crate::heap::peak_while(|| {
-            let mut sequence = 0;
-            for _ in 0..segments {
-                for _ in 0..32 {
-                    sequence += 1;
-                    write(&store, sequence, &data);
-                    local_cell::upload::wait_on(store.commit_ordered(None)).unwrap();
+            futures::executor::block_on(async {
+                let mut sequence = 0;
+                for _ in 0..segments {
+                    for _ in 0..32 {
+                        sequence += 1;
+                        write(&store, sequence, &data).await;
+                        store.commit_ordered(None).await.unwrap();
+                    }
+                    let committing = store.clone();
+                    waiting.push(tokio::spawn(async move { committing.commit(None).await }));
                 }
-                let committing = store.clone();
-                waiting.push(std::thread::spawn(move || {
-                    local_cell::upload::wait_on(committing.commit(None))
-                }));
-            }
-            // As many as the budget lets go at once: seven at least, or more of segments closed
-            // short, as commits waiting close them.
-            let deadline = std::time::Instant::now() + Duration::from_secs(30);
-            let held = || gated.held.load(std::sync::atomic::Ordering::Relaxed);
-            while held() < 7 && std::time::Instant::now() < deadline {
-                std::thread::yield_now();
-            }
-            assert!(held() >= 7, "{} uploads held", held());
+                // As many as the budget lets go at once: seven at least, or more of segments closed
+                // short, as commits waiting close them.
+                let deadline = std::time::Instant::now() + Duration::from_secs(30);
+                let held = || gated.held.load(std::sync::atomic::Ordering::Relaxed);
+                while held() < 7 && std::time::Instant::now() < deadline {
+                    std::thread::yield_now();
+                }
+                assert!(held() >= 7, "{} uploads held", held());
+            })
         });
         let memory = super::upload_memory();
         let behind = store.uploader().unwrap().status().unwrap().pending_bytes;
         gated.hold.send_replace(Hold::Nothing);
         for commit in waiting {
-            assert_eq!(commit.join().unwrap(), Ok(()));
+            assert_eq!(commit.await.unwrap(), Ok(()));
         }
         eprintln!("heap {} MiB, {memory:?}, {} MiB behind", heap >> 20, behind >> 20);
         assert!(behind >= (segments as u64) << 25, "{behind} bytes behind");
@@ -2749,21 +2735,23 @@ mod tests {
     }
 
     /// Segments upload at once: a commit made while those before it upload goes up with them.
-    #[test]
-    fn segments_upload_at_once() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn segments_upload_at_once() {
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
         let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
         let store = Arc::new(
-            kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap(),
+            kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
+                .await
+                .unwrap(),
         );
         gated.hold.send_replace(Hold::Segments);
         let commits: Vec<_> = (1..=3)
             .map(|sequence| {
                 let committing = store.clone();
-                let commit = std::thread::spawn(move || {
-                    write(&committing, sequence, &pattern(sequence as u8, BLOCK));
-                    local_cell::upload::wait_on(committing.commit(None))
+                let commit = tokio::spawn(async move {
+                    write(&committing, sequence, &pattern(sequence as u8, BLOCK)).await;
+                    committing.commit(None).await
                 });
                 gated.wait_held(sequence as usize);
                 commit
@@ -2771,7 +2759,7 @@ mod tests {
             .collect();
         gated.hold.send_replace(Hold::Nothing);
         for commit in commits {
-            assert_eq!(commit.join().unwrap(), Ok(()));
+            assert_eq!(commit.await.unwrap(), Ok(()));
         }
         let (extents, _) = uploaded(&bucket, store.cell());
         assert_eq!(extents.iter().map(|(sequence, _)| *sequence).collect::<Vec<_>>(), [1, 2, 3]);
@@ -2783,13 +2771,15 @@ mod tests {
     /// Here four segments, one for each commit waiting, upload, held in the bucket; a commit is
     /// made that no one waits for; then they land, one after another: the store closes none for
     /// it, which uploads once one waits for it.
-    #[test]
-    fn uploads_done_close_no_segment_for_commits_no_one_waits_for() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn uploads_done_close_no_segment_for_commits_no_one_waits_for() {
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
         let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
         let store = Arc::new(
-            kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap(),
+            kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
+                .await
+                .unwrap(),
         );
         let cell = store.cell();
         // The commits' segments are 0 to 3.
@@ -2797,31 +2787,31 @@ mod tests {
         let waiting: Vec<_> = (1..=local_cell::upload::IN_FLIGHT as u64)
             .map(|sequence| {
                 let committing = store.clone();
-                let commit = std::thread::spawn(move || {
-                    write(&committing, sequence, &pattern(sequence as u8, BLOCK));
-                    local_cell::upload::wait_on(committing.commit(None))
+                let commit = tokio::spawn(async move {
+                    write(&committing, sequence, &pattern(sequence as u8, BLOCK)).await;
+                    committing.commit(None).await
                 });
                 gated.wait_held(sequence as usize);
                 commit
             })
             .collect();
         let ordered = local_cell::upload::IN_FLIGHT as u64 + 1;
-        write(&store, ordered, &pattern(ordered as u8, BLOCK));
-        local_cell::upload::wait_on(store.commit_ordered(None)).unwrap();
+        write(&store, ordered, &pattern(ordered as u8, BLOCK)).await;
+        store.commit_ordered(None).await.unwrap();
         // The first lands alone: its commit is acknowledged; then the rest.
         let mut waiting = waiting.into_iter();
         gated.hold.send_replace(Hold::SegmentsFrom(1));
-        assert_eq!(waiting.next().unwrap().join().unwrap(), Ok(()));
+        assert_eq!(waiting.next().unwrap().await.unwrap(), Ok(()));
         gated.hold.send_replace(Hold::Nothing);
         for commit in waiting {
-            assert_eq!(commit.join().unwrap(), Ok(()));
+            assert_eq!(commit.await.unwrap(), Ok(()));
         }
         // The store's segments closed, in the bucket: those of the commits waiting.
         let prefix = bucket_cell::layout::segments(cell);
         let closed = futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, &prefix));
         let closed = closed.unwrap();
         assert_eq!(closed.len(), local_cell::upload::IN_FLIGHT);
-        local_cell::upload::wait_on(store.wait_uploaded()).unwrap();
+        store.wait_uploaded().await.unwrap();
         let (extents, _) = uploaded(&bucket, cell);
         let sequences: Vec<_> = extents.iter().map(|(sequence, _)| *sequence).collect();
         assert_eq!(sequences, (1..=ordered).collect::<Vec<_>>());
@@ -2832,7 +2822,7 @@ mod tests {
     /// Lost then, its store, its uploader and its disk, its commits made durable, which waited for
     /// their uploads, are all in the cell, which another host's empty store takes, losing the
     /// lag's commits at most; and writes on. In the objects of `store` under `prefix`.
-    fn survives_its_hosts_loss(store: Arc<dyn object_store::ObjectStore>, prefix: &str) {
+    async fn survives_its_hosts_loss(store: Arc<dyn object_store::ObjectStore>, prefix: &str) {
         use bucket_cell::layout;
         use std::sync::atomic::Ordering::Relaxed;
         let dir = tempfile::tempdir().unwrap();
@@ -2850,21 +2840,22 @@ mod tests {
                 &Arc::new(ObjectBucket::new(gated.clone(), prefix)),
                 options,
             )
+            .await
             .unwrap(),
         );
         let cell = lost.cell();
-        write(&lost, 1, &pattern(1, BLOCK));
-        local_cell::upload::wait_on(lost.commit(Some(b"durable"))).unwrap();
+        write(&lost, 1, &pattern(1, BLOCK)).await;
+        lost.commit(Some(b"durable")).await.unwrap();
         gated.shut.store(true, Relaxed);
         for sequence in 2..=1 + max_lag {
-            write(&lost, sequence, &pattern(sequence as u8, BLOCK));
-            local_cell::upload::wait_on(lost.commit_ordered(Some(b"ordered"))).unwrap();
+            write(&lost, sequence, &pattern(sequence as u8, BLOCK)).await;
+            lost.commit_ordered(Some(b"ordered")).await.unwrap();
         }
         let waiting = {
             let lost = lost.clone();
-            std::thread::spawn(move || {
-                write(&lost, 2 + max_lag, &pattern(9, BLOCK));
-                local_cell::upload::wait_on(lost.commit_ordered(None))
+            tokio::spawn(async move {
+                write(&lost, 2 + max_lag, &pattern(9, BLOCK)).await;
+                lost.commit_ordered(None).await
             })
         };
         let uploader = lost.uploader().unwrap();
@@ -2901,66 +2892,55 @@ mod tests {
         let bucket = Arc::new(ObjectBucket::new(store, prefix));
         let taken =
             kept_in(dir.path().join("taken"), (1 << 30, Some(cell)), &bucket.clone(), idle())
+                .await
                 .unwrap();
         assert_eq!(taken.root(), Ok(b"durable".to_vec()));
         let mut data = vec![0; BLOCK];
         let durable = ExtentId { cell: cell.id, sequence: 1 };
-        local_cell::upload::wait_on(taken.read(
-            durable,
-            0,
-            &mut [crate::VolatileSliceMut::from(&mut data[..])],
-        ))
-        .unwrap();
+        taken.read(durable, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).await.unwrap();
         assert_eq!(data, pattern(1, BLOCK));
         let info = taken.info().unwrap();
         let sequence = info.next_sequence.max(info.sequence_floor);
-        write(&taken, sequence, &pattern(3, BLOCK));
-        local_cell::upload::wait_on(taken.commit(Some(b"taken"))).unwrap();
+        write(&taken, sequence, &pattern(3, BLOCK)).await;
+        taken.commit(Some(b"taken")).await.unwrap();
         drop(taken);
-        // The lag's commits, and no more, lost. Read back with a reactor, which a real bucket's
-        // client needs.
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let (extents, root) = {
-            let _entered = runtime.enter();
-            uploaded(&bucket, cell)
-        };
+        // The lag's commits, and no more, lost. Read back in the test's runtime, whose reactor a
+        // real bucket's client needs.
+        let (extents, root) = uploaded(&bucket, cell);
         let sequences: Vec<u64> = extents.iter().map(|(sequence, _)| *sequence).collect();
         assert_eq!(sequences, [1, sequence]);
         assert_eq!(root, Some(b"taken".to_vec()));
     }
 
-    #[test]
-    fn cells_survive_their_hosts_loss() {
-        survives_its_hosts_loss(Arc::new(InMemory::new()), "");
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cells_survive_their_hosts_loss() {
+        survives_its_hosts_loss(Arc::new(InMemory::new()), "").await;
     }
 
     /// TASK-79.68: an extent freed while open and written anew before the commit is the cell's
     /// still once a store taking the cell recovers it from object storage: its segment's footer
     /// named it among the commit's frees too, which recovery applies after its extents, and the
     /// cell recovered lacked it.
-    #[test]
-    fn extents_freed_and_written_anew_survive_recovery() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extents_freed_and_written_anew_survive_recovery() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let lost =
-            kept_in(dir.path().join("lost"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
+        let lost = kept_in(dir.path().join("lost"), (1 << 30, None), &bucket.clone(), idle())
+            .await
+            .unwrap();
         let cell = lost.cell();
-        let extent = write(&lost, 1, &pattern(1, BLOCK));
+        let extent = write(&lost, 1, &pattern(1, BLOCK)).await;
         lost.free(extent).unwrap();
-        write(&lost, 1, &pattern(2, BLOCK));
-        local_cell::upload::wait_on(lost.commit(None)).unwrap();
+        write(&lost, 1, &pattern(2, BLOCK)).await;
+        lost.commit(None).await.unwrap();
         // The host is lost, what it committed in object storage.
         std::mem::forget(lost);
 
-        let taken =
-            kept_in(dir.path().join("taken"), (1 << 30, Some(cell)), &bucket, idle()).unwrap();
+        let taken = kept_in(dir.path().join("taken"), (1 << 30, Some(cell)), &bucket, idle())
+            .await
+            .unwrap();
         let mut data = vec![0; BLOCK];
-        local_cell::upload::wait_on(taken.read(
-            extent,
-            0,
-            &mut [crate::VolatileSliceMut::from(&mut data[..])],
-        ))
-        .unwrap();
+        taken.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).await.unwrap();
         assert!(data == pattern(2, BLOCK), "the extent read back is not its second write");
     }
 
@@ -2976,10 +2956,11 @@ mod tests {
     /// scripts/test-host.sh runs it with `CLADEFS_TEST_PARTS=workspace` and
     /// `CLADEFS_TEST_ARGS='--run-ignored only --no-capture bucket_round_trips_by_phase'`. Each
     /// operation is a line, `PHASE ...`.
-    #[test]
+    #[tokio::test(flavor = "multi_thread")]
     #[ignore = "a measurement against CLADEFS_PHASES_BUCKET's bucket"]
-    fn bucket_round_trips_by_phase() {
+    async fn bucket_round_trips_by_phase() {
         use bucket_cell::object_bucket::Request;
+        use futures::future::LocalBoxFuture;
         let url =
             std::env::var("CLADEFS_PHASES_BUCKET").expect("CLADEFS_PHASES_BUCKET names a bucket");
         let url = format!("{}/phases-{:016x}/", url.trim_end_matches('/'), rand::random::<u64>());
@@ -2987,9 +2968,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut phases: std::collections::BTreeMap<&str, Vec<f64>> = Default::default();
         // Runs `operation`, a `phase`, and says what it took and asked of the bucket.
-        let mut measure = |phase: &'static str, operation: &mut dyn FnMut()| {
+        let mut measure = async |phase: &'static str, operation: LocalBoxFuture<'_, ()>| {
             let (before, started) = (bucket.stats(), std::time::Instant::now());
-            operation();
+            operation.await;
             let took = started.elapsed().as_secs_f64() * 1000.0;
             let after = bucket.stats();
             let mut line = format!("PHASE {phase} ms={took:.1}");
@@ -3008,38 +2989,39 @@ mod tests {
         let base = dir.path().join("base");
         let cell = crate::host_cell::new_alone();
         let mut store = None;
-        measure("create", &mut || {
-            let made = local_cell::upload::wait_on(OpenCell::create_kept_with(
-                &base,
-                1 << 30,
-                cell,
-                &url,
-                idle(),
-            ));
-            store = Some(made.unwrap());
-        });
+        measure(
+            "create",
+            Box::pin(async {
+                let made = OpenCell::create_kept_with(&base, 1 << 30, cell, &url, idle()).await;
+                store = Some(made.unwrap());
+            }),
+        )
+        .await;
         let store = store.unwrap();
         for sequence in 1..=20 {
-            write(&store, sequence, &pattern(sequence as u8, BLOCK));
-            measure("durable-commit", &mut || {
-                local_cell::upload::wait_on(store.commit(None)).unwrap()
-            });
+            write(&store, sequence, &pattern(sequence as u8, BLOCK)).await;
+            measure("durable-commit", Box::pin(async { store.commit(None).await.unwrap() })).await;
         }
         drop(store);
         for _ in 0..10 {
-            measure("open", &mut || drop(reopened(&base, idle()).unwrap()));
+            measure("open", Box::pin(async { drop(reopened(&base, idle()).await.unwrap()) })).await;
         }
-        let store = reopened(&base, idle()).unwrap();
+        let store = reopened(&base, idle()).await.unwrap();
         let forks: Vec<_> = (0..10).map(|fork| dir.path().join(format!("fork-{fork}"))).collect();
         for fork in &forks {
             let child = crate::host_cell::new_alone();
-            measure("fork", &mut || {
-                local_cell::upload::wait_on(store.fork_to(fork, child)).unwrap()
-            });
+            measure(
+                "fork",
+                Box::pin(async {
+                    store.fork_to(fork, child).await.unwrap();
+                }),
+            )
+            .await;
         }
         drop(store);
         for fork in &forks {
-            measure("fork-open", &mut || drop(reopened(fork, idle()).unwrap()));
+            measure("fork-open", Box::pin(async { drop(reopened(fork, idle()).await.unwrap()) }))
+                .await;
         }
         for (phase, mut took) in phases {
             took.sort_by(f64::total_cmp);
@@ -3058,18 +3040,19 @@ mod tests {
     /// cell's head that names it, which acknowledges it (TASK-407: before, the create alone, the
     /// fencing; TASK-371: before that, a read of the head after it); nothing else, as no
     /// checkpoint is due and no fork made. On GCS each request is a round trip.
-    #[test]
-    fn durable_commits_cost_a_create_and_a_head_swap() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn durable_commits_cost_a_create_and_a_head_swap() {
         use bucket_cell::object_bucket::Request;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let store =
-            kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
-        write(&store, 1, &pattern(1, BLOCK));
-        local_cell::upload::wait_on(store.commit(None)).unwrap();
+        let store = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
+            .await
+            .unwrap();
+        write(&store, 1, &pattern(1, BLOCK)).await;
+        store.commit(None).await.unwrap();
         let before = bucket.stats();
-        write(&store, 2, &pattern(2, BLOCK));
-        local_cell::upload::wait_on(store.commit(None)).unwrap();
+        write(&store, 2, &pattern(2, BLOCK)).await;
+        store.commit(None).await.unwrap();
         let after = bucket.stats();
         let asked: Vec<_> = (Request::ALL.iter())
             .map(|&request| (request.name(), after.requests(request) - before.requests(request)))
@@ -3091,19 +3074,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn takes_recover_their_cells_once_by_their_segments_tails() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn takes_recover_their_cells_once_by_their_segments_tails() {
         use bucket_cell::layout;
         use bucket_cell::object_bucket::Request;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let lost =
-            kept_in(dir.path().join("lost"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
+        let lost = kept_in(dir.path().join("lost"), (1 << 30, None), &bucket.clone(), idle())
+            .await
+            .unwrap();
         let cell = lost.cell();
         // A segment of a MiB for each commit, uploaded as it is durable.
         for sequence in 1..=4 {
-            write(&lost, sequence, &noise(sequence, 1 << 20));
-            local_cell::upload::wait_on(lost.commit(None)).unwrap();
+            write(&lost, sequence, &noise(sequence, 1 << 20)).await;
+            lost.commit(None).await.unwrap();
         }
         // The host is lost, its uploader stopping where it is, with no checkpoint.
         std::mem::forget(lost);
@@ -3118,6 +3102,7 @@ mod tests {
         let before = bucket.stats();
         let taken =
             kept_in(dir.path().join("taken"), (1 << 30, Some(cell)), &bucket.clone(), idle())
+                .await
                 .unwrap();
         let after = bucket.stats();
         let asked: Vec<_> = (Request::ALL.iter())
@@ -3155,57 +3140,54 @@ mod tests {
         );
         let mut data = vec![0; 1 << 20];
         let extent = ExtentId { cell: cell.id, sequence: 4 };
-        local_cell::upload::wait_on(taken.read(
-            extent,
-            0,
-            &mut [crate::VolatileSliceMut::from(&mut data[..])],
-        ))
-        .unwrap();
+        taken.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).await.unwrap();
         assert_eq!(data, noise(4, 1 << 20));
     }
 
     /// As `cells_survive_their_hosts_loss`, in the bucket CLADEFS_S3_URL names: RustFS's
     /// (scripts/test-rustfs.sh), or another S3 store's.
-    #[test]
+    #[tokio::test(flavor = "multi_thread")]
     #[ignore = "needs an S3 bucket: scripts/test-rustfs.sh, CI's object-stores job"]
-    fn rustfs_cells_survive_their_hosts_loss() {
+    async fn rustfs_cells_survive_their_hosts_loss() {
         let url = std::env::var("CLADEFS_S3_URL").expect("CLADEFS_S3_URL names the bucket to use");
         let (store, prefix) = bucket_cell::object_bucket::object_store_at(&url).unwrap();
         // A prefix of the run's own, in a bucket runs share.
         let prefix = format!("{prefix}/{:016x}", rand::random::<u64>());
-        survives_its_hosts_loss(store, prefix.trim_start_matches('/'));
+        survives_its_hosts_loss(store, prefix.trim_start_matches('/')).await;
     }
 
-    #[test]
-    fn commits_wait_at_the_lag_bound() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn commits_wait_at_the_lag_bound() {
         let interval = Duration::from_millis(1);
         let options = local_cell::upload::Options { interval, max_lag: 2, ..Default::default() };
         waits_at_the_lag_bound(
             options,
             |gated| &gated.shut,
-            |store| local_cell::upload::wait_on(store.commit_ordered(None)),
-        );
+            |store| Box::pin(store.commit_ordered(None)),
+        )
+        .await;
     }
 
     /// TASK-582: a local commit, synced to the host's disk, waits at the lag bound as an ordered
     /// one does, each level including the one before (doc-12): what a lost host costs, and what
     /// its disk holds, stays within the bound, as SQLite's and memory cells' commits, all local,
     /// go on while the bucket is out of reach.
-    #[test]
-    fn local_commits_wait_at_the_lag_bound() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_commits_wait_at_the_lag_bound() {
         let interval = Duration::from_millis(1);
         let options = local_cell::upload::Options { interval, max_lag: 2, ..Default::default() };
         waits_at_the_lag_bound(
             options,
             |gated| &gated.shut,
-            |store| local_cell::upload::wait_on(store.commit_local(None)),
-        );
+            |store| Box::pin(store.commit_local(None)),
+        )
+        .await;
     }
 
     /// TASK-582: as [`local_commits_wait_at_the_lag_bound`], at a bound in bytes, as
     /// [`commits_wait_at_the_lag_bound_in_bytes`] sets it.
-    #[test]
-    fn local_commits_wait_at_the_lag_bound_in_bytes() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_commits_wait_at_the_lag_bound_in_bytes() {
         let interval = Duration::from_millis(1);
         let options = local_cell::upload::Options {
             interval,
@@ -3215,17 +3197,18 @@ mod tests {
         waits_at_the_lag_bound(
             options,
             |gated| &gated.shut,
-            |store| local_cell::upload::wait_on(store.commit_local(None)),
-        );
+            |store| Box::pin(store.commit_local(None)),
+        )
+        .await;
     }
 
-    #[test]
+    #[tokio::test(flavor = "multi_thread")]
     /// Three blocks' lag: the first two commits' at most, whether or not the uploader closed the
     /// segment between the second's write and its commit, the segment holding the write, which the
     /// commit copied into the next (TASK-92.41): their lag a block more. A bound of two blocks
     /// left the second waiting then, once in some 350 runs, and once in 60 with the uploader
     /// closing segments sooner, as it no longer waits for their framed files durable (TASK-384).
-    fn commits_wait_at_the_lag_bound_in_bytes() {
+    async fn commits_wait_at_the_lag_bound_in_bytes() {
         let interval = Duration::from_millis(1);
         let options = local_cell::upload::Options {
             interval,
@@ -3235,70 +3218,64 @@ mod tests {
         waits_at_the_lag_bound(
             options,
             |gated| &gated.shut,
-            |store| local_cell::upload::wait_on(store.commit_ordered(None)),
-        );
+            |store| Box::pin(store.commit_ordered(None)),
+        )
+        .await;
     }
 
     /// TASK-314: a bucket that keeps failing its writes, its disk full, holds its stores' commits
     /// at the lag bound, failing none and losing none: as the guest sees it, its fsyncs wait once
     /// the lag reaches its bound (its syncs at once), until the bucket has room (doc-12).
-    #[test]
-    fn commits_wait_at_the_lag_bound_while_the_bucket_is_full() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn commits_wait_at_the_lag_bound_while_the_bucket_is_full() {
         let interval = Duration::from_millis(1);
         let options = local_cell::upload::Options { interval, max_lag: 2, ..Default::default() };
         waits_at_the_lag_bound(
             options,
             |gated| &gated.full,
-            |store| local_cell::upload::wait_on(store.commit_ordered(None)),
-        );
+            |store| Box::pin(store.commit_ordered(None)),
+        )
+        .await;
     }
 
     /// A cell opens on a host without it: an empty store of it takes what the cell holds, and
     /// writes on; the store it came from, opened again, finds the cell moved on, and refuses.
-    #[test]
-    fn opens_cells_elsewhere() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn opens_cells_elsewhere() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let first =
-            kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
+        let first = kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle())
+            .await
+            .unwrap();
         let cell = first.cell();
         let large = pattern(2, 4 << 20);
-        write(&first, 1, &pattern(1, BLOCK));
-        write(&first, 2, &large);
-        local_cell::upload::wait_on(first.commit(Some(b"root"))).unwrap();
+        write(&first, 1, &pattern(1, BLOCK)).await;
+        write(&first, 2, &large).await;
+        first.commit(Some(b"root")).await.unwrap();
         drop(first);
 
         let second =
             kept_in(dir.path().join("second"), (1 << 30, Some(cell)), &bucket.clone(), idle())
+                .await
                 .unwrap();
         assert_eq!(second.root(), Ok(b"root".to_vec()));
         let mut data = vec![0; 4 << 20];
         let extent = ExtentId { cell: cell.id, sequence: 2 };
-        local_cell::upload::wait_on(second.read(
-            extent,
-            0,
-            &mut [crate::VolatileSliceMut::from(&mut data[..])],
-        ))
-        .unwrap();
+        second.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).await.unwrap();
         assert_eq!(data, large);
         let info = second.info().unwrap();
         let sequence = info.next_sequence.max(info.sequence_floor);
-        write(&second, sequence, &pattern(3, BLOCK));
-        local_cell::upload::wait_on(second.commit(None)).unwrap();
+        write(&second, sequence, &pattern(3, BLOCK)).await;
+        second.commit(None).await.unwrap();
         drop(second);
 
         // cladefs: the first, opened again, its write-ahead log empty, takes the cell as it is
         // (TASK-165.9): before, a store that held the cell refused once it moved on.
-        let first = reopened(dir.path().join("first"), idle()).unwrap();
+        let first = reopened(dir.path().join("first"), idle()).await.unwrap();
         assert_eq!(first.root(), Ok(b"root".to_vec()));
         let mut data = vec![0; BLOCK];
         let extent = ExtentId { cell: cell.id, sequence };
-        local_cell::upload::wait_on(first.read(
-            extent,
-            0,
-            &mut [crate::VolatileSliceMut::from(&mut data[..])],
-        ))
-        .unwrap();
+        first.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).await.unwrap();
         assert_eq!(data, pattern(3, BLOCK));
         drop(first);
         let (extents, root) = uploaded(&bucket, cell);
@@ -3312,20 +3289,22 @@ mod tests {
     /// TASK-260: a read for a guest request of what only object storage holds logs the requests
     /// it makes of the bucket, on the bucket runtime, with the guest request.
     #[cfg(target_os = "linux")]
-    #[test]
-    fn reads_of_object_storage_are_logged_with_their_guest_request() {
-        use crate::request::{RequestId, within_now};
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reads_of_object_storage_are_logged_with_their_guest_request() {
+        use crate::request::{RequestId, within};
         let lines = crate::cladefsd::logging::capture();
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let first =
-            kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
+        let first = kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle())
+            .await
+            .unwrap();
         let cell = first.cell();
-        write(&first, 1, &pattern(1, BLOCK));
-        local_cell::upload::wait_on(first.commit(None)).unwrap();
+        write(&first, 1, &pattern(1, BLOCK)).await;
+        first.commit(None).await.unwrap();
         drop(first);
         let second =
             kept_in(dir.path().join("second"), (1 << 30, Some(cell)), &bucket.clone(), idle())
+                .await
                 .unwrap();
         lines.lock().unwrap().clear();
         let request = RequestId {
@@ -3334,14 +3313,11 @@ mod tests {
         };
         let mut data = vec![0; BLOCK];
         let extent = ExtentId { cell: cell.id, sequence: 1 };
-        within_now(Some(request), || {
-            local_cell::upload::wait_on(second.read(
-                extent,
-                0,
-                &mut [crate::VolatileSliceMut::from(&mut data[..])],
-            ))
-            .unwrap()
-        });
+        within(Some(request), async {
+            second.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).await
+        })
+        .await
+        .unwrap();
         assert_eq!(data, pattern(1, BLOCK));
         // Each request of the bucket the read made: its kind, and the request it names.
         let mut made: Vec<(String, String)> = (lines.lock().unwrap().iter())
@@ -3360,18 +3336,18 @@ mod tests {
 
     /// Opens the store at `path`, whose bucket's objects `gated` reaches, the write of its cell's
     /// head that takes it held until `meanwhile` ran.
-    fn open_racing(
+    async fn open_racing(
         path: std::path::PathBuf,
         gated: &Arc<Gated>,
         cell: crate::CellId,
-        meanwhile: impl FnOnce(),
+        meanwhile: impl AsyncFnOnce(),
     ) -> Result<OpenCell, crate::Error> {
         gated.hold.send_replace(Hold::FirstOfHead(cell));
-        let opening = std::thread::spawn(move || reopened(path, idle()));
+        let opening = tokio::spawn(async move { reopened(path, idle()).await });
         gated.wait_held(1);
-        meanwhile();
+        meanwhile().await;
         gated.hold.send_replace(Hold::Nothing);
-        opening.join().unwrap()
+        opening.await.unwrap()
     }
 
     /// The directory of a store of `cell` at `path`, its cell kept in `bucket`, made whole, and
@@ -3388,32 +3364,29 @@ mod tests {
     /// TASK-79.4: a store opening takes the cell as of its taking of the head, not as of what it
     /// found before: the commit another writer made meanwhile, which frees the extent the cell
     /// held before and writes another, is the cell's, and the store's.
-    #[test]
-    fn takes_take_what_the_cell_holds_once_taken() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn takes_take_what_the_cell_holds_once_taken() {
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
         let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
-        let first = kept_in(dir.path().join("first"), (1 << 30, None), &bucket, idle()).unwrap();
+        let first =
+            kept_in(dir.path().join("first"), (1 << 30, None), &bucket, idle()).await.unwrap();
         let cell = first.cell();
-        let before = write(&first, 1, &pattern(1, BLOCK));
-        local_cell::upload::wait_on(first.commit(Some(b"before"))).unwrap();
+        let before = write(&first, 1, &pattern(1, BLOCK)).await;
+        first.commit(Some(b"before")).await.unwrap();
 
         made_for(&dir.path().join("second"), cell, &bucket);
-        let second = open_racing(dir.path().join("second"), &gated, cell, || {
-            write(&first, 2, &pattern(2, BLOCK));
+        let second = open_racing(dir.path().join("second"), &gated, cell, async || {
+            write(&first, 2, &pattern(2, BLOCK)).await;
             first.free(before).unwrap();
-            local_cell::upload::wait_on(first.commit(Some(b"meanwhile"))).unwrap();
-        });
+            first.commit(Some(b"meanwhile")).await.unwrap();
+        })
+        .await;
         let second = second.unwrap();
         assert_eq!(second.root(), Ok(b"meanwhile".to_vec()));
         let mut data = vec![0; BLOCK];
         let written = ExtentId { cell: cell.id, sequence: 2 };
-        local_cell::upload::wait_on(second.read(
-            written,
-            0,
-            &mut [crate::VolatileSliceMut::from(&mut data[..])],
-        ))
-        .unwrap();
+        second.read(written, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).await.unwrap();
         assert_eq!(data, pattern(2, BLOCK));
         assert_eq!(
             uploaded(&bucket, cell),
@@ -3426,8 +3399,8 @@ mod tests {
     /// log diverged as recovery first finds the cell; and once it holds it, another writer having
     /// committed between the two (`wal_follows`), having fenced that writer, whose commits stay the
     /// cell's. `OpenCell::take` drops the log, and opens the store as the cell is.
-    #[test]
-    fn stores_whose_cell_moved_on_before_their_taking_refuse() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stores_whose_cell_moved_on_before_their_taking_refuse() {
         let dir = tempfile::tempdir().unwrap();
         let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let gated = Arc::new(Gated::over(memory.clone()));
@@ -3440,16 +3413,17 @@ mod tests {
             (1 << 30, None),
             &Arc::new(ObjectBucket::new(dying.clone(), "")),
             idle(),
-        );
+        )
+        .await;
         let first = first.unwrap();
         let cell = first.cell();
-        write(&first, 1, &pattern(1, BLOCK));
-        local_cell::upload::wait_on(first.commit(Some(b"before"))).unwrap();
+        write(&first, 1, &pattern(1, BLOCK)).await;
+        first.commit(Some(b"before")).await.unwrap();
         // A commit its log holds, durable on its disk alone, as its host dies: restarted with its
         // disk as it was, reaching the bucket again; what it had going does nothing more.
-        write(&first, 2, &pattern(2, BLOCK));
-        local_cell::upload::wait_on(first.commit_ordered(Some(b"local"))).unwrap();
-        first.flush().unwrap();
+        write(&first, 2, &pattern(2, BLOCK)).await;
+        first.commit_ordered(Some(b"local")).await.unwrap();
+        first.flush().await.unwrap();
         let path = dir.path().join("first");
         restart(&lost, &path);
         dying.sever();
@@ -3457,16 +3431,17 @@ mod tests {
         naming(&path, &bucket);
 
         // The cell moves to another host, which takes it, as the bucket has it.
-        let taken = kept_in(dir.path().join("taken"), (1 << 30, Some(cell)), &bucket, idle());
+        let taken = kept_in(dir.path().join("taken"), (1 << 30, Some(cell)), &bucket, idle()).await;
         let taken = taken.unwrap();
         assert_eq!(taken.root(), Ok(b"before".to_vec()));
         // Its writer's fence moved the cell past no commit: the first's log follows it still.
-        let opened = open_racing(path.clone(), &gated, cell, || {
+        let opened = open_racing(path.clone(), &gated, cell, async || {
             let info = taken.info().unwrap();
             let sequence = info.next_sequence.max(info.sequence_floor);
-            write(&taken, sequence, &pattern(3, BLOCK));
-            local_cell::upload::wait_on(taken.commit(Some(b"meanwhile"))).unwrap();
-        });
+            write(&taken, sequence, &pattern(3, BLOCK)).await;
+            taken.commit(Some(b"meanwhile")).await.unwrap();
+        })
+        .await;
         assert_eq!(opened.err().and_then(|err| err.errno()), Some(crate::Errno::ESTALE));
         // The writer that committed meanwhile was fenced, its commit the cell's.
         let (extents, root) = uploaded(&bucket, cell);
@@ -3475,12 +3450,12 @@ mod tests {
         drop(taken);
         // Plainly diverged now, before the taking.
         assert_eq!(
-            reopened(&path, idle()).err().and_then(|err| err.errno()),
+            reopened(&path, idle()).await.err().and_then(|err| err.errno()),
             Some(crate::Errno::ESTALE)
         );
         // Taken, its log dropped: the store holds the cell as it is, its local commit lost.
-        local_cell::upload::wait_on(OpenCell::take(&path, 1 << 30, cell, None)).unwrap();
-        let first = reopened(&path, idle()).unwrap();
+        OpenCell::take(&path, 1 << 30, cell, None).await.unwrap();
+        let first = reopened(&path, idle()).await.unwrap();
         assert_eq!(first.root(), Ok(b"meanwhile".to_vec()));
     }
 
@@ -3490,28 +3465,29 @@ mod tests {
     /// TASK-160.10: a store at a version refuses all that would change what it holds, with `EROFS`,
     /// whoever asks: writes, frees, commits, a resize, a writer taking it over. What changes none
     /// of its extents it does: it forks, and is made public.
-    #[test]
-    fn copies_of_versions_refuse_what_would_change_them() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn copies_of_versions_refuse_what_would_change_them() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let source =
-            kept_in(dir.path().join("source"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
-        let extent = write(&source, 1, &pattern(1, BLOCK));
-        local_cell::upload::wait_on(source.commit(Some(b"root"))).unwrap();
+        let source = kept_in(dir.path().join("source"), (1 << 30, None), &bucket.clone(), idle())
+            .await
+            .unwrap();
+        let extent = write(&source, 1, &pattern(1, BLOCK)).await;
+        source.commit(Some(b"root")).await.unwrap();
         let path = dir.path().join("copy");
-        local_cell::upload::wait_on(source.uploaded_version_at(&path)).unwrap();
+        source.uploaded_version_at(&path).await.unwrap();
         drop(source);
 
-        let version = reopened(&path, idle()).unwrap();
+        let version = reopened(&path, idle()).await.unwrap();
         assert_eq!(version.access().role, crate::CellRole::Version);
         let capacity = version.info().unwrap().capacity;
         let own = ExtentId { cell: version.cell().id, sequence: 2 };
         let refused = [
-            ("set_capacity", version.set_capacity(2 * capacity)),
-            ("write", version.write(own, 0, &[VolatileSlice::from(&pattern(2, BLOCK)[..])])),
+            ("set_capacity", version.set_capacity(2 * capacity).await),
+            ("write", version.write(own, 0, &[VolatileSlice::from(&pattern(2, BLOCK)[..])]).await),
             ("free", version.free(extent)),
-            ("commit", local_cell::upload::wait_on(version.commit(Some(b"changed")))),
-            ("commit_ordered", local_cell::upload::wait_on(version.commit_ordered(None))),
+            ("commit", version.commit(Some(b"changed")).await),
+            ("commit_ordered", version.commit_ordered(None).await),
             ("take_over", version.take_over()),
         ];
         for (what, result) in refused {
@@ -3519,10 +3495,10 @@ mod tests {
         }
         assert_eq!(version.info().unwrap().capacity, capacity);
         assert_eq!(version.root().unwrap(), b"root");
-        local_cell::upload::wait_on(
-            version.fork_to(dir.path().join("fork"), crate::host_cell::fork_child(version.cell())),
-        )
-        .unwrap();
+        version
+            .fork_to(dir.path().join("fork"), crate::host_cell::fork_child(version.cell()))
+            .await
+            .unwrap();
         version.make_public().unwrap();
     }
 
@@ -3532,57 +3508,48 @@ mod tests {
     /// version the head names not is `ENOENT`. The version dropped once its cell freed what it
     /// held, and the collector run, the other tenant's fork, the one left, still reads all it
     /// inherited.
-    #[test]
-    fn versions_fork_into_other_tenants_cells_while_shared() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn versions_fork_into_other_tenants_cells_while_shared() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let of = |tenant| crate::host_cell::named(tenant);
         let source = dir.path().join("source");
-        let source = kept_in(&source, (1 << 30, Some(of(1))), &bucket, idle()).unwrap();
-        let extent = write(&source, 1, &pattern(1, BLOCK));
-        local_cell::upload::wait_on(source.commit(Some(b"base"))).unwrap();
+        let source = kept_in(&source, (1 << 30, Some(of(1))), &bucket, idle()).await.unwrap();
+        let extent = write(&source, 1, &pattern(1, BLOCK)).await;
+        source.commit(Some(b"base")).await.unwrap();
         let path = dir.path().join("copy");
-        let version = local_cell::upload::wait_on(source.uploaded_version_at(&path)).unwrap();
+        let version = source.uploaded_version_at(&path).await.unwrap();
         source.free(extent).unwrap();
-        local_cell::upload::wait_on(source.commit(Some(b"later"))).unwrap();
+        source.commit(Some(b"later")).await.unwrap();
         // Another fork, gone: a checkpoint past the version's, so that only the version, and its
         // forks, keep what it names.
         // Deleted as this process, no host, deletes them, of the first placement.
-        let delete = |path: &std::path::Path| {
-            local_cell::upload::wait_on(crate::host_cell::delete(
-                path,
-                Some(&bucket),
-                crate::host_cell::token,
-            ))
-            .unwrap()
+        let delete = async |path: &std::path::Path| {
+            crate::host_cell::delete(path, Some(&bucket), crate::host_cell::token).await.unwrap()
         };
         let later = dir.path().join("later");
-        local_cell::upload::wait_on(
-            source.fork_to(&later, crate::host_cell::fork_child(source.cell())),
-        )
-        .unwrap();
-        delete(&later);
-        let copy = reopened(&path, idle()).unwrap();
-        let fork = |name: &str, tenant| {
+        source.fork_to(&later, crate::host_cell::fork_child(source.cell())).await.unwrap();
+        delete(&later).await;
+        let copy = reopened(&path, idle()).await.unwrap();
+        let fork = async |name: &str, tenant| {
             let to = dir.path().join(name);
-            let forked = local_cell::upload::wait_on(copy.fork_to(&to, of(tenant)))
-                .map_err(|err| err.errno());
+            let forked = copy.fork_to(&to, of(tenant)).await.map_err(|err| err.errno());
             (forked, to.exists())
         };
 
-        assert_eq!(fork("refused", 2), (Err(Some(crate::Errno::EACCES)), false));
-        assert_eq!(fork("ours", 1), (Ok(()), true));
-        local_cell::upload::wait_on(source.share_version(version, true)).unwrap();
-        assert_eq!(fork("theirs", 2), (Ok(()), true));
-        local_cell::upload::wait_on(source.share_version(version, false)).unwrap();
-        assert_eq!(fork("unshared", 2), (Err(Some(crate::Errno::EACCES)), false));
-        let refused = local_cell::upload::wait_on(source.share_version(version + 1, true));
+        assert_eq!(fork("refused", 2).await, (Err(Some(crate::Errno::EACCES)), false));
+        assert_eq!(fork("ours", 1).await, (Ok(()), true));
+        source.share_version(version, true).await.unwrap();
+        assert_eq!(fork("theirs", 2).await, (Ok(()), true));
+        source.share_version(version, false).await.unwrap();
+        assert_eq!(fork("unshared", 2).await, (Err(Some(crate::Errno::EACCES)), false));
+        let refused = source.share_version(version + 1, true).await;
         assert_eq!(refused.map_err(|err| err.errno()), Err(Some(crate::Errno::ENOENT)));
 
         drop(copy);
-        delete(&dir.path().join("ours"));
-        delete(&path);
-        local_cell::upload::wait_on(source.drop_versions(&[version].into())).unwrap();
+        delete(&dir.path().join("ours")).await;
+        delete(&path).await;
+        source.drop_versions(&[version].into()).await.unwrap();
         let options = bucket_cell::collector::Options { compact_below: 0.5, grace: 0 };
         for holder in 1..=2 {
             let pass = bucket_cell::collector::collect(&*bucket, holder, &options);
@@ -3590,15 +3557,10 @@ mod tests {
         }
         // What this process cached of the extents goes: the fork reads them from the bucket.
         crate::cache::evict_least_used(None, |_| false);
-        let theirs = reopened(dir.path().join("theirs"), idle()).unwrap();
+        let theirs = reopened(dir.path().join("theirs"), idle()).await.unwrap();
         assert_eq!(theirs.root().unwrap(), b"base");
         let mut data = vec![0; BLOCK];
-        local_cell::upload::wait_on(theirs.read(
-            extent,
-            0,
-            &mut [crate::VolatileSliceMut::from(&mut data[..])],
-        ))
-        .unwrap();
+        theirs.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).await.unwrap();
         assert!(data == pattern(1, BLOCK), "the fork reads other bytes");
     }
 
@@ -3608,8 +3570,8 @@ mod tests {
     /// nothing: compaction of encrypted objects is TASK-411.6's), and the version's tenant's KEK
     /// destroyed, the host told so: the clone still reads all it inherited, and the source forks
     /// no more.
-    #[test]
-    fn encrypted_versions_fork_into_other_tenants_cells_while_shared() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn encrypted_versions_fork_into_other_tenants_cells_while_shared() {
         let keys = tempfile::tempdir().unwrap();
         let kms = Arc::new(extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap());
         for tenant in [1, 2] {
@@ -3620,33 +3582,27 @@ mod tests {
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let of = |tenant| crate::host_cell::named(tenant);
         let source = dir.path().join("source");
-        let source = kept_in(&source, (1 << 30, Some(of(1))), &bucket, idle()).unwrap();
-        let extent = write(&source, 1, &pattern(1, BLOCK));
-        local_cell::upload::wait_on(source.commit(Some(b"base"))).unwrap();
+        let source = kept_in(&source, (1 << 30, Some(of(1))), &bucket, idle()).await.unwrap();
+        let extent = write(&source, 1, &pattern(1, BLOCK)).await;
+        source.commit(Some(b"base")).await.unwrap();
         let path = dir.path().join("copy");
-        let version = local_cell::upload::wait_on(source.uploaded_version_at(&path)).unwrap();
+        let version = source.uploaded_version_at(&path).await.unwrap();
         source.free(extent).unwrap();
-        local_cell::upload::wait_on(source.commit(Some(b"later"))).unwrap();
-        let delete = |path: &std::path::Path| {
-            local_cell::upload::wait_on(crate::host_cell::delete(
-                path,
-                Some(&bucket),
-                crate::host_cell::token,
-            ))
-            .unwrap()
+        source.commit(Some(b"later")).await.unwrap();
+        let delete = async |path: &std::path::Path| {
+            crate::host_cell::delete(path, Some(&bucket), crate::host_cell::token).await.unwrap()
         };
-        let copy = reopened(&path, idle()).unwrap();
-        let fork = |name: &str, tenant| {
+        let copy = reopened(&path, idle()).await.unwrap();
+        let fork = async |name: &str, tenant| {
             let to = dir.path().join(name);
-            let forked = local_cell::upload::wait_on(copy.fork_to(&to, of(tenant)))
-                .map_err(|err| err.errno());
+            let forked = copy.fork_to(&to, of(tenant)).await.map_err(|err| err.errno());
             (forked, to.exists())
         };
-        assert_eq!(fork("refused", 2), (Err(Some(crate::Errno::EACCES)), false));
-        assert_eq!(fork("ours", 1), (Ok(()), true));
-        local_cell::upload::wait_on(source.share_version(version, true)).unwrap();
-        assert_eq!(fork("theirs", 2), (Ok(()), true));
-        let theirs = reopened(dir.path().join("theirs"), idle()).unwrap();
+        assert_eq!(fork("refused", 2).await, (Err(Some(crate::Errno::EACCES)), false));
+        assert_eq!(fork("ours", 1).await, (Ok(()), true));
+        source.share_version(version, true).await.unwrap();
+        assert_eq!(fork("theirs", 2).await, (Ok(()), true));
+        let theirs = reopened(dir.path().join("theirs"), idle()).await.unwrap();
         let record = futures::executor::block_on(bucket_cell::head::get(&*bucket, theirs.cell()));
         let record = record.unwrap().unwrap();
         let inherited: Vec<_> = record.inherited.iter().map(|had| had.cell).collect();
@@ -3654,9 +3610,9 @@ mod tests {
         drop(theirs);
 
         drop(copy);
-        delete(&dir.path().join("ours"));
-        delete(&path);
-        local_cell::upload::wait_on(source.drop_versions(&[version].into())).unwrap();
+        delete(&dir.path().join("ours")).await;
+        delete(&path).await;
+        source.drop_versions(&[version].into()).await.unwrap();
         let options = bucket_cell::collector::Options { compact_below: 0.0, grace: 0 };
         for holder in 1..=2 {
             let pass = bucket_cell::collector::collect(&*bucket, holder, &options);
@@ -3665,26 +3621,21 @@ mod tests {
         kms.destroy(1).unwrap();
         crate::bucket::kms().unwrap().revoked(1, "tenant 1: its KEK is destroyed");
         crate::cache::evict_least_used(None, |_| false);
-        let theirs = reopened(dir.path().join("theirs"), idle()).unwrap();
+        let theirs = reopened(dir.path().join("theirs"), idle()).await.unwrap();
         assert_eq!(theirs.root().unwrap(), b"base");
         let mut data = vec![0; BLOCK];
-        local_cell::upload::wait_on(theirs.read(
-            extent,
-            0,
-            &mut [crate::VolatileSliceMut::from(&mut data[..])],
-        ))
-        .unwrap();
+        theirs.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).await.unwrap();
         assert!(data == pattern(1, BLOCK), "the fork reads other bytes");
-        let refused = local_cell::upload::wait_on(source.fork_to(dir.path().join("after"), of(1)))
-            .map_err(|err| err.errno());
+        let refused =
+            source.fork_to(dir.path().join("after"), of(1)).await.map_err(|err| err.errno());
         assert_eq!(refused, Err(Some(crate::Errno::EACCES)));
     }
 
     /// TASK-411.19, as TASK-411.28 left it: a tenant whose KEK the KMS has forgotten (answering
     /// as for a tenant that never had one), and a tenant that never had one, get no store opened
     /// here, encrypted or in the clear: `EACCES`, the cell not made.
-    #[test]
-    fn tenants_with_no_kek_in_the_kms_open_no_store() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tenants_with_no_kek_in_the_kms_open_no_store() {
         let keys = tempfile::tempdir().unwrap();
         let local = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
         local.create(1).unwrap();
@@ -3695,7 +3646,8 @@ mod tests {
         let of = |tenant| crate::host_cell::named(tenant);
         for (name, tenant) in [("forgotten", 1), ("never", 2)] {
             let cell = of(tenant);
-            let refused = kept_in(dir.path().join(name), (1 << 30, Some(cell)), &bucket, idle());
+            let refused =
+                kept_in(dir.path().join(name), (1 << 30, Some(cell)), &bucket, idle()).await;
             let refused = refused.map(drop).map_err(|err| err.errno());
             assert_eq!(refused, Err(Some(crate::Errno::EACCES)), "{name}");
             let cell = futures::executor::block_on(bucket_cell::head::get(&*bucket, cell));
@@ -3708,8 +3660,8 @@ mod tests {
     /// do; their extents leave the extent cache, pages and all; its fetchers forget their rings.
     /// The tenant's other cell's store, until its tenant goes, and another tenant's, read on, their
     /// extents cached still. No file of the stores' directories holds what they wrote.
-    #[test]
-    fn stores_of_shredded_cells_and_tenants_are_halted_and_leave_the_cache() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stores_of_shredded_cells_and_tenants_are_halted_and_leave_the_cache() {
         let keys = tempfile::tempdir().unwrap();
         let kms = Arc::new(extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap());
         for tenant in [1, 2] {
@@ -3720,27 +3672,22 @@ mod tests {
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let of = |tenant| crate::host_cell::named(tenant);
         let names = ["ours", "sibling", "theirs"];
-        let stores: Vec<(OpenCell, ExtentId, Vec<u8>)> = (names.iter().zip([1, 1, 2]))
-            .enumerate()
-            .map(|(at, (name, tenant))| {
-                let store =
-                    kept_in(dir.path().join(name), (1 << 30, Some(of(tenant))), &bucket, idle());
-                let store = store.unwrap();
-                let data = noise(at as u64 + 1, 4 * BLOCK);
-                let extent = write(&store, 1, &data);
-                local_cell::upload::wait_on(store.commit(None)).unwrap();
-                local_cell::upload::wait_on(store.wait_uploaded()).unwrap();
-                (store, extent, data)
-            })
-            .collect();
-        let read = |at: usize| {
+        let mut stores: Vec<(OpenCell, ExtentId, Vec<u8>)> = Vec::new();
+        for (at, (name, tenant)) in names.iter().zip([1, 1, 2]).enumerate() {
+            let store =
+                kept_in(dir.path().join(name), (1 << 30, Some(of(tenant))), &bucket, idle()).await;
+            let store = store.unwrap();
+            let data = noise(at as u64 + 1, 4 * BLOCK);
+            let extent = write(&store, 1, &data).await;
+            store.commit(None).await.unwrap();
+            store.wait_uploaded().await.unwrap();
+            stores.push((store, extent, data));
+        }
+        let read = async |at: usize| {
             let (store, extent, data) = &stores[at];
             let mut read = vec![0; data.len()];
-            let done = local_cell::upload::wait_on(store.read(
-                *extent,
-                0,
-                &mut [crate::VolatileSliceMut::from(&mut read[..])],
-            ));
+            let done =
+                store.read(*extent, 0, &mut [crate::VolatileSliceMut::from(&mut read[..])]).await;
             done.map(|()| read == *data)
         };
         let cached = || {
@@ -3748,10 +3695,13 @@ mod tests {
                 crate::cache::keys().into_iter().map(|(_, extent)| extent).collect();
             stores.iter().map(|(_, extent, _)| extents.contains(extent)).collect::<Vec<_>>()
         };
-        assert_eq!((0..3).map(read).collect::<Vec<_>>(), [Ok(true), Ok(true), Ok(true)]);
+        assert_eq!(
+            futures::future::join_all((0..3).map(read)).await,
+            [Ok(true), Ok(true), Ok(true)]
+        );
         assert_eq!(cached(), [true, true, true]);
-        let reopened_errno = |at: usize| {
-            reopened(dir.path().join(names[at]), idle()).map(drop).map_err(|err| err.errno())
+        let reopened_errno = async |at: usize| {
+            reopened(dir.path().join(names[at]), idle()).await.map(drop).map_err(|err| err.errno())
         };
 
         let cell = stores[0].0.cell();
@@ -3764,22 +3714,17 @@ mod tests {
             "{forgotten:?}"
         );
         assert_eq!(
-            (0..3).map(read).collect::<Vec<_>>(),
+            futures::future::join_all((0..3).map(read)).await,
             [Err(crate::Errno::EACCES), Ok(true), Ok(true)]
         );
         assert_eq!(cached(), [false, true, true]);
-        assert_eq!(
-            local_cell::upload::wait_on(stores[0].0.commit(None)),
-            Err(crate::Errno::EACCES)
-        );
+        assert_eq!(stores[0].0.commit(None).await, Err(crate::Errno::EACCES));
         // Nor what the control API changes of it: its capacity, its versions (TASK-611).
         let ours = &stores[0].0;
-        assert_eq!(ours.set_capacity(2 << 30), Err(crate::Errno::EACCES));
-        let dropped =
-            local_cell::upload::wait_on(ours.drop_versions(&[1].into())).map_err(|err| err.errno());
+        assert_eq!(ours.set_capacity(2 << 30).await, Err(crate::Errno::EACCES));
+        let dropped = ours.drop_versions(&[1].into()).await.map_err(|err| err.errno());
         assert_eq!(dropped, Err(Some(crate::Errno::EACCES)));
-        let shared =
-            local_cell::upload::wait_on(ours.share_version(1, true)).map_err(|err| err.errno());
+        let shared = ours.share_version(1, true).await.map_err(|err| err.errno());
         assert_eq!(shared, Err(Some(crate::Errno::EACCES)));
 
         kms.destroy(1).unwrap();
@@ -3791,7 +3736,7 @@ mod tests {
             "{forgotten:?}"
         );
         assert_eq!(
-            (0..3).map(read).collect::<Vec<_>>(),
+            futures::future::join_all((0..3).map(read)).await,
             [Err(crate::Errno::EACCES), Err(crate::Errno::EACCES), Ok(true)]
         );
         assert_eq!(cached(), [false, false, true]);
@@ -3800,7 +3745,7 @@ mod tests {
         // Closed by their holders, the stores of the tenant open no more; the other's does.
         let written: Vec<Vec<u8>> = stores.into_iter().map(|(_, _, data)| data).collect();
         assert_eq!(
-            (0..3).map(reopened_errno).collect::<Vec<_>>(),
+            futures::future::join_all((0..3).map(reopened_errno)).await,
             [Err(Some(crate::Errno::EACCES)), Err(Some(crate::Errno::EACCES)), Ok(())]
         );
 
@@ -3814,8 +3759,8 @@ mod tests {
     /// at `tenants/<t>/kek`. Shredding a tenant here leaves a tombstone there, halts its store
     /// (`EACCES`), which opens no more, nor any new store of the tenant's, nothing made; another
     /// tenant's reads on. Shredding it again finds it so.
-    #[test]
-    fn hosts_given_a_master_key_alone_encrypt_every_store_under_the_bucket_kms() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hosts_given_a_master_key_alone_encrypt_every_store_under_the_bucket_kms() {
         use bucket_cell::bucket_kms::Destroyed;
         use bucket_cell::layout;
         let url = "memory:///bucket-kms";
@@ -3830,19 +3775,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let of = |tenant| crate::host_cell::named(tenant);
         let names = ["ours", "theirs"];
-        let stores: Vec<(OpenCell, ExtentId, Vec<u8>)> = (names.iter().zip([1, 2]))
-            .enumerate()
-            .map(|(at, (name, tenant))| {
-                let store =
-                    kept_in(dir.path().join(name), (1 << 30, Some(of(tenant))), &bucket, idle());
-                let store = store.unwrap();
-                let data = noise(at as u64 + 1, 4 * BLOCK);
-                let extent = write(&store, 1, &data);
-                local_cell::upload::wait_on(store.commit(None)).unwrap();
-                local_cell::upload::wait_on(store.wait_uploaded()).unwrap();
-                (store, extent, data)
-            })
-            .collect();
+        let mut stores: Vec<(OpenCell, ExtentId, Vec<u8>)> = Vec::new();
+        for (at, (name, tenant)) in names.iter().zip([1, 2]).enumerate() {
+            let store =
+                kept_in(dir.path().join(name), (1 << 30, Some(of(tenant))), &bucket, idle()).await;
+            let store = store.unwrap();
+            let data = noise(at as u64 + 1, 4 * BLOCK);
+            let extent = write(&store, 1, &data).await;
+            store.commit(None).await.unwrap();
+            store.wait_uploaded().await.unwrap();
+            stores.push((store, extent, data));
+        }
         assert!(crate::bucket::bucket_kms().is_some());
         for (store, _, _) in &stores {
             let record =
@@ -3857,14 +3800,11 @@ mod tests {
             got.map(|object| object.bytes)
         };
         assert_eq!(kek(1).map(|bytes| bytes.len()), Some(extent_keys::kms::bucket::KEK_OBJECT_LEN));
-        let read = |at: usize| {
+        let read = async |at: usize| {
             let (store, extent, data) = &stores[at];
             let mut read = vec![0; data.len()];
-            let done = local_cell::upload::wait_on(store.read(
-                *extent,
-                0,
-                &mut [crate::VolatileSliceMut::from(&mut read[..])],
-            ));
+            let done =
+                store.read(*extent, 0, &mut [crate::VolatileSliceMut::from(&mut read[..])]).await;
             done.map(|()| read == *data)
         };
 
@@ -3872,15 +3812,15 @@ mod tests {
         let (destroyed, forgotten) = shredded.unwrap();
         assert_eq!((destroyed, forgotten.stores, forgotten.rings), (Destroyed::Now, 1, 1));
         assert_eq!(kek(1), Some(b"fxkt\x01\x02\0\0\0\0\0\0\0\x01".to_vec()));
-        assert_eq!((read(0), read(1)), (Err(crate::Errno::EACCES), Ok(true)));
+        assert_eq!((read(0).await, read(1).await), (Err(crate::Errno::EACCES), Ok(true)));
         let written: Vec<Vec<u8>> = stores.into_iter().map(|(_, _, data)| data).collect();
-        let reopened_errno = |name: &str| {
-            reopened(dir.path().join(name), idle()).map(drop).map_err(|err| err.errno())
+        let reopened_errno = async |name: &str| {
+            reopened(dir.path().join(name), idle()).await.map(drop).map_err(|err| err.errno())
         };
-        assert_eq!(reopened_errno("ours"), Err(Some(crate::Errno::EACCES)));
-        assert_eq!(reopened_errno("theirs"), Ok(()));
+        assert_eq!(reopened_errno("ours").await, Err(Some(crate::Errno::EACCES)));
+        assert_eq!(reopened_errno("theirs").await, Ok(()));
         let new = of(1);
-        let refused = kept_in(dir.path().join("new"), (1 << 30, Some(new)), &bucket, idle());
+        let refused = kept_in(dir.path().join("new"), (1 << 30, Some(new)), &bucket, idle()).await;
         assert_eq!(refused.map(drop).map_err(|err| err.errno()), Err(Some(crate::Errno::EACCES)));
         let cell = futures::executor::block_on(bucket_cell::head::get(&*bucket, new));
         assert_eq!(cell, Ok(None));
@@ -3909,8 +3849,8 @@ mod tests {
     /// into any other tenant's cell, the default tenant's too, leaving nothing at the fork's path
     /// nor in the bucket; into its own tenant's it forks. A store of the default tenant's, as
     /// public bases are, forks into two tenants' cells, each reading what it holds.
-    #[test]
-    fn stores_with_writers_fork_into_other_tenants_cells_from_the_common_tenant_alone() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stores_with_writers_fork_into_other_tenants_cells_from_the_common_tenant_alone() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let of = |tenant| crate::host_cell::named(tenant);
@@ -3918,28 +3858,25 @@ mod tests {
             let listed = futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, ""));
             listed.unwrap()
         };
-        let store = |name: &str, tenant| {
+        let store = async |name: &str, tenant| {
             let store =
-                kept_in(dir.path().join(name), (1 << 30, Some(of(tenant))), &bucket, idle());
+                kept_in(dir.path().join(name), (1 << 30, Some(of(tenant))), &bucket, idle()).await;
             let store = store.unwrap();
-            write(&store, 1, &pattern(tenant as u8, BLOCK));
-            local_cell::upload::wait_on(store.commit(Some(name.as_bytes()))).unwrap();
-            local_cell::upload::wait_on(store.wait_uploaded()).unwrap();
+            write(&store, 1, &pattern(tenant as u8, BLOCK)).await;
+            store.commit(Some(name.as_bytes())).await.unwrap();
+            store.wait_uploaded().await.unwrap();
             store
         };
 
-        let acme = store("acme", 1);
+        let acme = store("acme", 1).await;
         let before = listed();
         let errno = |forked: Result<(), crate::Error>| forked.map_err(|err| err.errno());
         for tenant in [2, crate::host_cell::DEFAULT_TENANT] {
             let to = dir.path().join(format!("refused-{tenant}"));
             let refused = [
-                ("fork", errno(local_cell::upload::wait_on(acme.fork(&to, tenant)).map(drop))),
-                (
-                    "fork_quiescent",
-                    errno(local_cell::upload::wait_on(acme.fork_quiescent(&to, tenant)).map(drop)),
-                ),
-                ("fork_to", errno(local_cell::upload::wait_on(acme.fork_to(&to, of(tenant))))),
+                ("fork", errno(acme.fork(&to, tenant).await.map(drop))),
+                ("fork_quiescent", errno(acme.fork_quiescent(&to, tenant).await.map(drop))),
+                ("fork_to", errno(acme.fork_to(&to, of(tenant)).await)),
             ];
             for (how, refused) in refused {
                 assert_eq!(refused, Err(Some(crate::Errno::EACCES)), "{how} to tenant {tenant}");
@@ -3948,49 +3885,47 @@ mod tests {
         }
         assert_eq!(listed(), before, "a refused fork wrote to the bucket");
         let ours = dir.path().join("ours");
-        assert_eq!(local_cell::upload::wait_on(acme.fork(&ours, 1)).unwrap().tenant, 1);
-        assert_eq!(reopened(&ours, idle()).unwrap().root().unwrap(), b"acme");
+        assert_eq!(acme.fork(&ours, 1).await.unwrap().tenant, 1);
+        assert_eq!(reopened(&ours, idle()).await.unwrap().root().unwrap(), b"acme");
 
-        let base = store("base", crate::host_cell::DEFAULT_TENANT);
+        let base = store("base", crate::host_cell::DEFAULT_TENANT).await;
         for tenant in [1, 2] {
             let to = dir.path().join(format!("base-{tenant}"));
-            assert_eq!(local_cell::upload::wait_on(base.fork(&to, tenant)).unwrap().tenant, tenant);
-            let fork = reopened(&to, idle()).unwrap();
+            assert_eq!(base.fork(&to, tenant).await.unwrap().tenant, tenant);
+            let fork = reopened(&to, idle()).await.unwrap();
             assert_eq!(fork.root().unwrap(), b"base");
             let mut data = vec![0; BLOCK];
             let extent = ExtentId { cell: base.cell().id, sequence: 1 };
-            local_cell::upload::wait_on(fork.read(
-                extent,
-                0,
-                &mut [crate::VolatileSliceMut::from(&mut data[..])],
-            ))
-            .unwrap();
+            fork.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])])
+                .await
+                .unwrap();
             assert!(data == pattern(0, BLOCK), "tenant {tenant}'s fork reads other bytes");
         }
     }
 
-    #[test]
-    fn forks_inherit_their_parents_extents() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn forks_inherit_their_parents_extents() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let parent =
-            kept_in(dir.path().join("parent"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
+        let parent = kept_in(dir.path().join("parent"), (1 << 30, None), &bucket.clone(), idle())
+            .await
+            .unwrap();
         let large = pattern(2, 4 << 20);
-        let small = write(&parent, 1, &pattern(1, BLOCK));
-        let own = write(&parent, 2, &large);
+        let small = write(&parent, 1, &pattern(1, BLOCK)).await;
+        let own = write(&parent, 2, &large).await;
         // Committed, not yet durable: the fork makes it so, and uploads it, first.
-        local_cell::upload::wait_on(parent.commit_ordered(Some(b"root"))).unwrap();
+        parent.commit_ordered(Some(b"root")).await.unwrap();
         let child = crate::host_cell::fork_child(parent.cell());
         let checkpoints = || {
             let prefix = bucket_cell::layout::checkpoints(parent.cell());
             futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, &prefix)).unwrap()
         };
         assert_eq!(checkpoints().len(), 0);
-        local_cell::upload::wait_on(parent.fork_to(dir.path().join("child"), child)).unwrap();
+        parent.fork_to(dir.path().join("child"), child).await.unwrap();
         // A checkpoint at the fork, which the child recovers from.
         assert_eq!(checkpoints().len(), 1);
-        write(&parent, 3, &pattern(3, BLOCK));
-        local_cell::upload::wait_on(parent.commit(None)).unwrap();
+        write(&parent, 3, &pattern(3, BLOCK)).await;
+        parent.commit(None).await.unwrap();
 
         let record =
             futures::executor::block_on(bucket_cell::head::get(&*bucket, child)).unwrap().unwrap();
@@ -4012,23 +3947,18 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        let forked = reopened(dir.path().join("child"), idle()).unwrap();
+        let forked = reopened(dir.path().join("child"), idle()).await.unwrap();
         let state =
             futures::executor::block_on(recover(&*bucket, child, Some(origin))).unwrap().state;
         assert_eq!(inherited(&state), [small.sequence, own.sequence]);
         assert_eq!(state.root, Some(b"root".to_vec()));
         let mut data = vec![0; 4 << 20];
-        local_cell::upload::wait_on(forked.read(
-            own,
-            0,
-            &mut [crate::VolatileSliceMut::from(&mut data[..])],
-        ))
-        .unwrap();
+        forked.read(own, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).await.unwrap();
         assert_eq!(data, large);
         let info = forked.info().unwrap();
         let sequence = info.next_sequence.max(info.sequence_floor);
-        let mine = write(&forked, sequence, &pattern(4, BLOCK));
-        local_cell::upload::wait_on(forked.commit(None)).unwrap();
+        let mine = write(&forked, sequence, &pattern(4, BLOCK)).await;
+        forked.commit(None).await.unwrap();
         drop(forked);
         let state =
             futures::executor::block_on(recover(&*bucket, child, Some(origin))).unwrap().state;
@@ -4046,17 +3976,19 @@ mod tests {
     /// TASK-79.39: a fork's child takes its cell through its marker, which names the fork's
     /// commit, the last the child inherits, though a later commit's segment is acknowledged with
     /// the fork's.
-    #[test]
-    fn forks_name_their_commit_though_later_ones_are_acknowledged_with_it() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn forks_name_their_commit_though_later_ones_are_acknowledged_with_it() {
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
         let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
         let parent = Arc::new(
-            kept_in(dir.path().join("parent"), (1 << 30, None), &bucket.clone(), idle()).unwrap(),
+            kept_in(dir.path().join("parent"), (1 << 30, None), &bucket.clone(), idle())
+                .await
+                .unwrap(),
         );
         let cell = parent.cell();
-        write(&parent, 1, &pattern(1, BLOCK));
-        local_cell::upload::wait_on(parent.commit(Some(b"root"))).unwrap();
+        write(&parent, 1, &pattern(1, BLOCK)).await;
+        parent.commit(Some(b"root")).await.unwrap();
         // The fork's segment, after the commit's, lands after the next.
         let segment = |number| bucket_cell::layout::segment(cell, number, 1);
         let (forking, next) = (segment(1), segment(2));
@@ -4064,15 +3996,15 @@ mod tests {
         let child = crate::host_cell::fork_child(cell);
         let fork = {
             let (parent, path) = (parent.clone(), dir.path().join("child"));
-            std::thread::spawn(move || local_cell::upload::wait_on(parent.fork_to(path, child)))
+            tokio::spawn(async move { parent.fork_to(path, child).await })
         };
         gated.wait_held(1);
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let later = {
             let parent = parent.clone();
-            std::thread::spawn(move || {
-                write(&parent, 2, &pattern(2, BLOCK));
-                local_cell::upload::wait_on(parent.commit(None))
+            tokio::spawn(async move {
+                write(&parent, 2, &pattern(2, BLOCK)).await;
+                parent.commit(None).await
             })
         };
         let landed =
@@ -4082,10 +4014,10 @@ mod tests {
         }
         assert!(landed(), "the commit after the fork never uploaded");
         gated.hold.send_replace(Hold::Nothing);
-        assert_eq!(later.join().unwrap(), Ok(()));
-        fork.join().unwrap().unwrap();
+        assert_eq!(later.await.unwrap(), Ok(()));
+        fork.await.unwrap().unwrap();
 
-        let forked = reopened(dir.path().join("child"), idle()).unwrap();
+        let forked = reopened(dir.path().join("child"), idle()).await.unwrap();
         assert_eq!(forked.root(), Ok(b"root".to_vec()));
     }
 
@@ -4093,20 +4025,21 @@ mod tests {
     /// is spent on a host that takes the cell, whose local index knows nothing of it, whether
     /// the cell's state there comes from a checkpoint or from its segments' footers; and one
     /// freed while open, never sealed, as a journal's tail is, is written still.
-    #[test]
-    fn extents_freed_are_spent_on_the_host_that_takes_their_cell() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extents_freed_are_spent_on_the_host_that_takes_their_cell() {
         for checkpointed in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
             let first = kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle())
+                .await
                 .unwrap();
             let cell = first.cell();
-            let sealed = write(&first, 1, &pattern(1, BLOCK));
-            local_cell::upload::wait_on(first.commit(Some(b"root"))).unwrap();
+            let sealed = write(&first, 1, &pattern(1, BLOCK)).await;
+            first.commit(Some(b"root")).await.unwrap();
             first.free(sealed).unwrap();
-            let open = write(&first, 2, &pattern(2, BLOCK));
+            let open = write(&first, 2, &pattern(2, BLOCK)).await;
             first.free(open).unwrap();
-            local_cell::upload::wait_on(first.commit(None)).unwrap();
+            first.commit(None).await.unwrap();
             // The store closing checkpoints the cell; a host lost doesn't.
             if checkpointed {
                 drop(first);
@@ -4114,29 +4047,35 @@ mod tests {
                 std::mem::forget(first);
             }
 
-            let taken =
-                kept_in(dir.path().join("taken"), (1 << 30, Some(cell)), &bucket, idle()).unwrap();
+            let taken = kept_in(dir.path().join("taken"), (1 << 30, Some(cell)), &bucket, idle())
+                .await
+                .unwrap();
             let data = pattern(3, BLOCK);
             let again = [crate::VolatileSlice::from(&data[..])];
-            assert_eq!(taken.write(sealed, 0, &again), Err(crate::Errno::EPERM), "{checkpointed}");
-            assert_eq!(taken.write(open, 0, &again), Ok(()), "{checkpointed}");
+            assert_eq!(
+                taken.write(sealed, 0, &again).await,
+                Err(crate::Errno::EPERM),
+                "{checkpointed}"
+            );
+            assert_eq!(taken.write(open, 0, &again).await, Ok(()), "{checkpointed}");
         }
     }
 
     /// TASK-165.3: an extent sealed by one commit and freed by the next, both in one segment, whose
     /// footer frees it and seals it not, is spent on a host that takes the cell, as it is on the
     /// store that made it: every reader of a footer spends every free of the cell's own extents.
-    #[test]
-    fn extents_sealed_and_freed_in_one_segment_are_spent_where_their_cell_is_taken() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extents_sealed_and_freed_in_one_segment_are_spent_where_their_cell_is_taken() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let first =
-            kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
+        let first = kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle())
+            .await
+            .unwrap();
         let cell = first.cell();
-        let sealed = write(&first, 1, &pattern(1, BLOCK));
-        local_cell::upload::wait_on(first.commit_ordered(Some(b"root"))).unwrap();
+        let sealed = write(&first, 1, &pattern(1, BLOCK)).await;
+        first.commit_ordered(Some(b"root")).await.unwrap();
         first.free(sealed).unwrap();
-        local_cell::upload::wait_on(first.commit(None)).unwrap();
+        first.commit(None).await.unwrap();
         let footers = footers(&bucket, cell);
         let last = footers.last().unwrap();
         let freed = storage_device::ExtentId::new(cell.id, sealed.sequence);
@@ -4145,25 +4084,27 @@ mod tests {
         assert_eq!((commits, extents, &contents.frees), (1, 0, &vec![freed]));
         let data = pattern(3, BLOCK);
         let again = [crate::VolatileSlice::from(&data[..])];
-        assert_eq!(first.write(sealed, 0, &again), Err(crate::Errno::EPERM));
+        assert_eq!(first.write(sealed, 0, &again).await, Err(crate::Errno::EPERM));
         // Its host lost: the cell's state is its footers'.
         std::mem::forget(first);
 
-        let taken =
-            kept_in(dir.path().join("taken"), (1 << 30, Some(cell)), &bucket, idle()).unwrap();
-        assert_eq!(taken.write(sealed, 0, &again), Err(crate::Errno::EPERM));
+        let taken = kept_in(dir.path().join("taken"), (1 << 30, Some(cell)), &bucket, idle())
+            .await
+            .unwrap();
+        assert_eq!(taken.write(sealed, 0, &again).await, Err(crate::Errno::EPERM));
     }
 
     /// TASK-165.3: a cell's capacity is its state, set by the commit after a resize: a host that
     /// takes the cell has it, not the capacity it made its store with, whether the cell's state
     /// there comes from a checkpoint or from its segments' footers; and a store attaching to a
     /// cell that has none, or another, sets its own with its next commit.
-    #[test]
-    fn resizes_hold_where_their_cell_is_taken() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resizes_hold_where_their_cell_is_taken() {
         for checkpointed in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
             let first = kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle())
+                .await
                 .unwrap();
             let cell = first.cell();
             let recovered = || {
@@ -4171,11 +4112,11 @@ mod tests {
                 futures::executor::block_on(recovered).unwrap().state.capacity
             };
             assert_eq!(recovered(), None, "{checkpointed}");
-            local_cell::upload::wait_on(first.commit(None)).unwrap();
+            first.commit(None).await.unwrap();
             assert_eq!(recovered(), Some(1 << 30), "{checkpointed}");
-            write(&first, 1, &pattern(1, BLOCK));
-            first.set_capacity(3 << 29).unwrap();
-            local_cell::upload::wait_on(first.commit(None)).unwrap();
+            write(&first, 1, &pattern(1, BLOCK)).await;
+            first.set_capacity(3 << 29).await.unwrap();
+            first.commit(None).await.unwrap();
             assert_eq!(recovered(), Some(3 << 29), "{checkpointed}");
             if checkpointed {
                 drop(first);
@@ -4185,10 +4126,11 @@ mod tests {
 
             let taken =
                 kept_in(dir.path().join("taken"), (1 << 30, Some(cell)), &bucket.clone(), idle())
+                    .await
                     .unwrap();
             assert_eq!(taken.info().unwrap().capacity, 3 << 29, "{checkpointed}");
-            taken.set_capacity(1 << 31).unwrap();
-            local_cell::upload::wait_on(taken.commit(None)).unwrap();
+            taken.set_capacity(1 << 31).await.unwrap();
+            taken.commit(None).await.unwrap();
             assert_eq!(recovered(), Some(1 << 31), "{checkpointed}");
         }
     }
@@ -4196,17 +4138,18 @@ mod tests {
     /// TASK-141.2: a cell whose record says a format newer than this daemon's is refused, naming
     /// the cell and the format, before anything of it is read or written: no store takes it, its
     /// head is as it was, and no segment of it is written.
-    #[test]
-    fn cells_of_newer_formats_are_refused() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cells_of_newer_formats_are_refused() {
         use bucket_cell::Bucket as _;
         use bucket_cell::bucket::PutMode;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let first =
-            kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
+        let first = kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle())
+            .await
+            .unwrap();
         let cell = first.cell();
-        write(&first, 1, &pattern(1, BLOCK));
-        local_cell::upload::wait_on(first.commit(Some(b"root"))).unwrap();
+        write(&first, 1, &pattern(1, BLOCK)).await;
+        first.commit(Some(b"root")).await.unwrap();
         drop(first);
         // A later release's record, whose format says first what follows, which this one can't
         // read.
@@ -4220,7 +4163,7 @@ mod tests {
         };
         let before = listed();
 
-        let taken = kept_in(dir.path().join("taken"), (1 << 30, Some(cell)), &bucket, idle());
+        let taken = kept_in(dir.path().join("taken"), (1 << 30, Some(cell)), &bucket, idle()).await;
         let refused = taken.err().unwrap();
         let format = bucket_cell::layout::FORMAT;
         let named = format!(
@@ -4235,15 +4178,15 @@ mod tests {
 
     /// Forks `parent`, attached to `bucket`, to `child`, whose handle is at `path`, the parent
     /// holding an extent and a root: returns the child's record.
-    fn forked(
+    async fn forked(
         parent: &OpenCell,
         bucket: &Arc<ObjectBucket>,
         path: &std::path::Path,
         child: crate::CellId,
     ) -> bucket_cell::layout::Head {
-        write(parent, 1, &pattern(1, BLOCK));
-        local_cell::upload::wait_on(parent.commit(Some(b"root"))).unwrap();
-        local_cell::upload::wait_on(parent.fork_to(path, child)).unwrap();
+        write(parent, 1, &pattern(1, BLOCK)).await;
+        parent.commit(Some(b"root")).await.unwrap();
+        parent.fork_to(path, child).await.unwrap();
         futures::executor::block_on(bucket_cell::head::get(&**bucket, child)).unwrap().unwrap()
     }
 
@@ -4251,23 +4194,24 @@ mod tests {
     /// having made nothing, the bucket having the child's record: no commit of the parent's names
     /// the child again, from another version, which its writers, finding the child forked twice,
     /// would fail on for ever, the parent's cell taken by none again. The parent attaches again.
-    #[test]
-    fn forks_to_a_child_forked_before_make_nothing() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn forks_to_a_child_forked_before_make_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let parent =
-            kept_in(dir.path().join("parent"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
+        let parent = kept_in(dir.path().join("parent"), (1 << 30, None), &bucket.clone(), idle())
+            .await
+            .unwrap();
         let child = crate::host_cell::fork_child(parent.cell());
-        forked(&parent, &bucket, &dir.path().join("child"), child);
+        forked(&parent, &bucket, &dir.path().join("child"), child).await;
         let again = dir.path().join("again");
-        let forked = local_cell::upload::wait_on(parent.fork_to(&again, child));
+        let forked = parent.fork_to(&again, child).await;
         let errno = forked.as_ref().map(drop).map_err(crate::Error::errno);
         let forked = forked.map_err(|err| err.to_string());
         assert_eq!((forked, again.exists()), (anothers(child), false));
         assert_eq!(errno, Err(Some(crate::Errno::EEXIST)));
         drop(parent);
 
-        reopened(dir.path().join("parent"), idle()).unwrap();
+        reopened(dir.path().join("parent"), idle()).await.unwrap();
     }
 
     /// The host whose disk is at `from`, crashed, restarted with its disk as the crash left it at
@@ -4306,8 +4250,8 @@ mod tests {
         Ok(())
     }
 
-    /// A fork, waiting in a thread of its own: what it gives.
-    type Forking = std::thread::JoinHandle<Result<(), crate::Error>>;
+    /// A fork, waiting in a task of its own: what it gives.
+    type Forking = tokio::task::JoinHandle<Result<(), crate::Error>>;
 
     /// What made the cell of `head`, and whether it lives: as the tests that are not of owners,
     /// keys or takings compare heads.
@@ -4320,10 +4264,14 @@ mod tests {
 
     /// The store of another cell, `cell`, at `path`, attached to `bucket`, holding an extent
     /// and a root: what a guest may name as its fork's child.
-    fn others(path: &std::path::Path, bucket: &Arc<ObjectBucket>, cell: crate::CellId) -> OpenCell {
-        let others = kept_in(path, (1 << 30, Some(cell)), &bucket.clone(), idle()).unwrap();
-        write(&others, 1, &pattern(3, BLOCK));
-        local_cell::upload::wait_on(others.commit(Some(b"other"))).unwrap();
+    async fn others(
+        path: &std::path::Path,
+        bucket: &Arc<ObjectBucket>,
+        cell: crate::CellId,
+    ) -> OpenCell {
+        let others = kept_in(path, (1 << 30, Some(cell)), &bucket.clone(), idle()).await.unwrap();
+        write(&others, 1, &pattern(3, BLOCK)).await;
+        others.commit(Some(b"other")).await.unwrap();
         others
     }
 
@@ -4332,14 +4280,10 @@ mod tests {
 
     /// Whether the cell of `others`, its store, is live still: it commits, and uploads its
     /// commits.
-    fn live(others: &OpenCell, bucket: &Arc<ObjectBucket>) -> Committed {
-        write(others, 2, &pattern(4, BLOCK));
-        let committed = local_cell::upload::wait_on(others.commit(Some(b"again")));
-        (
-            committed,
-            local_cell::upload::wait_on(others.wait_uploaded()),
-            uploaded(bucket, others.cell()),
-        )
+    async fn live(others: &OpenCell, bucket: &Arc<ObjectBucket>) -> Committed {
+        write(others, 2, &pattern(4, BLOCK)).await;
+        let committed = others.commit(Some(b"again")).await;
+        (committed, others.wait_uploaded().await, uploaded(bucket, others.cell()))
     }
 
     /// What [`live`] gives for a cell live still.
@@ -4352,33 +4296,33 @@ mod tests {
     /// name, fails with `EEXIST`, having made nothing: no footer of the parent's names the child,
     /// whose record the parent's writers would find another's, failing on it for ever, and the
     /// other cell is left as it was.
-    #[test]
-    fn forks_to_a_cell_the_bucket_has_fail_with_eexist() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn forks_to_a_cell_the_bucket_has_fail_with_eexist() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let parent =
-            kept_in(dir.path().join("parent"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
+        let parent = kept_in(dir.path().join("parent"), (1 << 30, None), &bucket.clone(), idle())
+            .await
+            .unwrap();
         let other = crate::host_cell::fork_child(parent.cell());
-        let others = others(&dir.path().join("other"), &bucket, other);
-        write(&parent, 1, &pattern(1, BLOCK));
-        local_cell::upload::wait_on(parent.commit(Some(b"root"))).unwrap();
+        let others = others(&dir.path().join("other"), &bucket, other).await;
+        write(&parent, 1, &pattern(1, BLOCK)).await;
+        parent.commit(Some(b"root")).await.unwrap();
         let path = dir.path().join("child");
-        let forked =
-            local_cell::upload::wait_on(parent.fork_to(&path, other)).map_err(|err| err.errno());
+        let forked = parent.fork_to(&path, other).await.map_err(|err| err.errno());
         assert_eq!((forked, path.exists()), (Err(Some(crate::Errno::EEXIST)), false));
 
         // The parent commits and uploads on, its cell naming no fork.
-        local_cell::upload::wait_on(parent.commit(Some(b"later"))).unwrap();
-        assert_eq!(local_cell::upload::wait_on(parent.wait_uploaded()), Ok(()));
+        parent.commit(Some(b"later")).await.unwrap();
+        assert_eq!(parent.wait_uploaded().await, Ok(()));
         let record = futures::executor::block_on(bucket_cell::head::get(&*bucket, other)).unwrap();
-        assert_eq!((record.map(made), live(&others, &bucket)), (Some(OWN), lives()));
+        assert_eq!((record.map(made), live(&others, &bucket).await), (Some(OWN), lives()));
     }
 
     /// A parent attached to the bucket through `gated`, in `dir`, holding an extent and a root,
     /// and its fork to a child whose handle is `path`, waiting in a thread of its own for the swap
     /// of the parent's head that names the fork's segment, which `gated` holds: the parent's
     /// cell and the child.
-    fn forking_held(
+    async fn forking_held(
         dir: &std::path::Path,
         gated: &Arc<Gated>,
         path: &std::path::Path,
@@ -4390,16 +4334,17 @@ mod tests {
                 &Arc::new(ObjectBucket::new(gated.clone(), "")),
                 idle(),
             )
+            .await
             .unwrap(),
         );
         let cell = parent.cell();
-        write(&parent, 1, &pattern(1, BLOCK));
-        local_cell::upload::wait_on(parent.commit(Some(b"root"))).unwrap();
+        write(&parent, 1, &pattern(1, BLOCK)).await;
+        parent.commit(Some(b"root")).await.unwrap();
         gated.hold.send_replace(Hold::Head(cell));
         let child = crate::host_cell::fork_child(cell);
         let fork = {
             let path = path.to_owned();
-            std::thread::spawn(move || local_cell::upload::wait_on(parent.fork_to(path, child)))
+            tokio::spawn(async move { parent.fork_to(path, child).await })
         };
         gated.wait_held(1);
         (cell, child, fork)
@@ -4417,60 +4362,60 @@ mod tests {
     /// the child here alone, leaving the other cell as it was. A fork deletes no cell it did
     /// not make, whatever ID its guest gives. And it harms no parent: its writers go on, as a
     /// writer taking its cell again does, its footer naming a child that is another's.
-    #[test]
-    fn forks_failed_leave_cells_that_took_their_childs_id_be() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn forks_failed_leave_cells_that_took_their_childs_id_be() {
         let dir = tempfile::tempdir().unwrap();
         let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let gated = Arc::new(Gated::over(memory.clone()));
         let bucket = Arc::new(ObjectBucket::new(memory, ""));
         let path = dir.path().join("child");
-        let (_, child, fork) = forking_held(dir.path(), &gated, &path);
-        let others = others(&dir.path().join("other"), &bucket, child);
+        let (_, child, fork) = forking_held(dir.path(), &gated, &path).await;
+        let others = others(&dir.path().join("other"), &bucket, child).await;
         gated.hold.send_replace(Hold::Nothing);
-        let forked = fork.join().unwrap();
+        let forked = fork.await.unwrap();
         let errno = forked.as_ref().map(drop).map_err(crate::Error::errno);
         let forked = forked.map_err(|err| err.to_string());
         assert_eq!((forked, errno), (anothers(child), Err(Some(crate::Errno::EEXIST))));
         assert!(!path.exists(), "the handle of a fork that failed is left");
 
         let record = futures::executor::block_on(bucket_cell::head::get(&*bucket, child)).unwrap();
-        assert_eq!((record.map(made), live(&others, &bucket)), (Some(OWN), lives()));
-        let parent = reopened(dir.path().join("parent"), idle()).unwrap();
-        local_cell::upload::wait_on(parent.commit(Some(b"later"))).unwrap();
-        assert_eq!(local_cell::upload::wait_on(parent.wait_uploaded()), Ok(()));
+        assert_eq!((record.map(made), live(&others, &bucket).await), (Some(OWN), lives()));
+        let parent = reopened(dir.path().join("parent"), idle()).await.unwrap();
+        parent.commit(Some(b"later")).await.unwrap();
+        assert_eq!(parent.wait_uploaded().await, Ok(()));
     }
 
     /// A store of a cell taken elsewhere keeps what it reads from the bucket in the host's cache,
     /// and reads it there next.
-    #[test]
-    fn reads_keep_what_they_fetch() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reads_keep_what_they_fetch() {
         let dir = tempfile::tempdir().unwrap();
         let memory = Arc::new(InMemory::new());
         let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
         let cache = Arc::new(Cache::open(&dir.path().join("cache"), 1 << 30).unwrap());
         let options = local_cell::upload::Options { cache: Some(cache.clone()), ..idle() };
-        let first =
-            kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
+        let first = kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle())
+            .await
+            .unwrap();
         let cell = first.cell();
         let data = pattern(2, 2 << 20);
-        let extent = write(&first, 1, &data);
-        local_cell::upload::wait_on(first.commit(None)).unwrap();
+        let extent = write(&first, 1, &data).await;
+        first.commit(None).await.unwrap();
         drop(first);
 
         let second =
             kept_in(dir.path().join("second"), (1 << 30, Some(cell)), &bucket.clone(), options)
+                .await
                 .unwrap();
-        let read = || {
+        let read = async || {
             let mut read = vec![0; 2 << 20];
-            local_cell::upload::wait_on(second.read(
-                extent,
-                0,
-                &mut [crate::VolatileSliceMut::from(&mut read[..])],
-            ))
-            .unwrap();
+            second
+                .read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut read[..])])
+                .await
+                .unwrap();
             read
         };
-        assert_eq!(read(), data);
+        assert_eq!(read().await, data);
         // Its parts, as they are stored: compressed.
         assert_ne!(cache.bytes(), 0);
         assert!(cache.bytes() < (2 << 20) / 100, "{} bytes kept", cache.bytes());
@@ -4484,6 +4429,6 @@ mod tests {
                 memory.delete(&meta.unwrap().location).await.unwrap();
             }
         });
-        assert_eq!(read(), data);
+        assert_eq!(read().await, data);
     }
 }

@@ -987,18 +987,23 @@ impl World {
     }
 
     /// Runs the profile's steps, then lets everything finish and checks that no garbage is left.
+    /// The test's outermost entry: its steps await the stores, which [`crate::wait_here`] runs them
+    /// for, its pool's tasks run between their awaits ([`World::settle_tasks`]), which
+    /// `futures::executor::block_on` would refuse to.
     pub fn run(&mut self) {
-        for _ in 0..self.profile.steps {
-            self.step();
-            self.check();
-            if !self.violations.is_empty() {
-                return;
+        crate::wait_here(async {
+            for _ in 0..self.profile.steps {
+                self.step().await;
+                self.check();
+                if !self.violations.is_empty() {
+                    return;
+                }
             }
-        }
-        self.quiesce();
+            self.quiesce().await;
+        })
     }
 
-    fn step(&mut self) {
+    async fn step(&mut self) {
         self.settle_tasks();
         if self.profile.regions > 0 && self.faults && self.rng.random_bool(REGION_FLIPS) {
             let region = self.rng.random_range(1..=self.profile.regions);
@@ -1044,7 +1049,7 @@ impl World {
         });
         match choice.unwrap() {
             0 => self.complete(),
-            1 => self.commit(),
+            1 => self.commit().await,
             2 => self.close(),
             3 => self.checkpoint(),
             4 => self.open(false),
@@ -1058,9 +1063,9 @@ impl World {
             12 => self.stale_delete(),
             13 => self.unfork(),
             14 => self.twins(),
-            15 => self.write(),
+            15 => self.write().await,
             16 => self.stale_checkpoint(),
-            17 => self.cut_version(),
+            17 => self.cut_version().await,
             18 => self.drop_version(),
             19 => self.restore_version(),
             20 => {
@@ -1790,22 +1795,22 @@ impl World {
         (!ready.is_empty()).then(|| ready[self.rng.random_range(0..ready.len())])
     }
 
-    fn write(&mut self) {
+    async fn write(&mut self) {
         let Some((host, cell)) = self.ready() else { return };
         let seed = self.id();
-        self.write_extent(host, cell, seed);
+        self.write_extent(host, cell, seed).await;
     }
 
     /// The guest of `cell`'s store on `host` writes an extent of its own, its bytes of `seed`:
     /// whether it could.
-    fn write_extent(&mut self, host: usize, cell: u64, seed: u64) -> bool {
+    async fn write_extent(&mut self, host: usize, cell: u64, seed: u64) -> bool {
         let session = self.hosts[host].sessions.get_mut(&cell).unwrap();
         let extent = ExtentId::new(cell, session.guest.next_sequence);
         session.guest.next_sequence += 1;
         let len = self.rng.random_range(1..=4) * BLOCK as usize;
         let bytes = Self::content(seed, extent, len);
         let store = session.store.clone().unwrap();
-        if let Err(err) = store.write(extent, 0, &bytes) {
+        if let Err(err) = store.write(extent, 0, &bytes).await {
             self.store_failed(host, cell, store, err);
             return false;
         }
@@ -1853,11 +1858,11 @@ impl World {
         self.commits.insert(tag, made);
     }
 
-    fn commit(&mut self) {
+    async fn commit(&mut self) {
         let Some((host, cell)) = self.ready() else { return };
         let tag = self.id();
         for _ in 0..self.rng.random_range(0..3) {
-            if !self.write_extent(host, cell, tag) {
+            if !self.write_extent(host, cell, tag).await {
                 return;
             }
         }
@@ -1873,7 +1878,7 @@ impl World {
         let root = self.rng.random_bool(0.2).then(|| tag.to_le_bytes().to_vec());
         // Every fifth by its tag resizes the cell first, a commit of its own, which seals none
         // of what the guest wrote: by the tag, not the generator (TASK-165.3).
-        if tag.is_multiple_of(5) && !self.resize(host, cell, tag << 20) {
+        if tag.is_multiple_of(5) && !self.resize(host, cell, tag << 20).await {
             return;
         }
         let session = &self.hosts[host].sessions[&cell];
@@ -1881,18 +1886,18 @@ impl World {
         let durable = self.rng.random_bool(0.5);
         let store = session.store.clone().unwrap();
         let parent = session.guest.head;
-        let committing = || -> anyhow::Result<u64> {
+        let committing = async || -> anyhow::Result<u64> {
             let before = store.last_commit()?;
             for extent in &frees {
                 store.free(*extent)?;
             }
-            store.commit_ordered(root.as_deref())?;
+            store.commit_ordered(root.as_deref()).await?;
             if durable {
-                store.flush()?;
+                store.flush().await?;
             }
             Ok(before)
         };
-        let before = match committing() {
+        let before = match committing().await {
             Ok(before) => before,
             Err(err) => return self.store_failed(host, cell, store, err),
         };
@@ -1906,16 +1911,16 @@ impl World {
 
     /// The guest of `cell`'s store on `host` sets its capacity to `capacity`: a commit of its
     /// own, which seals none of what it wrote. Whether it could.
-    fn resize(&mut self, host: usize, cell: u64, capacity: u64) -> bool {
+    async fn resize(&mut self, host: usize, cell: u64, capacity: u64) -> bool {
         let tag = self.id();
         let session = &self.hosts[host].sessions[&cell];
         let (store, parent) = (session.store.clone().unwrap(), session.guest.head);
-        let resizing = || -> anyhow::Result<u64> {
+        let resizing = async || -> anyhow::Result<u64> {
             let before = store.last_commit()?;
-            store.set_capacity(capacity)?;
+            store.set_capacity(capacity).await?;
             Ok(before)
         };
-        let before = match resizing() {
+        let before = match resizing().await {
             Ok(before) => before,
             Err(err) => {
                 self.store_failed(host, cell, store, err);
@@ -2197,7 +2202,7 @@ impl World {
     /// cladefs: a cell's writer cuts a version (doc-18, TASK-476), its store quiescent, its guest
     /// having written nothing since its last commit: a commit of its store's whose segment's
     /// footer names it, which its uploader is asked for, as a snapshot's caller may wait for it.
-    fn cut_version(&mut self) {
+    async fn cut_version(&mut self) {
         let Some((host, cell)) = self.ready() else { return };
         let session = &self.hosts[host].sessions[&cell];
         if !session.guest.written.is_empty() {
@@ -2211,7 +2216,7 @@ impl World {
             Err(err) => return self.store_failed(host, cell, store, err),
         };
         let cut = layout::NewVersion { id, keep_last: None };
-        if let Err(err) = store.commit_version(cut, true) {
+        if let Err(err) = store.commit_version(cut, true).await {
             return self.store_failed(host, cell, store, err);
         }
         let Some(epoch) = self.committed(cell, &store, before) else { return };
@@ -3318,7 +3323,7 @@ impl World {
     /// Stops the guests, lets every request and task finish, takes every live cell over with a
     /// new writer, then has each commit, upload and checkpoint while collectors run, a few times
     /// over.
-    fn quiesce(&mut self) {
+    async fn quiesce(&mut self) {
         trace!("quiescing");
         self.faults = false;
         // cladefs: the network mends, and lets every call through, those held landing.
@@ -3383,7 +3388,7 @@ impl World {
                 let parent = session.guest.head;
                 let tag = self.id();
                 let before = store.last_commit().unwrap();
-                if let Err(err) = store.commit(None) {
+                if let Err(err) = store.commit(None).await {
                     self.violation(format!(
                         "cell {cell}'s last store: {err:#}",
                         cell = Short(cell)

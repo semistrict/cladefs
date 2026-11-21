@@ -45,6 +45,7 @@ use extent_frame::segment::{Chain, Footer, NewVersion};
 use local_cell::{
     BucketData, Description, Dir, LocalCell, MemDir, Opening, Options, Rules, set_rules,
 };
+use shuttle::future::block_on;
 use shuttle::scheduler::{PctScheduler, RandomScheduler, ReplayScheduler};
 use shuttle::sync::Mutex;
 use shuttle::sync::atomic::{AtomicBool, Ordering};
@@ -176,45 +177,49 @@ fn run_with(Run { steps, follow }: Run) {
         let (store, history, written, forked) =
             (store.clone(), history.clone(), written.clone(), forked.clone());
         thread::spawn(move || {
-            let mut holds = Holds::new();
-            for step in steps {
-                match *step {
-                    Step::Write(sequence, blocks) => {
-                        let data = pattern(sequence as u8, blocks * BLOCK);
-                        store.write(extent(sequence), 0, &data).unwrap();
-                        holds.insert(extent(sequence), data);
-                    }
-                    Step::Free(sequence) => {
-                        store.free(extent(sequence)).unwrap();
-                        holds.remove(&extent(sequence));
-                    }
-                    Step::Commit { .. } | Step::Version => {
-                        match *step {
-                            Step::Version => {
-                                let cut = NewVersion { id: 0xa, keep_last: None };
-                                *forked.lock().unwrap() =
-                                    Some(store.commit_version(cut, false).unwrap());
-                            }
-                            Step::Commit { durable: true } => store.commit(None).unwrap(),
-                            _ => store.commit_ordered(None).unwrap(),
+            block_on(async move {
+                let mut holds = Holds::new();
+                for step in steps {
+                    match *step {
+                        Step::Write(sequence, blocks) => {
+                            let data = pattern(sequence as u8, blocks * BLOCK);
+                            store.write(extent(sequence), 0, &data).await.unwrap();
+                            holds.insert(extent(sequence), data);
                         }
-                        let mut history = history.lock().unwrap();
-                        assert_eq!(store.last_commit().unwrap(), history.len() as u64);
-                        history.push(holds.clone());
+                        Step::Free(sequence) => {
+                            store.free(extent(sequence)).unwrap();
+                            holds.remove(&extent(sequence));
+                        }
+                        Step::Commit { .. } | Step::Version => {
+                            match *step {
+                                Step::Version => {
+                                    let cut = NewVersion { id: 0xa, keep_last: None };
+                                    *forked.lock().unwrap() =
+                                        Some(store.commit_version(cut, false).await.unwrap());
+                                }
+                                Step::Commit { durable: true } => store.commit(None).await.unwrap(),
+                                _ => store.commit_ordered(None).await.unwrap(),
+                            }
+                            let mut history = history.lock().unwrap();
+                            assert_eq!(store.last_commit().unwrap(), history.len() as u64);
+                            history.push(holds.clone());
+                        }
                     }
                 }
-            }
-            written.store(true, Ordering::SeqCst);
+                written.store(true, Ordering::SeqCst);
+            })
         })
     };
 
     let closer = {
         let store = store.clone();
         thread::spawn(move || {
-            for _ in 0..3 {
-                store.close_now().unwrap();
-                thread::yield_now();
-            }
+            block_on(async move {
+                for _ in 0..3 {
+                    store.close_now().await.unwrap();
+                    thread::yield_now();
+                }
+            })
         })
     };
 
@@ -233,106 +238,114 @@ fn run_with(Run { steps, follow }: Run) {
             bucket.clone(),
         );
         thread::spawn(move || {
-            // What the store held as of commit `epoch`, which the writer records once the commit
-            // returns: its record may come later.
-            let held = |epoch: u64| loop {
-                if let Some(holds) = history.lock().unwrap().get(epoch as usize) {
-                    break holds.clone();
-                }
-                thread::yield_now();
-            };
-            loop {
-                // Whether the writer was done before this round: then it takes everything.
-                let done = written.load(Ordering::SeqCst);
-                // As cladefs's uploader does (upload.rs): closes the open segment between commits,
-                // and takes the segments closed whose commits are durable, reading them and their
-                // extents' own files.
-                store.close_now().unwrap();
-                // Taking them opens their extents' own files, which the store keeps for it though
-                // their extents are freed.
-                let segments = store
-                    .closed(usize::MAX)
-                    .unwrap_or_else(|error| panic!("taking the closed segments: {error:#}"));
-                for closed in segments {
-                    let last = closed.last();
-                    // Each commit it holds, after those of the segments taken before: what the
-                    // commit wrote reads, for the uploader, as it was written, though freed since;
-                    // and the host crashing now, the store recovers at least the commit.
-                    let after = *taken.lock().unwrap();
-                    for epoch in after + 1..=last {
-                        for seed in [epoch, epoch + 100] {
-                            let crashed = bucket.reopen(dir.crash(seed));
-                            let recovered = crashed.last_commit().unwrap();
-                            assert!(
-                                recovered >= epoch,
-                                "uploaded commit {epoch} before durable: a crash recovered \
+            block_on(async move {
+                // What the store held as of commit `epoch`, which the writer records once the commit
+                // returns: its record may come later.
+                let held = |epoch: u64| loop {
+                    if let Some(holds) = history.lock().unwrap().get(epoch as usize) {
+                        break holds.clone();
+                    }
+                    thread::yield_now();
+                };
+                loop {
+                    // Whether the writer was done before this round: then it takes everything.
+                    let done = written.load(Ordering::SeqCst);
+                    // As cladefs's uploader does (upload.rs): closes the open segment between commits,
+                    // and takes the segments closed whose commits are durable, reading them and their
+                    // extents' own files.
+                    store.close_now().await.unwrap();
+                    // Taking them opens their extents' own files, which the store keeps for it though
+                    // their extents are freed.
+                    let segments = store
+                        .closed(usize::MAX)
+                        .await
+                        .unwrap_or_else(|error| panic!("taking the closed segments: {error:#}"));
+                    for closed in segments {
+                        let last = closed.last();
+                        // Each commit it holds, after those of the segments taken before: what the
+                        // commit wrote reads, for the uploader, as it was written, though freed since;
+                        // and the host crashing now, the store recovers at least the commit.
+                        let after = *taken.lock().unwrap();
+                        for epoch in after + 1..=last {
+                            for seed in [epoch, epoch + 100] {
+                                let crashed = bucket.reopen(dir.crash(seed));
+                                let recovered = crashed.last_commit().unwrap();
+                                assert!(
+                                    recovered >= epoch,
+                                    "uploaded commit {epoch} before durable: a crash recovered \
                                  {recovered}, seed {seed}"
-                            );
+                                );
+                            }
+                            *taken.lock().unwrap() = epoch;
                         }
-                        *taken.lock().unwrap() = epoch;
-                    }
-                    let holds = held(last);
-                    let data = extent_frame::data(
-                        &closed.bytes().unwrap(),
-                        &bucket_cell::testing::ring([CELL]).of(CELL.id),
-                    )
-                    .unwrap();
-                    let own: BTreeMap<_, _> = closed.own_bytes().unwrap().into_iter().collect();
-                    bucket.put(bucket_key(&closed), data.to_vec());
-                    bucket.acknowledge(closed.footer.clone());
-                    for (key, bytes) in &own {
-                        bucket.put(
-                            key.clone(),
-                            extent_frame::data(
-                                bytes,
-                                &bucket_cell::testing::ring([CELL]).of(CELL.id),
-                            )
-                            .unwrap()
-                            .to_vec(),
-                        );
-                    }
-                    let in_segment =
-                        closed.footer.contents.extents.iter().map(|&(extent, offset, len)| {
-                            (extent, len, data[offset as usize..(offset + len) as usize].to_vec())
-                        });
-                    let on_their_own = closed.footer.own().map(|(extent, location)| {
+                        let holds = held(last);
                         let data = extent_frame::data(
-                            &own[&location.key],
+                            &closed.bytes().unwrap(),
                             &bucket_cell::testing::ring([CELL]).of(CELL.id),
                         )
                         .unwrap();
-                        (extent, location.len, data)
-                    });
-                    // Each extent its footer names, as its last commit left it: in it, or in a
-                    // file of its own of the write-ahead log, though freed since (TASK-165.9).
-                    for (extent, len, uploaded) in in_segment.chain(on_their_own) {
-                        assert!(
-                            Some(&uploaded) == holds.get(&extent) && uploaded.len() as u64 == len,
-                            "{extent:?} of commit {last} uploads other data than was written"
-                        );
+                        let own: BTreeMap<_, _> = closed.own_bytes().unwrap().into_iter().collect();
+                        bucket.put(bucket_key(&closed), data.to_vec());
+                        bucket.acknowledge(closed.footer.clone());
+                        for (key, bytes) in &own {
+                            bucket.put(
+                                key.clone(),
+                                extent_frame::data(
+                                    bytes,
+                                    &bucket_cell::testing::ring([CELL]).of(CELL.id),
+                                )
+                                .unwrap()
+                                .to_vec(),
+                            );
+                        }
+                        let in_segment =
+                            closed.footer.contents.extents.iter().map(|&(extent, offset, len)| {
+                                (
+                                    extent,
+                                    len,
+                                    data[offset as usize..(offset + len) as usize].to_vec(),
+                                )
+                            });
+                        let on_their_own = closed.footer.own().map(|(extent, location)| {
+                            let data = extent_frame::data(
+                                &own[&location.key],
+                                &bucket_cell::testing::ring([CELL]).of(CELL.id),
+                            )
+                            .unwrap();
+                            (extent, location.len, data)
+                        });
+                        // Each extent its footer names, as its last commit left it: in it, or in a
+                        // file of its own of the write-ahead log, though freed since (TASK-165.9).
+                        for (extent, len, uploaded) in in_segment.chain(on_their_own) {
+                            assert!(
+                                Some(&uploaded) == holds.get(&extent)
+                                    && uploaded.len() as u64 == len,
+                                "{extent:?} of commit {last} uploads other data than was written"
+                            );
+                        }
+                        // A version's ends at the version, as its commit closed it (doc-18).
+                        if !closed.footer.contents.versions.is_empty() {
+                            let fork = loop {
+                                if let Some(epoch) = *forked.lock().unwrap() {
+                                    break epoch;
+                                }
+                                thread::yield_now();
+                            };
+                            assert!(
+                                last == fork,
+                                "a version's segment ends after it: at commit {last}, of {fork}"
+                            );
+                        }
+                        // Uploaded: acknowledged, the frees of its commits, whose extents' own files it
+                        // may name, are the bucket's, and it may go.
+                        store.acknowledged(closed.number).await.unwrap();
                     }
-                    // A version's ends at the version, as its commit closed it (doc-18).
-                    if !closed.footer.contents.versions.is_empty() {
-                        let fork = loop {
-                            if let Some(epoch) = *forked.lock().unwrap() {
-                                break epoch;
-                            }
-                            thread::yield_now();
-                        };
-                        assert!(
-                            last == fork,
-                            "a version's segment ends after it: at commit {last}, of {fork}"
-                        );
+                    if done {
+                        return;
                     }
-                    // Uploaded: acknowledged, the frees of its commits, whose extents' own files it
-                    // may name, are the bucket's, and it may go.
-                    store.acknowledged(closed.number).unwrap();
+                    thread::yield_now();
                 }
-                if done {
-                    return;
-                }
-                thread::yield_now();
-            }
+            })
         })
     };
 
@@ -343,97 +356,102 @@ fn run_with(Run { steps, follow }: Run) {
         let (store, history, written) = (store.clone(), history.clone(), written.clone());
         let bucket = bucket.clone();
         thread::spawn(move || {
-            let pinned = extent(2);
-            let mut pin = None;
-            let mut view = Some(store.view());
-            // What it finds wrong, it panics with once its view is gone: a task panicking unwinds
-            // through what it holds, whose drops take Shuttle's locks, which fail in a failed run
-            // with panics that abort the process (TASK-55).
-            let followed = (|| -> Result<(), String> {
-                loop {
-                    let current = view.as_mut().unwrap();
-                    let done = written.load(Ordering::SeqCst);
-                    // A view opens as of a commit as it is made: its record may come later.
-                    let holds = loop {
-                        if let Some(holds) = history.lock().unwrap().get(current.commit() as usize)
-                        {
-                            break holds.clone();
-                        }
-                        thread::yield_now();
-                    };
-                    for (extent, data) in &holds {
-                        let mut read = vec![0; data.len()];
-                        let viewed = |read: &mut [u8]| store.read_view(current, *extent, 0, read);
-                        bucket.read(&mut read, viewed).map_err(|error| {
-                            format!(
-                                "a view's read of {extent:?} at {}: {error:#}",
-                                current.commit()
-                            )
-                        })?;
-                        check(&read == data, || {
-                            format!("a view's read of {extent:?} reads other data")
-                        })?;
-                    }
-                    // An extent its commit doesn't hold, and it doesn't pin, it refuses: written
-                    // since, or freed before, kept for others (the uploader) or not.
-                    for sequence in 1..=5 {
-                        let extent = extent(sequence);
-                        let pinning = pin.is_some() && extent == pinned;
-                        if holds.contains_key(&extent) || pinning {
-                            continue;
-                        }
-                        let mut read = vec![0; BLOCK];
-                        let result = store.read_view(current, extent, 0, &mut read);
-                        check(
-                            matches!(&result, Err(error) if error.downcast_ref::<NoExtent>().is_some()),
-                            || {
+            block_on(async move {
+                let pinned = extent(2);
+                let mut pin = None;
+                let mut view = Some(store.view());
+                // What it finds wrong, it panics with once its view is gone: a task panicking unwinds
+                // through what it holds, whose drops take Shuttle's locks, which fail in a failed run
+                // with panics that abort the process (TASK-55).
+                let followed = (|| -> Result<(), String> {
+                    loop {
+                        let current = view.as_mut().unwrap();
+                        let done = written.load(Ordering::SeqCst);
+                        // A view opens as of a commit as it is made: its record may come later.
+                        let holds = loop {
+                            if let Some(holds) =
+                                history.lock().unwrap().get(current.commit() as usize)
+                            {
+                                break holds.clone();
+                            }
+                            thread::yield_now();
+                        };
+                        for (extent, data) in &holds {
+                            let mut read = vec![0; data.len()];
+                            let viewed =
+                                |read: &mut [u8]| store.read_view(current, *extent, 0, read);
+                            bucket.read(&mut read, viewed).map_err(|error| {
                                 format!(
-                                    "a view at {} read {extent:?}, which its commit doesn't hold: {result:?}",
+                                    "a view's read of {extent:?} at {}: {error:#}",
                                     current.commit()
                                 )
-                            },
-                        )?;
-                    }
-                    if follow == Follow::Advance
-                        && pin.is_none()
-                        && let Some(data) = holds.get(&pinned)
-                    {
-                        current.pin(pinned).map_err(|error| format!("pinning: {error:#}"))?;
-                        pin = Some(data.clone());
-                    }
-                    if let Some(data) = &pin {
-                        let mut read = vec![0; data.len()];
-                        let viewed = |read: &mut [u8]| store.read_view(current, pinned, 0, read);
-                        bucket.read(&mut read, viewed).map_err(|error| {
-                            format!(
-                                "a view's read of pinned {pinned:?} at {}: {error:#}",
-                                current.commit()
-                            )
-                        })?;
-                        check(&read == data, || {
-                            format!("a view's read of pinned {pinned:?} reads other data")
-                        })?;
-                    }
-                    if done {
-                        return Ok(());
-                    }
-                    match follow {
-                        Follow::Advance => {
-                            current.advance().map_err(|error| format!("advancing: {error:#}"))?
+                            })?;
+                            check(&read == data, || {
+                                format!("a view's read of {extent:?} reads other data")
+                            })?;
                         }
-                        Follow::Reopen => {
-                            view = None;
-                            thread::yield_now();
-                            view = Some(store.view());
+                        // An extent its commit doesn't hold, and it doesn't pin, it refuses: written
+                        // since, or freed before, kept for others (the uploader) or not.
+                        for sequence in 1..=5 {
+                            let extent = extent(sequence);
+                            let pinning = pin.is_some() && extent == pinned;
+                            if holds.contains_key(&extent) || pinning {
+                                continue;
+                            }
+                            let mut read = vec![0; BLOCK];
+                            let result = store.read_view(current, extent, 0, &mut read);
+                            check(
+                                matches!(&result, Err(error) if error.downcast_ref::<NoExtent>().is_some()),
+                                || {
+                                    format!(
+                                        "a view at {} read {extent:?}, which its commit doesn't hold: {result:?}",
+                                        current.commit()
+                                    )
+                                },
+                            )?;
                         }
+                        if follow == Follow::Advance
+                            && pin.is_none()
+                            && let Some(data) = holds.get(&pinned)
+                        {
+                            current.pin(pinned).map_err(|error| format!("pinning: {error:#}"))?;
+                            pin = Some(data.clone());
+                        }
+                        if let Some(data) = &pin {
+                            let mut read = vec![0; data.len()];
+                            let viewed =
+                                |read: &mut [u8]| store.read_view(current, pinned, 0, read);
+                            bucket.read(&mut read, viewed).map_err(|error| {
+                                format!(
+                                    "a view's read of pinned {pinned:?} at {}: {error:#}",
+                                    current.commit()
+                                )
+                            })?;
+                            check(&read == data, || {
+                                format!("a view's read of pinned {pinned:?} reads other data")
+                            })?;
+                        }
+                        if done {
+                            return Ok(());
+                        }
+                        match follow {
+                            Follow::Advance => current
+                                .advance()
+                                .map_err(|error| format!("advancing: {error:#}"))?,
+                            Follow::Reopen => {
+                                view = None;
+                                thread::yield_now();
+                                view = Some(store.view());
+                            }
+                        }
+                        thread::yield_now();
                     }
-                    thread::yield_now();
+                })();
+                drop(view);
+                if let Err(failure) = followed {
+                    panic!("{failure}");
                 }
-            })();
-            drop(view);
-            if let Err(failure) = followed {
-                panic!("{failure}");
-            }
+            })
         })
     };
 
@@ -462,7 +480,7 @@ fn run_with(Run { steps, follow }: Run) {
 
     // Its open segment closed, its footer names where the extents its commits touched are.
     store.close_segment().unwrap();
-    store.commit(None).expect("the last commit failed");
+    block_on(store.commit(None)).expect("the last commit failed");
 }
 
 /// cladefs: what the uploader uploaded, as far as the store's reads need it once their data is in
@@ -533,56 +551,67 @@ fn bucket_key<F>(closed: &local_cell::Closed<F>) -> String {
 /// between commits. Each extent a commit sealed holds what was written to it, and the segments
 /// closed after hold what their commits sealed, in them.
 fn racing() {
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
-    let store = Arc::new(LocalCell::create(MemDir::new(), description, OPTIONS).unwrap());
-    // Extents of one block, in segments, and of four, in a file of its own.
-    const WRITES: [(u64, usize); 3] = [(1, 1), (2, 4), (3, 1)];
-    let writer = {
-        let store = store.clone();
-        thread::spawn(move || {
-            for (sequence, blocks) in WRITES {
-                store.write(extent(sequence), 0, &pattern(sequence as u8, blocks * BLOCK)).unwrap();
-            }
-            // A write begun in a segment and abandoned, as a failed one is: commits and closings
-            // waiting for it go on.
-            drop(store.begin_write(extent(9), 0, BLOCK as u64).unwrap());
-        })
-    };
-    let committer = {
-        let store = store.clone();
-        thread::spawn(move || {
-            for _ in 0..2 {
-                store.commit_ordered(None).expect("a write raced a commit");
-            }
-        })
-    };
-    let closer = {
-        let store = store.clone();
-        thread::spawn(move || {
-            for _ in 0..2 {
-                store.close_now().expect("a write raced a commit");
-                thread::yield_now();
-            }
-        })
-    };
-    for thread in [writer, committer, closer] {
-        thread.join().unwrap();
-    }
-    store.commit(None).expect("a write raced a commit");
-    store.close_segment().unwrap();
-    store.commit(None).expect("a write raced a commit");
-    // The framings the closings began end first, as no commit waits for them (TASK-165.9): a
-    // failure found below unwinds with no framer holding the store's locks, which Shuttle, a task
-    // panicking, can't wait for, and aborts.
-    store.wait_framed().expect("a write raced a commit");
-    for (sequence, blocks) in WRITES {
-        let mut data = vec![0; blocks * BLOCK];
-        store.read(extent(sequence), 0, &mut data).expect("a write raced a commit");
-        assert!(
-            data == pattern(sequence as u8, blocks * BLOCK),
-            "a write raced a commit: extent {sequence} reads other data"
-        );
-    }
+    block_on(async {
+        let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
+        let store = Arc::new(LocalCell::create(MemDir::new(), description, OPTIONS).unwrap());
+        // Extents of one block, in segments, and of four, in a file of its own.
+        const WRITES: [(u64, usize); 3] = [(1, 1), (2, 4), (3, 1)];
+        let writer = {
+            let store = store.clone();
+            thread::spawn(move || {
+                block_on(async move {
+                    for (sequence, blocks) in WRITES {
+                        store
+                            .write(extent(sequence), 0, &pattern(sequence as u8, blocks * BLOCK))
+                            .await
+                            .unwrap();
+                    }
+                    // A write begun in a segment and abandoned, as a failed one is: commits and closings
+                    // waiting for it go on.
+                    drop(store.begin_write(extent(9), 0, BLOCK as u64).await.unwrap());
+                })
+            })
+        };
+        let committer = {
+            let store = store.clone();
+            thread::spawn(move || {
+                block_on(async move {
+                    for _ in 0..2 {
+                        store.commit_ordered(None).await.expect("a write raced a commit");
+                    }
+                })
+            })
+        };
+        let closer = {
+            let store = store.clone();
+            thread::spawn(move || {
+                block_on(async move {
+                    for _ in 0..2 {
+                        store.close_now().await.expect("a write raced a commit");
+                        thread::yield_now();
+                    }
+                })
+            })
+        };
+        for thread in [writer, committer, closer] {
+            thread.join().unwrap();
+        }
+        store.commit(None).await.expect("a write raced a commit");
+        store.close_segment().unwrap();
+        store.commit(None).await.expect("a write raced a commit");
+        // The framings the closings began end first, as no commit waits for them (TASK-165.9): a
+        // failure found below unwinds with no framer holding the store's locks, which Shuttle, a task
+        // panicking, can't wait for, and aborts.
+        store.wait_framed().await.expect("a write raced a commit");
+        for (sequence, blocks) in WRITES {
+            let mut data = vec![0; blocks * BLOCK];
+            store.read(extent(sequence), 0, &mut data).expect("a write raced a commit");
+            assert!(
+                data == pattern(sequence as u8, blocks * BLOCK),
+                "a write raced a commit: extent {sequence} reads other data"
+            );
+        }
+    })
 }
 
 /// Segments of three blocks, and extents of four at most: a segment holds seven blocks at most,
@@ -596,52 +625,66 @@ const ROLLING: Options = Options { max_extent: 4 * BLOCK as u64, ..OPTIONS };
 /// written, where it is (TASK-92.41). Each extent reads as written, and the store, crashed, opens
 /// again holding what its last commit did.
 fn rolling_over() {
-    let dir = MemDir::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
-    let store = Arc::new(LocalCell::create(dir.clone(), description, ROLLING).unwrap());
-    const EXTENTS: u64 = 6;
-    let writer = {
-        let store = store.clone();
-        thread::spawn(move || {
-            for sequence in 1..=EXTENTS {
-                let data = pattern(sequence as u8, 2 * BLOCK);
-                store.write(extent(sequence), 0, &data).expect("a write filling segments failed");
-            }
-        })
-    };
-    let committer = {
-        let store = store.clone();
-        thread::spawn(move || {
-            for _ in 0..2 {
-                store.commit_ordered(None).expect("a commit of writes filling segments failed");
-            }
-        })
-    };
-    let closer = {
-        let store = store.clone();
-        thread::spawn(move || {
-            for _ in 0..2 {
-                store.close_now().expect("a closing of segments being filled failed");
-                thread::yield_now();
-            }
-        })
-    };
-    for thread in [writer, committer, closer] {
-        thread.join().unwrap();
-    }
-    store.commit(None).expect("a commit of writes filling segments failed");
-    let check = |store: &LocalCell<MemDir>| {
-        for sequence in 1..=EXTENTS {
-            let mut data = vec![0; 2 * BLOCK];
-            store.read(extent(sequence), 0, &mut data).unwrap();
-            assert!(
-                data == pattern(sequence as u8, 2 * BLOCK),
-                "extent {sequence}, written filling segments, reads other data"
-            );
+    block_on(async {
+        let dir = MemDir::new();
+        let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
+        let store = Arc::new(LocalCell::create(dir.clone(), description, ROLLING).unwrap());
+        const EXTENTS: u64 = 6;
+        let writer = {
+            let store = store.clone();
+            thread::spawn(move || {
+                block_on(async move {
+                    for sequence in 1..=EXTENTS {
+                        let data = pattern(sequence as u8, 2 * BLOCK);
+                        store
+                            .write(extent(sequence), 0, &data)
+                            .await
+                            .expect("a write filling segments failed");
+                    }
+                })
+            })
+        };
+        let committer = {
+            let store = store.clone();
+            thread::spawn(move || {
+                block_on(async move {
+                    for _ in 0..2 {
+                        store
+                            .commit_ordered(None)
+                            .await
+                            .expect("a commit of writes filling segments failed");
+                    }
+                })
+            })
+        };
+        let closer = {
+            let store = store.clone();
+            thread::spawn(move || {
+                block_on(async move {
+                    for _ in 0..2 {
+                        store.close_now().await.expect("a closing of segments being filled failed");
+                        thread::yield_now();
+                    }
+                })
+            })
+        };
+        for thread in [writer, committer, closer] {
+            thread.join().unwrap();
         }
-    };
-    check(&store);
-    check(&LocalCell::open(dir.crash(0), ROLLING).unwrap());
+        store.commit(None).await.expect("a commit of writes filling segments failed");
+        let check = |store: &LocalCell<MemDir>| {
+            for sequence in 1..=EXTENTS {
+                let mut data = vec![0; 2 * BLOCK];
+                store.read(extent(sequence), 0, &mut data).unwrap();
+                assert!(
+                    data == pattern(sequence as u8, 2 * BLOCK),
+                    "extent {sequence}, written filling segments, reads other data"
+                );
+            }
+        };
+        check(&store);
+        check(&LocalCell::open(dir.crash(0), ROLLING).unwrap());
+    })
 }
 
 /// One run of a free racing a write in flight, as a VM's requests may (TASK-79.1): a writer
@@ -650,52 +693,63 @@ fn rolling_over() {
 /// free raced is dropped, whenever it finishes: the extent holds the freer's write alone, and the
 /// store commits, and opens again holding that.
 fn freeing_during_a_write() {
-    let dir = MemDir::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
-    let store = Arc::new(LocalCell::create(dir.clone(), description, OPTIONS).unwrap());
-    let begun = Arc::new(AtomicBool::new(false));
-    let writer = {
-        let (store, begun) = (store.clone(), begun.clone());
-        thread::spawn(move || {
-            let data = pattern(1, 4 * BLOCK);
-            let write = store.begin_write(extent(1), 0, data.len() as u64).unwrap();
-            begun.store(true, Ordering::SeqCst);
-            write.write(&data, 0).unwrap();
-            write.finish();
-        })
-    };
-    let freer = {
-        let store = store.clone();
-        thread::spawn(move || {
-            while !begun.load(Ordering::SeqCst) {
-                thread::yield_now();
-            }
-            store.free(extent(1)).unwrap();
-            store
-                .write(extent(1), BLOCK as u64, &pattern(2, BLOCK))
-                .expect("a write to a freed extent landed: the extent is sealed");
-        })
-    };
-    for thread in [writer, freer] {
-        thread.join().unwrap();
-    }
-    let written = [vec![0; BLOCK], pattern(2, BLOCK)].concat();
-    let check = |store: &LocalCell<MemDir>| {
-        let held = store.extents().unwrap();
-        assert!(
-            held == [(extent(1), 2 * BLOCK as u64)],
-            "a write to a freed extent landed: the store holds {held:?}"
+    block_on(async {
+        let dir = MemDir::new();
+        let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
+        let store = Arc::new(LocalCell::create(dir.clone(), description, OPTIONS).unwrap());
+        let begun = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let (store, begun) = (store.clone(), begun.clone());
+            thread::spawn(move || {
+                block_on(async move {
+                    let data = pattern(1, 4 * BLOCK);
+                    let write = store.begin_write(extent(1), 0, data.len() as u64).await.unwrap();
+                    begun.store(true, Ordering::SeqCst);
+                    write.write(&data, 0).unwrap();
+                    write.finish();
+                })
+            })
+        };
+        let freer = {
+            let store = store.clone();
+            thread::spawn(move || {
+                block_on(async move {
+                    while !begun.load(Ordering::SeqCst) {
+                        thread::yield_now();
+                    }
+                    store.free(extent(1)).unwrap();
+                    store
+                        .write(extent(1), BLOCK as u64, &pattern(2, BLOCK))
+                        .await
+                        .expect("a write to a freed extent landed: the extent is sealed");
+                })
+            })
+        };
+        for thread in [writer, freer] {
+            thread.join().unwrap();
+        }
+        let written = [vec![0; BLOCK], pattern(2, BLOCK)].concat();
+        let check = |store: &LocalCell<MemDir>| {
+            let held = store.extents().unwrap();
+            assert!(
+                held == [(extent(1), 2 * BLOCK as u64)],
+                "a write to a freed extent landed: the store holds {held:?}"
+            );
+            let mut read = vec![0; 2 * BLOCK];
+            store.read(extent(1), 0, &mut read).unwrap();
+            assert!(
+                read == written,
+                "a write to a freed extent landed: the extent reads other data"
+            );
+        };
+        check(&store);
+        store.commit(None).await.expect("a write to a freed extent landed: the commit failed");
+        drop(Arc::into_inner(store).unwrap());
+        check(
+            &LocalCell::open(dir, OPTIONS)
+                .expect("a write to a freed extent landed: no store opens"),
         );
-        let mut read = vec![0; 2 * BLOCK];
-        store.read(extent(1), 0, &mut read).unwrap();
-        assert!(read == written, "a write to a freed extent landed: the extent reads other data");
-    };
-    check(&store);
-    store.commit(None).expect("a write to a freed extent landed: the commit failed");
-    drop(Arc::into_inner(store).unwrap());
-    check(
-        &LocalCell::open(dir, OPTIONS).expect("a write to a freed extent landed: no store opens"),
-    );
+    })
 }
 
 /// One run of an uploader beginning while commits are made durable: a writer orders commits, a
@@ -710,34 +764,43 @@ fn uploading_during_flushes() {
     let writer = {
         let store = store.clone();
         thread::spawn(move || {
-            for sequence in 1..=3 {
-                store.write(extent(sequence), 0, &pattern(sequence as u8, BLOCK)).unwrap();
-                store.commit_ordered(None).unwrap();
-            }
+            block_on(async move {
+                for sequence in 1..=3 {
+                    store
+                        .write(extent(sequence), 0, &pattern(sequence as u8, BLOCK))
+                        .await
+                        .unwrap();
+                    store.commit_ordered(None).await.unwrap();
+                }
+            })
         })
     };
     let flusher = {
         let store = store.clone();
         thread::spawn(move || {
-            for _ in 0..3 {
-                store.flush().unwrap();
-                thread::yield_now();
-            }
+            block_on(async move {
+                for _ in 0..3 {
+                    store.flush().await.unwrap();
+                    thread::yield_now();
+                }
+            })
         })
     };
     let uploader = {
         let store = store.clone();
         thread::spawn(move || {
-            store.close_now().unwrap();
-            for closed in store.closed(usize::MAX).unwrap() {
-                let crashed = LocalCell::open(dir.crash(closed.last()), OPTIONS).unwrap();
-                let epoch = crashed.last_commit().unwrap();
-                assert!(
-                    epoch >= closed.last(),
-                    "uploaded a segment of commit {} before durable: a crash recovered {epoch}",
-                    closed.last()
-                );
-            }
+            block_on(async move {
+                store.close_now().await.unwrap();
+                for closed in store.closed(usize::MAX).await.unwrap() {
+                    let crashed = LocalCell::open(dir.crash(closed.last()), OPTIONS).unwrap();
+                    let epoch = crashed.last_commit().unwrap();
+                    assert!(
+                        epoch >= closed.last(),
+                        "uploaded a segment of commit {} before durable: a crash recovered {epoch}",
+                        closed.last()
+                    );
+                }
+            })
         })
     };
     for thread in [writer, flusher, uploader] {
@@ -750,58 +813,66 @@ fn uploading_during_flushes() {
 /// it; and a flush fails the store meanwhile. The commit fails then, as all after a failure do:
 /// the store's state may differ from its files.
 fn failing_during_a_commit() {
-    let dir = MemDir::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
-    let store = Arc::new(LocalCell::create(dir.clone(), description, OPTIONS).unwrap());
-    store.write(extent(1), 0, &pattern(1, BLOCK)).unwrap();
-    store.commit_ordered(None).unwrap();
-    let (begun, failed) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
-    let writer = {
-        let (store, begun, failed) = (store.clone(), begun.clone(), failed.clone());
-        thread::spawn(move || {
-            let write = store.begin_write(extent(2), 0, BLOCK as u64).unwrap();
-            write.write(&pattern(2, BLOCK), 0).unwrap();
-            begun.store(true, Ordering::SeqCst);
-            while !failed.load(Ordering::SeqCst) {
-                thread::yield_now();
-            }
-            write.finish();
-        })
-    };
-    let committer = {
-        let (store, begun) = (store.clone(), begun.clone());
-        thread::spawn(move || {
-            while !begun.load(Ordering::SeqCst) {
-                thread::yield_now();
-            }
-            store.commit_ordered(None)
-        })
-    };
-    let flusher = {
-        let store = store.clone();
-        thread::spawn(move || {
-            // Once the commit waits for the write.
-            while !store.holding_writes() {
-                thread::yield_now();
-            }
-            dir.fail_after(Some(0));
-            let flushed = store.flush();
-            dir.fail_after(None);
-            failed.store(true, Ordering::SeqCst);
-            flushed
-        })
-    };
-    writer.join().unwrap();
-    assert!(flusher.join().unwrap().is_err(), "a flush failing succeeded");
-    let committed = committer.join().unwrap().map_err(|error| error.to_string());
-    // Saying why: the flush's failure (TASK-165.9), at its first step, appending the records,
-    // which go before the data in a directory that does one thing at a time (TASK-301).
-    let failed = "the extent store failed: committing the extent store: appending commits' \
-                  records: the file system crashed";
-    assert!(
-        committed == Err(failed.to_owned()),
-        "a commit went on over a store that failed: {committed:?}"
-    );
+    block_on(async {
+        let dir = MemDir::new();
+        let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
+        let store = Arc::new(LocalCell::create(dir.clone(), description, OPTIONS).unwrap());
+        store.write(extent(1), 0, &pattern(1, BLOCK)).await.unwrap();
+        store.commit_ordered(None).await.unwrap();
+        let (begun, failed) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let writer = {
+            let (store, begun, failed) = (store.clone(), begun.clone(), failed.clone());
+            thread::spawn(move || {
+                block_on(async move {
+                    let write = store.begin_write(extent(2), 0, BLOCK as u64).await.unwrap();
+                    write.write(&pattern(2, BLOCK), 0).unwrap();
+                    begun.store(true, Ordering::SeqCst);
+                    while !failed.load(Ordering::SeqCst) {
+                        thread::yield_now();
+                    }
+                    write.finish();
+                })
+            })
+        };
+        let committer = {
+            let (store, begun) = (store.clone(), begun.clone());
+            thread::spawn(move || {
+                block_on(async move {
+                    while !begun.load(Ordering::SeqCst) {
+                        thread::yield_now();
+                    }
+                    store.commit_ordered(None).await
+                })
+            })
+        };
+        let flusher = {
+            let store = store.clone();
+            thread::spawn(move || {
+                block_on(async move {
+                    // Once the commit waits for the write.
+                    while !store.holding_writes() {
+                        thread::yield_now();
+                    }
+                    dir.fail_after(Some(0));
+                    let flushed = store.flush().await;
+                    dir.fail_after(None);
+                    failed.store(true, Ordering::SeqCst);
+                    flushed
+                })
+            })
+        };
+        writer.join().unwrap();
+        assert!(flusher.join().unwrap().is_err(), "a flush failing succeeded");
+        let committed = committer.join().unwrap().map_err(|error| error.to_string());
+        // Saying why: the flush's failure (TASK-165.9), at its first step, appending the records,
+        // which go before the data in a directory that does one thing at a time (TASK-301).
+        let failed = "the extent store failed: committing the extent store: appending commits' \
+                      records: the file system crashed";
+        assert!(
+            committed == Err(failed.to_owned()),
+            "a commit went on over a store that failed: {committed:?}"
+        );
+    })
 }
 
 /// One run of the cell closing while a commit waits for a write in progress (TASK-83): a writer
@@ -809,86 +880,102 @@ fn failing_during_a_commit() {
 /// it; and the cell closes meanwhile, after which another store may open it. The commit fails
 /// then, changing nothing, as all changes of a closed cell do.
 fn closing_during_a_commit() {
-    let dir = MemDir::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
-    let store = Arc::new(LocalCell::create(dir.clone(), description, OPTIONS).unwrap());
-    let (begun, closed) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
-    let writer = {
-        let (store, begun, closed) = (store.clone(), begun.clone(), closed.clone());
-        thread::spawn(move || {
-            let write = store.begin_write(extent(1), 0, BLOCK as u64).unwrap();
-            write.write(&pattern(1, BLOCK), 0).unwrap();
-            begun.store(true, Ordering::SeqCst);
-            while !closed.load(Ordering::SeqCst) {
-                thread::yield_now();
-            }
-            write.finish();
-        })
-    };
-    let committer = {
-        let (store, begun) = (store.clone(), begun.clone());
-        thread::spawn(move || {
-            while !begun.load(Ordering::SeqCst) {
-                thread::yield_now();
-            }
-            store.commit_ordered(None)
-        })
-    };
-    let closer = {
-        let store = store.clone();
-        thread::spawn(move || {
-            while !store.holding_writes() {
-                thread::yield_now();
-            }
-            store.close().unwrap();
-            closed.store(true, Ordering::SeqCst);
-        })
-    };
-    writer.join().unwrap();
-    closer.join().unwrap();
-    let committed = committer.join().unwrap().map_err(|error| error.to_string());
-    assert!(
-        committed == Err(format!("cell {CELL} is closed")),
-        "a commit went on over a cell closed: {committed:?}"
-    );
+    block_on(async {
+        let dir = MemDir::new();
+        let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
+        let store = Arc::new(LocalCell::create(dir.clone(), description, OPTIONS).unwrap());
+        let (begun, closed) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let writer = {
+            let (store, begun, closed) = (store.clone(), begun.clone(), closed.clone());
+            thread::spawn(move || {
+                block_on(async move {
+                    let write = store.begin_write(extent(1), 0, BLOCK as u64).await.unwrap();
+                    write.write(&pattern(1, BLOCK), 0).unwrap();
+                    begun.store(true, Ordering::SeqCst);
+                    while !closed.load(Ordering::SeqCst) {
+                        thread::yield_now();
+                    }
+                    write.finish();
+                })
+            })
+        };
+        let committer = {
+            let (store, begun) = (store.clone(), begun.clone());
+            thread::spawn(move || {
+                block_on(async move {
+                    while !begun.load(Ordering::SeqCst) {
+                        thread::yield_now();
+                    }
+                    store.commit_ordered(None).await
+                })
+            })
+        };
+        let closer = {
+            let store = store.clone();
+            thread::spawn(move || {
+                block_on(async move {
+                    while !store.holding_writes() {
+                        thread::yield_now();
+                    }
+                    store.close().await.unwrap();
+                    closed.store(true, Ordering::SeqCst);
+                })
+            })
+        };
+        writer.join().unwrap();
+        closer.join().unwrap();
+        let committed = committer.join().unwrap().map_err(|error| error.to_string());
+        assert!(
+            committed == Err(format!("cell {CELL} is closed")),
+            "a commit went on over a cell closed: {committed:?}"
+        );
+    })
 }
 
 /// One run of the cell closing while a flush makes its commits durable: once closed, it holds
 /// its last commit durably, as another store opening it, or a crash, finds.
 fn closing_during_a_flush() {
-    let dir = MemDir::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
-    let store = Arc::new(LocalCell::create(dir.clone(), description, OPTIONS).unwrap());
-    for sequence in 1..=2 {
-        store.write(extent(sequence), 0, &pattern(sequence as u8, BLOCK)).unwrap();
-        store.commit_ordered(None).unwrap();
-    }
-    let flusher = {
-        let store = store.clone();
-        thread::spawn(move || store.flush().unwrap())
-    };
-    let closer = {
-        let store = store.clone();
-        thread::spawn(move || {
-            store.close().unwrap();
-            let epoch = LocalCell::open(dir.crash(0), OPTIONS).unwrap().last_commit().unwrap();
-            assert!(epoch == 2, "a crash after the cell closed recovered commit {epoch} of 2");
-        })
-    };
-    for thread in [flusher, closer] {
-        thread.join().unwrap();
-    }
+    block_on(async {
+        let dir = MemDir::new();
+        let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
+        let store = Arc::new(LocalCell::create(dir.clone(), description, OPTIONS).unwrap());
+        for sequence in 1..=2 {
+            store.write(extent(sequence), 0, &pattern(sequence as u8, BLOCK)).await.unwrap();
+            store.commit_ordered(None).await.unwrap();
+        }
+        let flusher = {
+            let store = store.clone();
+            thread::spawn(move || block_on(async move { store.flush().await.unwrap() }))
+        };
+        let closer = {
+            let store = store.clone();
+            thread::spawn(move || {
+                block_on(async move {
+                    store.close().await.unwrap();
+                    let epoch =
+                        LocalCell::open(dir.crash(0), OPTIONS).unwrap().last_commit().unwrap();
+                    assert!(
+                        epoch == 2,
+                        "a crash after the cell closed recovered commit {epoch} of 2"
+                    );
+                })
+            })
+        };
+        for thread in [flusher, closer] {
+            thread.join().unwrap();
+        }
+    })
 }
 
 /// A store of the cell whose open segment, its first, holds a commit's extent, in a directory
 /// that stalls the creation of the segment's framed file, as the segment closes: so that a closing
 /// between commits stalls framing it, as on a slow disk (TASK-41.1).
-fn framing_stalls() -> (Stalling, Arc<LocalCell<Stalling>>) {
+async fn framing_stalls() -> (Stalling, Arc<LocalCell<Stalling>>) {
     let dir = Stalling::new();
     let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
     let store = Arc::new(LocalCell::create(dir.clone(), description, OPTIONS).unwrap());
-    store.write(extent(1), 0, &pattern(1, BLOCK)).unwrap();
-    store.commit(None).unwrap();
+    store.write(extent(1), 0, &pattern(1, BLOCK)).await.unwrap();
+    store.commit(None).await.unwrap();
     dir.arm(Op::Create, &format!("segments/{}/framing-{}", Padded(CELL.id), Padded(0)));
     (dir, store)
 }
@@ -898,9 +985,11 @@ fn framing_stalls() -> (Stalling, Arc<LocalCell<Stalling>>) {
 fn spawn_closing(store: &Arc<LocalCell<Stalling>>) -> thread::JoinHandle<()> {
     let store = store.clone();
     thread::spawn(move || {
-        let closed = store.close_now();
-        let closed = closed.expect("a closing between commits raced the cell's closing");
-        assert!(closed, "a closing between commits closed nothing");
+        block_on(async move {
+            let closed = store.close_now().await;
+            let closed = closed.expect("a closing between commits raced the cell's closing");
+            assert!(closed, "a closing between commits closed nothing");
+        })
     })
 }
 
@@ -916,37 +1005,44 @@ fn check_framed(store: &LocalCell<Stalling>, failure: &str) {
 /// its locks as it frames, as a commit's closing does not. Shuttle, whose waits that can't end are
 /// deadlocks it reports, finds so.
 fn serving_during_a_framing() {
-    let (dir, store) = framing_stalls();
-    let closing = spawn_closing(&store);
-    dir.wait_until_stalled();
-    store.write(extent(2), 0, &pattern(2, BLOCK)).unwrap();
-    check_framed(&store, "a read while a closing between commits frames");
-    store.commit_ordered(None).unwrap();
-    dir.let_go(Ok(()));
-    closing.join().unwrap();
-    store.flush().unwrap();
-    check_framed(&store, "a read once a closing between commits framed");
+    block_on(async {
+        let (dir, store) = framing_stalls().await;
+        let closing = spawn_closing(&store);
+        dir.wait_until_stalled();
+        store.write(extent(2), 0, &pattern(2, BLOCK)).await.unwrap();
+        check_framed(&store, "a read while a closing between commits frames");
+        store.commit_ordered(None).await.unwrap();
+        dir.let_go(Ok(()));
+        closing.join().unwrap();
+        store.flush().await.unwrap();
+        check_framed(&store, "a read once a closing between commits framed");
+    })
 }
 
 /// One run of the cell closing while a closing between commits frames the segment, which stalls
 /// (TASK-41.1): the cell's closing waits for it, so that another store opening the cell then
 /// finds the segment framed, rather than framing it again meanwhile from its raw file.
 fn closing_during_a_framing() {
-    let (dir, store) = framing_stalls();
-    let closing = spawn_closing(&store);
-    dir.wait_until_stalled();
-    let reopening = {
-        let (store, dir) = (store.clone(), dir.clone());
-        thread::spawn(move || {
-            store.close().unwrap();
-            let reopened = LocalCell::open(dir, OPTIONS);
-            let reopened = reopened.expect("a closing between commits raced the cell's closing");
-            check_framed(&reopened, "a closing between commits raced the cell's closing");
-        })
-    };
-    dir.let_go(Ok(()));
-    closing.join().unwrap();
-    reopening.join().unwrap();
+    block_on(async {
+        let (dir, store) = framing_stalls().await;
+        let closing = spawn_closing(&store);
+        dir.wait_until_stalled();
+        let reopening = {
+            let (store, dir) = (store.clone(), dir.clone());
+            thread::spawn(move || {
+                block_on(async move {
+                    store.close().await.unwrap();
+                    let reopened = LocalCell::open(dir, OPTIONS);
+                    let reopened =
+                        reopened.expect("a closing between commits raced the cell's closing");
+                    check_framed(&reopened, "a closing between commits raced the cell's closing");
+                })
+            })
+        };
+        dir.let_go(Ok(()));
+        closing.join().unwrap();
+        reopening.join().unwrap();
+    })
 }
 
 /// One run of the framing of the segment a commit closed, which stalls, failing, while those of
@@ -957,54 +1053,60 @@ fn closing_during_a_framing() {
 /// durable while the first stalled, their records in the logs of the segments they were made in,
 /// the opening recovers; the commit after, which no flush took before the store failed, not.
 fn closing_after_a_failed_framing() {
-    let (dir, store) = framing_stalls();
-    // Each commit fills the open segment, and closes it: the first, whose framing stalls.
-    store.write(extent(2), 0, &pattern(2, 2 * BLOCK)).unwrap();
-    store.commit_ordered(None).unwrap();
-    store.write(extent(3), 0, &pattern(3, 3 * BLOCK)).unwrap();
-    store.commit_ordered(None).unwrap();
-    store.flush().unwrap();
-    store.write(extent(4), 0, &pattern(4, 3 * BLOCK)).unwrap();
-    store.commit_ordered(None).unwrap();
-    dir.wait_until_stalled();
-    dir.let_go(Err(std::io::Error::other("the disk failed")));
-    // The framings end, failing, and the store with them.
-    let error = store.closed(usize::MAX).map(|_| ()).expect_err("a framing failed");
-    drop(error);
-    store.close().expect_err("a store whose framing failed closed with its commits durable");
-    let failure = "a framing raced the cell's closing after a failed framing";
-    let reopened = LocalCell::open(dir.clone(), OPTIONS);
-    let reopened = reopened.unwrap_or_else(|error| panic!("{failure}: {error:#}"));
-    // What was durable: the commits the flush took, extents 1 to 3's.
-    assert_eq!(
-        reopened.last_commit().unwrap(),
-        3,
-        "{failure}: other commits than durable recovered"
-    );
-    check_framed(&reopened, failure);
-    // Writing on, it closes segments of its own, numbered past those it found, framed where no
-    // framing of the store before frames them still, making files of their numbers.
-    for sequence in 5..8 {
-        let written = reopened.write(extent(sequence), 0, &pattern(sequence as u8, 3 * BLOCK));
-        written.unwrap_or_else(|error| panic!("{failure}: {error:#}"));
-        let committed = reopened.commit(None);
-        committed.unwrap_or_else(|error| panic!("{failure}: {error:#}"));
-    }
+    block_on(async {
+        let (dir, store) = framing_stalls().await;
+        // Each commit fills the open segment, and closes it: the first, whose framing stalls.
+        store.write(extent(2), 0, &pattern(2, 2 * BLOCK)).await.unwrap();
+        store.commit_ordered(None).await.unwrap();
+        store.write(extent(3), 0, &pattern(3, 3 * BLOCK)).await.unwrap();
+        store.commit_ordered(None).await.unwrap();
+        store.flush().await.unwrap();
+        store.write(extent(4), 0, &pattern(4, 3 * BLOCK)).await.unwrap();
+        store.commit_ordered(None).await.unwrap();
+        dir.wait_until_stalled();
+        dir.let_go(Err(std::io::Error::other("the disk failed")));
+        // The framings end, failing, and the store with them.
+        let error = store.closed(usize::MAX).await.map(|_| ()).expect_err("a framing failed");
+        drop(error);
+        store
+            .close()
+            .await
+            .expect_err("a store whose framing failed closed with its commits durable");
+        let failure = "a framing raced the cell's closing after a failed framing";
+        let reopened = LocalCell::open(dir.clone(), OPTIONS);
+        let reopened = reopened.unwrap_or_else(|error| panic!("{failure}: {error:#}"));
+        // What was durable: the commits the flush took, extents 1 to 3's.
+        assert_eq!(
+            reopened.last_commit().unwrap(),
+            3,
+            "{failure}: other commits than durable recovered"
+        );
+        check_framed(&reopened, failure);
+        // Writing on, it closes segments of its own, numbered past those it found, framed where no
+        // framing of the store before frames them still, making files of their numbers.
+        for sequence in 5..8 {
+            let written =
+                reopened.write(extent(sequence), 0, &pattern(sequence as u8, 3 * BLOCK)).await;
+            written.unwrap_or_else(|error| panic!("{failure}: {error:#}"));
+            let committed = reopened.commit(None).await;
+            committed.unwrap_or_else(|error| panic!("{failure}: {error:#}"));
+        }
+    })
 }
 
 /// A store of the cell, segments laid out as [`ROLLING`] says, whose open segment, its first,
 /// holds a commit's extent, and those of three written since, and is full, in a directory that
 /// stalls the creation of the segment's framed file: so that the next commit, which seals what it
 /// holds where it is, closes it, and its framing stalls, as on a slow disk (TASK-79.2, TASK-92.41).
-fn framing_at_a_commit_stalls() -> (Stalling, Arc<LocalCell<Stalling>>) {
+async fn framing_at_a_commit_stalls() -> (Stalling, Arc<LocalCell<Stalling>>) {
     let dir = Stalling::new();
     let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
     let store = Arc::new(LocalCell::create(dir.clone(), description, ROLLING).unwrap());
-    store.write(extent(1), 0, &pattern(1, BLOCK)).unwrap();
-    store.commit(None).unwrap();
+    store.write(extent(1), 0, &pattern(1, BLOCK)).await.unwrap();
+    store.commit(None).await.unwrap();
     // Six blocks more: the seven it holds at most.
     for sequence in 2..5 {
-        store.write(extent(sequence), 0, &pattern(sequence as u8, 2 * BLOCK)).unwrap();
+        store.write(extent(sequence), 0, &pattern(sequence as u8, 2 * BLOCK)).await.unwrap();
     }
     dir.arm(Op::Create, &format!("segments/{}/framing-{}", Padded(CELL.id), Padded(0)));
     (dir, store)
@@ -1028,36 +1130,46 @@ fn check_rolled(store: &LocalCell<Stalling>, last: u64, failure: &str) {
 /// the reads after; the flush after makes the commit durable. Shuttle, whose waits that can't end
 /// are deadlocks it reports, finds so.
 fn serving_during_a_framing_at_a_commit() {
-    let (dir, store) = framing_at_a_commit_stalls();
-    store.write(extent(5), 0, &pattern(5, 2 * BLOCK)).unwrap();
-    store.commit_ordered(None).unwrap();
-    dir.wait_until_stalled();
-    check_rolled(&store, 5, "a read while a commit's closing of a segment filled frames");
-    dir.let_go(Ok(()));
-    store.flush().unwrap();
-    check_rolled(&store, 5, "a read once a commit's closing of a segment filled framed");
-    drop(store);
-    check_rolled(&LocalCell::open(dir, OPTIONS).unwrap(), 5, "the cell opened again");
+    block_on(async {
+        let (dir, store) = framing_at_a_commit_stalls().await;
+        store.write(extent(5), 0, &pattern(5, 2 * BLOCK)).await.unwrap();
+        store.commit_ordered(None).await.unwrap();
+        dir.wait_until_stalled();
+        check_rolled(&store, 5, "a read while a commit's closing of a segment filled frames");
+        dir.let_go(Ok(()));
+        store.flush().await.unwrap();
+        check_rolled(&store, 5, "a read once a commit's closing of a segment filled framed");
+        drop(store);
+        check_rolled(&LocalCell::open(dir, OPTIONS).unwrap(), 5, "the cell opened again");
+    })
 }
 
 /// One run of the cell closing while the framing of a segment filled between commits, which the
 /// commit after closed, stalls (TASK-79.2, TASK-92.41): the cell's closing waits for it; another
 /// store, opening the cell, finds it framed, and holds what the commit made.
 fn closing_during_a_framing_at_a_commit() {
-    let (dir, store) = framing_at_a_commit_stalls();
-    store.write(extent(5), 0, &pattern(5, 2 * BLOCK)).unwrap();
-    store.commit_ordered(None).unwrap();
-    dir.wait_until_stalled();
-    let reopening = {
-        let (store, dir) = (store.clone(), dir.clone());
-        thread::spawn(move || {
-            store.close().unwrap();
-            let reopened = LocalCell::open(dir, OPTIONS).unwrap();
-            check_rolled(&reopened, 5, "a commit's closing of a segment filled raced the closing");
-        })
-    };
-    dir.let_go(Ok(()));
-    reopening.join().unwrap();
+    block_on(async {
+        let (dir, store) = framing_at_a_commit_stalls().await;
+        store.write(extent(5), 0, &pattern(5, 2 * BLOCK)).await.unwrap();
+        store.commit_ordered(None).await.unwrap();
+        dir.wait_until_stalled();
+        let reopening = {
+            let (store, dir) = (store.clone(), dir.clone());
+            thread::spawn(move || {
+                block_on(async move {
+                    store.close().await.unwrap();
+                    let reopened = LocalCell::open(dir, OPTIONS).unwrap();
+                    check_rolled(
+                        &reopened,
+                        5,
+                        "a commit's closing of a segment filled raced the closing",
+                    );
+                })
+            })
+        };
+        dir.let_go(Ok(()));
+        reopening.join().unwrap();
+    })
 }
 
 /// One run of a write filling the open segment, which holds a commit's data, racing an uploader
@@ -1065,34 +1177,41 @@ fn closing_during_a_framing_at_a_commit() {
 /// uploader's closing between commits closes it (TASK-92.41). Whichever goes first, the uploader,
 /// asking once more after, with no commit to come, has the commit's segment.
 fn uploading_what_a_segment_filled_holds() {
-    let dir = MemDir::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
-    let store = Arc::new(LocalCell::create(dir, description, ROLLING).unwrap());
-    store.write(extent(1), 0, &pattern(1, BLOCK)).unwrap();
-    store.commit(None).unwrap();
-    let writer = {
-        let store = store.clone();
-        thread::spawn(move || {
-            for sequence in 2..7 {
-                store.write(extent(sequence), 0, &pattern(sequence as u8, 2 * BLOCK)).unwrap();
-            }
-        })
-    };
-    let mut taken = Vec::new();
-    gather(&store, &mut taken);
-    writer.join().unwrap();
-    gather(&store, &mut taken);
-    assert_eq!(taken, [1], "no commit's segment reached the uploader");
+    block_on(async {
+        let dir = MemDir::new();
+        let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
+        let store = Arc::new(LocalCell::create(dir, description, ROLLING).unwrap());
+        store.write(extent(1), 0, &pattern(1, BLOCK)).await.unwrap();
+        store.commit(None).await.unwrap();
+        let writer = {
+            let store = store.clone();
+            thread::spawn(move || {
+                block_on(async move {
+                    for sequence in 2..7 {
+                        store
+                            .write(extent(sequence), 0, &pattern(sequence as u8, 2 * BLOCK))
+                            .await
+                            .unwrap();
+                    }
+                })
+            })
+        };
+        let mut taken = Vec::new();
+        gather(&store, &mut taken).await;
+        writer.join().unwrap();
+        gather(&store, &mut taken).await;
+        assert_eq!(taken, [1], "no commit's segment reached the uploader");
+    })
 }
 
 /// As an uploader gathers for a commit waiting for it, adding what it takes to `taken`: what is
 /// closed, closing the rest.
-fn gather(store: &LocalCell<MemDir>, taken: &mut Vec<u64>) {
-    store.flush().unwrap();
-    taken.extend(store.closed(8).unwrap().iter().map(|closed| closed.last()));
-    store.close_now().unwrap();
-    store.flush().unwrap();
-    taken.extend(store.closed(8).unwrap().iter().map(|closed| closed.last()));
+async fn gather(store: &LocalCell<MemDir>, taken: &mut Vec<u64>) {
+    store.flush().await.unwrap();
+    taken.extend(store.closed(8).await.unwrap().iter().map(|closed| closed.last()));
+    store.close_now().await.unwrap();
+    store.flush().await.unwrap();
+    taken.extend(store.closed(8).await.unwrap().iter().map(|closed| closed.last()));
 }
 
 /// One run of writes filling segments, and a commit after, which closes them, sealing in them what
@@ -1102,25 +1221,32 @@ fn gather(store: &LocalCell<MemDir>, taken: &mut Vec<u64>) {
 /// framing of the segments filled that waited for a commit after, which may never come, would
 /// leave the uploader without them (TASK-150.2, TASK-153.8).
 fn uploading_what_a_spanning_commit_closed() {
-    let dir = MemDir::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
-    let store = Arc::new(LocalCell::create(dir, description, ROLLING).unwrap());
-    store.write(extent(1), 0, &pattern(1, BLOCK)).unwrap();
-    store.commit(None).unwrap();
-    let writer = {
-        let store = store.clone();
-        thread::spawn(move || {
-            for sequence in 2..9 {
-                store.write(extent(sequence), 0, &pattern(sequence as u8, 2 * BLOCK)).unwrap();
-            }
-            store.commit_ordered(None).unwrap();
-        })
-    };
-    let mut taken = Vec::new();
-    gather(&store, &mut taken);
-    writer.join().unwrap();
-    gather(&store, &mut taken);
-    assert_eq!(taken.last(), Some(&2), "no commit's segment reached the uploader: {taken:?}");
+    block_on(async {
+        let dir = MemDir::new();
+        let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
+        let store = Arc::new(LocalCell::create(dir, description, ROLLING).unwrap());
+        store.write(extent(1), 0, &pattern(1, BLOCK)).await.unwrap();
+        store.commit(None).await.unwrap();
+        let writer = {
+            let store = store.clone();
+            thread::spawn(move || {
+                block_on(async move {
+                    for sequence in 2..9 {
+                        store
+                            .write(extent(sequence), 0, &pattern(sequence as u8, 2 * BLOCK))
+                            .await
+                            .unwrap();
+                    }
+                    store.commit_ordered(None).await.unwrap();
+                })
+            })
+        };
+        let mut taken = Vec::new();
+        gather(&store, &mut taken).await;
+        writer.join().unwrap();
+        gather(&store, &mut taken).await;
+        assert_eq!(taken.last(), Some(&2), "no commit's segment reached the uploader: {taken:?}");
+    })
 }
 
 /// One run of a guest's requests while the flush of a commit, its record appended to the open
@@ -1129,26 +1255,28 @@ fn uploading_what_a_spanning_commit_closed() {
 /// writes, reads and commits meanwhile; Shuttle, whose waits that can't end are deadlocks it
 /// reports, finds so. Both commits are durable after, in their order.
 fn serving_during_a_flush() {
-    let dir = Stalling::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
-    let store = Arc::new(LocalCell::create(dir.clone(), description, OPTIONS).unwrap());
-    store.write(extent(1), 0, &pattern(1, BLOCK)).unwrap();
-    dir.arm(Op::Barrier, "");
-    let committing = {
-        let store = store.clone();
-        thread::spawn(move || store.commit(None).unwrap())
-    };
-    dir.wait_until_stalled();
-    store.write(extent(2), 0, &pattern(2, BLOCK)).unwrap();
-    check_flushed(&store, "a read while a flush syncs");
-    store.commit_ordered(None).unwrap();
-    dir.let_go(Ok(()));
-    committing.join().unwrap();
-    store.flush().unwrap();
-    drop(store);
-    let reopened = LocalCell::open(dir, OPTIONS).unwrap();
-    assert_eq!(reopened.last_commit().unwrap(), 2, "the commits made durable were not");
-    check_flushed(&reopened, "the cell opened again");
+    block_on(async {
+        let dir = Stalling::new();
+        let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
+        let store = Arc::new(LocalCell::create(dir.clone(), description, OPTIONS).unwrap());
+        store.write(extent(1), 0, &pattern(1, BLOCK)).await.unwrap();
+        dir.arm(Op::Barrier, "");
+        let committing = {
+            let store = store.clone();
+            thread::spawn(move || block_on(async move { store.commit(None).await.unwrap() }))
+        };
+        dir.wait_until_stalled();
+        store.write(extent(2), 0, &pattern(2, BLOCK)).await.unwrap();
+        check_flushed(&store, "a read while a flush syncs");
+        store.commit_ordered(None).await.unwrap();
+        dir.let_go(Ok(()));
+        committing.join().unwrap();
+        store.flush().await.unwrap();
+        drop(store);
+        let reopened = LocalCell::open(dir, OPTIONS).unwrap();
+        assert_eq!(reopened.last_commit().unwrap(), 2, "the commits made durable were not");
+        check_flushed(&reopened, "the cell opened again");
+    })
 }
 
 /// One run of a flush, an uploader's, of a commit only ordered, stalled at its barrier, as a
@@ -1157,21 +1285,23 @@ fn serving_during_a_flush() {
 /// it, the daemon's turn, finding none, told the guest of it as durable, and a daemon killed then
 /// lost it (GCE r717's crash-dax-daemon-killed, TASK-165.9).
 fn pending_during_a_flush() {
-    let dir = Stalling::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
-    let store = Arc::new(LocalCell::create(dir.clone(), description, OPTIONS).unwrap());
-    store.write(extent(1), 0, &pattern(1, BLOCK)).unwrap();
-    store.commit_ordered(None).unwrap();
-    dir.arm(Op::Barrier, "");
-    let flushing = {
-        let store = store.clone();
-        thread::spawn(move || store.flush().unwrap())
-    };
-    dir.wait_until_stalled();
-    assert!(store.flush_pending(), "a commit a flush in flight took is not pending");
-    dir.let_go(Ok(()));
-    flushing.join().unwrap();
-    assert!(!store.flush_pending(), "a commit made durable is pending");
+    block_on(async {
+        let dir = Stalling::new();
+        let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
+        let store = Arc::new(LocalCell::create(dir.clone(), description, OPTIONS).unwrap());
+        store.write(extent(1), 0, &pattern(1, BLOCK)).await.unwrap();
+        store.commit_ordered(None).await.unwrap();
+        dir.arm(Op::Barrier, "");
+        let flushing = {
+            let store = store.clone();
+            thread::spawn(move || block_on(async move { store.flush().await.unwrap() }))
+        };
+        dir.wait_until_stalled();
+        assert!(store.flush_pending(), "a commit a flush in flight took is not pending");
+        dir.let_go(Ok(()));
+        flushing.join().unwrap();
+        assert!(!store.flush_pending(), "a commit made durable is pending");
+    })
 }
 
 /// One run of a flush, as a daemon's turn makes its guests' commits durable, while the framing of
@@ -1183,24 +1313,26 @@ fn pending_during_a_flush() {
 /// flush that waits. A crash then recovers both commits, closing both segments again from their
 /// logs, the one being framed and the open one.
 fn flushing_during_a_framing() {
-    let (dir, store) = framing_stalls();
-    let closing = spawn_closing(&store);
-    dir.wait_until_stalled();
-    store.write(extent(2), 0, &pattern(2, BLOCK)).unwrap();
-    store.commit_ordered(None).unwrap();
-    store.flush().unwrap();
-    assert!(!store.flush_pending(), "a commit flushed during a framing is pending");
-    for seed in 0..4 {
-        let crashed = LocalCell::open(dir.crash(seed), OPTIONS).unwrap();
-        assert_eq!(
-            crashed.last_commit().unwrap(),
-            2,
-            "a crash during a framing lost a commit flushed"
-        );
-        check_flushed(&crashed, "a crash during a framing");
-    }
-    dir.let_go(Ok(()));
-    closing.join().unwrap();
+    block_on(async {
+        let (dir, store) = framing_stalls().await;
+        let closing = spawn_closing(&store);
+        dir.wait_until_stalled();
+        store.write(extent(2), 0, &pattern(2, BLOCK)).await.unwrap();
+        store.commit_ordered(None).await.unwrap();
+        store.flush().await.unwrap();
+        assert!(!store.flush_pending(), "a commit flushed during a framing is pending");
+        for seed in 0..4 {
+            let crashed = LocalCell::open(dir.crash(seed), OPTIONS).unwrap();
+            assert_eq!(
+                crashed.last_commit().unwrap(),
+                2,
+                "a crash during a framing lost a commit flushed"
+            );
+            check_flushed(&crashed, "a crash during a framing");
+        }
+        dir.let_go(Ok(()));
+        closing.join().unwrap();
+    })
 }
 
 /// Reads extents 1 and 2 of a store [`serving_during_a_flush`] wrote, through `store`, which must

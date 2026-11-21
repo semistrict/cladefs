@@ -687,8 +687,8 @@ fn one_mount_attaches_and_detaches_many_stores() {
 /// (TASK-475.2): a VM process's store closed, its last commit durable; the mount gone, its
 /// cell's write written back and uploaded, so that a later placement's daemon, with none of the
 /// stores, attaches the cell from the bucket and reads it; the daemon exits 0.
-#[test]
-fn sigterm_drains_vms_stores_and_the_mount_of_cells() {
+#[tokio::test(flavor = "multi_thread")]
+async fn sigterm_drains_vms_stores_and_the_mount_of_cells() {
     let dir = tempfile::tempdir().unwrap();
     let bucket = dir.path().join("bucket");
     let first = dir.path().join("first");
@@ -707,10 +707,7 @@ fn sigterm_drains_vms_stores_and_the_mount_of_cells() {
     terminate(child, &m);
     drop(vm);
     assert_eq!(
-        local_cell::upload::wait_on(cladefs::OpenCell::open(first.join("vm")))
-            .unwrap()
-            .root()
-            .unwrap(),
+        cladefs::OpenCell::open(first.join("vm")).await.unwrap().root().unwrap(),
         b"vm drained"
     );
 

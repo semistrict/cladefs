@@ -93,7 +93,9 @@ impl Pool {
     }
 
     /// cladefs: runs `work` on a thread of the pool, as [`Pool::run`] runs a job, and returns what it
-    /// returns, once it has, holding no thread while it waits: none if it panicked or could not start.
+    /// returns, once it has, holding no thread while it waits: none if it panicked or could not
+    /// start. The tests' way to see what a job did (TASK-92.49, TASK-522).
+    #[cfg(test)]
     pub(super) async fn call<T: Send + 'static>(
         &'static self,
         work: impl FnOnce() -> T + Send + 'static,

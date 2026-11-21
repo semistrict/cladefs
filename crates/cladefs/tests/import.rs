@@ -743,8 +743,8 @@ fn deep_images_make_stores_on_a_daemons_thread() {
 /// bucket its description names, its own beside it, as an image's does. Opened so, it had none,
 /// and the fork failed (`ENOTSUP`, GCE r701). The fork holds the image's files, read from the
 /// bucket, and the base is as it was.
-#[test]
-fn stores_made_of_images_fork_where_no_daemon_is() {
+#[tokio::test(flavor = "multi_thread")]
+async fn stores_made_of_images_fork_where_no_daemon_is() {
     let dir = tempfile::tempdir().unwrap();
     let layout = dir.path().join("image");
     let image = layer(&[Entry::new("etc/motd", Kind::File(b"forked\n"))]).unwrap();
@@ -753,8 +753,8 @@ fn stores_made_of_images_fork_where_no_daemon_is() {
     block_on(cladefs::import::store(&base, STORAGE_SIZE, &layout, Some("fork:1"))).unwrap();
     let manifest = store_manifest(&base);
     let fork = dir.path().join("fork");
-    let base_store = local_cell::upload::wait_on(cladefs::OpenCell::open(&base)).unwrap();
-    local_cell::upload::wait_on(base_store.fork(&fork, base_store.cell().tenant)).unwrap();
+    let base_store = cladefs::OpenCell::open(&base).await.unwrap();
+    base_store.fork(&fork, base_store.cell().tenant).await.unwrap();
     drop(base_store);
     assert_eq!(store_manifest(&fork), manifest);
     assert_eq!(store_manifest(&base), manifest);

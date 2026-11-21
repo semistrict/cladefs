@@ -24,15 +24,15 @@ fn extent(sequence: u64) -> ExtentId {
 }
 
 /// The nanoseconds a call of `call` took, on average, over `calls` calls.
-fn timed(calls: u64, mut call: impl FnMut()) -> f64 {
+async fn timed(calls: u64, call: impl AsyncFnOnce()) -> f64 {
     let started = Instant::now();
-    call();
+    call().await;
     started.elapsed().as_nanos() as f64 / calls as f64
 }
 
-#[test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "a benchmark: --run-ignored only, in release"]
-fn hot_paths() {
+async fn hot_paths() {
     let temp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let description = Description { block_size: BLOCK as u32, capacity: 4 << 30, cell: CELL };
     let dir = HostDir::new(temp.path()).unwrap();
@@ -40,49 +40,54 @@ fn hot_paths() {
     let data = vec![7u8; BLOCK];
     // Held: 1..=EXTENTS; kept, freed: EXTENTS+1..=2*EXTENTS, their numbers spent.
     for sequence in 1..=2 * EXTENTS {
-        store.write(extent(sequence), 0, &data).unwrap();
+        store.write(extent(sequence), 0, &data).await.unwrap();
         if sequence % 1000 == 0 {
-            store.commit(None).unwrap();
+            store.commit(None).await.unwrap();
         }
     }
     for sequence in EXTENTS + 1..=2 * EXTENTS {
         store.free(extent(sequence)).unwrap();
     }
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     let view = store.view();
     let held = || (1..=EXTENTS).map(extent);
     let mut results = Vec::new();
     for _ in 0..ROUNDS {
-        let locate = timed(EXTENTS, || {
+        let locate = timed(EXTENTS, async || {
             for extent in held() {
                 store.locate(extent, 0, BLOCK as u64).unwrap();
             }
-        });
-        let viewed = timed(EXTENTS, || {
+        })
+        .await;
+        let viewed = timed(EXTENTS, async || {
             for extent in held() {
                 store.locate_view(&view, extent, 0, BLOCK as u64).unwrap();
             }
-        });
+        })
+        .await;
         // Refused: sealed, or spent, as a write to a sealed extent is.
-        let refused = timed(2 * EXTENTS, || {
+        let refused = timed(2 * EXTENTS, async || {
             for sequence in 1..=2 * EXTENTS {
-                assert!(store.begin_write(extent(sequence), 0, BLOCK as u64).is_err());
+                assert!(store.begin_write(extent(sequence), 0, BLOCK as u64).await.is_err());
             }
-        });
+        })
+        .await;
         results.push((locate, viewed, refused));
     }
     // Writes of new extents, opened and finished, and frees of them, open: once each.
     let first = 2 * EXTENTS + 1;
-    let written = timed(EXTENTS, || {
+    let written = timed(EXTENTS, async || {
         for sequence in first..first + EXTENTS {
-            store.write(extent(sequence), 0, &data).unwrap();
+            store.write(extent(sequence), 0, &data).await.unwrap();
         }
-    });
-    let freed = timed(EXTENTS, || {
+    })
+    .await;
+    let freed = timed(EXTENTS, async || {
         for sequence in first..first + EXTENTS {
             store.free(extent(sequence)).unwrap();
         }
-    });
+    })
+    .await;
     let best =
         |pick: fn(&(f64, f64, f64)) -> f64| results.iter().map(pick).fold(f64::INFINITY, f64::min);
     eprintln!(

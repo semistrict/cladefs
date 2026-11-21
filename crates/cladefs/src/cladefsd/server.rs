@@ -672,7 +672,7 @@ impl Connection {
 async fn finish_connection(connection: Arc<Connection>) {
     if let (Some(hold), Some(store)) = (connection.hold(), connection.store()) {
         // cladefs: its disk work off the runtime's threads (doc-24, step 9).
-        if let Err(err) = local_cell::upload::blocking(|| store.flush()) {
+        if let Err(err) = local_cell::upload::blocking(|| store.flush()).await {
             log::error!("cladefsd: making a store's last commits durable: {err:?}");
         }
         // cladefs: what it wrote since its last commit no next writer knows of, nor takes over.
@@ -2097,8 +2097,8 @@ impl Drop for TransferArea {
 }
 
 /// cladefs: makes `store`'s commits durable within [`FLUSH_EVERY`] of being ordered, until
-/// `stopped` says to stop: on the daemon's runtime, flushing on the threads every store's flushes
-/// share ([`FLUSHERS`]). It takes a thread only to flush. Looking at every turn, every store open
+/// `stopped` says to stop: on the daemon's runtime, [`FLUSHES`] stores' flushes at once
+/// ([`FLUSH_TURNS`]), each holding its thread only for its syncs (TASK-685.17). Looking at every turn, every store open
 /// took a blocking thread at every turn, which hundreds of stores, their turns coming at once,
 /// kept as many of, each idle for a while after (TASK-34). And so did their flushes, every
 /// store's whose guest committed, on the runtime's blocking threads (TASK-92.49): no more threads
@@ -2111,18 +2111,21 @@ async fn flush_behind(store: Arc<OpenCell>, mut stopped: tokio::sync::oneshot::R
             store.flush_turned();
             continue;
         }
-        let behind = store.clone();
-        let flushed = FLUSHERS
-            .get()
-            .call(move || if behind.flush_pending() { behind.flush() } else { Ok(()) });
-        match flushed.await {
-            Some(Ok(())) => store.flush_turned(),
-            Some(Err(err)) => {
+        let flushed = async {
+            let _turn = FLUSH_TURNS.get().acquire().await.expect("never closed");
+            match store.flush_pending() {
+                true => store.flush().await,
+                false => Ok(()),
+            }
+        };
+        match futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(flushed)).await {
+            Ok(Ok(())) => store.flush_turned(),
+            Ok(Err(err)) => {
                 log::error!("cladefsd: making a store's commits durable: {err:?}");
                 break;
             }
-            // Its panic logged, which went through the store (TASK-153.16).
-            None => {
+            // Its panic went through the store (TASK-153.16).
+            Err(_) => {
                 store.halt(|| "a panic making its commits durable".into());
                 break;
             }
@@ -2130,7 +2133,8 @@ async fn flush_behind(store: Arc<OpenCell>, mut stopped: tokio::sync::oneshot::R
     }
 }
 
-/// cladefs: how many threads every store's flushes run on, at most ([`flush_behind`], TASK-92.49): as many syncs at once as a host's disk
+/// cladefs: how many stores' flushes run at once, at most ([`flush_behind`], TASK-92.49), each on a
+/// thread of the runtime's for its syncs alone (TASK-685.17): as many syncs at once as a host's disk
 /// takes, those past them waiting a few milliseconds for their turn, holding no thread; and the
 /// 15 a flush of many files syncs them on beside its own, which every flush shares
 /// (`local_cell`'s `HELPERS`), 47 threads at most at once, those 15 none once idle. A
@@ -2142,8 +2146,8 @@ async fn flush_behind(store: Arc<OpenCell>, mut stopped: tokio::sync::oneshot::R
 pub(super) const FLUSHES: usize = 32;
 
 node_local::node_local! {
-    /// cladefs: the threads stores' flushes run on ([`FLUSHES`]).
-    static FLUSHERS: Pool = Pool::new("cladefsd flush", FLUSHES);
+    /// cladefs: the turns stores' flushes take, [`FLUSHES`] at once.
+    static FLUSH_TURNS: tokio::sync::Semaphore = tokio::sync::Semaphore::new(FLUSHES);
 }
 
 /// cladefs: tells the VM process at the other end of `sender` of each commit of its follower's

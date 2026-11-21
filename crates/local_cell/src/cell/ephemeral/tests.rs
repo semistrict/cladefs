@@ -69,9 +69,9 @@ fn open(dir: &MemDir) -> LocalCell<MemDir> {
 }
 
 /// Writes and commits the child's extent `sequence`, a block of `byte`s.
-fn commit(store: &LocalCell<MemDir>, sequence: u64, byte: u8) {
-    store.write(own(sequence), 0, &[byte; BLOCK]).unwrap();
-    store.commit(None).unwrap();
+async fn commit(store: &LocalCell<MemDir>, sequence: u64, byte: u8) {
+    store.write(own(sequence), 0, &[byte; BLOCK]).await.unwrap();
+    store.commit(None).await.unwrap();
 }
 
 /// What the child's extent `sequence` holds: a block of one byte, or none.
@@ -101,8 +101,8 @@ fn allocated(dir: &MemDir, number: u64) -> u64 {
 /// An ephemeral cell reads its parent's extents in the bucket, and its own here; its segments
 /// close raw, never framed, and a checkpoint covers them once eight are closed, moving them to
 /// `kept/`, its local checkpoint naming them; it reopens as it was.
-#[test]
-fn an_ephemeral_cell_keeps_its_segments_raw_and_checkpoints_them() {
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ephemeral_cell_keeps_its_segments_raw_and_checkpoints_them() {
     let dir = MemDir::new();
     make(&dir);
     let store = open(&dir);
@@ -113,14 +113,14 @@ fn an_ephemeral_cell_keeps_its_segments_raw_and_checkpoints_them() {
     let in_bucket = read.downcast::<BucketData>().unwrap();
     assert_eq!(in_bucket.location.key, "parent/segment");
     for sequence in 0..7 {
-        commit(&store, sequence, sequence as u8 + 1);
+        commit(&store, sequence, sequence as u8 + 1).await;
     }
     assert_eq!(numbers(&dir, SEGMENTS), Vec::<u64>::new(), "nothing framed");
     assert_eq!(numbers(&dir, KEPT), Vec::<u64>::new(), "seven closed: no checkpoint yet");
     // Those of the seven closed and the open one's; the next one's, if prepared ahead yet.
     let logs = numbers(&dir, LOGS);
     assert_eq!(logs[..8], (0..8).collect::<Vec<_>>(), "{logs:?}");
-    commit(&store, 7, 8);
+    commit(&store, 7, 8).await;
     assert_eq!(numbers(&dir, KEPT), (0..8).collect::<Vec<_>>(), "eight closed: covered");
     for kind in [LOGS, OPEN_SEGMENTS] {
         let left = numbers(&dir, kind);
@@ -145,23 +145,23 @@ fn an_ephemeral_cell_keeps_its_segments_raw_and_checkpoints_them() {
 /// What a checkpoint covers of frees gives back the runs of the extents freed, in their kept
 /// segments, which then take less of the disk; a kept segment no extent is in any more goes; a
 /// freed extent of the parent's is the bucket's no more.
-#[test]
-fn checkpoints_give_back_what_was_freed() {
+#[tokio::test(flavor = "multi_thread")]
+async fn checkpoints_give_back_what_was_freed() {
     let dir = MemDir::new();
     make(&dir);
     let store = open(&dir);
     for sequence in 0..8 {
-        commit(&store, sequence, 1);
+        commit(&store, sequence, 1).await;
     }
     assert_eq!(numbers(&dir, KEPT), (0..8).collect::<Vec<_>>());
     let whole = allocated(&dir, 0);
     assert!(whole >= BLOCK as u64, "a kept segment holds its block: {whole}");
     store.free(own(0)).unwrap();
     store.free(inherited()).unwrap();
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     // Eight more closed, the first with the commit freeing, all covered by the next checkpoint.
     for sequence in 8..16 {
-        commit(&store, sequence, 2);
+        commit(&store, sequence, 2).await;
     }
     assert_eq!(byte_of(&store, 0), None);
     assert!(!numbers(&dir, KEPT).contains(&0), "segment 0 held extent 0 alone: it goes");
@@ -181,8 +181,8 @@ fn checkpoints_give_back_what_was_freed() {
 
 /// A run freed in a kept segment that still holds others is given back alone: the segment takes
 /// less of the disk, and its other extents read as they were.
-#[test]
-fn a_kept_segment_gives_back_a_run_alone() {
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kept_segment_gives_back_a_run_alone() {
     let dir = MemDir::new();
     make(&dir);
     let options = Options { segment_size: 4 * BLOCK as u64, ..Options::default() };
@@ -192,14 +192,14 @@ fn a_kept_segment_gives_back_a_run_alone() {
     store.made().unwrap();
     // Four extents a segment, eight segments.
     for sequence in 0..32 {
-        commit(&store, sequence, sequence as u8);
+        commit(&store, sequence, sequence as u8).await;
     }
     assert!(numbers(&dir, KEPT).contains(&0));
     let before = allocated(&dir, 0);
     store.free(own(1)).unwrap();
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     for sequence in 32..64 {
-        commit(&store, sequence, sequence as u8);
+        commit(&store, sequence, sequence as u8).await;
     }
     let after = allocated(&dir, 0);
     assert_eq!(after, before - BLOCK as u64, "extent 1's run given back");
@@ -211,13 +211,13 @@ fn a_kept_segment_gives_back_a_run_alone() {
 
 /// Closing it covers every closed segment, however few: its next opening replays the open
 /// segment's log alone.
-#[test]
-fn closing_covers_every_closed_segment() {
+#[tokio::test(flavor = "multi_thread")]
+async fn closing_covers_every_closed_segment() {
     let dir = MemDir::new();
     make(&dir);
     let store = open(&dir);
     for sequence in 0..3 {
-        commit(&store, sequence, 9);
+        commit(&store, sequence, 9).await;
     }
     assert_eq!(numbers(&dir, KEPT), Vec::<u64>::new());
     drop(store);
@@ -232,8 +232,8 @@ fn closing_covers_every_closed_segment() {
 /// the disk fails after `n` operations, for every `n` through a run of checkpoints, the directory
 /// is left as a crash would leave it, and the store opened again holds each extent whose commit
 /// returned, and none torn.
-#[test]
-fn crashes_at_every_step_keep_what_was_committed() {
+#[tokio::test(flavor = "multi_thread")]
+async fn crashes_at_every_step_keep_what_was_committed() {
     for fail_after in 1..400 {
         let dir = MemDir::new();
         make(&dir);
@@ -241,7 +241,7 @@ fn crashes_at_every_step_keep_what_was_committed() {
         dir.fail_after(Some(fail_after));
         let mut committed = BTreeMap::new();
         for sequence in 0..20u64 {
-            let written = store.write(own(sequence), 0, &[sequence as u8 + 1; BLOCK]);
+            let written = store.write(own(sequence), 0, &[sequence as u8 + 1; BLOCK]).await;
             let freed = match sequence {
                 12 => store.free(own(3)),
                 _ => Ok(()),
@@ -250,7 +250,11 @@ fn crashes_at_every_step_keep_what_was_committed() {
             if sequence == 12 {
                 committed.remove(&3);
             }
-            if written.and(freed).and_then(|()| store.commit(None)).is_err() {
+            let changed = match written.and(freed) {
+                Ok(()) => store.commit(None).await,
+                failed => failed,
+            };
+            if changed.is_err() {
                 break;
             }
             committed.insert(sequence, sequence as u8 + 1);

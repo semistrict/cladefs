@@ -41,9 +41,9 @@ fn delta(before: Written, after: Written) -> Written {
 }
 
 /// Writes `data` to `extent` of `store` as a guest's VM process does, [`WRITE`] bytes a request.
-fn write(store: &OpenCell, extent: ExtentId, data: &[u8]) {
+async fn write(store: &OpenCell, extent: ExtentId, data: &[u8]) {
     for (at, piece) in data.chunks(WRITE).enumerate() {
-        store.write(extent, (at * WRITE) as u64, &[VolatileSlice::from(piece)]).unwrap();
+        store.write(extent, (at * WRITE) as u64, &[VolatileSlice::from(piece)]).await.unwrap();
     }
 }
 
@@ -88,14 +88,14 @@ fn framing_overhead(len: u64) -> u64 {
 /// written, as none of its parts compresses (TASK-310). And
 /// (Linux) what its process had the kernel write to its disk is what the store says it wrote, each
 /// write a page more than its bytes at most: nothing written twice uncounted.
-#[test]
-fn a_hosts_store_writes_what_its_design_says() {
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hosts_store_writes_what_its_design_says() {
     // cladefs: at the shell's limit of open files, not the daemon's: a burst's extents spilled to
     // raw files of their own held two each till its commit, past 1,024 (TASK-332).
     let dir = tempfile::tempdir().unwrap();
     let bucket =
         Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), "cells"));
-    let store = kept_in(dir.path().join("store"), (4 << 30, None), &bucket, idle()).unwrap();
+    let store = kept_in(dir.path().join("store"), (4 << 30, None), &bucket, idle()).await.unwrap();
     let options = crate::host_cell::options();
     let cell = store.cell();
     let mut sequence = 0;
@@ -118,12 +118,12 @@ fn a_hosts_store_writes_what_its_design_says() {
     let (before, cpu_before) = (local_cell::written(), cpu());
     for _ in 0..BURSTS {
         for at in 0..extents_per_burst {
-            write(&store, next(), &data[at % data.len()]);
+            write(&store, next(), &data[at % data.len()]).await;
         }
-        local_cell::upload::wait_on(store.commit_local(None)).unwrap();
+        store.commit_local(None).await.unwrap();
     }
     // The last commit's copies framed too, as the open segment closes for its upload.
-    local_cell::upload::wait_on(store.frame_open_segment()).unwrap();
+    store.frame_open_segment().await.unwrap();
     let (large, large_cpu) = (delta(before, local_cell::written()), cpu() - cpu_before);
 
     // The small files: 2,000 of 8 KiB, which compress, four commits of 500.
@@ -134,12 +134,12 @@ fn a_hosts_store_writes_what_its_design_says() {
         for file in 0..SMALL_FILES / 4 {
             let seed = (commit * SMALL_FILES + file) as u8;
             let data: Vec<u8> = (0..SMALL_FILE).map(|i| seed ^ (i % 251) as u8).collect();
-            write(&store, next(), &data);
+            write(&store, next(), &data).await;
         }
-        local_cell::upload::wait_on(store.commit_local(None)).unwrap();
+        store.commit_local(None).await.unwrap();
     }
     // Their segment framed, as it closes for its upload.
-    local_cell::upload::wait_on(store.frame_open_segment()).unwrap();
+    store.frame_open_segment().await.unwrap();
     let small = delta(before, local_cell::written());
 
     // The large extents: 4 of 8 MiB, which don't compress, each reaching past
@@ -152,12 +152,12 @@ fn a_hosts_store_writes_what_its_design_says() {
     for seed in 0..LARGE_EXTENTS {
         let (extent, data) = (next(), noise(16 + seed as u64, large_extent));
         let (first, last) = data.split_at(large_extent - WRITE);
-        store.write(extent, first.len() as u64, &[VolatileSlice::from(last)]).unwrap();
-        write(&store, extent, first);
+        store.write(extent, first.len() as u64, &[VolatileSlice::from(last)]).await.unwrap();
+        write(&store, extent, first).await;
         tails += framing_overhead(large_extent as u64)
             + bucket_cell::layout::encode(&extent).len() as u64;
     }
-    local_cell::upload::wait_on(store.commit_local(None)).unwrap();
+    store.commit_local(None).await.unwrap();
     let own = delta(before, local_cell::written());
 
     let guests = (BURSTS as usize * BURST) as u64;

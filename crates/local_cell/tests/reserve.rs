@@ -65,7 +65,7 @@ impl Guest {
 
     /// Does a guest's next thing to `store`: writes small and large, sparse or not, to a new extent
     /// or one open; commits; frees; closes the open segment. Returns what a write was refused by.
-    fn step(&mut self, store: &LocalCell<MemDir>) -> Option<DiskFull> {
+    async fn step(&mut self, store: &LocalCell<MemDir>) -> Option<DiskFull> {
         let rng = &mut self.rng;
         match rng.random_range(0..10) {
             0..6 => {
@@ -79,13 +79,15 @@ impl Guest {
                 };
                 let offset = rng.random_range(0..8) * BLOCK;
                 let written = data(rng, blocks * BLOCK);
-                if let Err(err) = store.write(ExtentId::new(CELL.id, sequence), offset, &written) {
+                if let Err(err) =
+                    store.write(ExtentId::new(CELL.id, sequence), offset, &written).await
+                {
                     return Some(*err.downcast_ref::<DiskFull>().expect("refused for room alone"));
                 }
                 let end = self.open.entry(sequence).or_insert(0);
                 *end = (*end).max(offset + blocks * BLOCK);
             }
-            6 | 7 => self.commit(store),
+            6 | 7 => self.commit(store).await,
             8 if !self.sealed.is_empty() => {
                 let sequence = self.sealed.swap_remove(rng.random_range(0..self.sealed.len()));
                 store.free(ExtentId::new(CELL.id, sequence)).unwrap();
@@ -95,8 +97,8 @@ impl Guest {
         None
     }
 
-    fn commit(&mut self, store: &LocalCell<MemDir>) {
-        store.commit(None).unwrap();
+    async fn commit(&mut self, store: &LocalCell<MemDir>) {
+        store.commit(None).await.unwrap();
         self.sealed.extend(std::mem::take(&mut self.open).into_keys());
     }
 }
@@ -109,15 +111,15 @@ fn store(dir: &MemDir) -> LocalCell<MemDir> {
 
 /// Runs a store's own work to its end, as if its guest wrote nothing more: what it took at its
 /// peak past what it took before.
-fn drain(store: &LocalCell<MemDir>, dir: &MemDir) -> u64 {
+async fn drain(store: &LocalCell<MemDir>, dir: &MemDir) -> u64 {
     let footprint = dir.footprint();
     let before = footprint.bytes();
     footprint.take_peak();
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     store.close_segment().unwrap();
-    store.commit(None).unwrap();
-    store.wait_framed().unwrap();
-    store.flush().unwrap();
+    store.commit(None).await.unwrap();
+    store.wait_framed().await.unwrap();
+    store.flush().await.unwrap();
     footprint.take_peak() - before
 }
 
@@ -126,20 +128,20 @@ fn drain(store: &LocalCell<MemDir>, dir: &MemDir) -> u64 {
 /// large extents in raw files of their own. The worst found, with its reserve's constant, was
 /// 1.08 times its unframed and open bytes (`host_disk::RESERVE_FACTOR`); and its footprint counts
 /// its open extents as its guest wrote them.
-#[test]
-fn a_stores_own_work_grows_it_within_its_reserve() {
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stores_own_work_grows_it_within_its_reserve() {
     let mut worst: f64 = 0.0;
     for seed in 0..100 {
         let dir = MemDir::new();
         let store = store(&dir);
         let mut guest = Guest::new(seed);
         for at in 0..200 {
-            assert_eq!(guest.step(&store), None);
+            assert_eq!(guest.step(&store).await, None);
             let footprint = dir.footprint();
             assert_eq!(footprint.open(), guest.open.values().sum::<u64>(), "seed {seed}, {at}");
             if guest.rng.random_range(0..8) == 0 {
                 let reserved = footprint.reserved();
-                let grew = drain(&store, &dir);
+                let grew = drain(&store, &dir).await;
                 assert!(grew <= reserved, "seed {seed}, {at}: grew {grew}, reserved {reserved}");
                 worst = worst.max(grew as f64 / reserved as f64);
                 guest.sealed.extend(std::mem::take(&mut guest.open).into_keys());
@@ -159,8 +161,8 @@ const RECORDS: u64 = 256 << 10;
 /// for commits' records ([`RECORDS`]), refuses its guests' writes, with `DiskFull`, before its own
 /// `ENOSPC`: every commit, closing, framing and flush finds room, and the store goes on, over many
 /// lives.
-#[test]
-fn a_full_disk_refuses_guests_and_never_its_stores_own_work() {
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_disk_refuses_guests_and_never_its_stores_own_work() {
     for seed in 0..40 {
         let capacity = 2 << 20;
         let dir = MemDir::with_capacity(capacity);
@@ -169,13 +171,13 @@ fn a_full_disk_refuses_guests_and_never_its_stores_own_work() {
         let mut guest = Guest::new(seed);
         let mut refused = 0;
         for _ in 0..600 {
-            if guest.step(&store).is_some() {
+            if guest.step(&store).await.is_some() {
                 refused += 1;
-                guest.commit(&store);
-                store.flush().unwrap();
+                guest.commit(&store).await;
+                store.flush().await.unwrap();
             }
         }
-        drain(&store, &dir);
+        drain(&store, &dir).await;
         assert!(refused > 0, "seed {seed}: never full");
         assert!(dir.footprint().bytes() <= capacity, "seed {seed}");
     }

@@ -30,9 +30,8 @@ use crate::CellId;
 use crate::error::{Errno, Result};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
-use std::sync::{
-    Arc, LockResult, Mutex, MutexGuard, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak,
-};
+use std::sync::{Arc, LockResult, Mutex, MutexGuard, OnceLock, Weak};
+use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// Whether a store is halted, the errno its requests fail with, and why: by the first panic to go
 /// through it, or the first shredding of its tenant or cell its host is told of.
@@ -175,6 +174,9 @@ impl<T> CellMutex<T> {
 }
 
 /// A reader-writer lock of a store's, locked only through its halt, as a [`CellMutex`] is.
+/// cladefs: awaited, holding no thread while another holds it, and held across the store's own
+/// awaits, as its holders' work waits for the store's (TASK-685.18): tokio's, whose guards a task
+/// sends; poisoned never, a panic holding it halting the store as its guard drops.
 pub(crate) struct StoreRwLock<T> {
     /// What the store's log calls it.
     name: &'static str,
@@ -182,25 +184,25 @@ pub(crate) struct StoreRwLock<T> {
 }
 
 impl<T> StoreRwLock<T> {
-    pub(crate) const fn new(name: &'static str, value: T) -> Self {
+    pub(crate) fn new(name: &'static str, value: T) -> Self {
         Self { name, lock: RwLock::new(value) }
     }
 
     /// Locks it shared, for the store `halt` halts: `EIO` if it is halted. A panic holding it
     /// shared halts the store too, which poisons no reader-writer lock.
-    pub(crate) fn read<'a>(
+    pub(crate) async fn read<'a>(
         &'a self,
         halt: &'a Halt,
     ) -> Result<CellGuard<'a, RwLockReadGuard<'a, T>>> {
-        halt.guard(self.name, self.lock.read())
+        halt.guard(self.name, Ok(self.lock.read().await))
     }
 
     /// Locks it alone, for the store `halt` halts: `EIO` if it is halted.
-    pub(crate) fn write<'a>(
+    pub(crate) async fn write<'a>(
         &'a self,
         halt: &'a Halt,
     ) -> Result<CellGuard<'a, RwLockWriteGuard<'a, T>>> {
-        halt.guard(self.name, self.lock.write())
+        halt.guard(self.name, Ok(self.lock.write().await))
     }
 }
 
@@ -243,8 +245,8 @@ pub(crate) mod tests {
         assert!(panicked.is_err());
         assert!(halt.is_halted());
         assert_eq!(lock.lock(&halt).err(), Some(Errno::EIO));
-        assert_eq!(rw.read(&halt).err(), Some(Errno::EIO));
-        assert_eq!(rw.write(&halt).err(), Some(Errno::EIO));
+        assert_eq!(futures::executor::block_on(rw.read(&halt)).err(), Some(Errno::EIO));
+        assert_eq!(futures::executor::block_on(rw.write(&halt)).err(), Some(Errno::EIO));
         assert_eq!(halt.check(), Err(Errno::EIO));
         let unhalted = CellMutex::new("third", 3);
         assert_eq!(*unhalted.lock(&other).unwrap(), 3);
@@ -257,12 +259,13 @@ pub(crate) mod tests {
     fn a_panic_holding_a_lock_shared_halts_its_store() {
         let halt = Halt::new(Path::new("store"), crate::host_cell::new_alone());
         let rw = StoreRwLock::new("shared", ());
-        let panicked = std::panic::catch_unwind(|| {
-            let _guard = rw.read(&halt).unwrap();
+        // Its guard a tokio lock's, which is no `RefUnwindSafe`: the halt is what it checks.
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = futures::executor::block_on(rw.read(&halt)).unwrap();
             panic!("a bug, holding the lock shared");
-        });
+        }));
         assert!(panicked.is_err());
-        assert_eq!(rw.write(&halt).err(), Some(Errno::EIO));
+        assert_eq!(futures::executor::block_on(rw.write(&halt)).err(), Some(Errno::EIO));
     }
 
     /// A store's lock taken without a panic, and let go of, leaves it unhalted, however often.

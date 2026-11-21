@@ -782,7 +782,7 @@ impl Command {
                         "shrinking a store needs its guest to agree: resize it through the \
                          extent daemon serving its VM (CLADEFSD_GRPC)"
                     )),
-                    Ok(_) => store.set_capacity(capacity).map_err(anyhow::Error::from),
+                    Ok(_) => store.set_capacity(capacity).await.map_err(anyhow::Error::from),
                     Err(err) => Err(err.into()),
                 };
                 store.close().await;

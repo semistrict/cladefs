@@ -46,8 +46,8 @@ fn daemon(dir: &Path) -> (KillOnDrop, PathBuf) {
     (daemon, socket)
 }
 
-#[test]
-fn stores_open_whole_in_another_process_once_their_vm_goes() {
+#[tokio::test(flavor = "multi_thread")]
+async fn stores_open_whole_in_another_process_once_their_vm_goes() {
     let dir = tempfile::tempdir().unwrap();
     let (_daemon, socket) = daemon(dir.path());
     let path = dir.path().join("store");
@@ -66,7 +66,7 @@ fn stores_open_whole_in_another_process_once_their_vm_goes() {
             store.commit(Some(&root)).unwrap();
         }
         drop(store);
-        let opened = local_cell::upload::wait_on(OpenCell::open(&path)).unwrap();
+        let opened = OpenCell::open(&path).await.unwrap();
         assert_eq!(opened.root().unwrap(), root, "round {round}");
         sequence = opened.info().unwrap().next_sequence.max(sequence);
     }
@@ -76,8 +76,8 @@ fn stores_open_whole_in_another_process_once_their_vm_goes() {
 /// goes right after them opens in another process with every one of them, as the daemon makes
 /// them durable before letting the store go. The crash test's lost fsyncs (TASK-26.6.2) were its
 /// check opening the store before then, which recovered it as of the daemon's last flush.
-#[test]
-fn ordered_commits_are_whole_in_another_process_once_their_vm_goes() {
+#[tokio::test(flavor = "multi_thread")]
+async fn ordered_commits_are_whole_in_another_process_once_their_vm_goes() {
     let dir = tempfile::tempdir().unwrap();
     let (_daemon, socket) = daemon(dir.path());
     let path = dir.path().join("store");
@@ -94,14 +94,10 @@ fn ordered_commits_are_whole_in_another_process_once_their_vm_goes() {
             last.push((extent, data));
         }
         drop(store);
-        let opened = local_cell::upload::wait_on(OpenCell::open(&path)).unwrap();
+        let opened = OpenCell::open(&path).await.unwrap();
         for (extent, data) in &last {
             let mut read = vec![0; data.len()];
-            let found = local_cell::upload::wait_on(opened.read(
-                *extent,
-                0,
-                &mut [VolatileSliceMut::from(&mut read[..])],
-            ));
+            let found = opened.read(*extent, 0, &mut [VolatileSliceMut::from(&mut read[..])]).await;
             assert_eq!(found.map(|()| read), Ok(data.clone()), "round {round}: {extent:?}");
         }
         sequence = opened.info().unwrap().next_sequence.max(sequence);

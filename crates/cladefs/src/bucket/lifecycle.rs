@@ -349,18 +349,18 @@ impl Run {
     }
 
     /// Runs `operation` and returns what it asked of the bucket.
-    fn asked<T>(&self, operation: impl FnOnce() -> T) -> (T, Asked, Vec<Event>) {
+    async fn asked<T>(&self, operation: impl AsyncFnOnce() -> T) -> (T, Asked, Vec<Event>) {
         let from = self.log.events.lock().unwrap().len();
         let started = Instant::now();
-        let done = operation();
+        let done = operation().await;
         let wall = started.elapsed();
         let events = self.log.events.lock().unwrap()[from..].to_vec();
         (done, Asked::of(&events, wall), events)
     }
 
     /// Runs `operation`, a `phase`, and keeps what it asked of the bucket.
-    fn phase<T>(&mut self, phase: &'static str, operation: impl FnOnce() -> T) -> T {
-        let (done, asked, mut events) = self.asked(operation);
+    async fn phase<T>(&mut self, phase: &'static str, operation: impl AsyncFnOnce() -> T) -> T {
+        let (done, asked, mut events) = self.asked(operation).await;
         events.sort_by_key(|event| event.began);
         self.phases.push((phase, asked, events));
         done
@@ -401,18 +401,18 @@ impl Run {
 }
 
 /// Writes a block to a new extent of `store`'s and commits it, durable.
-fn write_and_commit(store: &OpenCell) {
+async fn write_and_commit(store: &OpenCell) {
     let info = store.info().unwrap();
     let sequence = info.next_sequence.max(info.sequence_floor);
     let extent = ExtentId { cell: store.cell().id, sequence };
     let data = pattern(sequence as u8, BLOCK);
-    store.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
-    local_cell::upload::wait_on(store.commit(None)).unwrap();
+    store.write(extent, 0, &[VolatileSlice::from(&data[..])]).await.unwrap();
+    store.commit(None).await.unwrap();
 }
 
 /// The store at `path`, opened, uploading only as a commit waits.
-fn open(path: &Path) -> OpenCell {
-    reopened(path, idle()).unwrap()
+async fn open(path: &Path) -> OpenCell {
+    reopened(path, idle()).await.unwrap()
 }
 
 /// A base of `extents` extents and a version of it, made on one host, kept in `objects`, and the
@@ -426,32 +426,27 @@ struct Made {
 
 impl Made {
     /// Makes them, their requests noted in `run`.
-    fn new(extents: u64, objects: &Arc<dyn ObjectStore>, run: &mut Run) -> Self {
+    async fn new(extents: u64, objects: &Arc<dyn ObjectStore>, run: &mut Run) -> Self {
         let dir = tempfile::tempdir().unwrap();
         // The host the base is made on, and its version: another's than the one measured.
         let elsewhere = Arc::new(ObjectBucket::new(objects.clone(), ""));
         let capacity = (8 * extents * BLOCK as u64).max(1 << 30);
         let made = dir.path().join("made");
         std::fs::create_dir(&made).unwrap();
-        let version = based(extents, &made, (capacity, &elsewhere), run);
+        let version = based(extents, &made, (capacity, &elsewhere), run).await;
         std::fs::create_dir(dir.path().join("host")).unwrap();
         Self { dir, version, capacity }
     }
 
     /// A copy of the version, made at `name` on the host measured, kept in `bucket`, and opened:
     /// as the daemon's `CreateCell` with a version, then the store's opening, make it.
-    fn copied(&self, bucket: &Arc<ObjectBucket>, name: &str) -> OpenCell {
+    async fn copied(&self, bucket: &Arc<ObjectBucket>, name: &str) -> OpenCell {
         let ((cell, version), capacity) = (self.version, self.capacity);
         let url = super::tests::url_of(bucket);
         let description = local_cell::Description { block_size: BLOCK as u32, capacity, cell };
         let kind = bucket_cell::cell::Kind::Fxfs;
         OpenCell::create_at_version(&self.at(name), (&url, kind), description, version).unwrap();
-        local_cell::upload::wait_on(OpenCell::take_with(
-            self.at(name),
-            (capacity, cell, None),
-            opening(),
-        ))
-        .unwrap()
+        OpenCell::take_with(self.at(name), (capacity, cell, None), opening()).await.unwrap()
     }
 
     /// The path of the store `name` on the host measured.
@@ -462,13 +457,13 @@ impl Made {
 
 /// Makes a base of `extents` extents, of `capacity` bytes, in `made` and kept in `bucket`, and a
 /// version of it, its requests noted in `run`, and returns the base's cell and the version.
-fn based(
+async fn based(
     extents: u64,
     made: &Path,
     (capacity, bucket): (u64, &Arc<ObjectBucket>),
     run: &mut Run,
 ) -> (CellId, u64) {
-    let base = kept_in(made.join("base"), (capacity, None), bucket, idle()).unwrap();
+    let base = kept_in(made.join("base"), (capacity, None), bucket, idle()).await.unwrap();
     run.names.name(base.cell(), "base");
     // Extents of one to four blocks, so that their lengths and places in their segments vary, as
     // an image's do: a checkpoint of extents all alike packs smaller than one of a real base.
@@ -476,17 +471,16 @@ fn based(
     for sequence in 1..=extents {
         let extent = ExtentId { cell: base.cell().id, sequence };
         let len = BLOCK * (1 + (sequence.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 62) as usize);
-        base.write(extent, 0, &[VolatileSlice::from(&blocks[..len])]).unwrap();
+        base.write(extent, 0, &[VolatileSlice::from(&blocks[..len])]).await.unwrap();
         if sequence % COMMIT_EVERY == 0 {
-            local_cell::upload::wait_on(base.commit(None)).unwrap();
+            base.commit(None).await.unwrap();
         }
     }
-    local_cell::upload::wait_on(base.commit(None)).unwrap();
+    base.commit(None).await.unwrap();
     drop(base);
-    let base = open(&made.join("base"));
-    let (version, asked, _) = run.asked(|| {
-        local_cell::upload::wait_on(base.uploaded_version_at(made.join("copy"))).unwrap()
-    });
+    let base = open(&made.join("base")).await;
+    let (version, asked, _) =
+        run.asked(async || base.uploaded_version_at(made.join("copy")).await.unwrap()).await;
     let line = asked.line(Duration::ZERO, &run.names);
     println!("SETUP extents={extents} version of the base: {line}");
     (base.cell(), version)
@@ -496,10 +490,10 @@ fn based(
 /// host does once, not for each restore: its conditional writes probed, a block of object IDs
 /// taken. Made so without the environment, which the base's stores' threads, and the S3 server's,
 /// may read meanwhile (TASK-444.16).
-fn host(bucket: &Arc<ObjectBucket>) {
+async fn host(bucket: &Arc<ObjectBucket>) {
     crate::host_cell::use_host_bucket(url_of(bucket));
-    local_cell::upload::block_on(bucket.probed(rand::random())).unwrap().unwrap();
-    local_cell::upload::wait_on(host_cell::new_cell(bucket, DEFAULT_TENANT)).unwrap();
+    bucket.probed(rand::random()).await.unwrap();
+    host_cell::new_cell(bucket, DEFAULT_TENANT).await.unwrap();
 }
 
 /// A bucket's objects in memory.
@@ -530,55 +524,50 @@ fn recorded(
 }
 
 /// The phases on a base of `extents` extents, each request `latency` late.
-fn lifecycle(extents: u64, latency: Duration) {
+async fn lifecycle(extents: u64, latency: Duration) {
     let (objects, mut run) = recorded(memory(), extents, latency);
-    let made = Made::new(extents, &objects, &mut run);
+    let made = Made::new(extents, &objects, &mut run).await;
     // The host measured: a bucket of its own over the same objects, which decoded nothing yet, and
     // directories of its own.
     let bucket = Arc::new(ObjectBucket::new(objects, ""));
-    host(&bucket);
+    host(&bucket).await;
     let at = |name: &str| made.at(name);
     run.late(true);
 
     // A restore on a host that never saw the version: a copy of it made, as the daemon's
     // `CreateCell` with a version does, opened, forked, the fork opened.
-    let taken = run.phase("cold copy-open", || made.copied(&bucket, "copy"));
-    let unwritten = run.phase("cold fork", || {
-        local_cell::upload::wait_on(taken.fork(at("cold"), DEFAULT_TENANT)).unwrap()
-    });
+    let taken = run.phase("cold copy-open", async || made.copied(&bucket, "copy").await).await;
+    let unwritten = run
+        .phase("cold fork", async || taken.fork(at("cold"), DEFAULT_TENANT).await.unwrap())
+        .await;
     run.names.name(unwritten, "cold-fork");
-    let cold = run.phase("cold fork-open", || open(&at("cold")));
+    let cold = run.phase("cold fork-open", async || open(&at("cold")).await).await;
     // And on one that has it open, as the daemon keeps a copy open for the restores after.
-    let fork = run.phase("warm fork", || {
-        local_cell::upload::wait_on(taken.fork(at("vm"), DEFAULT_TENANT)).unwrap()
-    });
+    let fork =
+        run.phase("warm fork", async || taken.fork(at("vm"), DEFAULT_TENANT).await.unwrap()).await;
     run.names.name(fork, "fork");
-    let vm = run.phase("warm fork-open", || open(&at("vm")));
+    let vm = run.phase("warm fork-open", async || open(&at("vm")).await).await;
 
-    run.phase("write-commit", || write_and_commit(&vm));
-    run.phase("close", || drop(vm));
-    let vm = run.phase("reopen", || open(&at("vm")));
-    run.phase("write-commit again", || write_and_commit(&vm));
-    let snapshot =
-        run.phase("snapshot", || local_cell::upload::wait_on(vm.make_version(None)).unwrap());
-    run.phase("drop snapshot", || {
-        local_cell::upload::wait_on(vm.drop_versions(&[snapshot].into())).unwrap()
-    });
-    run.phase("close after snapshot", || drop(vm));
-    let deleting = |name: &str| {
-        local_cell::upload::wait_on(host_cell::delete(&at(name), Some(&bucket), || Ok(1))).unwrap()
-    };
-    run.phase("delete", || deleting("vm"));
+    run.phase("write-commit", async || write_and_commit(&vm).await).await;
+    run.phase("close", async || drop(vm)).await;
+    let vm = run.phase("reopen", async || open(&at("vm")).await).await;
+    run.phase("write-commit again", async || write_and_commit(&vm).await).await;
+    let snapshot = run.phase("snapshot", async || vm.make_version(None).await.unwrap()).await;
+    run.phase("drop snapshot", async || vm.drop_versions(&[snapshot].into()).await.unwrap()).await;
+    run.phase("close after snapshot", async || drop(vm)).await;
+    let deleting =
+        async |name: &str| host_cell::delete(&at(name), Some(&bucket), || Ok(1)).await.unwrap();
+    run.phase("delete", async || deleting("vm").await).await;
     // A sandbox that lived minutes: restored, written, closed, deleted. Its deletion.
-    let short = local_cell::upload::wait_on(taken.fork(at("short"), DEFAULT_TENANT)).unwrap();
+    let short = taken.fork(at("short"), DEFAULT_TENANT).await.unwrap();
     run.names.name(short, "short");
-    let lived = open(&at("short"));
-    write_and_commit(&lived);
+    let lived = open(&at("short")).await;
+    write_and_commit(&lived).await;
     drop(lived);
-    run.phase("delete after close", || deleting("short"));
+    run.phase("delete after close", async || deleting("short").await).await;
     // A fork that wrote nothing.
-    run.phase("close unwritten", || drop(cold));
-    run.phase("delete unwritten", || deleting("cold"));
+    run.phase("close unwritten", async || drop(cold)).await;
+    run.phase("delete unwritten", async || deleting("cold").await).await;
 
     run.report();
     run.total("restore, cold", &["cold copy-open", "cold fork", "cold fork-open"]);
@@ -602,11 +591,13 @@ fn lifecycle(extents: u64, latency: Duration) {
     // The states the bucket keeps decoded: after how many resumes of other stores a restore reads
     // the base's checkpoint again. Not late: its requests and bytes alone.
     run.late(false);
-    let restore = |run: &Run, name: &str| {
-        let (_, asked, events) = run.asked(|| {
-            local_cell::upload::wait_on(taken.fork(at(name), DEFAULT_TENANT)).unwrap();
-            drop(open(&at(name)));
-        });
+    let restore = async |run: &Run, name: &str| {
+        let (_, asked, events) = run
+            .asked(async || {
+                taken.fork(at(name), DEFAULT_TENANT).await.unwrap();
+                drop(open(&at(name)).await);
+            })
+            .await;
         let checkpoints = events.iter().filter(|event| {
             event.kind == "get" && event.key.contains("/checkpoints/") && event.down > 0
         });
@@ -620,15 +611,15 @@ fn lifecycle(extents: u64, latency: Duration) {
             asked.down
         );
     };
-    said(0, restore(&run, "restore-0"));
+    said(0, restore(&run, "restore-0").await);
     for resumes in 1..=RESUMES {
         let name = format!("resumed-{resumes}");
-        local_cell::upload::wait_on(taken.fork(at(&name), DEFAULT_TENANT)).unwrap();
-        let resumed = open(&at(&name));
-        write_and_commit(&resumed);
+        taken.fork(at(&name), DEFAULT_TENANT).await.unwrap();
+        let resumed = open(&at(&name)).await;
+        write_and_commit(&resumed).await;
         drop(resumed);
-        drop(open(&at(&name)));
-        said(resumes, restore(&run, &format!("restore-{resumes}")));
+        drop(open(&at(&name)).await);
+        said(resumes, restore(&run, &format!("restore-{resumes}")).await);
     }
     drop(taken);
 }
@@ -637,14 +628,14 @@ fn lifecycle(extents: u64, latency: Duration) {
 /// ask of the bucket, by phase (the module's docs), on bases of `CLADEFS_LIFECYCLE_EXTENTS` extents
 /// each (`1024,32768`), each request `CLADEFS_LIFECYCLE_LATENCY_MS` late (30). Lines `PHASE`, each
 /// followed by its requests, `TOTAL` and `DECODED`; recorded in docs/measurements.
-#[test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "a benchmark (TASK-443.5): --run-ignored only, alone"]
-fn bucket_lifecycle_by_phase() {
+async fn bucket_lifecycle_by_phase() {
     let sizes = std::env::var("CLADEFS_LIFECYCLE_EXTENTS").unwrap_or_else(|_| "1024,32768".into());
     let latency = std::env::var("CLADEFS_LIFECYCLE_LATENCY_MS").unwrap_or_else(|_| "30".into());
     let latency = Duration::from_millis(latency.parse().expect("CLADEFS_LIFECYCLE_LATENCY_MS"));
     for extents in sizes.split(',') {
-        lifecycle(extents.trim().parse().expect("CLADEFS_LIFECYCLE_EXTENTS"), latency);
+        lifecycle(extents.trim().parse().expect("CLADEFS_LIFECYCLE_EXTENTS"), latency).await;
     }
 }
 
@@ -681,27 +672,25 @@ fn bucket_lifecycle_by_phase() {
 /// cladefs: since TASK-702.2 the host's first open of a fork of the version reads its tenant's read
 /// evidence of it behind the open, a listing of none here, waited for: 2 in 2; the second's, the
 /// evidence read once for both, 1 in 1.
-#[test]
-fn restores_ask_the_bucket_what_the_protocol_needs() {
+#[tokio::test(flavor = "multi_thread")]
+async fn restores_ask_the_bucket_what_the_protocol_needs() {
     let (objects, mut run) = recorded(memory(), 64, Duration::from_millis(5));
-    let made = Made::new(64, &objects, &mut run);
+    let made = Made::new(64, &objects, &mut run).await;
     let bucket = Arc::new(ObjectBucket::new(objects, ""));
-    host(&bucket);
+    host(&bucket).await;
     let at = |name: &str| made.at(name);
     run.late(true);
-    let taken = run.phase("cold copy-open", || made.copied(&bucket, "copy"));
-    run.phase("cold fork", || {
-        local_cell::upload::wait_on(taken.fork(at("cold"), DEFAULT_TENANT)).unwrap()
-    });
-    let cold = run.phase("cold fork-open", || {
-        let cold = open(&at("cold"));
-        futures::executor::block_on(cold.predicted().unwrap()).unwrap();
-        cold
-    });
-    run.phase("warm fork", || {
-        local_cell::upload::wait_on(taken.fork(at("vm"), DEFAULT_TENANT)).unwrap()
-    });
-    let vm = run.phase("warm fork-open", || open(&at("vm")));
+    let taken = run.phase("cold copy-open", async || made.copied(&bucket, "copy").await).await;
+    run.phase("cold fork", async || taken.fork(at("cold"), DEFAULT_TENANT).await.unwrap()).await;
+    let cold = run
+        .phase("cold fork-open", async || {
+            let cold = open(&at("cold")).await;
+            cold.predicted().unwrap().await.unwrap();
+            cold
+        })
+        .await;
+    run.phase("warm fork", async || taken.fork(at("vm"), DEFAULT_TENANT).await.unwrap()).await;
+    let vm = run.phase("warm fork-open", async || open(&at("vm")).await).await;
     let costs: Vec<_> =
         (run.phases.iter()).map(|(phase, asked, _)| (*phase, asked.cost())).collect();
     run.report();
@@ -725,20 +714,20 @@ fn restores_ask_the_bucket_what_the_protocol_needs() {
 /// from memory, not from a read, unchanged, writes nothing, so a read once the clone's head is
 /// taken finds it still held, or the open fails. Opened anyway, this host would write the clone
 /// until the later placement's writer fenced it, what its guest wrote meanwhile lost.
-#[test]
-fn restores_refused_to_placements_superseded_since_their_forks() {
+#[tokio::test(flavor = "multi_thread")]
+async fn restores_refused_to_placements_superseded_since_their_forks() {
     let (objects, mut run) = recorded(memory(), 16, Duration::ZERO);
-    let made = Made::new(16, &objects, &mut run);
+    let made = Made::new(16, &objects, &mut run).await;
     let bucket = Arc::new(ObjectBucket::new(objects.clone(), ""));
-    host(&bucket);
-    let taken = made.copied(&bucket, "copy");
-    let clone = local_cell::upload::wait_on(taken.fork(made.at("vm"), DEFAULT_TENANT)).unwrap();
+    host(&bucket).await;
+    let taken = made.copied(&bucket, "copy").await;
+    let clone = taken.fork(made.at("vm"), DEFAULT_TENANT).await.unwrap();
     // Another host, placed later, holds the clone's cell, through a bucket handle of its own.
     let elsewhere = ObjectBucket::new(objects, "");
     let later = host_cell::keeping().unwrap().token + 1;
     let holding = bucket_cell::testing::take(&elsewhere, clone, later, later);
-    local_cell::upload::block_on(holding).unwrap().unwrap();
-    let opened = super::tests::reopened(made.at("vm"), super::tests::idle());
+    holding.await.unwrap();
+    let opened = super::tests::reopened(made.at("vm"), super::tests::idle()).await;
     assert_eq!(opened.err().and_then(|err| err.errno()), Some(crate::Errno::ESTALE));
     drop(taken);
 }
@@ -748,39 +737,38 @@ fn restores_refused_to_placements_superseded_since_their_forks() {
 /// runtime's task opened stay in the bucket's pool, which the uploads take first; their sockets
 /// are served by the runtime they opened on. `CLADEFS_UPLOAD_MIB` MiB (256) written, in extents of
 /// 1 MiB, then committed, three times. Lines `UPLOADS`.
-#[test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "a benchmark (TASK-449's review): --run-ignored only, alone"]
-fn uploads_after_restores() {
+async fn uploads_after_restores() {
     let var = |name: &str, default: u64| {
         std::env::var(name).map_or(default, |value| value.parse().expect(name))
     };
     let (restores, mib) = (var("CLADEFS_UPLOAD_RESTORES", 8), var("CLADEFS_UPLOAD_MIB", 256));
-    let serving = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-    let server = serving.block_on(async { bucket_cell::s3_server::S3Server::start(None) });
+    let server = bucket_cell::s3_server::S3Server::start(None);
     let (objects, mut run) = recorded(server.objects(), 16, Duration::ZERO);
-    let made = Made::new(16, &objects, &mut run);
+    let made = Made::new(16, &objects, &mut run).await;
     let bucket = Arc::new(ObjectBucket::new(server.objects(), ""));
-    host(&bucket);
-    let taken = made.copied(&bucket, "copy");
+    host(&bucket).await;
+    let taken = made.copied(&bucket, "copy").await;
     for restore in 0..restores {
         let at = made.at(&format!("restore-{restore}"));
-        local_cell::upload::wait_on(taken.fork(&at, DEFAULT_TENANT)).unwrap();
-        drop(open(&at));
+        taken.fork(&at, DEFAULT_TENANT).await.unwrap();
+        drop(open(&at).await);
     }
     let connected = server.connections();
     let extent = pattern(9, 1 << 20);
     for round in 0..3 {
         let at = made.at(&format!("writer-{round}"));
-        local_cell::upload::wait_on(taken.fork(&at, DEFAULT_TENANT)).unwrap();
-        let writer = open(&at);
+        taken.fork(&at, DEFAULT_TENANT).await.unwrap();
+        let writer = open(&at).await;
         let info = writer.info().unwrap();
         let first = info.next_sequence.max(info.sequence_floor);
         for sequence in first..first + mib {
             let id = ExtentId { cell: writer.cell().id, sequence };
-            writer.write(id, 0, &[VolatileSlice::from(&extent[..])]).unwrap();
+            writer.write(id, 0, &[VolatileSlice::from(&extent[..])]).await.unwrap();
         }
         let began = Instant::now();
-        local_cell::upload::wait_on(writer.commit(None)).unwrap();
+        writer.commit(None).await.unwrap();
         let took = began.elapsed();
         println!(
             "UPLOADS restores={restores} round={round} mib={mib} commit-ms={} mib-per-s={:.0} \
@@ -803,24 +791,26 @@ fn uploads_after_restores() {
 /// its cell's holding), a TCP handshake, and on a bucket elsewhere a TLS one too, before the
 /// request, the connection closed as the fork returned. Against the S3 server in memory, which
 /// counts the connections it accepts, the host a client of its own, as another host is.
-#[test]
-fn restores_connect_to_the_bucket_no_more() {
-    let serving = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-    let server = serving.block_on(async { bucket_cell::s3_server::S3Server::start(None) });
+#[tokio::test(flavor = "multi_thread")]
+async fn restores_connect_to_the_bucket_no_more() {
+    let server = bucket_cell::s3_server::S3Server::start(None);
     let (objects, mut run) = recorded(server.objects(), 16, Duration::ZERO);
-    let made = Made::new(16, &objects, &mut run);
+    let made = Made::new(16, &objects, &mut run).await;
     // The host measured: a client of its own, its own pool of connections, as another host's.
     let bucket = Arc::new(ObjectBucket::new(server.objects(), ""));
-    host(&bucket);
-    let taken = made.copied(&bucket, "copy");
-    let restore = |name: &str| {
+    host(&bucket).await;
+    let taken = made.copied(&bucket, "copy").await;
+    let restore = async |name: &str| {
         let before = server.connections();
-        local_cell::upload::wait_on(taken.fork(made.at(name), DEFAULT_TENANT)).unwrap();
+        taken.fork(made.at(name), DEFAULT_TENANT).await.unwrap();
         let forked = server.connections();
-        drop(open(&made.at(name)));
+        drop(open(&made.at(name)).await);
         (forked - before, server.connections() - forked)
     };
-    let connected: Vec<_> = ["first", "second", "third"].map(restore).into();
+    let mut connected = Vec::new();
+    for name in ["first", "second", "third"] {
+        connected.push(restore(name).await);
+    }
     assert_eq!(connected, [(0, 0); 3]);
 }
 
@@ -830,8 +820,8 @@ fn restores_connect_to_the_bucket_no_more() {
 ///
 /// TASK-633.8: the fork starts the version's mirror in the host's bucket, in the background, which
 /// marks it there and moves the child's reference there from the parent's bucket.
-#[test]
-fn versions_forked_on_a_host_of_another_bucket_make_children_there() {
+#[tokio::test(flavor = "multi_thread")]
+async fn versions_forked_on_a_host_of_another_bucket_make_children_there() {
     use bucket_cell::identity::Details;
     let dir = tempfile::tempdir().unwrap();
     let url = |name: &str| {
@@ -851,19 +841,17 @@ fn versions_forked_on_a_host_of_another_bucket_make_children_there() {
     let capacity = 1 << 30;
 
     // The base, a cell of bucket A, and its version, made on a host of A.
-    let cell = local_cell::upload::wait_on(host_cell::new_cell(&bucket_a, DEFAULT_TENANT)).unwrap();
+    let cell = host_cell::new_cell(&bucket_a, DEFAULT_TENANT).await.unwrap();
     assert_eq!(cell.id >> 48, 1);
     let base_path = dir.path().join("base");
-    let base = kept_in(&base_path, (capacity, Some(cell)), &bucket_a, idle()).unwrap();
+    let base = kept_in(&base_path, (capacity, Some(cell)), &bucket_a, idle()).await.unwrap();
     let extent = ExtentId { cell: cell.id, sequence: base.info().unwrap().sequence_floor };
     let data = pattern(3, BLOCK);
-    base.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
-    local_cell::upload::wait_on(base.commit(None)).unwrap();
+    base.write(extent, 0, &[VolatileSlice::from(&data[..])]).await.unwrap();
+    base.commit(None).await.unwrap();
     drop(base);
-    let base = open(&base_path);
-    let version =
-        local_cell::upload::wait_on(base.uploaded_version_at(dir.path().join("version-a")))
-            .unwrap();
+    let base = open(&base_path).await;
+    let version = base.uploaded_version_at(dir.path().join("version-a")).await.unwrap();
     drop(base);
 
     // On a host of B: the version opened there, then forked.
@@ -871,38 +859,28 @@ fn versions_forked_on_a_host_of_another_bucket_make_children_there() {
     let description = local_cell::Description { block_size: BLOCK as u32, capacity, cell };
     let kind = bucket_cell::cell::Kind::Fxfs;
     OpenCell::create_at_version(&at, (&url_of(&bucket_b), kind), description, version).unwrap();
-    let opened =
-        local_cell::upload::wait_on(OpenCell::take_with(&at, (capacity, cell, None), opening()))
-            .unwrap();
+    let opened = OpenCell::take_with(&at, (capacity, cell, None), opening()).await.unwrap();
     let child_path = dir.path().join("child");
-    let child = local_cell::upload::wait_on(opened.fork(&child_path, DEFAULT_TENANT)).unwrap();
+    let child = opened.fork(&child_path, DEFAULT_TENANT).await.unwrap();
     assert_eq!(child.id >> 48, 2, "the child is not a cell of the host's bucket");
 
     let raw = |url: &str| ObjectBucket::from_url(url).unwrap();
-    let head = |bucket: &ObjectBucket, cell| {
-        local_cell::upload::block_on(bucket_cell::head::get(bucket, cell)).unwrap().unwrap()
-    };
-    let childs = head(&raw(&url_b), child).expect("the child's head is not in B");
-    assert!(head(&raw(&url_a), child).is_none(), "the child's head is in A");
+    let head =
+        async |bucket: &ObjectBucket, cell| bucket_cell::head::get(bucket, cell).await.unwrap();
+    let childs = head(&raw(&url_b), child).await.expect("the child's head is not in B");
+    assert!(head(&raw(&url_a), child).await.is_none(), "the child's head is in A");
     let origin = childs.origin().expect("the child names no origin");
     let reference = bucket_cell::layout::reference(cell, origin.at, child);
-    let got = |url: &str, key: &str| {
-        local_cell::upload::block_on(bucket_cell::bucket::get(&raw(url), key)).unwrap().is_some()
-    };
+    let got = async |url: &str, key: &str| bucket_cell::bucket::get(&raw(url), key).await.is_some();
     let mirrored = bucket_b.mirror_wanted(cell, origin.at);
-    assert_eq!(local_cell::upload::block_on(mirrored).unwrap().unwrap(), None, "not mirrored");
+    assert_eq!(mirrored.await.unwrap(), None, "not mirrored");
     let marker = bucket_cell::layout::mirror(cell, origin.at);
-    assert_eq!((got(&url_a, &marker), got(&url_b, &marker)), (false, true));
-    assert_eq!((got(&url_a, &reference), got(&url_b, &reference)), (false, true));
+    assert_eq!((got(&url_a, &marker).await, got(&url_b, &marker).await), (false, true));
+    assert_eq!((got(&url_a, &reference).await, got(&url_b, &reference).await), (false, true));
     drop(opened);
 
-    let child = open(&child_path);
+    let child = open(&child_path).await;
     let mut read = vec![0; BLOCK];
-    local_cell::upload::wait_on(child.read(
-        extent,
-        0,
-        &mut [crate::VolatileSliceMut::from(&mut read[..])],
-    ))
-    .unwrap();
+    child.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut read[..])]).await.unwrap();
     assert!(read == data, "the child reads another than its parent's data");
 }

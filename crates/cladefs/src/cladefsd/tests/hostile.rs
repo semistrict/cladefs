@@ -2289,8 +2289,8 @@ fn what_requests_hold_is_within_the_credit() {
 /// are bounded by the connection, not by how many faults it has in flight, as a fault holds no
 /// worker while it waits for the pager (TASK-92.20). Here faults on a page of each of 256 extents
 /// of a MiB, the snapshot's version of another host's, all in the bucket alone, whose reads are held.
-#[test]
-fn page_ins_in_flight_are_bounded() {
+#[tokio::test(flavor = "multi_thread")]
+async fn page_ins_in_flight_are_bounded() {
     use crate::{OpenCell, VolatileSlice};
     const EXTENTS: u64 = 256;
     const MIB: u64 = 1 << 20;
@@ -2308,15 +2308,16 @@ fn page_ins_in_flight_are_bounded() {
     // alone.
     let path = dir.path().join("store");
     let cell = {
-        let store = local_cell::upload::wait_on(OpenCell::create(&path, 1 << 30)).unwrap();
+        let store = OpenCell::create(&path, 1 << 30).await.unwrap();
         let cell = store.cell();
         for sequence in 1..=EXTENTS {
             let data = super::pattern(sequence as u8, MIB as usize);
             store
                 .write(ExtentId { cell: cell.id, sequence }, 0, &[VolatileSlice::from(&data[..])])
+                .await
                 .unwrap();
         }
-        local_cell::upload::wait_on(store.commit(None)).unwrap();
+        store.commit(None).await.unwrap();
         cell
     };
     let store = CellClient::connect(&socket, &path, 1 << 30).unwrap();

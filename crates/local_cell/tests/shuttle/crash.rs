@@ -23,6 +23,7 @@ use super::config;
 use local_cell::{MemDir, Rules, set_rules};
 use rounds::{ROUNDS, recovering, same, twice};
 use shuttle::Runner;
+use shuttle::future::block_on;
 use shuttle::scheduler::RandomScheduler;
 use std::sync::{Arc, Mutex};
 
@@ -44,12 +45,13 @@ fn crashes_recover_prefixes_of_their_commits_concurrently() {
     set_rules(Rules::ALL);
     let (mut crashes_mid_commit, mut crashes_elsewhere) = (0, 0);
     for round in 0..ROUNDS {
-        let ((first, mid_commit, elsewhere), (second, _, _)) = twice(|| {
-            concurrently(round, |round, dir| {
-                let (left, mid_commit) = recovering(round, dir.clone());
-                (left, mid_commit, dir.failed_elsewhere())
-            })
-        });
+        let ((first, mid_commit, elsewhere), (second, _, _)) =
+            futures::executor::block_on(twice(async || {
+                concurrently(round, |round, dir| {
+                    let (left, mid_commit) = block_on(recovering(round, dir.clone()));
+                    (left, mid_commit, dir.failed_elsewhere())
+                })
+            }));
         same(round, &first, &second);
         crashes_mid_commit += mid_commit as u64;
         crashes_elsewhere += elsewhere as u64;

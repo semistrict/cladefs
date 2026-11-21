@@ -14,6 +14,8 @@
 //! close, and sync a flush's files at once, while the workload goes on: on Shuttle's schedules,
 //! seeded by the rounds, so that each is still a function of its seed (tests/shuttle/crash.rs).
 
+#[path = "../common/host_runtime.rs"]
+mod host_runtime;
 mod kept;
 mod rounds;
 
@@ -24,11 +26,12 @@ use rounds::{ROUNDS, recovering, same, twice};
 /// cladefs: each round runs twice, at once, and its two runs' crashes leave the same directories,
 /// and they end with the same: a round is a function of its seed alone, so that a round that failed
 /// fails again, and a round that passed says what it seems (TASK-79.79).
-#[test]
-fn recovers_a_prefix_of_its_commits() {
+#[tokio::test(flavor = "multi_thread")]
+async fn recovers_a_prefix_of_its_commits() {
     let mut crashes_mid_commit = 0;
     for round in 0..ROUNDS {
-        let ((first, mid_commit), (second, _)) = twice(|| recovering(round, MemDir::serial()));
+        let ((first, mid_commit), (second, _)) =
+            twice(async || recovering(round, MemDir::serial()).await).await;
         same(round, &first, &second);
         crashes_mid_commit += mid_commit as u64;
     }
@@ -45,11 +48,11 @@ fn recovers_a_prefix_of_its_commits() {
 /// made durable (TASK-165.9's AC #4); the host's collector passing over the bucket all along, cut
 /// in a pass as it crashes, or before, and a full pass after (TASK-291.2); then passes alone,
 /// which leave nothing they should have collected (TASK-390).
-#[test]
-fn recovers_from_its_bucket_with_and_without_its_disk() {
+#[tokio::test(flavor = "multi_thread")]
+async fn recovers_from_its_bucket_with_and_without_its_disk() {
     let (mut uploaded, mut ahead, mut cut, mut compacted, mut deleted) = (0, 0, 0, 0, 0);
     for round in 0..KEPT_ROUNDS {
-        let found = kept(round);
+        let found = kept(round).await;
         uploaded += found.acknowledged as u64;
         ahead += found.ahead as u64;
         cut += found.cut as u64;
@@ -75,9 +78,12 @@ fn recovers_from_its_bucket_with_and_without_its_disk() {
 
 /// cladefs: a store's opening cut by a crash at each of its writes in turn leaves what opens again
 /// to at least what the store made durable (TASK-165.9).
-#[test]
-fn openings_cut_at_each_write_open_again() {
-    let writes: u64 = (0..CUT_ROUNDS).map(cut).sum();
+#[tokio::test(flavor = "multi_thread")]
+async fn openings_cut_at_each_write_open_again() {
+    let mut writes = 0;
+    for round in 0..CUT_ROUNDS {
+        writes += cut(round).await;
+    }
     // The openings write: a segment closed again, the WAL's start, a restated capacity.
     assert!(writes > CUT_ROUNDS, "{writes} writes in {CUT_ROUNDS} openings");
 }

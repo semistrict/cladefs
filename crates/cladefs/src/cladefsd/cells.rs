@@ -466,13 +466,12 @@ fn capacity(store: &OpenCell) -> Result<(u64, u64), Errno> {
     Ok((info.capacity, info.capacity - info.available))
 }
 
-/// Sets `store`'s capacity to `capacity` bytes, on a blocking thread, which holds it meanwhile.
+/// Sets `store`'s capacity to `capacity` bytes.
 async fn set_capacity<S>(store: &Arc<S>, capacity: u64) -> Result<(), Errno>
 where
     S: Borrow<OpenCell> + Send + Sync + 'static,
 {
-    let store = store.clone();
-    blocking(move || (*store).borrow().set_capacity(capacity)).await
+    (**store).borrow().set_capacity(capacity).await
 }
 
 /// The store a fork forks ([`Here`]), and whether connections have it open: their writer's,
@@ -488,14 +487,13 @@ impl Close for Forked {
     }
 }
 
-/// Returns once every commit of `store` ordered so far is uploaded: its flush on a
-/// blocking thread, which holds it meanwhile, the wait for its uploads holding none.
+/// Returns once every commit of `store` ordered so far is uploaded: its flush, then the wait for
+/// its uploads, holding no thread.
 pub(super) async fn uploaded<S>(store: &Arc<S>) -> Result<(), Errno>
 where
     S: Borrow<OpenCell> + Send + Sync + 'static,
 {
-    let flushed = store.clone();
-    let epoch = blocking(move || (*flushed).borrow().make_local()).await?;
+    let epoch = (**store).borrow().make_local().await?;
     (**store).borrow().uploaded(epoch).await
 }
 

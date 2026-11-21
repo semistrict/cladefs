@@ -111,14 +111,14 @@ impl KeptImage {
     /// Forks the store's cell, as of its last commit, to a new cell of its tenant's (TASK-364),
     /// whose handle is a new directory at `path`, in its bucket too, through a version of that
     /// commit ([`host_cell::fork_through`]): `held` is let go of once the version's commit is made.
-    pub fn fork<H>(&self, path: &Path, held: H) -> Result<(), Error> {
+    pub async fn fork<H>(&self, path: &Path, held: H) -> Result<(), Error> {
         let tenant = self.store.description().cell.tenant;
         let cell = local_cell::upload::wait_on(host_cell::new_cell(self.uploader.bucket(), tenant))
             .map_err(Error::from)?;
         let child = Child { cell, owner: rand::random() };
         let id = rand::random::<u64>().max(1);
         let version = bucket_cell::layout::NewVersion { id, keep_last: None };
-        let epoch = self.store.commit_version(version, false).map_err(Error::new)?;
+        let epoch = self.store.commit_version(version, false).await.map_err(Error::new)?;
         drop(held);
         local_cell::upload::wait_on(self.uploader.uploaded(epoch)).map_err(Error::from)?;
         let forking =
@@ -181,12 +181,15 @@ mod tests {
 
     /// The extents `cell`'s state in `bucket` holds, by their lengths, those it inherited too,
     /// and its root.
-    fn kept(bucket: &ObjectBucket, cell: crate::CellId) -> (BTreeMap<ExtentId, u64>, Vec<u8>) {
-        let recovered = local_cell::upload::block_on(async {
+    async fn kept(
+        bucket: &ObjectBucket,
+        cell: crate::CellId,
+    ) -> (BTreeMap<ExtentId, u64>, Vec<u8>) {
+        let recovered = async {
             let record = bucket_cell::head::get(bucket, cell).await?;
             bucket_cell::recover(bucket, cell, record.and_then(|record| record.origin())).await
-        });
-        let state = recovered.unwrap().unwrap().state;
+        };
+        let state = recovered.await.unwrap().state;
         let extents = state.extents.iter().map(|(extent, at)| (*extent, at.len)).collect();
         (extents, state.root.unwrap_or_default())
     }
@@ -210,8 +213,8 @@ mod tests {
 
     /// TASK-165.6: an image keeps its cell in a file bucket of its own, beside its directory
     /// (TASK-165.7), which its description names: closed, the cell holds what its store does.
-    #[test]
-    fn images_keep_their_cells_in_a_file_bucket_of_their_own() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn images_keep_their_cells_in_a_file_bucket_of_their_own() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("image");
         let storage = block_on(image_with(&path, b"file", b"contents"));
@@ -220,7 +223,7 @@ mod tests {
         assert_eq!(local_cell::host_bucket(&path).unwrap(), Some(url));
         let image = image(&storage);
         let cell = image.store().description().cell;
-        let (extents, root) = kept(&bucket_of(&path), cell);
+        let (extents, root) = kept(&bucket_of(&path), cell).await;
         assert!(!extents.is_empty() && !root.is_empty());
         assert_eq!((extents, root), held(image));
     }
@@ -247,8 +250,8 @@ mod tests {
             let (file, _) = fs.root().lookup(b"file").await.unwrap();
             file.write(0, b"modified").await.unwrap();
             let fork = fs.close().await.unwrap();
-            assert_eq!(kept(&bucket, child), held(image(&fork)));
-            assert_ne!(kept(&bucket, child), kept(&bucket, parent));
+            assert_eq!(kept(&bucket, child).await, held(image(&fork)));
+            assert_ne!(kept(&bucket, child).await, kept(&bucket, parent).await);
         })
     }
 
@@ -297,16 +300,16 @@ mod tests {
     /// once, as the extent daemon does a store an import made: its uploader's task, held up by the
     /// failpoint after it said it stopped, keeps nothing of it open. That task said so before it let
     /// go of the store, and the daemon found the import's store still open (`EIO`, CI 42119298585).
-    #[test]
-    fn images_dropped_let_go_of_their_stores() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn images_dropped_let_go_of_their_stores() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("image");
         let scenario = fail::FailScenario::setup();
         fail::cfg("upload::stopped", "sleep(500)").unwrap();
         drop(Storage::create(&path, SIZE).unwrap());
-        let reopened =
-            local_cell::upload::wait_on(host_cell::open(&path, host_cell::keeping().unwrap()))
-                .map(|opened| opened.store.description().cell);
+        let reopened = host_cell::open(&path, host_cell::keeping().unwrap())
+            .await
+            .map(|opened| opened.store.description().cell);
         scenario.teardown();
         let cell = reopened.map_err(|err| format!("{err:#}"));
         assert_eq!(cell.map(|_| ()), Ok(()));
@@ -314,36 +317,37 @@ mod tests {
 
     /// TASK-165.6: an image kept in a host's bucket, as a store the extent daemon made is, which
     /// this process opens, has no collector here: the host's collects it.
-    #[test]
-    fn images_in_a_hosts_bucket_are_not_collected_here() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn images_in_a_hosts_bucket_are_not_collected_here() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
         let keeping = host_cell::keeping().unwrap();
-        let made = local_cell::upload::wait_on(host_cell::create_unmade(
+        let made = host_cell::create_unmade(
             &path,
             SIZE,
             CellOf::Named(bucket_cell::layout::test_cell(7)),
             bucket_cell::cell::Kind::Fxfs,
             Some("memory:///host"),
             keeping,
-        ));
+        )
+        .await;
         made.unwrap().made().unwrap();
         let image = KeptImage::open(&path).unwrap();
         assert!(image.collecting().is_none());
-        image.store().write(ExtentId::new(7, 1), 0, &[1; 4096]).unwrap();
-        image.store().commit(None).unwrap();
+        image.store().write(ExtentId::new(7, 1), 0, &[1; 4096]).await.unwrap();
+        image.store().commit(None).await.unwrap();
         image.committed().unwrap();
         image.wait_uploaded().unwrap();
         assert_eq!(
-            kept(&bucket_of(&path), bucket_cell::layout::test_cell(7)).0,
+            kept(&bucket_of(&path), bucket_cell::layout::test_cell(7)).await.0,
             BTreeMap::from([(ExtentId::new(7, 1), 4096)])
         );
     }
 
     /// TASK-165.6: what an image freed, uploaded, and checkpointed as its uploader stops, a pass of
     /// its bucket's collector reclaims; what it holds, the cell still holds.
-    #[test]
-    fn the_collector_reclaims_what_images_freed() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_collector_reclaims_what_images_freed() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("image");
         let image = KeptImage::create(
@@ -356,9 +360,9 @@ mod tests {
         // Each stored on its own, in its bucket: 5 MiB, past the size for it.
         let data = crate::test_data::noise(1, 5 * MIB);
         for sequence in 0..4 {
-            image.store().write(extent(sequence), 0, &data).unwrap();
+            image.store().write(extent(sequence), 0, &data).await.unwrap();
         }
-        image.store().commit(None).unwrap();
+        image.store().commit(None).await.unwrap();
         image.committed().unwrap();
         // Uploaded before they are freed: a segment of the commits sealing and freeing them both
         // would hold none of them.
@@ -366,7 +370,7 @@ mod tests {
         for sequence in 0..3 {
             image.store().free(extent(sequence)).unwrap();
         }
-        image.store().commit(Some(b"root")).unwrap();
+        image.store().commit(Some(b"root")).await.unwrap();
         image.committed().unwrap();
         image.wait_uploaded().unwrap();
         drop(image);
@@ -379,7 +383,7 @@ mod tests {
         assert!(report.deleted >= 3, "{report:?}");
         let after = bucket_bytes(&own);
         assert!(after < 6 * MIB as u64, "{after} bytes");
-        let (extents, root) = kept(&bucket_of(&path), bucket_cell::layout::test_cell(7));
+        let (extents, root) = kept(&bucket_of(&path), bucket_cell::layout::test_cell(7)).await;
         assert_eq!(
             (extents, root),
             (BTreeMap::from([(extent(3), 5 * MIB as u64)]), b"root".into())

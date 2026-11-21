@@ -22,7 +22,6 @@
 //! each kind's over the rounds.
 
 use cladefs::{Access, ExtentId, OpenCell, VolatileSlice};
-use futures::executor::block_on;
 use std::time::Instant;
 
 /// The parts of an extent.
@@ -56,31 +55,27 @@ fn cpu_micros() -> f64 {
 
 /// Reads `mib` of data as random as `mask` lets each byte be, a part at a time, from a store of its
 /// own, and returns the time a part took, and the CPU time.
-fn round(mib: u64, mask: u8) -> (f64, f64) {
+async fn round(mib: u64, mask: u8) -> (f64, f64) {
     let part = extent_frame::PART;
     let extents = (mib << 20).div_ceil(PARTS * part);
     let len = PARTS * part;
     let dir = tempfile::tempdir().unwrap();
-    let store =
-        local_cell::upload::wait_on(OpenCell::create(dir.path().join("store"), 2 * extents * len))
-            .unwrap();
+    let store = OpenCell::create(dir.path().join("store"), 2 * extents * len).await.unwrap();
     for sequence in 1..=extents {
         let extent = ExtentId { cell: store.cell().id, sequence };
         let bytes = data(sequence, len as usize, mask);
-        store.write(extent, 0, &[VolatileSlice::from(&bytes[..])]).unwrap();
+        store.write(extent, 0, &[VolatileSlice::from(&bytes[..])]).await.unwrap();
     }
     let window = store.create_dax_window(extents * len, None).unwrap();
-    local_cell::upload::wait_on(store.commit(None)).unwrap();
+    store.commit(None).await.unwrap();
     for sequence in 1..=extents {
         let extent = ExtentId { cell: store.cell().id, sequence };
-        local_cell::upload::wait_on(store.map(extent, 0, len, (sequence - 1) * len)).unwrap();
+        store.map(extent, 0, len, (sequence - 1) * len).await.unwrap();
     }
     let (start, cpu) = (Instant::now(), cpu_micros());
-    block_on(async {
-        for at in (0..extents * PARTS).rev() {
-            window.fault(at * part, Access::Read).await.unwrap();
-        }
-    });
+    for at in (0..extents * PARTS).rev() {
+        window.fault(at * part, Access::Read).await.unwrap();
+    }
     let parts = (extents * PARTS) as f64;
     (start.elapsed().as_secs_f64() * 1e6 / parts, (cpu_micros() - cpu) / parts)
 }
@@ -100,8 +95,11 @@ fn main() {
     let mib: u64 = args.next().map_or(256, |n| n.parse().unwrap());
     let rounds: usize = args.next().map_or(3, |n| n.parse().unwrap());
     cladefs::pages::configure(cladefs::pages::Config::with_memory((4 * mib) << 20)).unwrap();
+    // The bench's runtime: its stores' uploaders run on it, and its rounds.
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     for (kind, mask) in [("compressed", 0x0f), ("raw", 0xff)] {
-        let (times, cpu): (Vec<f64>, Vec<f64>) = (0..rounds).map(|_| round(mib, mask)).unzip();
+        let (times, cpu): (Vec<f64>, Vec<f64>) =
+            (0..rounds).map(|_| runtime.block_on(round(mib, mask))).unzip();
         let ((time, times), (cpu, cpus)) = (median(times), median(cpu));
         println!(
             "{kind:<10} {time:>6.0} µs a part ({times}), CPU {cpu:>6.0} µs ({cpus}), median of \

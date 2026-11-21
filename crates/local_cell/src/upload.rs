@@ -160,9 +160,22 @@ pub fn uploaders() -> tokio::sync::watch::Receiver<usize> {
 /// `requests_on_runtimes_dropped_after_connect_anew`); one of the calls' own beside the host's
 /// served, from its own few threads, the sockets of the connections they left in the pool, which
 /// the host's uploads and fetches went on to use.
+/// Called on a thread of a multi-threaded runtime, as a sync path of a test's or a FUSE call's
+/// is, the thread hands its other tasks to another meanwhile, as [`blocking`] does.
+#[allow(clippy::disallowed_methods, reason = "an outermost entry's wait, as above")]
 pub fn block_on<F: std::future::Future>(future: F) -> Result<F::Output, Failure> {
     crate::blocks!("upload::block_on");
-    Ok(bucket_runtime()?.block_on(future))
+    let runtime = bucket_runtime()?;
+    // Never reached under madsim, whose one thread `blocks!` refuses to block.
+    #[cfg(madsim)]
+    return Ok(runtime.block_on(future));
+    #[cfg(not(madsim))]
+    match tokio::runtime::Handle::try_current().map(|current| current.runtime_flavor()) {
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => {
+            Ok(tokio::task::block_in_place(|| runtime.block_on(future)))
+        }
+        _ => Ok(runtime.block_on(future)),
+    }
 }
 
 /// cladefs: runs `future` to its end as [`block_on`] does, on the calling thread in the bucket
@@ -1511,7 +1524,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             }
             // cladefs: acknowledgements the store's disk refused before, tried again.
             if !in_flight.acknowledging.is_empty()
-                && let Err(err) = self.acknowledge_pending(&mut in_flight)
+                && let Err(err) = self.acknowledge_pending(&mut in_flight).await
             {
                 return self.fail(&writer, err);
             }
@@ -1528,7 +1541,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             }
             if (close || more || stop) && in_flight.len() < IN_FLIGHT {
                 let closing = (close || stop, urgent || stop);
-                let gathered = blocking(|| self.gather(&writer, &mut in_flight, closing));
+                let gathered = self.gather(&writer, &mut in_flight, closing).await;
                 let gathered = match gathered {
                     Ok(gathered) => gathered,
                     Err(err) => return self.fail(&writer, err),
@@ -1588,7 +1601,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                                 checkpointed = segments;
                                 head_work = Some(Self::checkpointing(writer.clone()));
                             }
-                            acked
+                            acked.await
                         }
                         Ok(HeadWork::Checkpointed) => Ok(()),
                         Err(err) => Err(err.into()),
@@ -1910,7 +1923,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 );
                 let spool = blocking(|| store.spool())?;
                 let replicator = self.replicator(&members, 0, base, spool, Vec::new());
-                store.replicate_to(replicator);
+                store.replicate_to(replicator).await;
                 return Ok(match before {
                     Some(before) if before.f == 0 => (before, false),
                     // The writer's own, of f = 0, which the head names once it names all the
@@ -1950,7 +1963,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 old.as_ref().map_or(0, |old| old.number),
             );
             writer.configure_past(base, configuration.clone());
-            store.replicate_to(replicator);
+            store.replicate_to(replicator).await;
             return Ok((configuration, true));
         }
         if !seed.is_empty() {
@@ -1970,7 +1983,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             }
         }
         writer.configure(configuration.clone()).await?;
-        store.replicate_to(replicator);
+        store.replicate_to(replicator).await;
         self.configured(number);
         log::info!(
             "cladefs: {cell:?} replicated in configuration {number} with {:?}",
@@ -2093,7 +2106,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 // What StatCell says of it, the head naming it now (Codex's review).
                 self.configured(configuration.number);
                 if configuration.f == 0 && wish.f == 0 {
-                    self.store().unreplicate();
+                    self.store().unreplicate().await;
                     log::info!("cladefs: {cell:?} replicated no more, as its head asks");
                     return;
                 }
@@ -2122,7 +2135,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                     backoff = 0;
                     avoid.clear();
                     if configuration.f == 0 && wish.f == 0 {
-                        self.store().unreplicate();
+                        self.store().unreplicate().await;
                         log::info!("cladefs: {cell:?} replicated no more, as its head asks");
                         return;
                     }
@@ -2462,7 +2475,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// for wait in it for those, rather than each go in a segment of its own (TASK-92.15).
     /// cladefs: if not `urgent`, the interval's, the open segment the guest is filling stays open
     /// for its next commit, up to `Options::filling_wait` (TASK-92.41).
-    fn gather(
+    async fn gather(
         &self,
         writer: &Arc<Writer<B>>,
         in_flight: &mut InFlight,
@@ -2473,8 +2486,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let room = IN_FLIGHT.saturating_sub(in_flight.len());
         // What a waiter wants is durable; then closed, if fewer segments wait than may upload, and
         // what the closing closed durable too.
-        store.flush()?;
-        let mut closed = store.closed(room)?;
+        store.flush().await?;
+        let mut closed = store.closed(room).await?;
         let mut closing = close && closed.len() < room;
         if closing {
             let waited = {
@@ -2486,17 +2499,20 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             // more (TASK-384). Asked again at the next interval, if the guest still hasn't
             // committed.
             match urgent || waited {
-                true => drop(store.close_for_upload(false)?),
-                false => closing = store.close_for_upload(true)?,
+                true => drop(store.close_for_upload(false).await?),
+                false => closing = store.close_for_upload(true).await?,
             }
-            store.flush()?;
-            closed.extend(store.closed(room - closed.len())?);
+            store.flush().await?;
+            closed.extend(store.closed(room - closed.len()).await?);
         }
         let mut segments = Vec::with_capacity(closed.len());
         for closed in closed {
             let (number, tag) = (closed.number, closed.tag());
-            let own = closed.own.iter().map(|(key, file)| Ok((key.clone(), stored(file)?)));
-            let own = own.collect::<Result<_, Failure>>()?;
+            // cladefs: what reads its files, on a blocking thread, as `blocking` gives (TASK-685.17).
+            let own = blocking(|| {
+                let own = closed.own.iter().map(|(key, file)| Ok((key.clone(), stored(file)?)));
+                own.collect::<Result<_, Failure>>()
+            })?;
             let footer = closed.footer.clone();
             let size = closed.file.size().map_err(|err| Failure::local(err, "a segment"))?;
             let closed = Arc::new(closed);
@@ -2513,11 +2529,15 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// uploaded, and the store's segments leave it, read in the bucket, into the host's cache if
     /// it has one (TASK-165.8); then the forks they name are made, with a checkpoint at them, which
     /// their children's recovery starts from.
-    fn acknowledged(&self, through: Option<u64>, in_flight: &mut InFlight) -> Result<(), Failure> {
+    async fn acknowledged(
+        &self,
+        through: Option<u64>,
+        in_flight: &mut InFlight,
+    ) -> Result<(), Failure> {
         failing!("upload::acknowledged");
         let acked = in_flight.acknowledged(through);
         in_flight.acknowledging.extend(acked);
-        self.acknowledge_pending(in_flight)
+        self.acknowledge_pending(in_flight).await
     }
 
     /// cladefs: has the store record the segments the writer acknowledged, in order, which leave it
@@ -2525,18 +2545,17 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// next pass, as a full disk fails the record of an acknowledgement, which leaves the one before
     /// it whole (`wal::StartFile`), and the store goes on; any other failure is the uploader's
     /// (TASK-539.12). Before, the store failed for it.
-    fn acknowledge_pending(&self, in_flight: &mut InFlight) -> Result<(), Failure> {
+    async fn acknowledge_pending(&self, in_flight: &mut InFlight) -> Result<(), Failure> {
         let mut epoch = None;
-        let stored = blocking(|| {
+        let stored = async {
             while let Some(segment) = in_flight.acknowledging.front() {
-                if let Err(err) = self.store().acknowledged(segment.number) {
-                    return Err(err);
-                }
+                self.store().acknowledged(segment.number).await?;
                 epoch = Some(segment.epoch());
                 in_flight.acknowledging.pop_front();
             }
-            Ok(())
-        });
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
         match stored {
             Ok(()) => in_flight.acknowledging_failed = false,
             Err(err) if err.chain().any(|cause| cause.is::<std::io::Error>()) => {
@@ -2770,11 +2789,10 @@ mod tests {
     /// taking of the cell, and of the cell's head with the epoch it took it at, fences the
     /// store's writer: its next commit's upload fails, and a placement of a lower token takes the
     /// cell back no more.
-    #[test]
-    fn stores_take_their_cells_and_are_fenced_with_them() {
-        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stores_take_their_cells_and_are_fenced_with_them() {
         let host = Runtime {
-            handle: runtime.handle().clone(),
+            handle: tokio::runtime::Handle::current(),
             uploads: Budget::new(Limits::UNBOUNDED),
             keys: bucket_cell::keys::testing::host(),
         };
@@ -2784,44 +2802,39 @@ mod tests {
         let description = Description { block_size: 4096, capacity: 1 << 30, cell: CELL };
         let kind = bucket_cell::cell::Kind::Fxfs;
         LocalCell::make(&dir, description, Some("memory:///cells"), Some(kind)).unwrap();
-        runtime.block_on(lifecycle::create(&*bucket, CELL, 1)).unwrap();
+        lifecycle::create(&*bucket, CELL, 1).await.unwrap();
         let options = Options { token: 5, ..Options::default() };
         let recovering = LocalCell::recover_unmade(dir).unwrap();
-        let (store, uploader) = crate::upload::wait_on(open(
-            recovering,
-            crate::Options::default(),
-            bucket.clone(),
-            (1, options),
-            &host,
-        ))
-        .unwrap();
+        let (store, uploader) =
+            open(recovering, crate::Options::default(), bucket.clone(), (1, options), &host)
+                .await
+                .unwrap();
         store.made().unwrap();
-        let head = runtime.block_on(bucket_cell::head::get(&*bucket, CELL)).unwrap().unwrap();
+        let head = bucket_cell::head::get(&*bucket, CELL).await.unwrap().unwrap();
         assert_eq!((head.epoch, head.holder, head.token), (1, 1, 5));
         assert_eq!(head.kind, Some(bucket_cell::cell::Kind::Fxfs));
 
-        store.write(ExtentId::new(CELL.id, 1), 0, &[1; 4096]).unwrap();
-        store.commit(None).unwrap();
-        crate::upload::wait_on(uploader.uploaded(store.last_commit().unwrap())).unwrap();
+        store.write(ExtentId::new(CELL.id, 1), 0, &[1; 4096]).await.unwrap();
+        store.commit(None).await.unwrap();
+        uploader.uploaded(store.last_commit().unwrap()).await.unwrap();
         // Another placement takes the cell, fencing it (TASK-371).
-        let taken = runtime.block_on(bucket_cell::testing::take(&*bucket, CELL, 0x66, 6));
+        let taken = bucket_cell::testing::take(&*bucket, CELL, 0x66, 6).await;
         assert_eq!(taken.map(|held| held.head.epoch), Ok(2));
-        store.write(ExtentId::new(CELL.id, 2), 0, &[2; 4096]).unwrap();
-        store.commit(None).unwrap();
-        let fenced = crate::upload::wait_on(uploader.uploaded(store.last_commit().unwrap()));
+        store.write(ExtentId::new(CELL.id, 2), 0, &[2; 4096]).await.unwrap();
+        store.commit(None).await.unwrap();
+        let fenced = uploader.uploaded(store.last_commit().unwrap()).await;
         assert!(matches!(fenced, Err(Failure::Bucket(bucket_cell::Error::Fenced))), "{fenced:?}");
-        let back = runtime.block_on(bucket_cell::testing::take(&*bucket, CELL, 0x55, 5));
+        let back = bucket_cell::testing::take(&*bucket, CELL, 0x55, 5).await;
         assert_eq!(back.map(|held| held.head), Err(bucket_cell::Error::Stale));
     }
 
     /// TASK-539.9: a store's disk under pressure urges its uploader, which closes the open segment
     /// its guest is filling and uploads it at once, rather than wait out its interval, and
     /// `filling_wait` past it, so that what it held leaves the disk (doc-22).
-    #[test]
-    fn a_disk_under_pressure_has_its_stores_uploaded_at_once() {
-        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_disk_under_pressure_has_its_stores_uploaded_at_once() {
         let host = Runtime {
-            handle: runtime.handle().clone(),
+            handle: tokio::runtime::Handle::current(),
             uploads: Budget::new(Limits::UNBOUNDED),
             keys: bucket_cell::keys::testing::host(),
         };
@@ -2831,22 +2844,18 @@ mod tests {
         let disk = dir.disk().disk().clone();
         let description = Description { block_size: 4096, capacity: 1 << 30, cell: CELL };
         LocalCell::make(&dir, description, Some("memory:///urged"), None).unwrap();
-        runtime.block_on(lifecycle::create(&*bucket, CELL, 1)).unwrap();
+        lifecycle::create(&*bucket, CELL, 1).await.unwrap();
         // Its uploader uploads nothing it is not asked to within the hour.
         let hour = Duration::from_secs(3600);
         let options = Options { interval: hour, filling_wait: hour, ..Options::default() };
         let recovering = LocalCell::recover_unmade(dir).unwrap();
-        let (store, uploader) = crate::upload::wait_on(open(
-            recovering,
-            crate::Options::default(),
-            bucket.clone(),
-            (1, options),
-            &host,
-        ))
-        .unwrap();
+        let (store, uploader) =
+            open(recovering, crate::Options::default(), bucket.clone(), (1, options), &host)
+                .await
+                .unwrap();
         store.made().unwrap();
-        store.write(ExtentId::new(CELL.id, 1), 0, &[1; 4096]).unwrap();
-        store.commit(None).unwrap();
+        store.write(ExtentId::new(CELL.id, 1), 0, &[1; 4096]).await.unwrap();
+        store.commit(None).await.unwrap();
         let epoch = store.last_commit().unwrap();
         std::thread::sleep(Duration::from_millis(200));
         assert!(uploader.last_uploaded() < epoch, "uploaded unasked");
@@ -2856,19 +2865,22 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "not uploaded as its disk urged it");
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(store.closed(usize::MAX).unwrap().len(), 0, "its segments left unuploaded");
+        assert_eq!(
+            store.closed(usize::MAX).await.unwrap().len(),
+            0,
+            "its segments left unuploaded"
+        );
     }
 
     /// TASK-539.12: the store's disk refusing the record of an acknowledgement, as a full one does,
     /// fails neither the store nor its uploader: the record before it whole, the store writes and
     /// commits on, its segments wait in it, and the uploader records them once it can, which lets
     /// them go. Before, the store failed for good.
-    #[test]
-    fn acknowledgements_a_full_disk_refuses_wait_for_room() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn acknowledgements_a_full_disk_refuses_wait_for_room() {
         let scenario = fail::FailScenario::setup();
-        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         let host = Runtime {
-            handle: runtime.handle().clone(),
+            handle: tokio::runtime::Handle::current(),
             uploads: Budget::new(Limits::UNBOUNDED),
             keys: bucket_cell::keys::testing::host(),
         };
@@ -2877,30 +2889,26 @@ mod tests {
         let dir = MemDir::new();
         let description = Description { block_size: 4096, capacity: 1 << 30, cell: CELL };
         LocalCell::make(&dir, description, Some("memory:///full"), None).unwrap();
-        runtime.block_on(lifecycle::create(&*bucket, CELL, 1)).unwrap();
+        lifecycle::create(&*bucket, CELL, 1).await.unwrap();
         let options = Options { interval: Duration::from_millis(20), ..Options::default() };
         let recovering = LocalCell::recover_unmade(dir).unwrap();
-        let (store, uploader) = crate::upload::wait_on(open(
-            recovering,
-            crate::Options::default(),
-            bucket.clone(),
-            (1, options),
-            &host,
-        ))
-        .unwrap();
+        let (store, uploader) =
+            open(recovering, crate::Options::default(), bucket.clone(), (1, options), &host)
+                .await
+                .unwrap();
         store.made().unwrap();
         fail::cfg("wal::start", "return").unwrap();
-        store.write(ExtentId::new(CELL.id, 1), 0, &[1; 4096]).unwrap();
-        store.commit(None).unwrap();
+        store.write(ExtentId::new(CELL.id, 1), 0, &[1; 4096]).await.unwrap();
+        store.commit(None).await.unwrap();
         let epoch = store.last_commit().unwrap();
         // Its interval's passes, 25 of them, each trying again.
         std::thread::sleep(Duration::from_millis(500));
         assert!(uploader.last_uploaded() < epoch, "counted uploaded, unrecorded");
-        store.write(ExtentId::new(CELL.id, 2), 0, &[2; 4096]).unwrap();
-        store.commit(None).unwrap();
+        store.write(ExtentId::new(CELL.id, 2), 0, &[2; 4096]).await.unwrap();
+        store.commit(None).await.unwrap();
         fail::remove("wal::start");
-        crate::upload::wait_on(uploader.uploaded(store.last_commit().unwrap())).unwrap();
-        assert_eq!(store.closed(usize::MAX).unwrap().len(), 0, "its segments left in it");
+        uploader.uploaded(store.last_commit().unwrap()).await.unwrap();
+        assert_eq!(store.closed(usize::MAX).await.unwrap().len(), 0, "its segments left in it");
         scenario.teardown();
     }
 
@@ -2909,13 +2917,12 @@ mod tests {
     /// one closing segment after segment. Each swap names all uploaded since the last, the uploads
     /// going on as it waits; the store refuses no write of the head. TASK-691: each slot of the head
     /// a second apart, the head many times a second.
-    #[test]
-    fn heads_are_swapped_as_fast_as_gcs_takes_them() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn heads_are_swapped_as_fast_as_gcs_takes_them() {
         use bucket_cell::faults::{Fault, Faults, Faulty};
         use bucket_cell::object_bucket::Request;
-        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         let host = Runtime {
-            handle: runtime.handle().clone(),
+            handle: tokio::runtime::Handle::current(),
             uploads: Budget::new(Limits::UNBOUNDED),
             keys: bucket_cell::keys::testing::host(),
         };
@@ -2927,15 +2934,16 @@ mod tests {
         let dir = MemDir::new();
         let description = Description { block_size: 4096, capacity: 1 << 30, cell: CELL };
         LocalCell::make(&dir, description, Some("memory:///gcs"), None).unwrap();
-        runtime.block_on(lifecycle::create(&*bucket, CELL, 1)).unwrap();
+        lifecycle::create(&*bucket, CELL, 1).await.unwrap();
         let recovering = LocalCell::recover_unmade(dir).unwrap();
-        let (store, uploader) = crate::upload::wait_on(open(
+        let (store, uploader) = open(
             recovering,
             crate::Options::default(),
             bucket.clone(),
             (1, Options::default()),
             &host,
-        ))
+        )
+        .await
         .unwrap();
         store.made().unwrap();
         // Its updates from now on: the head's swaps, the bucket's probe and the taking done.
@@ -2943,27 +2951,30 @@ mod tests {
         let opened = updates();
         let started = std::time::Instant::now();
         let mut sequence = 0;
-        let mut write = |close: bool| {
+        let mut write = async |close: bool| {
             sequence += 1;
-            store.write(ExtentId::new(CELL.id, sequence), 0, &[sequence as u8; 4096]).unwrap();
+            store
+                .write(ExtentId::new(CELL.id, sequence), 0, &[sequence as u8; 4096])
+                .await
+                .unwrap();
             if close {
                 store.close_segment().unwrap();
             }
-            store.commit(None).unwrap();
+            store.commit(None).await.unwrap();
             sequence
         };
         let mut waits = Vec::new();
         while started.elapsed() < 3 * second {
-            write(false);
+            write(false).await;
             let waiting = std::time::Instant::now();
-            crate::upload::wait_on(uploader.uploaded(store.last_commit().unwrap())).unwrap();
+            uploader.uploaded(store.last_commit().unwrap()).await.unwrap();
             waits.push(waiting.elapsed());
         }
         for _ in 0..3 * IN_FLIGHT {
-            write(true);
+            write(true).await;
         }
-        let last = write(false);
-        crate::upload::wait_on(uploader.uploaded(store.last_commit().unwrap())).unwrap();
+        let last = write(false).await;
+        uploader.uploaded(store.last_commit().unwrap()).await.unwrap();
         let elapsed = started.elapsed();
         let stats = bucket.stats();
         assert_eq!(stats.failures(Request::Update), 0, "writes of the head refused");
@@ -2977,18 +2988,17 @@ mod tests {
         let longest = waits.iter().max().unwrap();
         assert!(*longest < second + second / 2, "a commit waited {longest:?}: {waits:?}");
         drop(uploader);
-        let state = runtime.block_on(bucket_cell::recover(&*bucket, CELL, None)).unwrap().state;
+        let state = bucket_cell::recover(&*bucket, CELL, None).await.unwrap().state;
         let sequences: Vec<u64> = state.extents.keys().map(|extent| extent.sequence).collect();
         assert_eq!(sequences, (1..=last).collect::<Vec<_>>());
     }
 
     /// TASK-79.19: a gather takes no more of the segments the store closed than may upload at once,
     /// with those uploading; the rest it leaves in the store, until those it took are uploaded.
-    #[test]
-    fn gathers_take_what_may_upload_at_once() {
-        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gathers_take_what_may_upload_at_once() {
         let host = Runtime {
-            handle: runtime.handle().clone(),
+            handle: tokio::runtime::Handle::current(),
             uploads: Budget::new(Limits::UNBOUNDED),
             keys: bucket_cell::keys::testing::host(),
         };
@@ -2997,44 +3007,44 @@ mod tests {
         let dir = MemDir::new();
         let description = Description { block_size: 4096, capacity: 1 << 30, cell: CELL };
         LocalCell::make(&dir, description, Some("memory:///gathers"), None).unwrap();
-        runtime.block_on(lifecycle::create(&*bucket, CELL, 1)).unwrap();
+        lifecycle::create(&*bucket, CELL, 1).await.unwrap();
         // Its uploader uploads nothing it is not asked to within the hour: the test gathers.
         let options = Options { interval: Duration::from_secs(3600), ..Options::default() };
         let recovering = LocalCell::recover_unmade(dir).unwrap();
-        let (store, uploader) = crate::upload::wait_on(open(
-            recovering,
-            crate::Options::default(),
-            bucket.clone(),
-            (1, options),
-            &host,
-        ))
-        .unwrap();
+        let (store, uploader) =
+            open(recovering, crate::Options::default(), bucket.clone(), (1, options), &host)
+                .await
+                .unwrap();
         store.made().unwrap();
         // Each commit closes its segment.
         let closed = 2 * IN_FLIGHT + 1;
         for sequence in 1..=closed as u64 {
-            store.write(ExtentId::new(CELL.id, sequence), 0, &[sequence as u8; 4096]).unwrap();
+            store
+                .write(ExtentId::new(CELL.id, sequence), 0, &[sequence as u8; 4096])
+                .await
+                .unwrap();
             store.close_segment().unwrap();
-            store.commit(None).unwrap();
+            store.commit(None).await.unwrap();
         }
         let shared = &uploader.shared;
         let writer = shared.writer.lock().unwrap().clone().unwrap();
         let mut in_flight = InFlight::default();
         let mut taken = Vec::new();
-        while shared.gather(&writer, &mut in_flight, (true, true)).unwrap().took {
+        while shared.gather(&writer, &mut in_flight, (true, true)).await.unwrap().took {
             taken.push(in_flight.len());
-            runtime.block_on(async {
+            (async {
                 while let Some(uploaded) = in_flight.next().await {
                     uploaded.unwrap();
                 }
                 let through = writer.acknowledge().await.unwrap();
-                shared.acknowledged(through, &mut in_flight).unwrap();
-            });
+                shared.acknowledged(through, &mut in_flight).await.unwrap();
+            })
+            .await;
         }
         assert_eq!(taken, [IN_FLIGHT, IN_FLIGHT, 1]);
         assert_eq!(uploader.last_uploaded(), store.last_commit().unwrap());
         drop(uploader);
-        let state = runtime.block_on(bucket_cell::recover(&*bucket, CELL, None)).unwrap().state;
+        let state = bucket_cell::recover(&*bucket, CELL, None).await.unwrap().state;
         let sequences: Vec<u64> = state.extents.keys().map(|extent| extent.sequence).collect();
         assert_eq!(sequences, (1..=closed as u64).collect::<Vec<_>>());
     }
@@ -3292,7 +3302,7 @@ mod shuttle_tests {
 
         fn write(&mut self, at: u64, blocks: usize) {
             let bytes = pattern(self.cell.id ^ at, blocks);
-            self.store.write(self.extent(at), 0, &bytes).unwrap();
+            shuttle::future::block_on(self.store.write(self.extent(at), 0, &bytes)).unwrap();
             self.holds.insert(self.extent(at), bytes);
         }
 
@@ -3345,7 +3355,7 @@ mod shuttle_tests {
         };
 
         parent.write(0, 1);
-        parent.store.commit_ordered(None).unwrap();
+        shuttle::future::block_on(parent.store.commit_ordered(None)).unwrap();
         // Asked for that commit with an extent of its own open, the uploader closes the open
         // segment between commits: its footer's next sequence number counts the extent, which the
         // next segment names, its object uploaded first (TASK-79.3).
@@ -3353,17 +3363,17 @@ mod shuttle_tests {
         parent.ask();
         parent.write(2, 2);
         parent.free(parent.extent(0));
-        parent.store.commit(None).unwrap();
+        shuttle::future::block_on(parent.store.commit(None)).unwrap();
         parent.ask();
         parent.write(3, 1);
-        parent.store.commit(None).unwrap();
+        shuttle::future::block_on(parent.store.commit(None)).unwrap();
         parent.ask();
         parent.free(parent.extent(1));
         parent.write(4, 2);
-        parent.store.commit_ordered(None).unwrap();
+        shuttle::future::block_on(parent.store.commit_ordered(None)).unwrap();
         parent.ask();
         parent.free(parent.extent(3));
-        parent.store.commit(None).unwrap();
+        shuttle::future::block_on(parent.store.commit(None)).unwrap();
         parent.ask();
         let parent = parent.end()?;
         writing.store(false, SeqCst);
@@ -3400,7 +3410,7 @@ mod shuttle_tests {
         let mut parent = Session::open(&bucket, CELL, 1);
         parent.write(0, 1);
         parent.write(1, 3);
-        parent.store.commit_ordered(None).unwrap();
+        shuttle::future::block_on(parent.store.commit_ordered(None)).unwrap();
         parent.ask();
         let before = parent.store.last_commit().unwrap();
         until(|| parent.uploader.last_uploaded() >= before);
@@ -3415,7 +3425,7 @@ mod shuttle_tests {
         bucket.gate.reached();
         parent.write(2, 1);
         parent.free(parent.extent(0));
-        parent.store.commit_ordered(None).unwrap();
+        shuttle::future::block_on(parent.store.commit_ordered(None)).unwrap();
         parent.ask();
         let committed = parent.store.last_commit().unwrap();
         until(|| parent.uploader.last_uploaded() >= committed);

@@ -41,8 +41,8 @@ fn create(options: Options) -> LocalCell<MemDir> {
 }
 
 /// Writes extent `sequence`, of `blocks` blocks of its pattern.
-fn write(store: &LocalCell<MemDir>, sequence: u64, blocks: usize) {
-    store.write(extent(sequence), 0, &pattern(sequence as u8, blocks)).unwrap();
+async fn write(store: &LocalCell<MemDir>, sequence: u64, blocks: usize) {
+    store.write(extent(sequence), 0, &pattern(sequence as u8, blocks)).await.unwrap();
 }
 
 /// Extent `sequence`, as `view` reads `blocks` blocks of it.
@@ -83,17 +83,17 @@ fn store_bytes(store: &LocalCell<MemDir>) -> u64 {
 /// the segment holding it is acknowledged there, and leaves the store: its read fails saying where
 /// in the bucket the data is ([`BucketData`]), for the fetcher to read there, as the store's own
 /// do (TASK-165.8). What the uploader kept of the frees, the view keeps, as before.
-#[test]
-fn views_read_frees_acknowledged_in_the_bucket() {
+#[tokio::test(flavor = "multi_thread")]
+async fn views_read_frees_acknowledged_in_the_bucket() {
     let store = create(OPTIONS);
-    write(&store, 1, 2);
-    store.commit(None).unwrap();
+    write(&store, 1, 2).await;
+    store.commit(None).await.unwrap();
     let view = store.view();
     store.free(extent(1)).unwrap();
-    store.commit(None).unwrap();
-    assert!(store.close_now().unwrap());
-    store.flush().unwrap();
-    let closed = store.closed(usize::MAX).unwrap();
+    store.commit(None).await.unwrap();
+    assert!(store.close_now().await.unwrap());
+    store.flush().await.unwrap();
+    let closed = store.closed(usize::MAX).await.unwrap();
     let keys: Vec<String> = (closed.iter())
         .map(|closed| {
             bucket_cell::layout::segment(
@@ -104,7 +104,7 @@ fn views_read_frees_acknowledged_in_the_bucket() {
         })
         .collect();
     for closed in &closed {
-        store.acknowledged(closed.number).unwrap();
+        store.acknowledged(closed.number).await.unwrap();
     }
     assert_eq!(store.usage().unwrap().segments, 1);
     let location = Location { key: keys[0].clone(), offset: 0, len: 2 * BLOCK as u64 };
@@ -113,23 +113,23 @@ fn views_read_frees_acknowledged_in_the_bucket() {
 
 /// A view reads the commit it is of, and its root, while the writer frees what it holds, in
 /// segments and in files of their own, writes more and commits.
-#[test]
-fn views_read_the_commit_they_are_of() {
+#[tokio::test(flavor = "multi_thread")]
+async fn views_read_the_commit_they_are_of() {
     let store = create(OPTIONS);
-    write(&store, 1, 2);
+    write(&store, 1, 2).await;
     // Large: in a file of its own.
-    write(&store, 2, 10);
-    write(&store, 3, 1);
-    store.commit(Some(b"one")).unwrap();
+    write(&store, 2, 10).await;
+    write(&store, 3, 1).await;
+    store.commit(Some(b"one")).await.unwrap();
     let view = store.view();
     assert_eq!((view.commit(), view.root()), (1, &b"one"[..]));
 
     store.free(extent(1)).unwrap();
     store.free(extent(2)).unwrap();
-    write(&store, 4, 3);
-    store.commit(Some(b"two")).unwrap();
-    write(&store, 5, 1);
-    store.commit(None).unwrap();
+    write(&store, 4, 3).await;
+    store.commit(Some(b"two")).await.unwrap();
+    write(&store, 5, 1).await;
+    store.commit(None).await.unwrap();
 
     assert_eq!(read(&store, &view, 1, 2).unwrap(), pattern(1, 2));
     assert_eq!(read(&store, &view, 2, 10).unwrap(), pattern(2, 10));
@@ -143,31 +143,31 @@ fn views_read_the_commit_they_are_of() {
 
 /// The frees after a view's commit are kept, and count as used, until it advances past them, or
 /// goes: then the next commit lets them go.
-#[test]
-fn kept_frees_go_once_views_advance_or_drop() {
+#[tokio::test(flavor = "multi_thread")]
+async fn kept_frees_go_once_views_advance_or_drop() {
     let store = create(OPTIONS);
-    write(&store, 1, 3);
-    store.commit(None).unwrap();
+    write(&store, 1, 3).await;
+    store.commit(None).await.unwrap();
     let mut view = store.view();
     store.free(extent(1)).unwrap();
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     assert_eq!(kept(&store), 3 * BLOCK as u64);
 
     view.advance().unwrap();
     assert_eq!(view.commit(), 2);
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     assert_eq!(kept(&store), 0);
     error_is(read(&store, &view, 1, 3), NoExtent(extent(1)));
 
     drop(view);
-    write(&store, 2, 1);
-    store.commit(None).unwrap();
+    write(&store, 2, 1).await;
+    store.commit(None).await.unwrap();
     let other = store.view();
     store.free(extent(2)).unwrap();
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     assert_eq!(kept(&store), BLOCK as u64);
     drop(other);
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     assert_eq!(kept(&store), 0);
     // cladefs: kept still for the bucket, until the segments holding them are acknowledged there
     // (TASK-165.9).
@@ -175,15 +175,15 @@ fn kept_frees_go_once_views_advance_or_drop() {
 }
 
 /// What views keep takes room as writes in progress do: it is used, and not available.
-#[test]
-fn kept_frees_take_room() {
+#[tokio::test(flavor = "multi_thread")]
+async fn kept_frees_take_room() {
     let store = create(OPTIONS);
-    write(&store, 1, 3);
-    store.commit(None).unwrap();
+    write(&store, 1, 3).await;
+    store.commit(None).await.unwrap();
     let _view = store.view();
     store.free(extent(1)).unwrap();
-    store.commit(None).unwrap();
-    let write = store.begin_write(extent(2), 0, 2 * BLOCK as u64).unwrap();
+    store.commit(None).await.unwrap();
+    let write = store.begin_write(extent(2), 0, 2 * BLOCK as u64).await.unwrap();
     let info = store.info().unwrap();
     assert_eq!(info.used, 3 * BLOCK as u64);
     assert_eq!(info.available, info.capacity - 5 * BLOCK as u64);
@@ -192,39 +192,39 @@ fn kept_frees_take_room() {
 
 /// A view locates the parts of what it holds, freed since, as [`LocalCell::locate`] does what the
 /// store holds; an open extent it holds not.
-#[test]
-fn views_locate_what_they_hold() {
+#[tokio::test(flavor = "multi_thread")]
+async fn views_locate_what_they_hold() {
     let store = create(OPTIONS);
-    write(&store, 1, 3);
-    store.commit(None).unwrap();
+    write(&store, 1, 3).await;
+    store.commit(None).await.unwrap();
     let view = store.view();
     let held = store.locate(extent(1), 0, 3 * BLOCK as u64).unwrap();
     store.free(extent(1)).unwrap();
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     let parts = store.locate_view(&view, extent(1), 0, 3 * BLOCK as u64).unwrap();
     assert_eq!(parts.len(), held.len());
     assert_eq!(parts.iter().map(|part| part.len()).sum::<u64>(), 3 * BLOCK as u64);
-    write(&store, 2, 1);
+    write(&store, 2, 1).await;
     error_is(store.locate_view(&view, extent(2), 0, BLOCK as u64), NoExtent(extent(2)));
 }
 
 /// A view opened after a free, but before the commit that frees it, is of the commit before,
 /// which holds it: it is kept. One opened after that commit keeps nothing of it.
-#[test]
-fn views_keep_what_their_commit_holds() {
+#[tokio::test(flavor = "multi_thread")]
+async fn views_keep_what_their_commit_holds() {
     let store = create(OPTIONS);
-    write(&store, 1, 1);
-    write(&store, 2, 1);
-    store.commit(None).unwrap();
+    write(&store, 1, 1).await;
+    write(&store, 2, 1).await;
+    store.commit(None).await.unwrap();
     store.free(extent(1)).unwrap();
     let before = store.view();
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     assert_eq!(read(&store, &before, 1, 1).unwrap(), pattern(1, 1));
     drop(before);
     store.free(extent(2)).unwrap();
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     let after = store.view();
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     assert_eq!(kept(&store), 0);
     error_is(read(&store, &after, 2, 1), NoExtent(extent(2)));
 }
@@ -232,65 +232,65 @@ fn views_keep_what_their_commit_holds() {
 /// A view refuses extents its commit doesn't hold, sealed by a later one: a follower's journal
 /// replay reads on until it finds nothing, and must end at its view's commit. Those sealed while
 /// no view lived are older than any view.
-#[test]
-fn views_refuse_extents_of_later_commits() {
+#[tokio::test(flavor = "multi_thread")]
+async fn views_refuse_extents_of_later_commits() {
     let store = create(OPTIONS);
-    write(&store, 1, 1);
-    store.commit(None).unwrap();
+    write(&store, 1, 1).await;
+    store.commit(None).await.unwrap();
     let mut view = store.view();
-    write(&store, 2, 1);
-    store.commit(None).unwrap();
+    write(&store, 2, 1).await;
+    store.commit(None).await.unwrap();
     error_is(read(&store, &view, 2, 1), NoExtent(extent(2)));
     view.advance().unwrap();
     assert_eq!(read(&store, &view, 2, 1).unwrap(), pattern(2, 1));
     drop(view);
-    write(&store, 3, 1);
-    store.commit(None).unwrap();
+    write(&store, 3, 1).await;
+    store.commit(None).await.unwrap();
     let view = store.view();
     assert_eq!(read(&store, &view, 3, 1).unwrap(), pattern(3, 1));
 }
 
 /// An extent freed while open, before a commit sealed it, was in no view's commit: it is not kept.
-#[test]
-fn open_extents_freed_are_not_kept() {
+#[tokio::test(flavor = "multi_thread")]
+async fn open_extents_freed_are_not_kept() {
     let store = create(OPTIONS);
     let _view = store.view();
-    write(&store, 1, 2);
+    write(&store, 1, 2).await;
     store.free(extent(1)).unwrap();
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     assert_eq!(kept(&store), 0);
 }
 
 /// A duplicate of a view is as of its commit, and keeps its frees when it goes, but not its pins.
-#[test]
-fn duplicates_keep_what_their_commit_holds() {
+#[tokio::test(flavor = "multi_thread")]
+async fn duplicates_keep_what_their_commit_holds() {
     let store = create(OPTIONS);
-    write(&store, 1, 1);
-    write(&store, 2, 1);
-    store.commit(None).unwrap();
+    write(&store, 1, 1).await;
+    write(&store, 2, 1).await;
+    store.commit(None).await.unwrap();
     let view = store.view();
     view.pin(extent(2)).unwrap();
     let copy = view.duplicate().unwrap();
     assert_eq!((copy.commit(), copy.root()), (view.commit(), view.root()));
     store.free(extent(1)).unwrap();
     store.free(extent(2)).unwrap();
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     drop(view);
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     assert_eq!(read(&store, &copy, 1, 1).unwrap(), pattern(1, 1));
     assert_eq!(read(&store, &copy, 2, 1).unwrap(), pattern(2, 1));
 }
 
 /// Of the frees kept, a view reads only those after its commit, which its commit holds: not one
 /// freed before, which an older view keeps.
-#[test]
-fn views_read_only_what_their_commit_holds() {
+#[tokio::test(flavor = "multi_thread")]
+async fn views_read_only_what_their_commit_holds() {
     let store = create(OPTIONS);
-    write(&store, 1, 2);
-    store.commit(None).unwrap();
+    write(&store, 1, 2).await;
+    store.commit(None).await.unwrap();
     let older = store.view();
     store.free(extent(1)).unwrap();
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     let newer = store.view();
     assert_eq!(read(&store, &older, 1, 2).unwrap(), pattern(1, 2));
     error_is(read(&store, &newer, 1, 2), NoExtent(extent(1)));
@@ -303,17 +303,17 @@ fn views_read_only_what_their_commit_holds() {
 
 /// A view advanced keeping holds what the commits since the one it was as of held, those
 /// between included, until it lets go of them: what a follower applying them reads.
-#[test]
-fn views_advanced_keeping_hold_the_commits_between() {
+#[tokio::test(flavor = "multi_thread")]
+async fn views_advanced_keeping_hold_the_commits_between() {
     let store = create(OPTIONS);
-    write(&store, 1, 1);
-    store.commit(None).unwrap();
+    write(&store, 1, 1).await;
+    store.commit(None).await.unwrap();
     let mut view = store.view();
-    write(&store, 2, 1);
-    store.commit(None).unwrap();
+    write(&store, 2, 1).await;
+    store.commit(None).await.unwrap();
     store.free(extent(1)).unwrap();
     store.free(extent(2)).unwrap();
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     view.advance_keeping().unwrap();
     assert_eq!(view.commit(), store.last_commit().unwrap());
     assert_eq!(read(&store, &view, 1, 1).unwrap(), pattern(1, 1));
@@ -322,27 +322,27 @@ fn views_advanced_keeping_hold_the_commits_between() {
     assert_eq!(view.since(), view.commit());
     error_is(read(&store, &view, 1, 1), NoExtent(extent(1)));
     error_is(read(&store, &view, 2, 1), NoExtent(extent(2)));
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     assert_eq!(kept(&store), 0);
 }
 
 /// A view lets go of the commits before the one named, which a let-go arriving after its next
 /// advance names: it holds the commits since that one still, and a let-go of an earlier one
 /// changes nothing.
-#[test]
-fn views_let_go_of_the_commits_before_the_one_named() {
+#[tokio::test(flavor = "multi_thread")]
+async fn views_let_go_of_the_commits_before_the_one_named() {
     let store = create(OPTIONS);
-    write(&store, 1, 1);
-    write(&store, 2, 1);
-    store.commit(None).unwrap();
+    write(&store, 1, 1).await;
+    write(&store, 2, 1).await;
+    store.commit(None).await.unwrap();
     let mut view = store.view();
     let first = view.commit();
     store.free(extent(1)).unwrap();
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     view.advance_keeping().unwrap();
     let second = view.commit();
     store.free(extent(2)).unwrap();
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     view.advance_keeping().unwrap();
 
     view.let_go(second);
@@ -358,99 +358,99 @@ fn views_let_go_of_the_commits_before_the_one_named() {
 
 /// An extent's length as of a view: of one its commit holds, still or freed since; not of one
 /// written after it.
-#[test]
-fn views_know_their_extents_lengths() {
+#[tokio::test(flavor = "multi_thread")]
+async fn views_know_their_extents_lengths() {
     let store = create(OPTIONS);
-    write(&store, 1, 3);
-    store.commit(None).unwrap();
+    write(&store, 1, 3).await;
+    store.commit(None).await.unwrap();
     let view = store.view();
-    write(&store, 2, 1);
+    write(&store, 2, 1).await;
     store.free(extent(1)).unwrap();
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     assert_eq!(store.view_extent(&view, extent(1)).unwrap(), 3 * BLOCK as u64);
     error_is(store.view_extent(&view, extent(2)), NoExtent(extent(2)));
 }
 
 /// A view waits for a commit after its own: what tells a follower to advance.
-#[test]
-fn views_wait_for_newer_commits() {
+#[tokio::test(flavor = "multi_thread")]
+async fn views_wait_for_newer_commits() {
     let store = std::sync::Arc::new(create(OPTIONS));
-    write(&store, 1, 1);
-    store.commit(None).unwrap();
+    write(&store, 1, 1).await;
+    store.commit(None).await.unwrap();
     let mut view = store.view();
     assert_eq!(view.newer(Duration::from_millis(10)).unwrap(), None);
     let committing = {
         let store = store.clone();
-        std::thread::spawn(move || {
-            write(&store, 2, 1);
-            store.commit(None).unwrap();
+        tokio::spawn(async move {
+            write(&store, 2, 1).await;
+            store.commit(None).await.unwrap();
             store.last_commit().unwrap()
         })
     };
     let newer = view.newer(Duration::from_secs(60)).unwrap();
-    let epoch = committing.join().unwrap();
+    let epoch = committing.await.unwrap();
     assert_eq!(newer, Some(epoch));
     view.advance().unwrap();
     assert_eq!(view.newer(Duration::from_millis(10)).unwrap(), None);
 }
 
 /// A pinned extent is kept, whatever commit its view advances to, until unpinned.
-#[test]
-fn pins_keep_extents_past_advances() {
+#[tokio::test(flavor = "multi_thread")]
+async fn pins_keep_extents_past_advances() {
     let store = create(OPTIONS);
-    write(&store, 1, 2);
-    store.commit(None).unwrap();
+    write(&store, 1, 2).await;
+    store.commit(None).await.unwrap();
     let mut view = store.view();
     view.pin(extent(1)).unwrap();
     store.free(extent(1)).unwrap();
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     view.advance().unwrap();
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     assert_eq!(read(&store, &view, 1, 2).unwrap(), pattern(1, 2));
     assert_eq!(kept(&store), 2 * BLOCK as u64);
     assert_eq!(view.pinned(), vec![extent(1)]);
 
     view.unpin(extent(1));
     assert_eq!(view.pinned(), vec![]);
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     assert_eq!(kept(&store), 0);
     error_is(read(&store, &view, 1, 2), NoExtent(extent(1)));
 }
 
 /// A view stale for `view_lag` is cut off: its reads, advances and pins fail, and it keeps
 /// nothing. Views opened since are not.
-#[test]
-fn views_lagging_too_long_are_cut_off() {
+#[tokio::test(flavor = "multi_thread")]
+async fn views_lagging_too_long_are_cut_off() {
     let store = create(Options { view_lag: Some(Duration::ZERO), ..OPTIONS });
-    write(&store, 1, 1);
-    store.commit(None).unwrap();
+    write(&store, 1, 1).await;
+    store.commit(None).await.unwrap();
     let mut view = store.view();
     assert_eq!(read(&store, &view, 1, 1).unwrap(), pattern(1, 1));
     store.free(extent(1)).unwrap();
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
 
     error_is(read(&store, &view, 1, 1), CutOff);
     error_is(view.advance(), CutOff);
     error_is(view.pin(extent(1)), CutOff);
     assert_eq!(kept(&store), 0);
     let fresh = store.view();
-    write(&store, 2, 1);
+    write(&store, 2, 1).await;
     assert_eq!(fresh.commit(), 2);
     error_is(read(&store, &fresh, 2, 1), NoExtent(extent(2)));
 }
 
 /// A store's views, as the followers' measurements report them: how many, how many commits the
 /// furthest behind is, and that it has been behind since; none once cut off.
-#[test]
-fn views_report_how_far_behind_they_are() {
+#[tokio::test(flavor = "multi_thread")]
+async fn views_report_how_far_behind_they_are() {
     let store = create(OPTIONS);
-    write(&store, 1, 1);
-    store.commit(None).unwrap();
+    write(&store, 1, 1).await;
+    store.commit(None).await.unwrap();
     assert_eq!(store.view_stats(), local_cell::ViewStats::default());
     let mut behind = store.view();
     let _latest = store.view();
-    store.commit(None).unwrap();
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
+    store.commit(None).await.unwrap();
     let stats = store.view_stats();
     assert_eq!((stats.views, stats.behind), (2, 2));
     assert!(stats.stale_for > Duration::ZERO, "{stats:?}");
@@ -461,11 +461,11 @@ fn views_report_how_far_behind_they_are() {
 
 /// Views the store cuts off (its writer gone with writes uncommitted) fail from then on, and the
 /// next commit keeps nothing for them; views opened after aren't cut off.
-#[test]
-fn views_cut_off_by_the_store_fail() {
+#[tokio::test(flavor = "multi_thread")]
+async fn views_cut_off_by_the_store_fail() {
     let store = create(OPTIONS);
-    write(&store, 1, 1);
-    store.commit(None).unwrap();
+    write(&store, 1, 1).await;
+    store.commit(None).await.unwrap();
     let mut view = store.view();
     store.free(extent(1)).unwrap();
     store.cut_views();
@@ -474,7 +474,7 @@ fn views_cut_off_by_the_store_fail() {
     error_is(view.advance(), CutOff);
     error_is(view.pin(extent(1)), CutOff);
     error_is(view.newer(Duration::ZERO), CutOff);
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     assert_eq!(kept(&store), 0);
     let fresh = store.view();
     assert_eq!(fresh.commit(), 2);
@@ -483,19 +483,19 @@ fn views_cut_off_by_the_store_fail() {
 
 /// Views keeping more than `view_kept_bytes` of frees are cut off, the oldest first, until those
 /// left keep no more.
-#[test]
-fn views_keeping_too_much_are_cut_off() {
+#[tokio::test(flavor = "multi_thread")]
+async fn views_keeping_too_much_are_cut_off() {
     let store = create(Options { view_kept_bytes: Some(2 * BLOCK as u64), ..OPTIONS });
-    write(&store, 1, 1);
-    write(&store, 2, 2);
-    store.commit(None).unwrap();
+    write(&store, 1, 1).await;
+    write(&store, 2, 2).await;
+    store.commit(None).await.unwrap();
     let old = store.view();
     store.free(extent(1)).unwrap();
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     assert_eq!(kept(&store), BLOCK as u64);
     let young = store.view();
     store.free(extent(2)).unwrap();
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
 
     // The old view would keep both, three blocks; the young one, the second's two.
     error_is(read(&store, &old, 1, 1), CutOff);
@@ -519,13 +519,13 @@ fn duplicates_are_views_of_their_own() {
 
 /// A view reading an extent freed before its commit, kept for another, finds it not held: it let
 /// go of it; another reader finds no extent, and no view's letting go.
-#[test]
-fn views_find_what_they_let_go_of_not_held() {
+#[tokio::test(flavor = "multi_thread")]
+async fn views_find_what_they_let_go_of_not_held() {
     let store = create(OPTIONS);
-    write(&store, 1, 1);
-    store.commit(None).unwrap();
+    write(&store, 1, 1).await;
+    store.commit(None).await.unwrap();
     store.free(extent(1)).unwrap();
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     let view = store.view();
     let error = read(&store, &view, 1, 1).unwrap_err();
     assert_eq!(error.downcast_ref::<NotHeld>(), Some(&NotHeld(extent(1))), "{error:?}");

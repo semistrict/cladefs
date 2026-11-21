@@ -101,29 +101,29 @@ fn each(elapsed: Duration, count: u64) -> f64 {
 /// Commits `store`, writing `extent` first, and freeing `freed` if any, and returns how long the
 /// commit took: ordered, as its flush, each hundredth commit, is not timed, the store in memory
 /// copying each file it syncs whole.
-fn commit(store: &LocalCell<MemDir>, extent: ExtentId, freed: Option<ExtentId>) -> Duration {
-    store.write(extent, 0, &data(extent.sequence, BLOCK)).unwrap();
+async fn commit(store: &LocalCell<MemDir>, extent: ExtentId, freed: Option<ExtentId>) -> Duration {
+    store.write(extent, 0, &data(extent.sequence, BLOCK)).await.unwrap();
     if let Some(freed) = freed {
         store.free(freed).unwrap();
     }
     let started = Instant::now();
-    store.commit_ordered(None).unwrap();
+    store.commit_ordered(None).await.unwrap();
     let elapsed = started.elapsed();
     if extent.sequence.is_multiple_of(100) {
-        store.flush().unwrap();
+        store.flush().await.unwrap();
     }
     elapsed
 }
 
 /// `commits` commits, each writing an extent and freeing the one before, with a view that never
 /// advances if `viewing`: the time each takes, by five thousands.
-fn commits_freeing(commits: u64, viewing: bool) {
+async fn commits_freeing(commits: u64, viewing: bool) {
     let store = create(MemDir::new(), Options::default());
-    commit(&store, extent(0), None);
+    commit(&store, extent(0), None).await;
     let view = viewing.then(|| store.view());
     let mut elapsed = Duration::ZERO;
     for sequence in 1..=commits {
-        elapsed += commit(&store, extent(sequence), Some(extent(sequence - 1)));
+        elapsed += commit(&store, extent(sequence), Some(extent(sequence - 1))).await;
         if sequence.is_multiple_of(5000) {
             let first = sequence - 4999;
             println!("commits {first:>6} to {sequence:>6}: {:8.1} µs each", each(elapsed, 5000));
@@ -136,27 +136,29 @@ fn commits_freeing(commits: u64, viewing: bool) {
     drop(view);
 }
 
-fn lagging_view(commits: u64) {
+async fn lagging_view(commits: u64) {
     println!("with no view:");
-    commits_freeing(commits, false);
+    commits_freeing(commits, false).await;
     println!("with a view that never advances:");
-    commits_freeing(commits, true);
+    commits_freeing(commits, true).await;
 }
 
-fn segments(count: u64) {
+async fn segments(count: u64) {
     let dir = MemDir::new();
     let options = Options::default();
     let store = create(dir.clone(), options);
     for sequence in 0..count {
-        store.write(extent(sequence), 0, &data(sequence, BLOCK)).unwrap();
+        store.write(extent(sequence), 0, &data(sequence, BLOCK)).await.unwrap();
         store.close_segment().unwrap();
-        store.commit(None).unwrap();
+        store.commit(None).await.unwrap();
     }
     println!("{} segments", store.usage().unwrap().segments);
     const COMMITS: u64 = 1000;
-    let elapsed: Duration =
-        (count..count + COMMITS).map(|sequence| commit(&store, extent(sequence), None)).sum();
-    store.flush().unwrap();
+    let mut elapsed = Duration::ZERO;
+    for sequence in count..count + COMMITS {
+        elapsed += commit(&store, extent(sequence), None).await;
+    }
+    store.flush().await.unwrap();
     println!("commits after them: {:8.1} µs each", each(elapsed, COMMITS));
     drop(store);
     let before = dir.io();
@@ -196,7 +198,7 @@ impl Waits {
     }
 }
 
-fn close_now(mib: u64) {
+async fn close_now(mib: u64) {
     const SEGMENTS: u64 = 8;
     const MIB: usize = 1 << 20;
     let temp = tempfile::tempdir().unwrap();
@@ -206,14 +208,14 @@ fn close_now(mib: u64) {
     let done = Arc::new(AtomicBool::new(false));
     let guest = {
         let (store, done) = (store.clone(), done.clone());
-        std::thread::spawn(move || {
+        tokio::spawn(async move {
             let (mut writes, mut commits) = (Waits::default(), Waits::default());
             let mut sequence = 1 << 32;
             while !done.load(Ordering::Relaxed) {
                 let started = Instant::now();
-                store.write(extent(sequence), 0, &[1; BLOCK]).unwrap();
+                store.write(extent(sequence), 0, &[1; BLOCK]).await.unwrap();
                 let written = Instant::now();
-                store.commit_ordered(None).unwrap();
+                store.commit_ordered(None).await.unwrap();
                 writes.add(written - started);
                 commits.add(written.elapsed());
                 sequence += 1;
@@ -225,44 +227,44 @@ fn close_now(mib: u64) {
     let mut sequence = 0;
     for _ in 0..SEGMENTS {
         for _ in 0..mib {
-            store.write(extent(sequence), 0, &data(sequence, MIB)).unwrap();
-            store.commit_ordered(None).unwrap();
+            store.write(extent(sequence), 0, &data(sequence, MIB)).await.unwrap();
+            store.commit_ordered(None).await.unwrap();
             sequence += 1;
         }
-        store.flush().unwrap();
+        store.flush().await.unwrap();
         let started = Instant::now();
-        assert!(store.close_now().unwrap());
+        assert!(store.close_now().await.unwrap());
         closings.add(started.elapsed());
     }
     done.store(true, Ordering::Relaxed);
-    let (writes, commits) = guest.join().unwrap();
+    let (writes, commits) = guest.await.unwrap();
     closings.print("closings between commits");
     writes.print("the guest's writes");
     commits.print("the guest's commits");
 }
 
-fn burst(mib: u64) {
+async fn burst(mib: u64) {
     const EXTENT: usize = 256 << 10;
     let temp = tempfile::tempdir().unwrap();
     let store = create(HostDir::new(temp.path()).unwrap(), Options::default());
-    store.write(extent(0), 0, &data(0, BLOCK)).unwrap();
-    store.commit(None).unwrap();
+    store.write(extent(0), 0, &data(0, BLOCK)).await.unwrap();
+    store.commit(None).await.unwrap();
     let mut writes = Waits::default();
     for sequence in 1..=mib * 4 {
         // Made before it is timed: making 256 KiB took as long as the store's write of it (on a
         // Mac, 200 µs to 140), so that until TASK-433.9 the times said half as much of the store.
         let bytes = data(sequence, EXTENT);
         let started = Instant::now();
-        store.write(extent(sequence), 0, &bytes).unwrap();
+        store.write(extent(sequence), 0, &bytes).await.unwrap();
         writes.add(started.elapsed());
     }
     let (started, before) = (Instant::now(), local_cell::written());
-    store.commit_ordered(None).unwrap();
+    store.commit_ordered(None).await.unwrap();
     let ordered = started.elapsed();
-    store.flush().unwrap();
+    store.flush().await.unwrap();
     let durable = started.elapsed();
     // Its segments framed: what the uploader takes waits for that.
-    let closed = store.closed(usize::MAX).unwrap().len();
+    let closed = store.closed(usize::MAX).await.unwrap().len();
     let framed = started.elapsed();
     let after = local_cell::written();
     let own =
@@ -288,7 +290,7 @@ fn burst(mib: u64) {
     );
 }
 
-fn durable(files: u64) {
+async fn durable(files: u64) {
     const COMMITS: u64 = 100;
     // Each extent's one write ends where an extent takes a file of its own, the rest of it a hole,
     // so that its file is quick to write, and the flush's syncs are most of what it takes.
@@ -302,11 +304,11 @@ fn durable(files: u64) {
         for _ in 0..files {
             sequence += 1;
             let offset = options.large_extent - WRITE as u64;
-            store.write(extent(sequence), offset, &data(sequence, WRITE)).unwrap();
+            store.write(extent(sequence), offset, &data(sequence, WRITE)).await.unwrap();
         }
-        store.commit_ordered(None).unwrap();
+        store.commit_ordered(None).await.unwrap();
         let started = Instant::now();
-        store.flush().unwrap();
+        store.flush().await.unwrap();
         flushes.add(started.elapsed());
     }
     let own =
@@ -386,7 +388,6 @@ fn nice(nice: i32) {
 /// runtime of their own, to open stores as `CLADEFS_BENCH_ENCRYPTED` says ([`Host::from_env`],
 /// TASK-411.5).
 struct Host {
-    runtime: tokio::runtime::Runtime,
     bucket: Arc<bucket_cell::object_bucket::ObjectBucket>,
     upload: local_cell::upload::Runtime,
     _kms: tempfile::TempDir,
@@ -404,7 +405,6 @@ impl Host {
             "CLADEFS_BENCH_ENCRYPTED: no store is in the clear since TASK-411.28; an old pin's \
              cell-bench measures one"
         );
-        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         let objects = Arc::new(object_store::memory::InMemory::new());
         let bucket = Arc::new(bucket_cell::object_bucket::ObjectBucket::new(objects, ""));
         let kms = tempfile::tempdir().unwrap();
@@ -415,15 +415,18 @@ impl Host {
             bucket_cell::fetch::Memory::new().keys().clone(),
         );
         let uploads = bucket_cell::fetch::Budget::new(bucket_cell::fetch::Limits::UNBOUNDED);
-        let upload =
-            local_cell::upload::Runtime { handle: runtime.handle().clone(), uploads, keys };
-        Some(Self { runtime, bucket, upload, _kms: kms })
+        let upload = local_cell::upload::Runtime {
+            handle: tokio::runtime::Handle::current(),
+            uploads,
+            keys,
+        };
+        Some(Self { bucket, upload, _kms: kms })
     }
 
     /// The store in `dir`, made, of cell `id` of the host's cell, encrypted, opened through its
     /// uploader, which closes no segment between commits, holding the parts it packs ahead in
     /// `held` (TASK-400).
-    fn open(
+    async fn open(
         &self,
         dir: HostDir,
         id: u64,
@@ -436,22 +439,17 @@ impl Host {
         let kind = bucket_cell::cell::Kind::Fxfs;
         LocalCell::make(&dir, description, Some("memory:///bench"), Some(kind)).unwrap();
         let making = bucket_cell::lifecycle::create(&*self.bucket, cell, id);
-        self.runtime.block_on(making).unwrap();
+        making.await.unwrap();
         let recovering = LocalCell::recover_unmade(dir).unwrap();
         let interval = Duration::from_secs(3600);
         let uploading =
             local_cell::upload::Options { interval, held: Some(held), ..Default::default() };
         let holding = (id, uploading);
         let bucket = self.bucket.clone();
-        let _entered = self.runtime.enter();
-        let (store, uploader) = local_cell::upload::wait_on(local_cell::upload::open(
-            recovering,
-            options,
-            bucket,
-            holding,
-            &self.upload,
-        ))
-        .unwrap();
+        let (store, uploader) =
+            local_cell::upload::open(recovering, options, bucket, holding, &self.upload)
+                .await
+                .unwrap();
         store.made().unwrap();
         assert!(store.keys().encrypts());
         (store, uploader)
@@ -469,7 +467,7 @@ fn temp_dir() -> tempfile::TempDir {
 
 /// cladefs: `mib` MiB written to a store's open segments as extents of `CLADEFS_BENCH_EXTENT` KiB, read
 /// back while open, then committed (TASK-411.5).
-fn writes(mib: u64) {
+async fn writes(mib: u64) {
     const MIB: u64 = 1 << 20;
     let extent_kib = env("EXTENT", 1024u64);
     let host = Host::from_env();
@@ -479,7 +477,7 @@ fn writes(mib: u64) {
     let options = Options { segment_size: 1 << 30, ..Options::default() };
     let (store, _uploader) = match &host {
         Some(host) => {
-            let (store, uploader) = host.open(dir, 1, options, HeldParts::new());
+            let (store, uploader) = host.open(dir, 1, options, HeldParts::new()).await;
             (store, Some(uploader))
         }
         None => (Arc::new(create(dir, options)), None),
@@ -489,7 +487,7 @@ fn writes(mib: u64) {
     let bytes = noise(1, len);
     let started = Instant::now();
     for sequence in 0..count {
-        store.write(extent(sequence), 0, &bytes).unwrap();
+        store.write(extent(sequence), 0, &bytes).await.unwrap();
     }
     let written = started.elapsed();
     let mut buf = vec![0; len];
@@ -500,7 +498,7 @@ fn writes(mib: u64) {
     let read = started.elapsed();
     assert!(buf == bytes);
     let started = Instant::now();
-    store.commit(None).unwrap();
+    store.commit(None).await.unwrap();
     let committed = started.elapsed();
     let kind = match &host {
         Some(_) => "encrypted, through an uploader",
@@ -516,7 +514,7 @@ fn writes(mib: u64) {
     );
 }
 
-fn framing(segments: u64) {
+fn framing(segments: u64, runtime: &tokio::runtime::Handle) {
     const MIB: usize = 1 << 20;
     const SEGMENT: u64 = 32;
     let (stores, hogs, cpus) = (env("STORES", 4u64), env("HOGS", 0usize), env("CPUS", 0usize));
@@ -527,7 +525,10 @@ fn framing(segments: u64) {
     let writing = std::sync::Mutex::new(Duration::ZERO);
     run_on(cpus);
     let temp = temp_dir();
-    let host = Host::from_env();
+    let host = {
+        let _entered = runtime.enter();
+        Host::from_env()
+    };
     let done = Arc::new(AtomicBool::new(false));
     let hogging: Vec<_> = (0..hogs)
         .map(|_| {
@@ -554,48 +555,56 @@ fn framing(segments: u64) {
         for store in 0..stores {
             let (temp, bytes, host) = (temp.path().join(format!("{store}")), &bytes, &host);
             let (held, writing) = (&held, &writing);
+            // Each store's writer a thread of the bench's, its outermost entry, its awaits in the
+            // bench's runtime.
             scope.spawn(move || {
-                std::fs::create_dir(&temp).unwrap();
-                // Segments close between commits alone, a commit after each 32 MiB.
-                let options = Options { segment_size: 1 << 30, ..Options::default() };
-                let dir = HostDir::new(&temp).unwrap();
-                let (store, _uploader) = match host {
-                    Some(host) => {
-                        let (store, uploader) = host.open(dir, store + 1, options, held.clone());
-                        (store, Some(uploader))
+                runtime.block_on(async move {
+                    std::fs::create_dir(&temp).unwrap();
+                    // Segments close between commits alone, a commit after each 32 MiB.
+                    let options = Options { segment_size: 1 << 30, ..Options::default() };
+                    let dir = HostDir::new(&temp).unwrap();
+                    let (store, _uploader) = match host {
+                        Some(host) => {
+                            let (store, uploader) =
+                                host.open(dir, store + 1, options, held.clone()).await;
+                            (store, Some(uploader))
+                        }
+                        None => {
+                            let description = Description {
+                                block_size: BLOCK as u32,
+                                capacity: 64 << 30,
+                                cell: CELL,
+                            };
+                            LocalCell::make(&dir, description, None, None).unwrap();
+                            let opening =
+                                Opening { held: Some(held.clone()), ..Opening::new(CELL) };
+                            let store = LocalCell::recover_unmade(dir)
+                                .unwrap()
+                                .open(options, opening)
+                                .unwrap();
+                            store.made().unwrap();
+                            (Arc::new(store), None)
+                        }
+                    };
+                    let (cell, mut sequence) = (store.description().cell.id, 0);
+                    for _ in 0..segments / stores {
+                        let started = Instant::now();
+                        for _ in 0..SEGMENT {
+                            let extent = ExtentId::new(cell, sequence);
+                            store.write(extent, 0, &bytes(sequence)).await.unwrap();
+                            sequence += 1;
+                        }
+                        *writing.lock().unwrap() += started.elapsed();
+                        if evict {
+                            held.evict_to(0);
+                        }
+                        store.close_segment().unwrap();
+                        store.commit(None).await.unwrap();
+                        store.flush().await.unwrap();
+                        // Its framing written, its timings recorded.
+                        store.closed(usize::MAX).await.unwrap();
                     }
-                    None => {
-                        let description = Description {
-                            block_size: BLOCK as u32,
-                            capacity: 64 << 30,
-                            cell: CELL,
-                        };
-                        LocalCell::make(&dir, description, None, None).unwrap();
-                        let opening = Opening { held: Some(held.clone()), ..Opening::new(CELL) };
-                        let store =
-                            LocalCell::recover_unmade(dir).unwrap().open(options, opening).unwrap();
-                        store.made().unwrap();
-                        (Arc::new(store), None)
-                    }
-                };
-                let (cell, mut sequence) = (store.description().cell.id, 0);
-                for _ in 0..segments / stores {
-                    let started = Instant::now();
-                    for _ in 0..SEGMENT {
-                        let extent = ExtentId::new(cell, sequence);
-                        store.write(extent, 0, &bytes(sequence)).unwrap();
-                        sequence += 1;
-                    }
-                    *writing.lock().unwrap() += started.elapsed();
-                    if evict {
-                        held.evict_to(0);
-                    }
-                    store.close_segment().unwrap();
-                    store.commit(None).unwrap();
-                    store.flush().unwrap();
-                    // Its framing written, its timings recorded.
-                    store.closed(usize::MAX).unwrap();
-                }
+                })
             });
         }
     });
@@ -696,14 +705,16 @@ fn main() {
     govern();
     let args: Vec<String> = std::env::args().collect();
     let n = |default| args.get(2).map_or(default, |n| n.parse().expect("N is a number"));
+    // The bench's runtime, as a daemon's: its stores' uploaders run on it, and its steps.
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     match args.get(1).map(String::as_str) {
-        Some("lagging-view") => lagging_view(n(20_000)),
-        Some("segments") => segments(n(2_000)),
-        Some("close-now") => close_now(n(32)),
-        Some("burst") => burst(n(256)),
-        Some("durable") => durable(n(2)),
-        Some("framing") => framing(n(64)),
-        Some("writes") => writes(n(256)),
+        Some("lagging-view") => runtime.block_on(lagging_view(n(20_000))),
+        Some("segments") => runtime.block_on(segments(n(2_000))),
+        Some("close-now") => runtime.block_on(close_now(n(32))),
+        Some("burst") => runtime.block_on(burst(n(256))),
+        Some("durable") => runtime.block_on(durable(n(2))),
+        Some("framing") => framing(n(64), runtime.handle()),
+        Some("writes") => runtime.block_on(writes(n(256))),
         _ => {
             eprintln!(
                 "usage: cell-bench lagging-view|segments|close-now|burst|durable|framing|writes \

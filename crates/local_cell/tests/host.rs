@@ -97,8 +97,8 @@ fn openings_wait_for_a_store_closing() {
 
 /// A store is opened once in a process, as in all: a second opening, and a deletion, of one open
 /// fail at once, rather than wait for the process itself (TASK-165.7).
-#[test]
-fn stores_open_once() {
+#[tokio::test(flavor = "multi_thread")]
+async fn stores_open_once() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
     let store = create(&path);
@@ -108,10 +108,7 @@ fn stores_open_once() {
         format!("{again:#}"),
         "taking the store's directory: this process has the store open"
     );
-    assert!(
-        local_cell::upload::wait_on(delete_host(&path, async |_| Ok(()))).is_err(),
-        "deleted an open store"
-    );
+    assert!(delete_host(&path, async |_| Ok(())).await.is_err(), "deleted an open store");
     assert!(started.elapsed() < std::time::Duration::from_secs(1), "waited for itself");
     drop(store);
     drop(open_host(&path).unwrap());
@@ -120,8 +117,8 @@ fn stores_open_once() {
 /// cladefs: a store is no store until its maker says it is whole: one whose maker stopped part way,
 /// as an import a crash cut off, refuses to open, opened again or by another process (TASK-196);
 /// once made, it opens.
-#[test]
-fn stores_unmade_refuse_to_open() {
+#[tokio::test(flavor = "multi_thread")]
+async fn stores_unmade_refuse_to_open() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
     std::fs::create_dir(&path).unwrap();
@@ -129,8 +126,8 @@ fn stores_unmade_refuse_to_open() {
     create_host(&path, description, "memory:///host", bucket_cell::cell::Kind::Fxfs).unwrap();
     let making = LocalCell::recover_unmade(HostDir::new(&path).unwrap()).unwrap();
     let store = making.open(OPTIONS, Opening::new(CELL)).unwrap();
-    store.write(ExtentId::new(CELL.id, 1), 0, &[1; BLOCK]).unwrap();
-    store.commit(None).unwrap();
+    store.write(ExtentId::new(CELL.id, 1), 0, &[1; BLOCK]).await.unwrap();
+    store.commit(None).await.unwrap();
     // Its maker gone, part way.
     drop(store);
     let refused = open_host(&path).err().expect("an unmade store opened");
@@ -183,17 +180,16 @@ fn placements_name_their_token_in_the_description() {
 }
 
 /// Deleting a store removes its directory, whole, once `before` deleted its cell elsewhere.
-#[test]
-fn deleting_stores() {
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_stores() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
     let store = create(&path);
-    store.write(ExtentId::new(CELL.id, 1), 0, &[1; BLOCK]).unwrap();
-    store.commit(None).unwrap();
+    store.write(ExtentId::new(CELL.id, 1), 0, &[1; BLOCK]).await.unwrap();
+    store.commit(None).await.unwrap();
     drop(store);
     let deleted = std::cell::Cell::new(None);
-    local_cell::upload::wait_on(delete_host(&path, async |cell| Ok(deleted.set(Some(cell)))))
-        .unwrap();
+    delete_host(&path, async |cell| Ok(deleted.set(Some(cell)))).await.unwrap();
     assert_eq!((deleted.get(), path.exists()), (Some(CELL), false));
     assert!(open_host(&path).is_err(), "the deleted store opened");
 }

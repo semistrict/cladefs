@@ -100,10 +100,10 @@ struct Run<'a> {
 
 impl Run<'_> {
     /// A new extent of `data`.
-    fn write_new(&mut self, data: Vec<u8>) -> anyhow::Result<()> {
+    async fn write_new(&mut self, data: Vec<u8>) -> anyhow::Result<()> {
         let extent = ExtentId::new(self.store.description().cell.id, self.next_sequence);
         self.next_sequence += 1;
-        let result = self.store.write(extent, 0, &data);
+        let result = self.store.write(extent, 0, &data).await;
         if result.is_ok() {
             self.model.extents.insert(extent, data);
             self.open.push(extent);
@@ -112,12 +112,12 @@ impl Run<'_> {
     }
 
     /// More of an open extent, over what it holds or past it.
-    fn write_more(&mut self, rng: &mut StdRng) -> anyhow::Result<()> {
+    async fn write_more(&mut self, rng: &mut StdRng) -> anyhow::Result<()> {
         let extent = self.open[rng.random_range(0..self.open.len())];
         let held = self.model.extents[&extent].len() / BLOCK;
         let offset = rng.random_range(0..=held);
         let data = random_data(rng, 2);
-        let result = self.store.write(extent, (offset * BLOCK) as u64, &data);
+        let result = self.store.write(extent, (offset * BLOCK) as u64, &data).await;
         if result.is_ok() {
             let contents = self.model.extents.get_mut(&extent).unwrap();
             if contents.len() < offset * BLOCK + data.len() {
@@ -141,7 +141,7 @@ impl Run<'_> {
     }
 
     /// A commit, durable or only ordered, setting the root or not.
-    fn commit(&mut self, rng: &mut StdRng) -> anyhow::Result<()> {
+    async fn commit(&mut self, rng: &mut StdRng) -> anyhow::Result<()> {
         let ordered = rng.random_bool(0.5);
         let root = rng.random_bool(0.5).then(|| format!("root {}", self.epochs.len()));
         if let Some(root) = &root {
@@ -151,7 +151,10 @@ impl Run<'_> {
         self.open.clear();
         let root = root.as_deref().map(str::as_bytes);
         let store = self.store;
-        let result = if ordered { store.commit_ordered(root) } else { store.commit(root) };
+        let result = match ordered {
+            true => store.commit_ordered(root).await,
+            false => store.commit(root).await,
+        };
         if result.is_ok() && !ordered {
             self.durable = self.epochs.len() - 1;
         }
@@ -159,8 +162,8 @@ impl Run<'_> {
     }
 
     /// The commits only ordered so far made durable.
-    fn flush(&mut self) -> anyhow::Result<()> {
-        let result = self.store.flush();
+    async fn flush(&mut self) -> anyhow::Result<()> {
+        let result = self.store.flush().await;
         if result.is_ok() {
             self.durable = self.epochs.len() - 1;
         }
@@ -168,11 +171,11 @@ impl Run<'_> {
     }
 
     /// cladefs: a burst, [`BURST`] new extents, then the commit that spans the segments they filled.
-    fn burst(&mut self, rng: &mut StdRng) -> anyhow::Result<()> {
+    async fn burst(&mut self, rng: &mut StdRng) -> anyhow::Result<()> {
         for _ in 0..BURST {
-            self.write_new(random_blocks(rng, BURST_BLOCKS))?;
+            self.write_new(random_blocks(rng, BURST_BLOCKS)).await?;
         }
-        self.commit(rng)
+        self.commit(rng).await
     }
 }
 
@@ -181,7 +184,7 @@ impl Run<'_> {
 /// commit began with, and returns the epoch of the last commit made durable, and what the store
 /// holds then, committed or not. The commits after `durable` may be ordered only, as a workload
 /// before this one may have ended on such commits.
-pub fn workload(
+pub async fn workload(
     rng: &mut StdRng,
     store: &LocalCell<MemDir>,
     epochs: &mut Vec<Model>,
@@ -193,18 +196,18 @@ pub fn workload(
     for _ in 0..STEPS {
         let result = match rng.random_range(0..15) {
             // A new extent, small or large.
-            0..=3 => run.write_new(random_data(rng, 8)),
-            4..=5 if !run.open.is_empty() => run.write_more(rng),
+            0..=3 => run.write_new(random_data(rng, 8)).await,
+            4..=5 if !run.open.is_empty() => run.write_more(rng).await,
             6..=7 if !run.model.extents.is_empty() => run.free(rng),
             // Cleaning, which commits durably, or a commit, durable or only ordered, setting the
             // root or not.
-            8..=11 => run.commit(rng),
-            12 => run.flush(),
+            8..=11 => run.commit(rng).await,
+            12 => run.flush().await,
             // cladefs: the open segment closed between commits, as an uploader has it closed: its
             // footer names commits only ordered, maybe (TASK-92.16).
-            13 => store.close_now().map(drop),
+            13 => store.close_now().await.map(drop),
             // cladefs: a burst, a quarter of the time: each writes more than two segments.
-            14 if rng.random_ratio(1, 4) => run.burst(rng),
+            14 if rng.random_ratio(1, 4) => run.burst(rng).await,
             _ => Ok(()),
         };
         if result.is_err() {
@@ -229,13 +232,13 @@ fn contents(store: &LocalCell<MemDir>) -> Model {
 /// system fails, from a random version on, as the host crashes, and the directory that crash leaves.
 /// Returns that, what each commit began with, the last made durable, and the round's RNG, to carry
 /// on.
-fn crashed_round(round: u64, dir: MemDir) -> (MemDir, Vec<Model>, usize, StdRng) {
+async fn crashed_round(round: u64, dir: MemDir) -> (MemDir, Vec<Model>, usize, StdRng) {
     let mut rng = StdRng::seed_from_u64(round);
     let description = Description { block_size: BLOCK as u32, capacity: 4 << 20, cell: CELL };
     let store = LocalCell::create(dir.clone(), description, OPTIONS).unwrap();
     let mut epochs = vec![Model::default()];
     dir.fail_after(Some(rng.random_range(0..600)));
-    let (durable, _) = workload(&mut rng, &store, &mut epochs, Model::default(), 0);
+    let (durable, _) = workload(&mut rng, &store, &mut epochs, Model::default(), 0).await;
     drop(store);
     (dir.crash(round), epochs, durable, rng)
 }
@@ -280,13 +283,10 @@ fn digest(dir: &MemDir) -> Digest {
 /// ended with.
 pub type Left = Vec<(&'static str, Digest)>;
 
-/// What `run` returned, run twice at once, on two threads: a round's two runs, in the time of one,
-/// whose directories [`same`] compares.
-pub fn twice<T: Send>(run: impl Fn() -> T + Sync) -> (T, T) {
-    std::thread::scope(|scope| {
-        let other = scope.spawn(&run);
-        (run(), other.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)))
-    })
+/// What `run` returned, run twice at once, two futures of the test's task: a round's two runs, in
+/// the time of one, whose directories [`same`] compares.
+pub async fn twice<T>(run: impl AsyncFn() -> T) -> (T, T) {
+    futures::join!(run(), run())
 }
 
 /// Checks that round `round`, run twice, left the same directories, `first` and `second`, of which
@@ -303,8 +303,8 @@ pub fn same(round: u64, first: &Left, second: &Left) {
 /// Round `round` of the recovering rounds, its store in `dir`: it crashes in a random workload,
 /// recovers a prefix of its commits, carries on, and crashes again after a flush, keeping what it
 /// committed. Returns the directories it left, and whether its first crash was in a commit.
-pub fn recovering(round: u64, dir: MemDir) -> (Left, bool) {
-    let (crashed, epochs, durable, mut rng) = crashed_round(round, dir);
+pub async fn recovering(round: u64, dir: MemDir) -> (Left, bool) {
+    let (crashed, epochs, durable, mut rng) = crashed_round(round, dir).await;
     let mut left = vec![("its first crash", digest(&crashed))];
     let mid_commit = durable + 1 < epochs.len();
 
@@ -321,7 +321,7 @@ pub fn recovering(round: u64, dir: MemDir) -> (Left, bool) {
     let info = store.info().unwrap();
     for (extent, _) in store.extents().unwrap() {
         assert!(extent.sequence < info.next_sequence, "round {round}");
-        let error = store.write(extent, 0, &[0; BLOCK]).expect_err("rewrote a sealed extent");
+        let error = store.write(extent, 0, &[0; BLOCK]).await.expect_err("rewrote a sealed extent");
         assert_eq!(error.downcast_ref::<SealedExtent>(), Some(&SealedExtent(extent)));
     }
 
@@ -331,10 +331,10 @@ pub fn recovering(round: u64, dir: MemDir) -> (Left, bool) {
     // the store's audit replays at each closing (TASK-165.9).
     let recovered = epochs[epoch].clone();
     let mut epochs = vec![recovered.clone()];
-    let (_, model) = workload(&mut rng, &store, &mut epochs, recovered, 0);
-    store.flush().unwrap_or_else(|e| panic!("round {round}: a commit failed: {e:?}"));
+    let (_, model) = workload(&mut rng, &store, &mut epochs, recovered, 0).await;
+    store.flush().await.unwrap_or_else(|e| panic!("round {round}: a commit failed: {e:?}"));
     epochs.push(model);
-    rebuilds(round, &store);
+    rebuilds(round, &store).await;
     let durable = epochs.len() - 1;
     drop(store);
     let crashed = crashed.crash(round + ROUNDS);
@@ -342,7 +342,7 @@ pub fn recovering(round: u64, dir: MemDir) -> (Left, bool) {
     let store = LocalCell::open(crashed.clone(), OPTIONS).unwrap();
     assert_eq!(contents(&store), epochs[durable], "round {round}: carrying on");
     // And closing its open segment, its footers say what it holds.
-    rebuilds(round, &store);
+    rebuilds(round, &store).await;
     drop(store);
     left.push(("its last directory", digest(&crashed)));
     (left, mid_commit)
@@ -351,7 +351,7 @@ pub fn recovering(round: u64, dir: MemDir) -> (Left, bool) {
 /// Checks that `store`'s footers, its open segment closed by a commit, say what it holds as of that
 /// commit: its extents, its root, and what it spent, which its audit asserts as it closes it
 /// (TASK-165.9's AC #5).
-fn rebuilds(round: u64, store: &LocalCell<MemDir>) {
+async fn rebuilds(round: u64, store: &LocalCell<MemDir>) {
     store.close_segment().unwrap();
-    store.commit(None).unwrap_or_else(|e| panic!("round {round}: a commit failed: {e:?}"));
+    store.commit(None).await.unwrap_or_else(|e| panic!("round {round}: a commit failed: {e:?}"));
 }

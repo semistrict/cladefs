@@ -91,38 +91,33 @@ impl Drop for KillOnDrop {
     }
 }
 
-fn read(store: &OpenCell, extent: ExtentId) -> Vec<u8> {
+async fn read(store: &OpenCell, extent: ExtentId) -> Vec<u8> {
     let mut data = vec![0; BLOCK];
-    local_cell::upload::wait_on(store.read(
-        extent,
-        0,
-        &mut [VolatileSliceMut::from(&mut data[..])],
-    ))
-    .unwrap();
+    store.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).await.unwrap();
     data
 }
 
 /// TASK-39.4: `cladefsctl delete` deletes a store whose fork lives: its cell in its bucket and its
 /// directory, the fork living on, a store of its own, reading what it inherited in the bucket
 /// (TASK-165.7). Before, the store's directory stayed, holding what the fork shared of it.
-fn stores_are_deleted_while_their_forks_live(cladefsctl: Cladefsctl, dir: &Path) {
+async fn stores_are_deleted_while_their_forks_live(cladefsctl: Cladefsctl, dir: &Path) {
     let (path, fork) = (dir.join("store"), dir.join("fork"));
-    let store = local_cell::upload::wait_on(OpenCell::create(&path, 1 << 24)).unwrap();
+    let store = OpenCell::create(&path, 1 << 24).await.unwrap();
     let extent = ExtentId { cell: store.cell().id, sequence: 1 };
-    store.write(extent, 0, &[VolatileSlice::from(&[7; BLOCK][..])]).unwrap();
-    local_cell::upload::wait_on(store.commit(None)).unwrap();
+    store.write(extent, 0, &[VolatileSlice::from(&[7; BLOCK][..])]).await.unwrap();
+    store.commit(None).await.unwrap();
     drop(store);
     let printed = cladefsctl.run(&[Path::new("fork"), &path, &fork]).unwrap();
     let cell: cladefs::CellId = printed.trim().parse().unwrap();
 
     cladefsctl.run(&[Path::new("delete"), &path]).unwrap();
     assert!(!path.exists(), "the store's directory stayed");
-    let forked = local_cell::upload::wait_on(OpenCell::open(&fork)).unwrap();
+    let forked = OpenCell::open(&fork).await.unwrap();
     assert_eq!(forked.cell(), cell);
-    assert_eq!(read(&forked, extent), [7; BLOCK]);
+    assert_eq!(read(&forked, extent).await, [7; BLOCK]);
     let own = ExtentId { cell: cell.id, sequence: 1 };
-    forked.write(own, 0, &[VolatileSlice::from(&[9; BLOCK][..])]).unwrap();
-    local_cell::upload::wait_on(forked.commit(None)).unwrap();
+    forked.write(own, 0, &[VolatileSlice::from(&[9; BLOCK][..])]).await.unwrap();
+    forked.commit(None).await.unwrap();
     drop(forked);
     // TASK-49: what the fork wrote, and what it inherited, which it shares.
     let stat = cladefsctl.run(&[Path::new("stat"), &fork]).unwrap();
@@ -130,8 +125,8 @@ fn stores_are_deleted_while_their_forks_live(cladefsctl: Cladefsctl, dir: &Path)
     assert!(stat.contains(&format!("own {BLOCK}\ninherited {BLOCK}\n")), "{stat}");
     // Deleted again: nothing is there.
     assert!(cladefsctl.run(&[Path::new("delete"), &path]).is_err(), "deleted nothing again");
-    let forked = local_cell::upload::wait_on(OpenCell::open(&fork)).unwrap();
-    assert_eq!(read(&forked, extent), [7; BLOCK]);
+    let forked = OpenCell::open(&fork).await.unwrap();
+    assert_eq!(read(&forked, extent).await, [7; BLOCK]);
     drop(forked);
 
     cladefsctl.run(&[Path::new("delete"), &fork]).unwrap();
@@ -191,27 +186,28 @@ fn versions_are_shared_and_unshared_locally() {
     assert_eq!(listed(), "");
 }
 
-#[test]
-fn stores_are_deleted_while_their_forks_live_locally() {
+#[tokio::test(flavor = "multi_thread")]
+async fn stores_are_deleted_while_their_forks_live_locally() {
     let dir = tempfile::tempdir().unwrap();
-    stores_are_deleted_while_their_forks_live(Cladefsctl::local(), dir.path());
+    stores_are_deleted_while_their_forks_live(Cladefsctl::local(), dir.path()).await;
 }
 
 #[cfg(target_os = "linux")]
-#[test]
-fn stores_are_deleted_while_their_forks_live_through_the_daemon() {
+#[tokio::test(flavor = "multi_thread")]
+async fn stores_are_deleted_while_their_forks_live_through_the_daemon() {
     let dir = tempfile::tempdir().unwrap();
     stores_are_deleted_while_their_forks_live(
         Cladefsctl::through_daemon(dir.path(), &[]),
         dir.path(),
-    );
+    )
+    .await;
 }
 
 /// TASK-454: `cladefsctl stat` prints how many extents a store holds, own and inherited, with their
 /// bytes: of a new store, none; of one written, its own, an extent written again or grown counted
 /// once; of its fork, all inherited; of the fork written and freed in, what it wrote and kept and
 /// what it kept of what it inherited; the store forked from as before.
-fn stat_counts_extents(cladefsctl: Cladefsctl, dir: &Path) {
+async fn stat_counts_extents(cladefsctl: Cladefsctl, dir: &Path) {
     let (path, fork) = (dir.join("store"), dir.join("fork"));
     let held = |path: &Path| {
         let stat = cladefsctl.run(&[Path::new("stat"), path]).unwrap();
@@ -223,82 +219,79 @@ fn stat_counts_extents(cladefsctl: Cladefsctl, dir: &Path) {
         named.map(value)
     };
     let block = BLOCK as u64;
-    let store = local_cell::upload::wait_on(OpenCell::create(&path, 1 << 24)).unwrap();
+    let store = OpenCell::create(&path, 1 << 24).await.unwrap();
     let base = store.cell().id;
     let extent = |store: &OpenCell, sequence| ExtentId { cell: store.cell().id, sequence };
-    let write = |store: &OpenCell, extent, offset, byte| {
-        store.write(extent, offset, &[VolatileSlice::from(&[byte; BLOCK][..])]).unwrap();
+    let write = async |store: &OpenCell, extent, offset, byte| {
+        store.write(extent, offset, &[VolatileSlice::from(&[byte; BLOCK][..])]).await.unwrap();
     };
     drop(store);
     assert_eq!(held(&path), [0, 0, 0, 0]);
-    let store = local_cell::upload::wait_on(OpenCell::open(&path)).unwrap();
+    let store = OpenCell::open(&path).await.unwrap();
     for sequence in 1..=3 {
-        write(&store, extent(&store, sequence), 0, sequence as u8);
+        write(&store, extent(&store, sequence), 0, sequence as u8).await;
     }
     // Written again, and grown: still three.
-    write(&store, extent(&store, 1), 0, 9);
-    write(&store, extent(&store, 2), block, 9);
-    local_cell::upload::wait_on(store.commit(None)).unwrap();
+    write(&store, extent(&store, 1), 0, 9).await;
+    write(&store, extent(&store, 2), block, 9).await;
+    store.commit(None).await.unwrap();
     drop(store);
     assert_eq!(held(&path), [4 * block, 0, 3, 0]);
 
     cladefsctl.run(&[Path::new("fork"), &path, &fork]).unwrap();
     assert_eq!(held(&fork), [0, 4 * block, 0, 3]);
-    let forked = local_cell::upload::wait_on(OpenCell::open(&fork)).unwrap();
+    let forked = OpenCell::open(&fork).await.unwrap();
     let inherited = |sequence| ExtentId { cell: base, sequence };
     for sequence in 1..=2 {
-        write(&forked, extent(&forked, sequence), 0, 7);
+        write(&forked, extent(&forked, sequence), 0, 7).await;
     }
     forked.free(inherited(2)).unwrap();
     forked.free(extent(&forked, 2)).unwrap();
-    local_cell::upload::wait_on(forked.commit(None)).unwrap();
+    forked.commit(None).await.unwrap();
     drop(forked);
     assert_eq!(held(&fork), [block, 2 * block, 1, 2]);
     assert_eq!(held(&path), [4 * block, 0, 3, 0]);
 }
 
-#[test]
-fn stat_counts_extents_locally() {
+#[tokio::test(flavor = "multi_thread")]
+async fn stat_counts_extents_locally() {
     let dir = tempfile::tempdir().unwrap();
-    stat_counts_extents(Cladefsctl::local(), dir.path());
+    stat_counts_extents(Cladefsctl::local(), dir.path()).await;
 }
 
 #[cfg(target_os = "linux")]
-#[test]
-fn stat_counts_extents_through_the_daemon() {
+#[tokio::test(flavor = "multi_thread")]
+async fn stat_counts_extents_through_the_daemon() {
     let dir = tempfile::tempdir().unwrap();
-    stat_counts_extents(Cladefsctl::through_daemon(dir.path(), &[]), dir.path());
+    stat_counts_extents(Cladefsctl::through_daemon(dir.path(), &[]), dir.path()).await;
 }
 
 /// cladefsctl changes no store whose cells another process has open, as an extent daemon serving
 /// them does: it waits a while for them to close, then refuses, saying `refusal`.
-fn stores_open_elsewhere_are_left_alone(cladefsctl: Cladefsctl, dir: &Path, refusal: &str) {
+async fn stores_open_elsewhere_are_left_alone(cladefsctl: Cladefsctl, dir: &Path, refusal: &str) {
     let path = dir.join("store");
-    let store = local_cell::upload::wait_on(OpenCell::create(&path, 1 << 24)).unwrap();
+    let store = OpenCell::create(&path, 1 << 24).await.unwrap();
     let error = cladefsctl.run(&[Path::new("delete"), &path]).expect_err("deleted an open store");
     assert!(error.contains(refusal), "{error}");
-    assert!(
-        local_cell::upload::wait_on(OpenCell::open(dir.join("store"))).is_err(),
-        "opened twice"
-    );
+    assert!(OpenCell::open(dir.join("store")).await.is_err(), "opened twice");
     drop(store);
     cladefsctl.run(&[Path::new("delete"), &path]).unwrap();
     assert!(!path.exists());
 }
 
-#[test]
-fn stores_open_elsewhere_are_left_alone_locally() {
+#[tokio::test(flavor = "multi_thread")]
+async fn stores_open_elsewhere_are_left_alone_locally() {
     let dir = tempfile::tempdir().unwrap();
     let refusal = "another process has the store's cells open";
-    stores_open_elsewhere_are_left_alone(Cladefsctl::local(), dir.path(), refusal);
+    stores_open_elsewhere_are_left_alone(Cladefsctl::local(), dir.path(), refusal).await;
 }
 
 #[cfg(target_os = "linux")]
-#[test]
-fn stores_open_elsewhere_are_left_alone_through_the_daemon() {
+#[tokio::test(flavor = "multi_thread")]
+async fn stores_open_elsewhere_are_left_alone_through_the_daemon() {
     let dir = tempfile::tempdir().unwrap();
     let cladefsctl = Cladefsctl::through_daemon(dir.path(), &[]);
-    stores_open_elsewhere_are_left_alone(cladefsctl, dir.path(), "EBUSY (errno 16)");
+    stores_open_elsewhere_are_left_alone(cladefsctl, dir.path(), "EBUSY (errno 16)").await;
 }
 
 /// TASK-633.9: `cladefsctl format-bucket` makes a bucket the root of buckets of its own, number 1;
@@ -359,8 +352,8 @@ fn buckets_are_added_in_turn_and_recorded_in_every_root() {
 /// cell with. The fork holds the image's file, read from the bucket; the base is as it was. The
 /// host's bucket is a file bucket: what the import uploaded has left the store, which a bucket in
 /// the import's memory would have taken with it (TASK-165.8).
-#[test]
-fn images_imported_where_no_daemon_is_fork_there() {
+#[tokio::test(flavor = "multi_thread")]
+async fn images_imported_where_no_daemon_is_fork_there() {
     use cladefs::import::testing::{Entry, Kind, layer};
     use cladefs::{Filesystem, Storage};
     use futures::executor::block_on;
@@ -377,7 +370,7 @@ fn images_imported_where_no_daemon_is_fork_there() {
     run(&[&"import", &base, &"67108864", &image]).unwrap();
     let printed = run(&[&"fork", &base, &fork]).unwrap();
     let cell: cladefs::CellId = printed.trim().parse().unwrap();
-    assert_eq!(local_cell::upload::wait_on(OpenCell::open(&fork)).unwrap().cell(), cell);
+    assert_eq!(OpenCell::open(&fork).await.unwrap().cell(), cell);
     // The file `hello` of the store at `path`, as its filesystem has it.
     let hello = |path: &Path| {
         block_on(async {
@@ -400,8 +393,8 @@ fn images_imported_where_no_daemon_is_fork_there() {
 /// daemon's bucket a file bucket, which the stores it left open from here: what it acknowledged
 /// has left them (TASK-165.9).
 #[cfg(target_os = "linux")]
-#[test]
-fn commands_through_the_daemon() {
+#[tokio::test(flavor = "multi_thread")]
+async fn commands_through_the_daemon() {
     use cladefs::import::testing::{Entry, Kind, layer};
     let dir = tempfile::tempdir().unwrap();
     let bucket = format!("file://{}/", dir.path().canonicalize().unwrap().join("bucket").display());
@@ -428,14 +421,13 @@ fn commands_through_the_daemon() {
 
     // As the daemon left them, which serves none of them now.
     drop(cladefsctl);
-    let base = local_cell::upload::wait_on(OpenCell::open(&base)).unwrap();
+    let base = OpenCell::open(&base).await.unwrap();
     assert_eq!(base.info().unwrap().capacity, 134217728);
     assert!(base.is_public());
     // The fork's store names its cell, which deleting the store that took it deleted in the
     // bucket: it opens no more (TASK-165.9: opening takes the cell's head).
     assert_eq!(local_cell::host_cell(&fork).unwrap().to_string(), cell);
-    let refused =
-        local_cell::upload::wait_on(OpenCell::open(&fork)).err().and_then(|err| err.errno());
+    let refused = OpenCell::open(&fork).await.err().and_then(|err| err.errno());
     assert_eq!(refused, Some(cladefs::Errno::EROFS));
 }
 
@@ -651,12 +643,12 @@ fn the_daemon_stops_on_sigterm() {
 
 /// TASK-45: without a daemon, cladefsctl changes no existing store's cell unless it has the bucket
 /// and this host's placement token; it makes new stores anywhere.
-#[test]
-fn existing_stores_change_only_with_a_bucket_and_a_token() {
+#[tokio::test(flavor = "multi_thread")]
+async fn existing_stores_change_only_with_a_bucket_and_a_token() {
     use cladefs::import::testing::{Entry, Kind, layer};
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    drop(local_cell::upload::wait_on(OpenCell::create(&path, 1 << 24)).unwrap());
+    drop(OpenCell::create(&path, 1 << 24).await.unwrap());
     let delete = [Path::new("delete"), &path];
 
     let error = Cladefsctl::with_env(&[]).run(&delete).expect_err("deleted with no bucket");
@@ -677,7 +669,7 @@ fn existing_stores_change_only_with_a_bucket_and_a_token() {
     Cladefsctl::with_env(&[]).run(&import).unwrap();
     let created = dir.path().join("created");
     Cladefsctl::with_env(&[]).run(&[Path::new("create"), &created, Path::new("67108864")]).unwrap();
-    assert!(local_cell::upload::wait_on(OpenCell::open(&imported)).is_ok() && created.exists());
+    assert!(OpenCell::open(&imported).await.is_ok() && created.exists());
 
     // With both.
     Cladefsctl::local().run(&delete).unwrap();
@@ -718,25 +710,24 @@ fn the_version_is_the_build_commit() {
 
 /// Without a daemon, a store grows, or keeps its capacity, here; it shrinks only through the
 /// daemon serving its VM, whose guest must agree.
-#[test]
-fn stores_grow_here_and_shrink_only_through_the_daemon() {
+#[tokio::test(flavor = "multi_thread")]
+async fn stores_grow_here_and_shrink_only_through_the_daemon() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    drop(local_cell::upload::wait_on(OpenCell::create(&path, 1 << 24)).unwrap());
+    drop(OpenCell::create(&path, 1 << 24).await.unwrap());
     let cladefsctl = Cladefsctl::local();
     let resize = |capacity: u64| {
         let capacity = capacity.to_string();
         cladefsctl.run(&[Path::new("resize"), &path, Path::new(&capacity)])
     };
-    let capacity =
-        || local_cell::upload::wait_on(OpenCell::open(&path)).unwrap().info().unwrap().capacity;
+    let capacity = async || OpenCell::open(&path).await.unwrap().info().unwrap().capacity;
     resize(1 << 24).unwrap();
-    assert_eq!(capacity(), 1 << 24);
+    assert_eq!(capacity().await, 1 << 24);
     resize(1 << 25).unwrap();
-    assert_eq!(capacity(), 1 << 25);
+    assert_eq!(capacity().await, 1 << 25);
     let error = resize(1 << 24).expect_err("shrank a store here");
     assert!(error.contains("shrinking a store needs its guest to agree"), "{error}");
-    assert_eq!(capacity(), 1 << 25);
+    assert_eq!(capacity().await, 1 << 25);
 }
 
 /// TASK-45: the daemon refuses to start without the bucket and its placement token, saying why.

@@ -125,7 +125,7 @@ async fn operator_delete(
 }
 
 impl Hosts {
-    fn new() -> Self {
+    async fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
@@ -137,23 +137,23 @@ impl Hosts {
             std::fs::create_dir(disk).unwrap();
         }
         // The version's cell is written on no host restoring it: no host's death takes its writer.
-        let source = kept_in(temp.path().join("source"), (1 << 30, None), &bucket, options());
+        let source = kept_in(temp.path().join("source"), (1 << 30, None), &bucket, options()).await;
         let source = source.unwrap();
         let lens = [fork_faults::BLOCK, 4 << 20];
-        let held = commit(&source, 1, &lens, b"root");
-        let version = local_cell::upload::wait_on(source.make_version(None)).unwrap();
+        let held = commit(&source, 1, &lens, b"root").await;
+        let version = source.make_version(None).await.unwrap();
         for (extent, _) in &held {
             source.free(*extent).unwrap();
         }
-        local_cell::upload::wait_on(source.commit(Some(b"later"))).unwrap();
+        source.commit(Some(b"later")).await.unwrap();
         // Another fork, gone: a checkpoint past the version's, so that only the version keeps
         // that, and what it names is all gone once nothing keeps it: its state too, not just its
         // data.
         let later = disks[0].join("later");
-        local_cell::upload::wait_on(source.fork_to(&later, crate::host_cell::new_alone())).unwrap();
-        local_cell::upload::wait_on(OpenCell::delete(&later, Some(&bucket))).unwrap();
+        source.fork_to(&later, crate::host_cell::new_alone()).await.unwrap();
+        OpenCell::delete(&later, Some(&bucket)).await.unwrap();
 
-        local_cell::upload::wait_on(source.wait_uploaded()).unwrap();
+        source.wait_uploaded().await.unwrap();
         let mut copies = Vec::new();
         for (host, disk) in disks.iter().enumerate() {
             let path = copy_at(disk);
@@ -167,7 +167,7 @@ impl Hosts {
                 let kind = bucket_cell::cell::Kind::Fxfs;
                 OpenCell::create_at_version(&path, (&url, kind), description, version).unwrap();
             }
-            let copy = reopened(&path, options()).unwrap();
+            let copy = reopened(&path, options()).await.unwrap();
             assert_eq!(copy.access().role, CellRole::Version, "host {host} holds no copy");
             copies.push(Some(Arc::new(copy)));
         }
@@ -209,28 +209,30 @@ impl Hosts {
 
     /// Asserts the fork `child` holds what the version held, in the bucket, and, its store at
     /// `path`, opened, reads it and goes on.
-    fn check_fork(&self, child: crate::CellId, path: &Path, case: &str) {
+    async fn check_fork(&self, child: crate::CellId, path: &Path, case: &str) {
         let mut read = in_bucket(&self.bucket, child).unwrap_or_else(|err| panic!("{case}: {err}"));
         read.sort();
         let mut held = self.held.clone();
         held.sort();
         assert!(read == held, "{case}: fork {child} holds other extents");
         naming(path, &self.bucket);
-        let store = reopened(path, options()).unwrap();
+        let store = reopened(path, options()).await.unwrap();
         assert_eq!(store.root(), Ok(b"root".to_vec()), "{case}");
-        let own = commit(&store, 5, &[fork_faults::BLOCK], b"child");
-        assert_eq!(local_cell::upload::wait_on(store.wait_uploaded()), Ok(()), "{case}");
-        assert!(fork_faults::read(&store, own[0].0, fork_faults::BLOCK) == own[0].1, "{case}");
+        let own = commit(&store, 5, &[fork_faults::BLOCK], b"child").await;
+        assert_eq!(store.wait_uploaded().await, Ok(()), "{case}");
+        assert!(
+            fork_faults::read(&store, own[0].0, fork_faults::BLOCK).await == own[0].1,
+            "{case}"
+        );
     }
 
     /// Restores the version on `host`, to a new child at `name` on its disk, and gives what that
     /// gave: the child noted, if made.
-    fn restore(&mut self, host: usize, name: &str) -> Result<(), Option<Errno>> {
+    async fn restore(&mut self, host: usize, name: &str) -> Result<(), Option<Errno>> {
         let path = self.disks[host].join(name);
         let child = crate::host_cell::new_alone();
         let copy = self.copies[host].as_ref().expect("a host's copy");
-        let forked =
-            local_cell::upload::wait_on(copy.fork_to(&path, child)).map_err(|err| err.errno());
+        let forked = copy.fork_to(&path, child).await.map_err(|err| err.errno());
         if forked.is_ok() {
             self.children.lock().unwrap().push((child, path));
         }
@@ -240,6 +242,9 @@ impl Hosts {
     /// Arms `fault`, for a restore on `host` of the child whose store will be at `name`.
     fn arm(&self, host: usize, fault: Fault) -> Option<FailGuard> {
         let once = Arc::new(AtomicBool::new(false));
+        // What the faults do off the host's thread, on threads of their own, awaited on the
+        // test's runtime: a failpoint's callback is no task's.
+        let runtime = tokio::runtime::Handle::current();
         let guard = match fault {
             Fault::Fails(step) => FailGuard::new(step, "1*return"),
             Fault::Dies(step) => {
@@ -259,13 +264,16 @@ impl Hosts {
                     // Off this host's thread, which may be on a runtime of its own.
                     let (copies, bucket, children) =
                         (copies.clone(), bucket.clone(), children.clone());
+                    let runtime = runtime.clone();
                     let raced = std::thread::spawn(move || {
-                        for (copy, disk) in copies {
-                            let child = crate::host_cell::new_alone();
-                            let path = disk.join("raced");
-                            local_cell::upload::wait_on(copy.fork_to(&path, child)).unwrap();
-                            children.lock().unwrap().push((child, path));
-                        }
+                        runtime.block_on(async {
+                            for (copy, disk) in copies {
+                                let child = crate::host_cell::new_alone();
+                                let path = disk.join("raced");
+                                copy.fork_to(&path, child).await.unwrap();
+                                children.lock().unwrap().push((child, path));
+                            }
+                        });
                         Self::collect(&bucket, "raced");
                     });
                     raced.join().unwrap();
@@ -282,9 +290,9 @@ impl Hosts {
                     }
                     let (bucket, source) = (bucket.clone(), source.clone());
                     deleted.store(true, Ordering::SeqCst);
+                    let runtime = runtime.clone();
                     let deleting = std::thread::spawn(move || {
-                        local_cell::upload::wait_on(source.drop_versions(&[version].into()))
-                            .unwrap();
+                        runtime.block_on(source.drop_versions(&[version].into())).unwrap();
                         Self::collect(&bucket, "the version dropped");
                     });
                     deleting.join().unwrap();
@@ -325,7 +333,7 @@ impl Hosts {
 
     /// Runs a restore on `host`, with `fault` going wrong: and what must hold, `leftover` being
     /// what is done with what a dead host left.
-    fn run(
+    async fn run(
         mut self,
         host: usize,
         fault: Option<Fault>,
@@ -335,9 +343,7 @@ impl Hosts {
         let guard = fault.and_then(|fault| self.arm(host, fault));
         let handle = self.disks[host].join("child");
         let child = crate::host_cell::new_alone();
-        let forked = local_cell::upload::wait_on(
-            self.copies[host].as_ref().unwrap().fork_to(&handle, child),
-        );
+        let forked = self.copies[host].as_ref().unwrap().fork_to(&handle, child).await;
         let forked = forked.map_err(|err| err.errno());
         drop(guard);
         let dead = self.dead.load(Ordering::SeqCst);
@@ -346,7 +352,7 @@ impl Hosts {
             self.disks[host] = self.restarted();
             let path = copy_at(&self.disks[host]);
             naming(&path, &self.bucket);
-            match reopened(&path, options()) {
+            match reopened(&path, options()).await {
                 Ok(copy) => self.copies[host] = Some(Arc::new(copy)),
                 Err(err) => {
                     assert!(
@@ -356,12 +362,12 @@ impl Hosts {
                 }
             }
         }
-        self.settle(host, child, forked, leftover, &case);
+        self.settle(host, child, forked, leftover, &case).await;
         forked
     }
 
     /// What must hold, whatever the restore of `child` on `host` gave.
-    fn settle(
+    async fn settle(
         mut self,
         host: usize,
         child: crate::CellId,
@@ -372,15 +378,14 @@ impl Hosts {
         Self::collect(&self.bucket, case);
         let handle = self.disks[host].join("child");
         let told = forked.is_ok() && !self.dead.load(Ordering::SeqCst);
-        let opened = || {
+        let opened = async || {
             naming(&handle, &self.bucket);
-            reopened(&handle, options()).map(drop).map_err(|err| err.to_string())
+            reopened(&handle, options()).await.map(drop).map_err(|err| err.to_string())
         };
-        if told || handle.exists() && leftover == Leftover::Opened && opened().is_ok() {
+        if told || handle.exists() && leftover == Leftover::Opened && opened().await.is_ok() {
             self.children.lock().unwrap().push((child, handle.clone()));
         } else if handle.exists() {
-            let deleted =
-                local_cell::upload::wait_on(OpenCell::delete(&handle, Some(&self.bucket)));
+            let deleted = OpenCell::delete(&handle, Some(&self.bucket)).await;
             assert_eq!(deleted.map_err(|err| err.to_string()), Ok(()), "{case}: deleting it");
         }
         // What the dead host had going, after what was done with what it left.
@@ -396,7 +401,7 @@ impl Hosts {
         if !orphans.is_empty() {
             assert!(!told, "{case}: a restore made left orphans: {orphans:x?}");
             assert_eq!(orphans, [child], "{case}: orphans");
-            let deleted = block_on(operator_delete(&self.bucket, child, rand::random()));
+            let deleted = operator_delete(&self.bucket, child, rand::random()).await;
             assert_eq!(deleted, Ok(()), "{case}: deleting the orphan");
             Self::collect(&self.bucket, case);
         }
@@ -406,7 +411,7 @@ impl Hosts {
         let deleted = self.deleted.load(Ordering::SeqCst);
         for other in 0..HOSTS {
             if self.copies[other].is_some() {
-                let restored = self.restore(other, "again");
+                let restored = self.restore(other, "again").await;
                 let expected = if deleted { Err(Some(Errno::ENOENT)) } else { Ok(()) };
                 assert_eq!(restored, expected, "{case}: host {other} restores it");
                 assert_eq!(self.disks[other].join("again").exists(), !deleted, "{case}");
@@ -416,15 +421,15 @@ impl Hosts {
         Self::collect(&self.bucket, case);
         let children = self.children.lock().unwrap().clone();
         for (child, path) in &children {
-            self.check_fork(*child, path, case);
+            self.check_fork(*child, path, case).await;
         }
 
         // The version goes: what its forks hold stays, for as long as they live.
         self.copies.clear();
         if !deleted {
             let source = self.source.as_ref().unwrap();
-            let dropped = local_cell::upload::wait_on(source.drop_versions(&[self.version].into()))
-                .map_err(|err| err.errno());
+            let dropped =
+                source.drop_versions(&[self.version].into()).await.map_err(|err| err.errno());
             assert_eq!(dropped, Ok(()), "{case}");
         }
         Self::collect(&self.bucket, case);
@@ -435,7 +440,7 @@ impl Hosts {
 
         // Everything deleted, nothing is left of it.
         for (_, path) in &children {
-            let deleted = local_cell::upload::wait_on(OpenCell::delete(path, Some(&self.bucket)));
+            let deleted = OpenCell::delete(path, Some(&self.bucket)).await;
             assert_eq!(deleted.map_err(|err| err.to_string()), Ok(()), "{case}: deleting a fork");
         }
         let source = self.source.take().unwrap();
@@ -444,10 +449,10 @@ impl Hosts {
         for disk in &self.disks {
             let copy = copy_at(disk);
             if copy.exists() {
-                local_cell::upload::wait_on(OpenCell::delete(&copy, None)).unwrap();
+                OpenCell::delete(&copy, None).await.unwrap();
             }
         }
-        let gone = block_on(operator_delete(&self.bucket, cell, rand::random()));
+        let gone = operator_delete(&self.bucket, cell, rand::random()).await;
         assert_eq!(gone, Ok(()), "{case}");
         Self::collect(&self.bucket, case);
         let keys = block_on(bucket_cell::Bucket::list(&*self.bucket, "")).unwrap();
@@ -486,12 +491,13 @@ impl Hosts {
 
 /// Runs `cases`, each in hosts of its own, going on past those that fail, then fails with them all:
 /// or gives what each restore gave.
-fn all(
+async fn all(
     cases: impl IntoIterator<Item = (usize, Option<Fault>, Leftover)>,
 ) -> Vec<Result<(), Option<Errno>>> {
     let (mut failed, mut restored) = (Vec::new(), Vec::new());
     for (host, fault, leftover) in cases {
-        match std::panic::catch_unwind(|| Hosts::new().run(host, fault, leftover)) {
+        let running = async { Hosts::new().await.run(host, fault, leftover).await };
+        match futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(running)).await {
             Ok(result) => restored.push(result),
             Err(panic) => {
                 let said = panic.downcast_ref::<String>().cloned().unwrap_or_default();
@@ -511,21 +517,21 @@ fn on_each_host(fault: Fault) -> impl Iterator<Item = (usize, Option<Fault>, Lef
 }
 
 /// A restore on each host with nothing going wrong restores, and what must hold holds.
-#[test]
-fn restores_with_nothing_going_wrong() {
+#[tokio::test(flavor = "multi_thread")]
+async fn restores_with_nothing_going_wrong() {
     host();
-    let restored = all((0..HOSTS).map(|host| (host, None, Leftover::Deleted)));
+    let restored = all((0..HOSTS).map(|host| (host, None, Leftover::Deleted))).await;
     assert_eq!(restored, vec![Ok(()); HOSTS]);
 }
 
 /// A restore's steps come in the order [`RESTORE_STEPS`] says, each passed, and none of a fork's
 /// on a cell with a writer: no upload, no segment, no acknowledgement.
-#[test]
-fn restores_take_their_steps_in_order() {
+#[tokio::test(flavor = "multi_thread")]
+async fn restores_take_their_steps_in_order() {
     use crate::faults::FORK_STEPS;
     use std::sync::Mutex;
     host();
-    let hosts = Hosts::new();
+    let hosts = Hosts::new().await;
     let steps = Arc::new(Mutex::new(Vec::new()));
     let guards: Vec<_> = (FORK_STEPS.into_iter().chain(RESTORE_STEPS))
         .map(|step| {
@@ -540,48 +546,46 @@ fn restores_take_their_steps_in_order() {
         })
         .collect();
     let copy = hosts.copies[1].as_ref().unwrap();
-    local_cell::upload::wait_on(
-        copy.fork_to(hosts.disks[1].join("child"), crate::host_cell::new_alone()),
-    )
-    .unwrap();
+    copy.fork_to(hosts.disks[1].join("child"), crate::host_cell::new_alone()).await.unwrap();
     drop(guards);
     assert_eq!(*steps.lock().unwrap(), RESTORE_STEPS);
 }
 
 /// A step of a restore failing on any host fails it, and what must hold holds.
-#[test]
-fn restores_failing_at_each_step_on_each_host() {
+#[tokio::test(flavor = "multi_thread")]
+async fn restores_failing_at_each_step_on_each_host() {
     host();
     let cases = RESTORE_STEPS.into_iter().flat_map(|step| on_each_host(Fault::Fails(step)));
     let cases: Vec<_> = cases.collect();
-    let restored = all(cases.clone());
+    let restored = all(cases.clone()).await;
     let made = cases.iter().zip(&restored).filter(|(_, result)| result.is_ok());
     assert_eq!(made.count(), 0, "restores made though a step of them failed");
 }
 
 /// What a host dying at a step of a restore leaves, deleted or opened, breaks nothing, on any host.
-#[test]
-fn hosts_dying_at_each_step_of_a_restore() {
+#[tokio::test(flavor = "multi_thread")]
+async fn hosts_dying_at_each_step_of_a_restore() {
     host();
-    all(RESTORE_STEPS.into_iter().flat_map(|step| on_each_host(Fault::Dies(step))));
+    all(RESTORE_STEPS.into_iter().flat_map(|step| on_each_host(Fault::Dies(step)))).await;
 }
 
 /// At each step of a restore, every other host restoring the version and a pass of the collector
 /// take nothing from it, and it restores.
-#[test]
-fn restores_racing_others_and_the_collector_at_each_step() {
+#[tokio::test(flavor = "multi_thread")]
+async fn restores_racing_others_and_the_collector_at_each_step() {
     host();
-    let restored = all(RESTORE_STEPS.into_iter().flat_map(|step| on_each_host(Fault::Raced(step))));
+    let restored =
+        all(RESTORE_STEPS.into_iter().flat_map(|step| on_each_host(Fault::Raced(step)))).await;
     assert!(restored.iter().all(Result::is_ok), "{restored:?}");
 }
 
 /// The version dropped, and a pass of the collector, at each step of a restore: it fails with
 /// `ENOENT`, leaving nothing, if it hadn't been made; and if it had, it holds all it held.
-#[test]
-fn versions_dropped_at_each_step_of_a_restore() {
+#[tokio::test(flavor = "multi_thread")]
+async fn versions_dropped_at_each_step_of_a_restore() {
     host();
     let restored =
-        all(RESTORE_STEPS.into_iter().flat_map(|step| on_each_host(Fault::Deleted(step))));
+        all(RESTORE_STEPS.into_iter().flat_map(|step| on_each_host(Fault::Deleted(step)))).await;
     let unexpected =
         restored.iter().filter(|result| !matches!(result, Ok(()) | Err(Some(Errno::ENOENT))));
     assert_eq!(unexpected.collect::<Vec<_>>(), Vec::<&Result<(), Option<Errno>>>::new());
@@ -592,11 +596,11 @@ fn versions_dropped_at_each_step_of_a_restore() {
 /// A version dropped, and what it named collected, with a fork of it being made whose host dies
 /// there, on any host: its record, being made, names what is gone, which must stop no pass of the
 /// collector, and what it left goes, or fails to open, whatever is done with it.
-#[test]
-fn versions_dropped_as_hosts_die_in_the_middle_of_a_restore() {
+#[tokio::test(flavor = "multi_thread")]
+async fn versions_dropped_as_hosts_die_in_the_middle_of_a_restore() {
     host();
     let steps = ["version::record", "version::recorded", "version::referred", "version::checked"];
-    all(steps.into_iter().flat_map(|step| on_each_host(Fault::DeletedAndDies(step))));
+    all(steps.into_iter().flat_map(|step| on_each_host(Fault::DeletedAndDies(step)))).await;
 }
 
 /// A restore's writes: its child's record, and the record saying it is made.
@@ -604,14 +608,15 @@ const WRITES: usize = 2;
 
 /// A write of a restore going wrong, its answer lost or the host dying as it goes, a dead host's
 /// PUT landing late, or a pass of the collector just before it, breaks nothing, on any host.
-#[test]
-fn each_write_of_a_restore_going_wrong() {
+#[tokio::test(flavor = "multi_thread")]
+async fn each_write_of_a_restore_going_wrong() {
     host();
     let mishaps: Vec<_> = MISHAPS.into_iter().chain([Mishap::Collected]).collect();
     all((0..WRITES).flat_map(|write| {
         let mishaps = mishaps.clone();
         mishaps.into_iter().flat_map(move |mishap| on_each_host(Fault::Write(write, mishap)))
-    }));
+    }))
+    .await;
 }
 
 /// TASK-411.4: the host's KMS holding the default tenant's KEK, which every store, copy and
@@ -627,16 +632,16 @@ fn encrypted() -> tempfile::TempDir {
 
 /// TASK-411.4: `restores_with_nothing_going_wrong`, encrypted: every restore's child keeps the
 /// keys it inherits, and reads, as what must hold checks.
-#[test]
-fn encrypted_restores_with_nothing_going_wrong() {
+#[tokio::test(flavor = "multi_thread")]
+async fn encrypted_restores_with_nothing_going_wrong() {
     host();
     let _kms = encrypted();
-    let restored = all((0..HOSTS).map(|host| (host, None, Leftover::Deleted)));
+    let restored = all((0..HOSTS).map(|host| (host, None, Leftover::Deleted))).await;
     assert_eq!(restored, vec![Ok(()); HOSTS]);
-    let hosts = Hosts::new();
+    let hosts = Hosts::new().await;
     let copy = hosts.copies[1].as_ref().unwrap();
     let child = crate::host_cell::new_alone();
-    local_cell::upload::wait_on(copy.fork_to(hosts.disks[1].join("child"), child)).unwrap();
+    copy.fork_to(hosts.disks[1].join("child"), child).await.unwrap();
     let record = block_on(bucket_cell::head::get(&*hosts.bucket, child)).unwrap().unwrap();
     let source = hosts.source.as_ref().unwrap().cell();
     let inherited: Vec<_> = record.inherited.iter().map(|had| had.cell).collect();
@@ -644,22 +649,22 @@ fn encrypted_restores_with_nothing_going_wrong() {
 }
 
 /// TASK-411.4: `restores_failing_at_each_step_on_each_host`, encrypted.
-#[test]
-fn encrypted_restores_failing_at_each_step_on_each_host() {
+#[tokio::test(flavor = "multi_thread")]
+async fn encrypted_restores_failing_at_each_step_on_each_host() {
     host();
     let _kms = encrypted();
     let cases = RESTORE_STEPS.into_iter().flat_map(|step| on_each_host(Fault::Fails(step)));
     let cases: Vec<_> = cases.collect();
-    let restored = all(cases.clone());
+    let restored = all(cases.clone()).await;
     let made = cases.iter().zip(&restored).filter(|(_, result)| result.is_ok());
     assert_eq!(made.count(), 0, "restores made though a step of them failed");
 }
 
 /// TASK-411.4: `hosts_dying_at_each_step_of_a_restore`, encrypted: what a host dying in the
 /// middle of an encrypted restore leaves, its child's keys given or not, breaks nothing.
-#[test]
-fn encrypted_hosts_dying_at_each_step_of_a_restore() {
+#[tokio::test(flavor = "multi_thread")]
+async fn encrypted_hosts_dying_at_each_step_of_a_restore() {
     host();
     let _kms = encrypted();
-    all(RESTORE_STEPS.into_iter().flat_map(|step| on_each_host(Fault::Dies(step))));
+    all(RESTORE_STEPS.into_iter().flat_map(|step| on_each_host(Fault::Dies(step)))).await;
 }

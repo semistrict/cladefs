@@ -34,6 +34,137 @@ pub(crate) fn salt() -> extent_keys::Salt {
 use std::sync::Arc;
 #[cfg(not(feature = "shuttle"))]
 pub(crate) use std::sync::{Condvar, Mutex, MutexGuard};
+
+// The lock its awaiting takers race for: a Shuttle atomic under Shuttle, so that its scheduler
+// chooses who wins it.
+#[cfg(feature = "shuttle")]
+use shuttle::sync::atomic::AtomicBool;
+#[cfg(not(feature = "shuttle"))]
+use std::sync::atomic::AtomicBool;
+
+/// cladefs: what the store's waits await, holding no thread (TASK-685.17): said as what they wait
+/// for changes. A wait listens, then looks, then, if it is to wait, lets its locks go and awaits
+/// the listener, so that a change after its look, made under the lock it looked under, wakes it.
+/// event_listener's, built normally, under madsim and under Shuttle alike: its listeners' wakers
+/// are those of the futures awaiting them, which Shuttle's executor schedules.
+pub(crate) use event_listener::Event;
+
+/// cladefs: runs `future` to its end on the calling thread, which it blocks meanwhile: for an
+/// outermost entry alone, as a store dropped unclosed closes there (TASK-685.17). Shuttle's own
+/// under Shuttle, which schedules the thread's waiting; else [`wait_here`].
+pub(crate) fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    #[cfg(feature = "shuttle")]
+    return shuttle::future::block_on(future);
+    #[cfg(not(feature = "shuttle"))]
+    return wait_here(future);
+}
+
+/// cladefs: runs `future` to its end on the calling thread, parked while it waits, for what it
+/// waits on to wake it (TASK-685.17): what a drop of what was never closed closes with, within
+/// whatever polls the drop, an executor's task or a test's thread. Not `futures::executor::block_on`,
+/// which refuses to run within another of its executors, as a drop within one does.
+pub fn wait_here<F: std::future::Future>(future: F) -> F::Output {
+    struct Unpark(std::thread::Thread);
+    impl std::task::Wake for Unpark {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = std::task::Waker::from(Arc::new(Unpark(std::thread::current())));
+    let mut context = std::task::Context::from_waker(&waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        if let std::task::Poll::Ready(output) = future.as_mut().poll(&mut context) {
+            return output;
+        }
+        std::thread::park();
+    }
+}
+
+/// cladefs: a lock its takers await, holding no thread meanwhile (TASK-685.17): for the store's
+/// locks held across work others wait for, its commit's and its flush's. Taken by one at a time;
+/// its guard, dropped, lets the next take it. Shared beyond one store, as its followers share its
+/// writer's: a panic holding it aborts the extent daemon, as one holding a `SharedLock` does
+/// ([`crate::shared::Awaited`], TASK-149.24).
+pub(crate) struct AsyncMutex<T> {
+    /// What the log calls it.
+    name: &'static str,
+    held: AtomicBool,
+    let_go: Event,
+    value: std::cell::UnsafeCell<T>,
+}
+
+// SAFETY: one guard at a time reaches the value, as `held` says, across threads as a mutex's.
+unsafe impl<T: Send> Send for AsyncMutex<T> {}
+// SAFETY: as above.
+unsafe impl<T: Send> Sync for AsyncMutex<T> {}
+
+impl<T> AsyncMutex<T> {
+    pub(crate) fn new(name: &'static str, value: T) -> Self {
+        Self {
+            name,
+            held: AtomicBool::new(false),
+            let_go: Event::new(),
+            value: std::cell::UnsafeCell::new(value),
+        }
+    }
+
+    /// The lock, once no other holds it.
+    pub(crate) async fn lock(&self) -> AsyncMutexGuard<'_, T> {
+        loop {
+            if let Some(guard) = self.try_lock() {
+                return guard;
+            }
+            let let_go = self.let_go.listen();
+            if let Some(guard) = self.try_lock() {
+                return guard;
+            }
+            let_go.await;
+        }
+    }
+
+    /// The lock, if no other holds it.
+    pub(crate) fn try_lock(&self) -> Option<AsyncMutexGuard<'_, T>> {
+        use std::sync::atomic::Ordering;
+        // Taken, Acquire, as a mutex's lock: what the last holder wrote, its Release, is seen.
+        // Refused, Relaxed: nothing is read of the value then, and the guard is not made.
+        let taken = self.held.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed);
+        taken.ok().map(|_| AsyncMutexGuard {
+            mutex: self,
+            _awaited: crate::shared::Awaited::new(self.name),
+        })
+    }
+}
+
+/// An [`AsyncMutex`] held.
+pub(crate) struct AsyncMutexGuard<'a, T> {
+    mutex: &'a AsyncMutex<T>,
+    /// Dropped after the lock is let go of, as a `Shared`'s holding is.
+    _awaited: crate::shared::Awaited,
+}
+
+impl<T> std::ops::Deref for AsyncMutexGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        // SAFETY: the guard is the one holder (`AsyncMutex::try_lock`).
+        unsafe { &*self.mutex.value.get() }
+    }
+}
+
+impl<T> std::ops::DerefMut for AsyncMutexGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: as above, `&mut self` its one use.
+        unsafe { &mut *self.mutex.value.get() }
+    }
+}
+
+impl<T> Drop for AsyncMutexGuard<'_, T> {
+    fn drop(&mut self) {
+        self.mutex.held.store(false, std::sync::atomic::Ordering::Release);
+        self.mutex.let_go.notify(1);
+    }
+}
 #[cfg(all(not(feature = "shuttle"), not(madsim)))]
 pub(crate) use std::thread;
 

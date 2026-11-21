@@ -222,23 +222,17 @@ fn keeps_cells_in_object_storage() {
 /// cladefs: a store whose description names a bucket other than the daemon's, as an image's names
 /// its own file bucket, keeps its cell there as the daemon serves it, not in the daemon's
 /// (TASK-165.6): the image's other openers, the cladefs CLI's, find it there.
-#[test]
-fn keeps_cells_in_the_buckets_their_stores_name() {
+#[tokio::test(flavor = "multi_thread")]
+async fn keeps_cells_in_the_buckets_their_stores_name() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("image");
     let url = format!("file://{}/", dir.path().canonicalize().unwrap().join("bucket").display());
     let cell = crate::host_cell::new_alone();
     let (of, keeping) = (crate::CellOf::Named(cell), crate::host_cell::keeping().unwrap());
-    let made = local_cell::upload::wait_on(crate::host_cell::create_unmade(
-        &path,
-        1 << 20,
-        of,
-        Kind::Fxfs,
-        Some(&url),
-        keeping,
-    ))
-    .unwrap();
+    let made = crate::host_cell::create_unmade(&path, 1 << 20, of, Kind::Fxfs, Some(&url), keeping)
+        .await
+        .unwrap();
     made.made().unwrap();
     drop(made);
     let (store, served) = connect(&path, 1 << 20);
@@ -392,10 +386,19 @@ fn keeps_object_storage_and_follower_stats() {
     }
 }
 
-/// Runs `call`, a store operation of the control API's, on a runtime of its own, as the API does.
+/// Runs `call`, a store operation of the control API's, on a runtime of its own, as the API does:
+/// a sync test's outermost entry. Called from a test's task, on its runtime, the thread handing
+/// its other tasks to another meanwhile.
+#[allow(clippy::disallowed_methods, reason = "a test's thread, waiting for the call alone")]
 fn control<T>(call: impl std::future::Future<Output = T>) -> T {
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    runtime.block_on(call)
+    match tokio::runtime::Handle::try_current() {
+        Ok(runtime) => tokio::task::block_in_place(|| runtime.block_on(call)),
+        Err(_) => {
+            let runtime =
+                tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            runtime.block_on(call)
+        }
+    }
 }
 
 /// Resizes the store at `path`, as the control API does (`ResizeCell`).
@@ -423,8 +426,8 @@ fn wait_uploaded(path: &Path) -> Result<(), crate::Error> {
 /// A store a VM has open grows at once, and its VM process is told the new capacity; it shrinks
 /// once its guest, asked, agrees, never below what it holds, and keeps its size if the guest
 /// refuses. Durably: the store reopened has the capacity it was given.
-#[test]
-fn resizes_open_stores() {
+#[tokio::test(flavor = "multi_thread")]
+async fn resizes_open_stores() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
@@ -457,7 +460,7 @@ fn resizes_open_stores() {
 
     drop(store);
     served.join().unwrap();
-    let reopened = local_cell::upload::wait_on(OpenCell::open(&path)).unwrap();
+    let reopened = OpenCell::open(&path).await.unwrap();
     assert_eq!(reopened.info().unwrap().capacity, 2 << 20);
 }
 
@@ -508,12 +511,12 @@ fn shrinks_dropped_by_their_callers_stop_waiting() {
 
 /// A store no VM has open grows, through the daemon, which no VM opens it from meanwhile; it does
 /// not shrink, as its guest is not there to agree.
-#[test]
-fn resizes_closed_stores() {
+#[tokio::test(flavor = "multi_thread")]
+async fn resizes_closed_stores() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    drop(local_cell::upload::wait_on(OpenCell::create(&path, 1 << 20)).unwrap());
+    drop(OpenCell::create(&path, 1 << 20).await.unwrap());
     resize(&path, 3 << 20).unwrap();
     assert_eq!(resize(&path, 2 << 20), Err(Errno::EBUSY));
     assert_eq!(resize(&dir.path().join("none"), 2 << 20), Err(Errno::ENOENT));
@@ -525,8 +528,8 @@ fn resizes_closed_stores() {
 
 /// A store served by the daemon is the store: what it writes it reads, commits, and keeps once
 /// the VM process is gone; it fails as the store does; and no other VM process opens it meanwhile.
-#[test]
-fn serves_a_store() {
+#[tokio::test(flavor = "multi_thread")]
+async fn serves_a_store() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
@@ -551,13 +554,8 @@ fn serves_a_store() {
     drop(store);
     served.join().unwrap();
     let mut data = vec![0; 2 * BLOCK];
-    let local = local_cell::upload::wait_on(OpenCell::open(&path)).unwrap();
-    local_cell::upload::wait_on(local.read(
-        extent,
-        0,
-        &mut [VolatileSliceMut::from(&mut data[..])],
-    ))
-    .unwrap();
+    let local = OpenCell::open(&path).await.unwrap();
+    local.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).await.unwrap();
     assert_eq!(data, pattern(1, 2 * BLOCK));
 }
 
@@ -1498,21 +1496,18 @@ fn child_maps_an_extent() {
 
 /// Two VM processes, each of a store forked from one, mapping one extent of it at once map the
 /// same pages: the daemon's, which cache it once.
-#[test]
-fn two_processes_map_the_same_pages() {
+#[tokio::test(flavor = "multi_thread")]
+async fn two_processes_map_the_same_pages() {
     host();
     let ps = page_size() as usize;
     let dir = tempfile::tempdir().unwrap();
     let (parent, child) = (dir.path().join("parent"), dir.path().join("child"));
     let extent = {
-        let store = local_cell::upload::wait_on(OpenCell::create(&parent, 1 << 24)).unwrap();
+        let store = OpenCell::create(&parent, 1 << 24).await.unwrap();
         let extent = ExtentId { cell: store.cell().id, sequence: 1 };
-        store.write(extent, 0, &[VolatileSlice::from(&pattern(9, ps)[..])]).unwrap();
-        local_cell::upload::wait_on(store.commit(None)).unwrap();
-        local_cell::upload::wait_on(
-            store.fork_to(&child, crate::host_cell::fork_child(store.cell())),
-        )
-        .unwrap();
+        store.write(extent, 0, &[VolatileSlice::from(&pattern(9, ps)[..])]).await.unwrap();
+        store.commit(None).await.unwrap();
+        store.fork_to(&child, crate::host_cell::fork_child(store.cell())).await.unwrap();
         extent
     };
     let socket = dir.path().join("cladefsd.sock");
@@ -1765,19 +1760,19 @@ fn page_is_held(arena: crate::pages::ArenaId, offset: u64) -> bool {
 /// faults on them are served; and once it has acknowledged nothing it was sent for a while, the
 /// daemon kills it, and lets its store go. The page it maps, evicted, is no other's until then: not
 /// free, but the quarantine's, until it has exited; free once it has.
-#[test]
-fn frozen_vm_processes_hold_nothing_up() {
-    frozen_vm_processes_are_killed();
+#[tokio::test(flavor = "multi_thread")]
+async fn frozen_vm_processes_hold_nothing_up() {
+    frozen_vm_processes_are_killed().await;
 }
 
 /// TASK-79.9: as [`frozen_vm_processes_hold_nothing_up`], on a kernel without `SO_PEERPIDFD`
 /// (Linux 6.1 to 6.4), as the system call is refused here: the daemon kills the frozen VM process,
 /// which it knows by the process that connected, and keeps the page it maps until it has exited.
-#[test]
-fn frozen_vm_processes_are_killed_without_peer_pidfds() {
+#[tokio::test(flavor = "multi_thread")]
+async fn frozen_vm_processes_are_killed_without_peer_pidfds() {
     let (level, option) = (libc::SOL_SOCKET as u32, libc::SO_PEERPIDFD as u32);
     refuse_system_call(libc::SYS_getsockopt, &[(1, level), (2, option)], libc::ENOPROTOOPT as u16);
-    frozen_vm_processes_are_killed();
+    frozen_vm_processes_are_killed().await;
 }
 
 /// A store of a tenant's, whose extent's page a VM process, a child, and this one map, and what
@@ -1796,7 +1791,7 @@ struct TwoVmProcesses {
 }
 
 /// [`TwoVmProcesses`], of a tenant, its child with `env` set too.
-fn two_vm_processes(env: &[&str]) -> TwoVmProcesses {
+async fn two_vm_processes(env: &[&str]) -> TwoVmProcesses {
     use std::io::BufRead as _;
     host();
     let ps = page_size() as usize;
@@ -1806,15 +1801,11 @@ fn two_vm_processes(env: &[&str]) -> TwoVmProcesses {
     let (parent, child) = (dir.path().join("parent"), dir.path().join("child"));
     let extent = {
         // A cell of the tenant's (TASK-364).
-        let store = local_cell::upload::wait_on(OpenCell::create_in(&parent, 1 << 24, tenant.id()))
-            .unwrap();
+        let store = OpenCell::create_in(&parent, 1 << 24, tenant.id()).await.unwrap();
         let extent = ExtentId { cell: store.cell().id, sequence: 1 };
-        store.write(extent, 0, &[VolatileSlice::from(&pattern(9, ps)[..])]).unwrap();
-        local_cell::upload::wait_on(store.commit(None)).unwrap();
-        local_cell::upload::wait_on(
-            store.fork_to(&child, crate::host_cell::fork_child(store.cell())),
-        )
-        .unwrap();
+        store.write(extent, 0, &[VolatileSlice::from(&pattern(9, ps)[..])]).await.unwrap();
+        store.commit(None).await.unwrap();
+        store.fork_to(&child, crate::host_cell::fork_child(store.cell())).await.unwrap();
         extent
     };
     let socket = dir.path().join("cladefsd.sock");
@@ -1844,11 +1835,11 @@ fn two_vm_processes(env: &[&str]) -> TwoVmProcesses {
 }
 
 /// What [`frozen_vm_processes_hold_nothing_up`] shows.
-fn frozen_vm_processes_are_killed() {
+async fn frozen_vm_processes_are_killed() {
     use std::os::unix::process::ExitStatusExt as _;
     let ps = page_size() as usize;
     let TwoVmProcesses { dir, tenant, socket, extent, ours, page, theirs, stdout, offset } =
-        two_vm_processes(&[]);
+        two_vm_processes(&[]).await;
     drop(stdout);
     freeze(&theirs.0);
 
@@ -1888,12 +1879,12 @@ fn frozen_vm_processes_are_killed() {
 /// TASK-79.100: a VM process that closes its connection and lives on maps what its window mapped
 /// still, as nothing took it away: the page, evicted, is no other's until it is gone, which the
 /// daemon sees to, killing it, and lets its store go once it has exited.
-#[test]
-fn vm_processes_that_close_their_connections_keep_their_pages_until_gone() {
+#[tokio::test(flavor = "multi_thread")]
+async fn vm_processes_that_close_their_connections_keep_their_pages_until_gone() {
     use std::os::unix::process::ExitStatusExt as _;
     let ps = page_size() as usize;
     let two = two_vm_processes(&[CHILD_CLOSES]);
-    let TwoVmProcesses { dir, tenant, socket, mut theirs, mut stdout, offset, .. } = two;
+    let TwoVmProcesses { dir, tenant, socket, mut theirs, mut stdout, offset, .. } = two.await;
     // Open as it runs on, for waiting for it not to close it.
     let _running = theirs.0.stdin.take();
     let closed = stdout.next().unwrap().unwrap();
@@ -2751,15 +2742,15 @@ fn deleted_stores_cells_keep_what_their_forks_need() {
 
 /// TASK-39.7: a store's copy placed at an earlier placement than the one that last took its cell
 /// does not open (`ESTALE`): a placement cut off takes no cell back from the one after it.
-#[test]
-fn earlier_placements_open_no_stores() {
+#[tokio::test(flavor = "multi_thread")]
+async fn earlier_placements_open_no_stores() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let (path, earlier) = (dir.path().join("store"), dir.path().join("earlier"));
-    let cell = local_cell::upload::wait_on(OpenCell::create(&path, 1 << 24)).unwrap().cell();
+    let cell = OpenCell::create(&path, 1 << 24).await.unwrap().cell();
     OpenCell::place(&path, 5).unwrap();
     let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
     write(&store, ExtentId { cell: cell.id, sequence: 1 }, 0, &pattern(1, BLOCK)).unwrap();
@@ -2782,22 +2773,21 @@ fn earlier_placements_open_no_stores() {
 /// TASK-550: a store whose cell a later placement took, its uploader fenced, changes nothing more:
 /// a `COMMIT` without `COMMIT_UPLOADED`, a guest's fsync, is answered `EROFS`, as `WRITE` and
 /// `FREE` are (doc-4), rather than acknowledged and lost.
-#[test]
-fn fenced_stores_answer_ordered_commits_erofs() {
+#[tokio::test(flavor = "multi_thread")]
+async fn fenced_stores_answer_ordered_commits_erofs() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let path = |name: &str| dir.path().join(name);
-    let cell =
-        local_cell::upload::wait_on(OpenCell::create(path("first"), 1 << 24)).unwrap().cell();
+    let cell = OpenCell::create(path("first"), 1 << 24).await.unwrap().cell();
     OpenCell::place(path("first"), 5).unwrap();
     let first = CellClient::connect(&socket, path("first"), 1 << 24).unwrap();
     let extent = |sequence| ExtentId { cell: cell.id, sequence };
     write(&first, extent(1), 0, &pattern(1, BLOCK)).unwrap();
     first.commit(None).unwrap();
-    local_cell::upload::wait_on(OpenCell::take(path("second"), 1 << 24, cell, Some(6))).unwrap();
+    OpenCell::take(path("second"), 1 << 24, cell, Some(6)).await.unwrap();
     // The first's uploader finds itself fenced at its next upload, which a durable commit waits
     // for, or has found it already.
     assert_eq!(first.commit(None), Err(Errno::EROFS));
@@ -2921,8 +2911,8 @@ fn vm_processes_drop_the_versions_they_made_alone() {
 /// `cladefsctl take` through the daemon's), takes the cell, and so its head, with that
 /// placement's token as it is made, not the daemon's: a copy placed later than the one that took
 /// the cell last, on another host, takes it over, in a file bucket as in any.
-#[test]
-fn control_takes_cells_at_the_placements_given() {
+#[tokio::test(flavor = "multi_thread")]
+async fn control_takes_cells_at_the_placements_given() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let url = format!("file://{}/", dir.path().canonicalize().unwrap().join("bucket").display());
@@ -2944,7 +2934,7 @@ fn control_takes_cells_at_the_placements_given() {
     drop(first);
     assert_eq!(control(super::cells::sync(path("first"))), Ok(()));
     // A copy beside the daemon, as cladefsctl's without it, placed at 6.
-    local_cell::upload::wait_on(OpenCell::take(path("second"), 1 << 24, cell, Some(6))).unwrap();
+    OpenCell::take(path("second"), 1 << 24, cell, Some(6)).await.unwrap();
     // One through the daemon, placed at 7.
     let taken =
         super::cells::create(path("third"), 1 << 24, cell, (Some(7), Kind::Fxfs, None, false));
@@ -3294,8 +3284,8 @@ fn stores_open_in_another_arena_are_busy() {
 
 /// cladefs: the daemon's work on a store followers have open: synced, grown and forked as it is;
 /// deleted, placed or made public, not (EBUSY).
-#[test]
-fn stores_followed_are_worked_on_as_they_are() {
+#[tokio::test(flavor = "multi_thread")]
+async fn stores_followed_are_worked_on_as_they_are() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
@@ -3318,14 +3308,9 @@ fn stores_followed_are_worked_on_as_they_are() {
     assert_eq!(control(super::cells::make_public(path.clone(), false)), Err(Errno::EBUSY));
     drop(follower);
     followed.join().unwrap();
-    let forked = local_cell::upload::wait_on(OpenCell::open(&fork)).unwrap();
+    let forked = OpenCell::open(&fork).await.unwrap();
     let mut data = vec![0; BLOCK];
-    local_cell::upload::wait_on(forked.read(
-        extent,
-        0,
-        &mut [VolatileSliceMut::from(&mut data[..])],
-    ))
-    .unwrap();
+    forked.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).await.unwrap();
     assert_eq!(data, pattern(1, BLOCK));
     delete_cell(&path).unwrap();
 }
@@ -3442,8 +3427,8 @@ fn serves_hundreds_of_forks_of_a_base() {
 /// the larger against ~3.5 ms, Linux in Docker), under a round trip to a real bucket, and 42 ms
 /// against 5 ms in debug (124.5 ms against 6.0 ms on GCE r1021 before the extents' map was
 /// persistent).
-#[test]
-fn forks_opening_reads_nothing_more_of_a_larger_base() {
+#[tokio::test(flavor = "multi_thread")]
+async fn forks_opening_reads_nothing_more_of_a_larger_base() {
     const FORKS: u64 = 20;
     host();
     super::raise_open_files_limit().unwrap();
@@ -3453,31 +3438,25 @@ fn forks_opening_reads_nothing_more_of_a_larger_base() {
     std::thread::spawn(move || serve(listener));
     // Forks of a base of `extents` extents, opened: how long their opening took, and what it
     // unpacked and read from the stores.
-    let opened = |extents: u64| {
-        let base = local_cell::upload::wait_on(OpenCell::create(
-            dir.path().join(format!("base-{extents}")),
-            1 << 30,
-        ))
-        .unwrap();
+    let opened = async |extents: u64| {
+        let base =
+            OpenCell::create(dir.path().join(format!("base-{extents}")), 1 << 30).await.unwrap();
         let cell = base.cell();
         for sequence in 1..=extents {
             let data = pattern(sequence as u8, BLOCK);
             base.write(ExtentId { cell: cell.id, sequence }, 0, &[VolatileSlice::from(&data[..])])
+                .await
                 .unwrap();
             if sequence % 1024 == 0 {
-                local_cell::upload::wait_on(base.commit(None)).unwrap();
+                base.commit(None).await.unwrap();
             }
         }
-        let forks: Vec<_> = (1..=FORKS)
-            .map(|n| {
-                let fork = dir.path().join(format!("fork-{extents}-{n}"));
-                local_cell::upload::wait_on(
-                    base.fork_to(&fork, crate::host_cell::fork_child(cell)),
-                )
-                .unwrap();
-                fork
-            })
-            .collect();
+        let mut forks = Vec::new();
+        for n in 1..=FORKS {
+            let fork = dir.path().join(format!("fork-{extents}-{n}"));
+            base.fork_to(&fork, crate::host_cell::fork_child(cell)).await.unwrap();
+            forks.push(fork);
+        }
         drop(base);
         let before = crate::stats::stats();
         let start = std::time::Instant::now();
@@ -3489,8 +3468,8 @@ fn forks_opening_reads_nothing_more_of_a_larger_base() {
         drop(stores);
         (took, after.unpacks - before.unpacks, after.read_stored_bytes - before.read_stored_bytes)
     };
-    let small = opened(1024);
-    let large = opened(32768);
+    let small = opened(1024).await;
+    let large = opened(32768).await;
     println!("a fork's opening, of a base of 1,024 extents and of 32,768: {small:?} and {large:?}");
     assert_eq!((large.1, large.2), (small.1, small.2), "(unpacked, read) by opening forks");
 }
@@ -3502,8 +3481,8 @@ fn forks_opening_reads_nothing_more_of_a_larger_base() {
 /// extent map, its base's with it, under its state lock: 3.3 million extents a count, 160 ms on a
 /// GCE host. The base is made here, its extents' writes no round trips to the daemon, and
 /// committed a thousand at a time, as a guest's are.
-#[test]
-fn counting_followers_walks_no_extents() {
+#[tokio::test(flavor = "multi_thread")]
+async fn counting_followers_walks_no_extents() {
     const FORKS: u64 = 100;
     const EXTENTS: u64 = 32768;
     host();
@@ -3512,25 +3491,23 @@ fn counting_followers_walks_no_extents() {
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
-    let base =
-        local_cell::upload::wait_on(OpenCell::create(dir.path().join("base"), 1 << 30)).unwrap();
+    let base = OpenCell::create(dir.path().join("base"), 1 << 30).await.unwrap();
     let cell = base.cell();
     for sequence in 1..=EXTENTS {
         let data = pattern(sequence as u8, BLOCK);
         base.write(ExtentId { cell: cell.id, sequence }, 0, &[VolatileSlice::from(&data[..])])
+            .await
             .unwrap();
         if sequence % 1024 == 0 {
-            local_cell::upload::wait_on(base.commit(None)).unwrap();
+            base.commit(None).await.unwrap();
         }
     }
-    let forks: Vec<_> = (1..=FORKS)
-        .map(|n| {
-            let fork = dir.path().join(format!("fork-{n}"));
-            local_cell::upload::wait_on(base.fork_to(&fork, crate::host_cell::fork_child(cell)))
-                .unwrap();
-            fork
-        })
-        .collect();
+    let mut forks = Vec::new();
+    for n in 1..=FORKS {
+        let fork = dir.path().join(format!("fork-{n}"));
+        base.fork_to(&fork, crate::host_cell::fork_child(cell)).await.unwrap();
+        forks.push(fork);
+    }
     drop(base);
     let stores: Vec<_> =
         (forks.iter()).map(|fork| CellClient::connect(&socket, fork, 1 << 30).unwrap()).collect();
@@ -3552,9 +3529,10 @@ fn counting_followers_walks_no_extents() {
 /// share, a bounded number, rather than a blocking thread for each store whose flush is due at
 /// its turn, which hundreds of guests committing together kept as many of as their syncs' waits
 /// took, each idle 10 s after: here each guest commits, ordered, again and again for a second.
-/// At once, the stores' flushes run on `FLUSHES` threads at most, and the 15 they share to sync
-/// their files on beside their own (`local_cell`'s `HELPERS`, which count as theirs, named as
-/// they are): the most seen at once, looking every millisecond, is no more. Once their commits are durable, the runtime keeps threads for
+/// At once, `FLUSHES` stores' flushes run at most, each on a thread of the runtime's for its
+/// syncs alone (TASK-685.17), and the 15 they share to sync their files on beside their own
+/// (`local_cell`'s `HELPERS`): the most threads seen at once, looking every millisecond, are a
+/// small part of the stores'. Once their commits are durable, the runtime keeps threads for
 /// the requests that ran at once, not for the stores: 2 and a little over 2 for each guest
 /// committing (8 to 9 for 3 guests, 18 to 25 for 9, 58 to 70 for 33, whether 150, 300 or 600 stores
 /// were open, in a container of 15 processors), more under load, as a thread just done is not yet
@@ -3571,8 +3549,8 @@ fn hundreds_of_writers_flush_on_threads_they_share() {
     use std::sync::atomic::{AtomicBool, Ordering};
     const STORES: usize = 300;
     const WRITERS: usize = 8;
-    // The runtime's, and those flushing.
-    const NAMES: [&str; 2] = ["cladefsd io", "cladefsd flush"];
+    // The runtime's, those flushing among them.
+    const NAMES: [&str; 1] = ["cladefsd io"];
     host();
     super::raise_open_files_limit().unwrap();
     let dir = tempfile::tempdir_in("/var/tmp").unwrap();
@@ -3667,8 +3645,7 @@ fn hundreds_of_writers_flush_on_threads_they_share() {
         most.iter().sum::<usize>(),
         lags.len()
     );
-    let flushing = super::server::FLUSHES + 15;
-    assert!(most[1] <= flushing, "{most:?} named {NAMES:?} at once");
+    assert!(most[0] < STORES / 4, "{most:?} named {NAMES:?} at once");
     assert!(kept[0] < STORES / 4, "{threads} threads kept: {kept:?} named {NAMES:?}, of {names:?}");
     // Four turns, however long the load made them.
     assert!(turns <= 4, "ordered commits durable {turns} turns after, {lag:?}");
@@ -3865,13 +3842,13 @@ fn the_daemon_accepts_on_after_failing_to() {
 
 /// TASK-79.83: a fork of a store, as the control API makes it (`ForkCell`), to a path a store is
 /// at already, fails with `EEXIST`, as making a store there does (`CreateCell`).
-#[test]
-fn forks_to_stores_there_already_fail_with_eexist() {
+#[tokio::test(flavor = "multi_thread")]
+async fn forks_to_stores_there_already_fail_with_eexist() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let (path, fork) = (dir.path().join("store"), dir.path().join("fork"));
-    let store = local_cell::upload::wait_on(OpenCell::create(&path, 1 << 20)).unwrap();
-    local_cell::upload::wait_on(store.commit(None)).unwrap();
+    let store = OpenCell::create(&path, 1 << 20).await.unwrap();
+    store.commit(None).await.unwrap();
     drop(store);
     fork_cell(&path, &fork).unwrap();
     let again = fork_cell(&path, &fork);
@@ -3880,8 +3857,8 @@ fn forks_to_stores_there_already_fail_with_eexist() {
 
 /// TASK-136.5: nothing a VM process sends attaches a store to the one it has open: whatever request
 /// it makes, naming the store, what that holds stays unreadable to it.
-#[test]
-fn requests_attach_nothing() {
+#[tokio::test(flavor = "multi_thread")]
+async fn requests_attach_nothing() {
     use super::wire::{ACK, Header, REPLY, STAGE_COUNTS, STAGE_PRIVATE_COUNTS};
     use std::os::unix::ffi::OsStrExt;
     host();
@@ -3890,10 +3867,10 @@ fn requests_attach_nothing() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let base = dir.path().join("base");
-    let store = local_cell::upload::wait_on(OpenCell::create(&base, 1 << 20)).unwrap();
+    let store = OpenCell::create(&base, 1 << 20).await.unwrap();
     let extent = ExtentId { cell: store.cell().id, sequence: 1 };
-    store.write(extent, 0, &[VolatileSlice::from(&[7; 4096][..])]).unwrap();
-    local_cell::upload::wait_on(store.commit(None)).unwrap();
+    store.write(extent, 0, &[VolatileSlice::from(&[7; 4096][..])]).await.unwrap();
+    store.commit(None).await.unwrap();
     drop(store);
     let vm = CellClient::connect(&socket, dir.path().join("vm"), 1 << 20).unwrap();
     // But those nothing replies to.
@@ -4021,18 +3998,17 @@ fn a_restored_vms_reads_are_its_versions_evidence() {
 /// the boot profile of the base it is a fork of is not read into the extent cache, as its pages
 /// would be the default arena's, which every VM process holds, a tenant's base's too. Here the
 /// fork is synced.
-#[test]
-fn stores_worked_on_here_read_no_boot_profile() {
+#[tokio::test(flavor = "multi_thread")]
+async fn stores_worked_on_here_read_no_boot_profile() {
     host();
     let ps = page_size() as usize;
     let dir = tempfile::tempdir().unwrap();
     let (base, fork) = (dir.path().join("base"), dir.path().join("fork"));
-    let store = local_cell::upload::wait_on(OpenCell::create(&base, 1 << 24)).unwrap();
+    let store = OpenCell::create(&base, 1 << 24).await.unwrap();
     let extent = ExtentId { cell: store.cell().id, sequence: 1 };
-    store.write(extent, 0, &[VolatileSlice::from(&pattern(7, ps)[..])]).unwrap();
-    local_cell::upload::wait_on(store.commit(None)).unwrap();
-    local_cell::upload::wait_on(store.fork_to(&fork, crate::host_cell::fork_child(store.cell())))
-        .unwrap();
+    store.write(extent, 0, &[VolatileSlice::from(&pattern(7, ps)[..])]).await.unwrap();
+    store.commit(None).await.unwrap();
+    store.fork_to(&fork, crate::host_cell::fork_child(store.cell())).await.unwrap();
     drop(store);
     // The base's profile, as its first fork to boot recorded it.
     let profile = crate::profile::path(&base.canonicalize().unwrap(), extent.cell);
@@ -4052,14 +4028,14 @@ fn stores_worked_on_here_read_no_boot_profile() {
 
 /// TASK-79.34: a store the daemon synced, opened here as no connection had it open, is closed
 /// before those waiting to open it may: deleted at once after, it is open no more, each time.
-#[test]
-fn stores_synced_here_are_closed_before_they_are_let_go() {
+#[tokio::test(flavor = "multi_thread")]
+async fn stores_synced_here_are_closed_before_they_are_let_go() {
     host();
     let dir = tempfile::tempdir().unwrap();
     for round in 0..20 {
         let path = dir.path().join(format!("store-{round}"));
-        let store = local_cell::upload::wait_on(OpenCell::create(&path, 1 << 20)).unwrap();
-        local_cell::upload::wait_on(store.commit(None)).unwrap();
+        let store = OpenCell::create(&path, 1 << 20).await.unwrap();
+        store.commit(None).await.unwrap();
         drop(store);
         wait_uploaded(&path).unwrap();
         let deleted = delete_cell(&path).map_err(|error| error.errno());
@@ -4743,8 +4719,8 @@ fn forks_whose_answers_are_lost_stand() {
 /// TASK-44.10: a fork of the control API's failing once its store's commits were uploaded makes
 /// nothing; a retry forks. One of a new cell, of a version kept open, whose fork fails once it is
 /// made, is made anew, of another cell, what the first left gone.
-#[test]
-fn control_forks_failing_fork_again() {
+#[tokio::test(flavor = "multi_thread")]
+async fn control_forks_failing_fork_again() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let (base, fork, again) =
@@ -4765,10 +4741,7 @@ fn control_forks_failing_fork_again() {
     let failing = fail::FailGuard::new("upload::forked", "1*return").unwrap();
     let cell = control(super::cells::fork(base.clone(), again.clone(), None)).unwrap();
     drop(failing);
-    assert_eq!(
-        local_cell::upload::wait_on(OpenCell::open(&again)).map(|store| store.cell()).map_err(drop),
-        Ok(cell)
-    );
+    assert_eq!(OpenCell::open(&again).await.map(|store| store.cell()).map_err(drop), Ok(cell));
     let (forked, served) = connect(&again, 1 << 24);
     assert_eq!(read(&forked, extent, 0, BLOCK), Ok(pattern(3, BLOCK)));
     drop(forked);
@@ -5280,8 +5253,8 @@ impl object_store::ObjectStore for GatedReads {
 /// daemon serves of a connection at once, wait while the bucket answers no reads, and the VM's
 /// `INFO` is answered meanwhile. Each held a thread of the daemon's and one of those 8 while it
 /// waited, as for a part from GCS, 30-100 ms, and the requests after them waited their turn.
-#[test]
-fn faults_waiting_for_object_storage_hold_up_no_request() {
+#[tokio::test(flavor = "multi_thread")]
+async fn faults_waiting_for_object_storage_hold_up_no_request() {
     use std::sync::Arc;
     const FAULTS: usize = 12;
     host();
@@ -5297,15 +5270,16 @@ fn faults_waiting_for_object_storage_hold_up_no_request() {
     // cell in the bucket.
     let path = dir.path().join("store");
     let cell = {
-        let store = local_cell::upload::wait_on(OpenCell::create(&path, 1 << 24)).unwrap();
+        let store = OpenCell::create(&path, 1 << 24).await.unwrap();
         let cell = store.cell();
         for sequence in 1..=FAULTS as u64 {
             let data = pattern(sequence as u8, ps);
             store
                 .write(ExtentId { cell: cell.id, sequence }, 0, &[VolatileSlice::from(&data[..])])
+                .await
                 .unwrap();
         }
-        local_cell::upload::wait_on(store.commit(None)).unwrap();
+        store.commit(None).await.unwrap();
         cell
     };
     let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
@@ -5740,21 +5714,21 @@ fn metrics_are_served_on_after_failing_to_accept() {
 /// TASK-79.17: a VM process opens no public base to write it, of the default tenant as of any
 /// (`EPERM`): what it wrote would be every VM's that forks it, its pages the default arena's, which
 /// every VM process holds. Its forks it opens.
-#[test]
-fn vm_processes_of_any_tenant_write_no_public_base() {
+#[tokio::test(flavor = "multi_thread")]
+async fn vm_processes_of_any_tenant_write_no_public_base() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let (base, fork) = (dir.path().join("base"), dir.path().join("fork"));
-    let store = local_cell::upload::wait_on(OpenCell::create(&base, 1 << 24)).unwrap();
-    local_cell::upload::wait_on(store.commit(None)).unwrap();
+    let store = OpenCell::create(&base, 1 << 24).await.unwrap();
+    store.commit(None).await.unwrap();
     store.make_public().unwrap();
     let forked = crate::host_cell::fork_child(store.cell());
     drop(store);
-    let opened = local_cell::upload::wait_on(OpenCell::open(&base)).unwrap();
-    local_cell::upload::wait_on(opened.fork_to(&fork, forked)).unwrap();
+    let opened = OpenCell::open(&base).await.unwrap();
+    opened.fork_to(&fork, forked).await.unwrap();
     drop(opened);
     let refused = CellClient::connect(&socket, &base, 1 << 24);
     assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::EPERM));
@@ -6658,8 +6632,8 @@ fn sockets_are_not_bound_over_another() {
 /// store, closed, opens elsewhere; the daemon's VM socket and its tenants' take no more
 /// connections, refused, their threads serving them returning; and the control API takes no more
 /// calls. Before, nothing drained: the daemon exited with all of them as they were.
-#[test]
-fn drains_close_every_connection_and_take_no_more() {
+#[tokio::test(flavor = "multi_thread")]
+async fn drains_close_every_connection_and_take_no_more() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let vms = dir.path().join("vms");
@@ -6684,10 +6658,7 @@ fn drains_close_every_connection_and_take_no_more() {
     write(&store, extent, 0, &pattern(1, BLOCK)).unwrap();
     store.commit_ordered(Some(b"drained")).unwrap();
 
-    assert_eq!(
-        local_cell::upload::wait_on(super::drain::drain(std::time::Duration::from_secs(60))),
-        Ok(())
-    );
+    assert_eq!(super::drain::drain(std::time::Duration::from_secs(60)).await, Ok(()));
     let mut told: Vec<_> = lost.try_iter().collect();
     told.sort();
     assert_eq!(told, ["store", "tenant's"]);
@@ -6701,18 +6672,17 @@ fn drains_close_every_connection_and_take_no_more() {
     assert!(super::control::CALLS.begin().is_none(), "a control call began, drained");
     drop((store, tenants));
     // Closed, durable, as of its last commit, though only ordered.
-    let closed = local_cell::upload::wait_on(OpenCell::open(&path)).unwrap();
+    let closed = OpenCell::open(&path).await.unwrap();
     assert_eq!(closed.root(), Ok(b"drained".to_vec()));
 }
 
 /// TASK-141.4: a drain gives up past its bound, saying what is left: here, a connection that never
 /// goes.
-#[test]
-fn drains_give_up_past_their_bound() {
+#[tokio::test(flavor = "multi_thread")]
+async fn drains_give_up_past_their_bound() {
     host();
     let connection = super::server::CONNECTIONS.begin().unwrap();
-    let left =
-        local_cell::upload::wait_on(super::drain::drain(std::time::Duration::from_millis(100)));
+    let left = super::drain::drain(std::time::Duration::from_millis(100)).await;
     let left = left.err().expect("a drain gave up");
     assert_eq!(left, super::drain::Left { connections: 1, calls: 0, uploaders: 0, mount: false });
     assert_eq!(

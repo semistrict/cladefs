@@ -324,7 +324,9 @@ pub(crate) async fn fork_image(
     std::thread::Builder::new()
         .name("cladefs fork".into())
         .spawn(move || {
-            let forked = image.fork(&path, writes.pause());
+            // cladefs: outside the simulation: FUSE's storage, on a thread of its own, which awaits
+            // the store's fork there, its outermost entry (TASK-685.17).
+            let forked = futures::executor::block_on(image.fork(&path, writes.pause()));
             let forked =
                 forked.map_err(|error| error.context(format!("forking to {}", path.display())));
             let _ = done.send(forked.map(|()| path));

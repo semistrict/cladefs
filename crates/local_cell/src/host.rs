@@ -376,7 +376,7 @@ mod tests {
     }
 
     /// A store at `store` in `temp`, holding an extent: its path.
-    fn stored(temp: &Path) -> PathBuf {
+    async fn stored(temp: &Path) -> PathBuf {
         let path = temp.join("store");
         host_fs::create_dir(&path).unwrap();
         let description = Description {
@@ -390,49 +390,46 @@ mod tests {
             .open(Options::default(), crate::Opening::new(bucket_cell::layout::test_cell(3)))
             .unwrap();
         store.made().unwrap();
-        store.write(ExtentId::new(3, 0), 0, &[7; BLOCK]).unwrap();
-        store.commit(None).unwrap();
+        store.write(ExtentId::new(3, 0), 0, &[7; BLOCK]).await.unwrap();
+        store.commit(None).await.unwrap();
         path
     }
 
     /// A deletion that stopped partway, its description renamed and part of the rest gone, is
     /// finished by deleting again, which calls nothing to delete the cell elsewhere; and so is
     /// a directory a store's making left before its description, holding files of no store's.
-    #[test]
-    fn stopped_deletions_finish() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stopped_deletions_finish() {
         let temp = tempfile::tempdir().unwrap();
-        let path = stored(temp.path());
+        let path = stored(temp.path()).await;
         host_fs::rename(path.join(DESCRIPTION), path.join("store.deleted")).unwrap();
         host_fs::remove_dir_all(path.join(crate::layout::LOGS)).unwrap();
-        crate::upload::wait_on(delete_host(&path, async |_| Err(anyhow!("called")))).unwrap();
+        delete_host(&path, async |_| Err(anyhow!("called"))).await.unwrap();
         assert!(!host_fs::exists(&path));
 
         let unmade = temp.path().join("unmade");
         host_fs::create_dir_all(unmade.join("segments")).unwrap();
         host_fs::write(unmade.join("stray"), "").unwrap();
-        crate::upload::wait_on(delete_host(&unmade, async |_| Err(anyhow!("called")))).unwrap();
+        delete_host(&unmade, async |_| Err(anyhow!("called"))).await.unwrap();
         assert!(!host_fs::exists(&unmade));
     }
 
     /// A deletion calls `before` with the store's cell, while the store is open nowhere, before
     /// its directory goes: one `before` stopped leaves the store, which deleting again finishes.
     /// One of a store open in this process fails, calling nothing.
-    #[test]
-    fn deletions_delete_their_cell_elsewhere_first() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deletions_delete_their_cell_elsewhere_first() {
         let temp = tempfile::tempdir().unwrap();
-        let path = stored(temp.path());
+        let path = stored(temp.path()).await;
         let opened = open(&path).unwrap();
-        let refused = crate::upload::wait_on(delete_host(&path, async |_| Err(anyhow!("called"))));
+        let refused = delete_host(&path, async |_| Err(anyhow!("called"))).await;
         assert!(refused.is_err() && host_fs::exists(&path.join(DESCRIPTION)), "{refused:?}");
         drop(opened);
-        let stopped = crate::upload::wait_on(delete_host(&path, async |cell| {
-            Err(anyhow!("stopped at {cell}"))
-        }));
+        let stopped = delete_host(&path, async |cell| Err(anyhow!("stopped at {cell}"))).await;
         assert_eq!(stopped.map_err(|err| err.to_string()), Err("stopped at 1/3".to_owned()));
         assert!(open(&path).is_ok(), "a store stopped opens no more");
         let called = std::cell::Cell::new(None);
-        crate::upload::wait_on(delete_host(&path, async |cell| Ok(called.set(Some(cell)))))
-            .unwrap();
+        delete_host(&path, async |cell| Ok(called.set(Some(cell)))).await.unwrap();
         assert_eq!(
             (called.get(), host_fs::exists(&path)),
             (Some(bucket_cell::layout::test_cell(3)), false)
@@ -442,51 +439,52 @@ mod tests {
     /// TASK-79.77: a deletion stopped at any step is finished by deleting again, which leaves
     /// nothing of the store: one stopped before the cell went elsewhere, and one stopped before
     /// each step of the removals that follow ([`removals`]), as a crash would stop them.
-    #[test]
-    fn deletions_stopped_at_any_step_finish() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deletions_stopped_at_any_step_finish() {
         // Stopped where it was stopped, and not before, by anything else.
         let stopped = |deleted: Result<(), Error>, at: &str| {
             let err = deleted.expect_err(&format!("went on {at}"));
             assert_eq!(err.root_cause().to_string(), "stopped", "stopped {at}: {err:#}");
         };
-        let finished = |temp: &Path, path: &Path, at: &str| {
-            crate::upload::wait_on(delete_host(path, async |_| Ok(())))
+        let finished = async |temp: &Path, path: &Path, at: &str| {
+            delete_host(path, async |_| Ok(()))
+                .await
                 .unwrap_or_else(|err| panic!("stopped {at}: {err:#}"));
             let left: Vec<_> = host_fs::read_dir(temp).unwrap().collect();
             assert_eq!(left.len(), 0, "stopped {at}: {left:?} left");
         };
         let at = "before the cell went";
         let temp = tempfile::tempdir().unwrap();
-        let path = stored(temp.path());
-        stopped(crate::upload::wait_on(delete_host(&path, async |_| Err(anyhow!("stopped")))), at);
-        finished(temp.path(), &path, at);
+        let path = stored(temp.path()).await;
+        stopped(delete_host(&path, async |_| Err(anyhow!("stopped"))).await, at);
+        finished(temp.path(), &path, at).await;
         // The removals' steps, as a deletion stopped at none takes them.
         let temp = tempfile::tempdir().unwrap();
-        let path = stored(temp.path());
+        let path = stored(temp.path()).await;
         taken();
-        crate::upload::wait_on(delete_host(&path, async |_| Ok(()))).unwrap();
+        delete_host(&path, async |_| Ok(())).await.unwrap();
         for (stop, (change, at)) in taken().into_iter().enumerate() {
             let at = format!("before step {stop}, {change:?} {:?}", at.file_name().unwrap());
             let temp = tempfile::tempdir().unwrap();
-            let path = stored(temp.path());
+            let path = stored(temp.path()).await;
             stop_after(Some(stop));
-            let deleted = crate::upload::wait_on(delete_host(&path, async |_| Ok(())));
+            let deleted = delete_host(&path, async |_| Ok(())).await;
             stop_after(None);
             stopped(deleted, &at);
-            finished(temp.path(), &path, &at);
+            finished(temp.path(), &path, &at).await;
         }
     }
 
     /// TASK-79.77: a deletion renames the store's description first, durably, so that the
     /// directory is no store from then on, and removes the directory durably, the directory it
     /// was in synced, last.
-    #[test]
-    fn deletions_remove_the_stores_directory_durably() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deletions_remove_the_stores_directory_durably() {
         let temp = tempfile::tempdir().unwrap();
-        let path = stored(temp.path());
+        let path = stored(temp.path()).await;
         let parent = super::parent(&path).to_owned();
         taken();
-        crate::upload::wait_on(delete_host(&path, async |_| Ok(()))).unwrap();
+        delete_host(&path, async |_| Ok(())).await.unwrap();
         let steps = taken();
         let removed = |at: PathBuf| {
             steps.iter().position(|(change, step)| *change == Change::Removed && *step == at)

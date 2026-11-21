@@ -171,8 +171,10 @@ impl ImageDevice {
     async fn commit(&self, root: Option<Vec<u8>>) -> Result<(), Error> {
         let _writing = self.writes.write().await;
         let image = self.image.clone();
+        // cladefs: its flush's disk work on a thread of its own, as before; the commit's waits
+        // awaited there, an outermost entry's (TASK-685.17).
         unblock(move || {
-            image.store().commit(root.as_deref())?;
+            futures::executor::block_on(image.store().commit(root.as_deref()))?;
             image.committed()
         })
         .await?
@@ -288,8 +290,8 @@ impl Device for ImageDevice {
             if let Some(write) = self.store.try_begin_write(extent, offset, buffer.len() as u64)? {
                 break write;
             }
-            let store = self.store.clone();
-            unblock(move || store.wait_until_writes_resume()).await?;
+            // cladefs: awaited, holding no thread (TASK-685.17).
+            self.store.wait_until_writes_resume().await;
         };
         self.write_file(&write, buffer).await?;
         write.finish();
@@ -471,9 +473,9 @@ mod tests {
     /// A write the store holds back while a commit waits for a write of the executor's own, on an
     /// executor of one thread, goes on once that write ends: it does not hold the thread the write
     /// would end on, which the commit would wait for for ever.
-    #[test]
+    #[tokio::test(flavor = "multi_thread")]
     #[allow(clippy::disallowed_methods, reason = "a write in progress, as a commit waits for")]
-    fn writes_held_back_by_a_commit_leave_the_executor_running() {
+    async fn writes_held_back_by_a_commit_leave_the_executor_running() {
         let (_dir, device, _) = device(16 * MIB as u64);
         let store = device.store.clone();
         let device = Arc::new(device);
@@ -483,15 +485,15 @@ mod tests {
         let (began, beginning) = std::sync::mpsc::channel();
         let held = store.clone();
         executor.spawn(async move {
-            let write = held.begin_write(extent(1), 0, BLOCK as u64).unwrap();
+            let write = held.begin_write(extent(1), 0, BLOCK as u64).await.unwrap();
             began.send(()).unwrap();
             let _ = went.await;
             write.finish();
         });
         beginning.recv().unwrap();
-        let committing = std::thread::spawn({
+        let committing = tokio::spawn({
             let store = store.clone();
-            move || store.commit(None).unwrap()
+            async move { store.commit(None).await.unwrap() }
         });
         while !store.holding_writes() {
             std::thread::yield_now();
@@ -505,16 +507,16 @@ mod tests {
         go.send(()).unwrap();
         let waited = written.recv_timeout(std::time::Duration::from_secs(30));
         assert_eq!(waited, Ok(()), "the held write never went on");
-        committing.join().unwrap();
+        committing.await.unwrap();
     }
 
     /// TASK-98: as above, with the write in progress a future of the held write's own task, as
     /// Fxfs joins its writes: the held write waits off the task's thread, which the other future
     /// ends on. cladefsctl import hung so, every executor thread waiting in `begin_write` for a
     /// commit that waited for the writes those threads had begun.
-    #[test]
+    #[tokio::test(flavor = "multi_thread")]
     #[allow(clippy::disallowed_methods, reason = "a write in progress, as a commit waits for")]
-    fn writes_held_back_by_a_commit_leave_their_own_task_running() {
+    async fn writes_held_back_by_a_commit_leave_their_own_task_running() {
         let (_dir, device, _) = device(16 * MIB as u64);
         let store = device.store.clone();
         let device = Arc::new(device);
@@ -528,7 +530,7 @@ mod tests {
         executor.spawn(async move {
             // A write in progress, which ends once told to.
             let in_progress = async {
-                let write = in_task.begin_write(extent(1), 0, BLOCK as u64).unwrap();
+                let write = in_task.begin_write(extent(1), 0, BLOCK as u64).await.unwrap();
                 began.send(()).unwrap();
                 let _ = went.await;
                 write.finish();
@@ -544,9 +546,9 @@ mod tests {
             wrote.send(()).unwrap();
         });
         beginning.recv().unwrap();
-        let committing = std::thread::spawn({
+        let committing = tokio::spawn({
             let store = store.clone();
-            move || store.commit(None).unwrap()
+            async move { store.commit(None).await.unwrap() }
         });
         while !store.holding_writes() {
             std::thread::yield_now();
@@ -556,7 +558,7 @@ mod tests {
         go.send(()).unwrap();
         let waited = written.recv_timeout(std::time::Duration::from_secs(30));
         assert_eq!(waited, Ok(()), "the task's writes never ended");
-        committing.join().unwrap();
+        committing.await.unwrap();
     }
 
     /// An image holds what was flushed when it is opened again, and what wasn't is gone.
@@ -589,8 +591,8 @@ mod tests {
     /// (`Write::stored`), and reads them back decrypted, open, sealed and after reopening; no file
     /// of the image holds them in the clear at any of those versions, each once the image does
     /// nothing behind its device's callers ([`quiesced`]).
-    #[test]
-    fn encrypted_images_hold_no_plaintext() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn encrypted_images_hold_no_plaintext() {
         let keys = tempfile::tempdir().unwrap();
         let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
         kms.create(5).unwrap();
@@ -605,8 +607,8 @@ mod tests {
         let (small, large) = (ExtentId::new(cell, 1), ExtentId::new(cell, 2));
         let small_data = crate::test_data::noise(1, 4 * BLOCK as usize);
         let large_data = crate::test_data::noise(2, 5 * MIB);
-        let in_the_clear = |device: &ImageDevice| {
-            quiesced(device);
+        let in_the_clear = async |device: &ImageDevice| {
+            quiesced(device).await;
             // As on the disk, what the store's page cache holds written there first (TASK-433).
             local_cell::pages::shared().write_back_all().unwrap();
             let pieces = [&small_data[..64], &large_data[..64], &large_data[MIB..MIB + 64]];
@@ -623,14 +625,14 @@ mod tests {
             write(&device, large, 0, &large_data).await;
         });
         reads(&device);
-        assert_eq!(in_the_clear(&device), Vec::<String>::new(), "written");
+        assert_eq!(in_the_clear(&device).await, Vec::<String>::new(), "written");
         block_on(device.flush()).unwrap();
         reads(&device);
-        assert_eq!(in_the_clear(&device), Vec::<String>::new(), "flushed");
+        assert_eq!(in_the_clear(&device).await, Vec::<String>::new(), "flushed");
         drop(device);
         let device = ImageDevice::open(&image, Default::default()).unwrap();
         reads(&device);
-        assert_eq!(in_the_clear(&device), Vec::<String>::new(), "reopened");
+        assert_eq!(in_the_clear(&device).await, Vec::<String>::new(), "reopened");
     }
 
     /// cladefs: `device`, once its image does nothing to its directory, nor to its bucket's,
@@ -640,9 +642,9 @@ mod tests {
     /// prepared ([`LocalCell::wait_idle`]); and the pass of the bucket's collector its commits started,
     /// if one runs. Walked before, a file listed could go before it was read, `NotFound` (CI run
     /// 43729753505).
-    fn quiesced(device: &ImageDevice) {
+    async fn quiesced(device: &ImageDevice) {
         device.image.wait_uploaded().unwrap();
-        device.store.wait_idle().unwrap();
+        device.store.wait_idle().await.unwrap();
         if let Some(collecting) = device.image.collecting() {
             collecting.collected();
         }

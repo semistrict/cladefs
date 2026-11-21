@@ -459,10 +459,14 @@ impl<D: Dir> LocalCell<D> {
     /// there are [`CHECKPOINT_SEGMENTS`] of them, or any if `drain` (see the module's docs): returns
     /// whether it covered any. Nothing, of a cell kept in the bucket. A failure fails the store, as
     /// what it holds may be ahead of its files.
-    pub fn checkpoint(&self, drain: bool) -> Result<bool, Error> {
+    pub async fn checkpoint(&self, drain: bool) -> Result<bool, Error> {
         let Some(ephemeral) = &self.ephemeral else { return Ok(false) };
+        // cladefs: the flush's lock first, as a flush takes it, then the cell's own: the segments
+        // a checkpoint covers leave the logs a flush holds (TASK-685.17).
+        let mut logs = self.flushing.lock().await;
         let mut ephemeral = ephemeral.lock().unwrap();
-        let checkpointed = self.checkpoint_locked(&mut ephemeral, drain);
+        let checkpointed =
+            crate::upload::blocking(|| self.checkpoint_locked(&mut ephemeral, &mut logs, drain));
         if let Err(error) = &checkpointed {
             self.lock().fail(error);
         }
@@ -470,7 +474,12 @@ impl<D: Dir> LocalCell<D> {
     }
 
     /// [`LocalCell::checkpoint`], holding `ephemeral`.
-    fn checkpoint_locked(&self, ephemeral: &mut Ephemeral, drain: bool) -> Result<bool, Error> {
+    fn checkpoint_locked(
+        &self,
+        ephemeral: &mut Ephemeral,
+        logs: &mut Logs<D::File>,
+        drain: bool,
+    ) -> Result<bool, Error> {
         let cell = self.cell;
         let segment = |number| SegmentId { cell: cell.id, number };
         let durable = self.durability.with(Mutex::lock).local();
@@ -532,11 +541,8 @@ impl<D: Dir> LocalCell<D> {
         let gone = numbers.iter().flat_map(|&number| [open_segment_path(number), log_path(number)]);
         unlink(&*self.dir, cell, gone)?;
         self.start.with(Mutex::lock).write(&*self.dir, ephemeral.based.last_commit)?;
-        {
-            let mut logs = self.flushing.with(Mutex::lock);
-            for (number, _) in &covered {
-                logs.by_segment.remove(&segment(*number));
-            }
+        for (number, _) in &covered {
+            logs.by_segment.remove(&segment(*number));
         }
 
         // What they freed lets go of their runs once views need them no more, which gives them

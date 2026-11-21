@@ -46,31 +46,32 @@ fn main() {
         "{forks} forks into new cells of a store of {EXTENTS} extents of {} KiB",
         EXTENT >> 10
     );
+    // The bench's runtime, made once the environment is set: its stores' uploaders run on it.
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     for &(tenant, name) in tenants {
-        bench(&dir.path().join(format!("tenant-{tenant}")), tenant, name, forks);
+        runtime.block_on(bench(&dir.path().join(format!("tenant-{tenant}")), tenant, name, forks));
     }
 }
 
 /// Forks a store of `tenant`'s `forks` times into new cells, under `dir`, and prints what it took.
-fn bench(dir: &std::path::Path, tenant: u64, name: &str, forks: usize) {
+async fn bench(dir: &std::path::Path, tenant: u64, name: &str, forks: usize) {
     std::fs::create_dir(dir).unwrap();
     let capacity = 2 * EXTENTS * EXTENT as u64;
-    let store =
-        local_cell::upload::wait_on(OpenCell::create_in(dir.join("parent"), capacity, tenant));
+    let store = OpenCell::create_in(dir.join("parent"), capacity, tenant).await;
     let store = store.unwrap();
     let data = vec![0x5a; EXTENT];
     for sequence in 1..=EXTENTS {
         let extent = ExtentId { cell: store.cell().id, sequence };
-        store.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
+        store.write(extent, 0, &[VolatileSlice::from(&data[..])]).await.unwrap();
     }
-    local_cell::upload::wait_on(store.commit(Some(b"root"))).unwrap();
+    store.commit(Some(b"root")).await.unwrap();
     // The pool of the tenant's new cell KEKs, filled as its store opened, off the forks' path.
-    futures::executor::block_on(cladefs::bucket::kms().unwrap().filled(tenant));
+    cladefs::bucket::kms().unwrap().filled(tenant).await;
     let mut took = Vec::with_capacity(forks);
     let before = store.bucket().stats();
     for n in 0..forks {
         let started = Instant::now();
-        local_cell::upload::wait_on(store.fork(dir.join(format!("fork-{n}")), tenant)).unwrap();
+        store.fork(dir.join(format!("fork-{n}")), tenant).await.unwrap();
         took.push(started.elapsed());
     }
     let after = store.bucket().stats();
@@ -78,7 +79,7 @@ fn bench(dir: &std::path::Path, tenant: u64, name: &str, forks: usize) {
     let mut opened = Vec::with_capacity(OPENED);
     for n in 0..OPENED.min(forks) {
         let started = Instant::now();
-        drop(local_cell::upload::wait_on(OpenCell::open(dir.join(format!("fork-{n}")))).unwrap());
+        drop(OpenCell::open(dir.join(format!("fork-{n}"))).await.unwrap());
         opened.push(started.elapsed());
     }
     took.sort();

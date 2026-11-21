@@ -28,7 +28,7 @@ use crate::raw::RawFile;
 use crate::segments::Recount;
 use crate::segments::{Segments, Unframed};
 use crate::shared::Shared;
-use crate::sync::{Condvar, MutexGuard, rules};
+use crate::sync::{MutexGuard, rules};
 use crate::views::{Keeping, NotHeld, Sealed};
 use crate::wal::Queue;
 use anyhow::{Error, bail};
@@ -501,7 +501,6 @@ impl Holds for Changeable {
 /// nothing.
 pub(crate) struct Guarded<'a, F: File, H> {
     state: Locked<'a, F>,
-    cell: CellId,
     holds: std::marker::PhantomData<H>,
 }
 
@@ -515,46 +514,22 @@ impl<'a, F: File, H: Holds> Guarded<'a, F, H> {
     /// `state`, of cell `cell`, if it holds to `H`.
     pub fn check(state: Locked<'a, F>, cell: CellId) -> Result<Self, Error> {
         H::check(&state, cell)?;
-        Ok(Self { state, cell, holds: std::marker::PhantomData })
+        Ok(Self { state, holds: std::marker::PhantomData })
     }
 
-    /// Waits for `condvar` while `busy` says so of the state, letting it go meanwhile, and returns
-    /// it, checked again.
-    pub fn wait_while(
-        mut self,
-        condvar: &Condvar,
-        busy: impl Fn(&State<F>) -> bool,
-    ) -> Result<Self, Error> {
-        let cell = self.cell;
-        while busy(&self.state) {
-            self.state = self.state.wait(condvar);
-        }
-        self.checked_again(cell)
+    /// The state, the check given up: what a wait lets go of, to lock again
+    /// (`LocalCell::lock_when`, TASK-685.17).
+    pub fn into_locked(self) -> Locked<'a, F> {
+        self.state
     }
 
-    /// Holds new writes back ([`Gate`]) while `busy` says so of the state, waiting for `condvar`
-    /// as [`Guarded::wait_while`] does, then lets them go on, and returns it, checked again: as a
-    /// commit, or a closing between commits, waits for the writes in progress.
-    pub fn hold_writes_while(
-        mut self,
-        condvar: &Condvar,
-        busy: impl Fn(&State<F>) -> bool,
-    ) -> Result<Self, Error> {
-        let cell = self.cell;
-        self.state.gate.hold();
-        while busy(&self.state) {
-            self.state = self.state.wait(condvar);
+    /// `state`, of cell `cell`, after a wait let it go: checked again, as it holds to `H`, unless
+    /// `recheck_after_waiting` is off, as a Shuttle test has it to show it needed.
+    pub fn rechecked(state: Locked<'a, F>, cell: CellId) -> Result<Self, Error> {
+        match rules().recheck_after_waiting {
+            true => Self::check(state, cell),
+            false => Ok(Self { state, holds: std::marker::PhantomData }),
         }
-        self.state.gate.release();
-        condvar.notify_all();
-        self.checked_again(cell)
-    }
-
-    fn checked_again(self, cell: CellId) -> Result<Self, Error> {
-        if !rules().recheck_after_waiting {
-            return Ok(self);
-        }
-        Self::check(self.state, cell)
     }
 }
 
@@ -588,13 +563,6 @@ pub(crate) type StateGuard<'a, F> = Shared<MutexGuard<'a, State<F>>>;
 impl<'a, F: File> Locked<'a, F> {
     pub fn new(guard: StateGuard<'a, F>) -> Self {
         Self { guard: Some(guard) }
-    }
-
-    /// Waits for `condvar`, letting the state go meanwhile, and returns it, locked again.
-    pub fn wait(mut self, condvar: &Condvar) -> Self {
-        crate::blocks!("a store's state, waiting for another thread's work on it");
-        let guard = audited(self.guard.take().expect("the state is locked"));
-        Self::new(guard.unlocked(|guard| condvar.wait(guard).unwrap()))
     }
 }
 
