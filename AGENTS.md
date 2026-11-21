@@ -75,7 +75,7 @@ A branch lives only as long as the batch on it: once its tests pass, it goes int
 
 Tasks live on the team board, channel `tasks`: a Vercel Board (`@vercel/board`, Apache-2.0) that
 the user runs with `vb serve` on a host of their tailnet, reachable from the tailnet only. Backlog.md
-is retired (2026-11-21): its 1483 tasks, Done ones included, are on the board, and `backlog/` is
+is retired (2026-11-21): its 1484 tasks, Done ones included, are on the board, and `backlog/` is
 gone. Its design docs are `docs/design/`, its decisions `docs/decisions/`.
 
 Setup: `BOARD_URL` is set in the user's shells (if it isn't, stop and say so; never guess a URL),
