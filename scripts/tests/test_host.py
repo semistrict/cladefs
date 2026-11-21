@@ -16,10 +16,12 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
 import weakref
 from pathlib import Path
@@ -260,7 +262,7 @@ class HostCommand(unittest.TestCase):
 # RESULTS/jobs.txt; builds, as the host scripts do, unless it measures, which a measurement refuses
 # (scripts/lib/measurement.sh, TASK-368); and, but for a build alone, says how it was run, its
 # arguments and the variables it was given, in RESULTS/ran.txt, and does as CLADEFS_FAKE_HOST says:
-# fail; block until it is ended (signal.pause); or a phase of a migration, the source's leaving its
+# fail; block until it is ended (signal.pause), its pid in RESULTS/waiting.pid; or a phase of a migration, the source's leaving its
 # snapshot in the bundle, the target's taking it from there. CLADEFS_FAKE_HOST=fail-build fails its
 # build.
 FAKE_HOST_SCRIPT = f"""#!/bin/bash
@@ -286,7 +288,9 @@ if [[ $phase == build ]]; then exit 0; fi
 echo "ran $(basename "$0") $*"
 case ${{CLADEFS_FAKE_HOST:-}} in
     fail) exit 3 ;;
-    wait) exec {shlex.quote(sys.executable)} -c 'import signal; signal.pause()' ;;
+    wait)
+        echo $$ > "$results/waiting.pid"
+        exec {shlex.quote(sys.executable)} -c 'import signal; signal.pause()' ;;
     migrate)
         if [[ $CLADEFS_MIGRATE_PHASE == source ]]; then
             mkdir -p "$CLADEFS_MIGRATE_BUNDLE"
@@ -612,20 +616,37 @@ class Runs(unittest.TestCase):
         self.assertEqual(fleet.runs(), [first.strip()])
         self.assertEqual(fleet.worktrees(), [f"{fleet.scratch}/{first.strip()}/tree"])
 
-    def test_the_runs_of_three_days_ago_go_but_a_running_one(self):
+    def test_runs_that_ran_nothing_for_six_hours_go_passed_or_failed(self):
+        """TASK-491: a run that failed, or whose driver died, kept its directory for days, and
+        such runs filled the scratch disk. Those that ran nothing for six hours go as the next
+        run starts, whatever their status; one whose job runs, or ended within six hours, stays."""
         fleet = Fleet()
         fleet.scratch.mkdir()
-        old, running = (fleet.scratch / f"run-2026010{n}T000000Z-0000000{n}" for n in (1, 2))
-        for run in (old, running):
-            (run / "job").mkdir(parents=True)
+        passed, failed, unlaunched, running, recent = (
+            fleet.scratch / f"run-2026010{n}T000000Z-0000000{n}" for n in range(1, 6))
+        for run, status in ((passed, "0"), (failed, "1"), (unlaunched, None), (running, None),
+                            (recent, "1")):
+            (run / "results").mkdir(parents=True)
+            (run / "job").mkdir()
             (run / "job" / "lock").touch()
+            (run / "job" / "log").write_text("a log\n")
+            if status is not None:
+                (run / "job" / "status").write_text(f"{status:<20}\n")
         # The running one's job holds its lock.
         hold(self, running / "job" / "lock")
-        for run in (old, running):
-            os.utime(run, (0, 0))
+        long_ago = time.time() - 6 * 3600 - 60
+        for run in (passed, failed, unlaunched, running, recent):
+            paths = [run, *run.iterdir(), *(run / "job").iterdir()]
+            if run == recent:
+                # Its job ended a minute ago.
+                paths.remove(run / "job" / "status")
+            for path in paths:
+                os.utime(path, (long_ago, long_ago))
         status, out, errors = fleet.drive(RAN)
-        self.assertEqual((status, out, errors), (0, "status 0\n", f"Removing {old}, of three days ago.\n"))
-        self.assertEqual(fleet.runs(), [running.name])
+        self.assertEqual((status, out), (0, "status 0\n"))
+        self.assertEqual(errors, "".join(f"Removing {run}, which ran nothing for six hours.\n"
+                                         for run in (passed, failed, unlaunched)))
+        self.assertEqual(fleet.runs(), [running.name, recent.name])
 
     def test_a_host_that_does_not_answer_runs_nothing(self):
         fleet = Fleet({"down": ["host1"]})
@@ -968,6 +989,28 @@ class Jobs(unittest.TestCase):
                          ("status 2\n", "", ["e2e", "host.txt", "remote.log", "run.txt",
                                               "source.txt"]))
 
+    def test_stores_buckets_and_images_a_killed_case_left_are_not_fetched(self):
+        """TASK-372: a job killed mid-case never prunes its stores, bases and images, and the fetch
+        copied 7.1 GB of them. Those directories stay on the host; files of the same names, as
+        perf's, are results."""
+        fleet = Fleet()
+        left = ["e2e/fxfs-guest/extents", "e2e/fxfs-guest/vm.root", "e2e/fxfs-guest/vm.data",
+                "sandboxes/a.base", "sandboxes/sandbox-image", "sandboxes/store-1",
+                "sandboxes/x.bucket", "sandboxes/disk.img", "sandboxes/.cladefsd-cache.ab12"]
+        status, out, errors = fleet.drive(
+            'host_start\n'
+            + "".join(f'mkdir -p "$host_dir/results/{d}"; echo big > "$host_dir/results/{d}/f"\n'
+                      for d in left)
+            + 'echo samples > "$host_dir/results/e2e/fxfs-guest/perf.data"\n'
+            'echo log > "$host_dir/results/sandboxes/store-1.log"\n'
+            'status=0; host_fetch || status=$?; echo "status $status"')
+        results = fleet.directory / "results"
+        self.assertEqual((status, out, errors), (0, "status 0\n", ""))
+        self.assertEqual(
+            sorted(str(path.relative_to(results)) for path in results.rglob("*")),
+            ["e2e", "e2e/fxfs-guest", "e2e/fxfs-guest/perf.data", "remote.log", "run.txt",
+             "sandboxes", "sandboxes/store-1.log", "source.txt"])
+
     def test_a_fetch_that_failed_fails(self):
         out, _, files = self.fetch({"calls": [{"fail": 255}]})
         self.assertEqual((out, files), ("status 255\n", ["remote.log", "run.txt", "source.txt"]))
@@ -1011,6 +1054,71 @@ class Resume(unittest.TestCase):
         self.assertIn(f"{run} on host1 is lost: its job ended without its status.\n",
                       (results / "remote.log").read_text())
         self.assertEqual(fleet.runs(), [])
+
+    def test_a_job_whose_shell_went_before_writing_its_status_is_lost(self):
+        """The status's room, taken at launch, still says pending: the job's shell went first."""
+        fleet, run = self.left({})
+        directory = fleet.scratch / run
+        fleet.drive(f'host_name {run}; host_side wait "$host_dir"')
+        (directory / "job" / "status").write_text(f"{'pending':<20}\n")
+        self.assertEqual(fleet.drive(f'host_name {run}; host_side wait "$host_dir"'),
+                         (0, "waiting\nlost\n", ""))
+
+    def test_a_jobs_status_is_written_over_the_room_its_launch_took(self):
+        """TASK-654: a job whose tests passed could not write its status, others' runs having
+        filled the scratch disk by its end, and its run failed. The launch takes the status's room;
+        the job writes over it in place, the same file, needing no new block."""
+        fleet, run = self.left({"CLADEFS_FAKE_HOST": "wait"})
+        directory = fleet.scratch / run
+        waiting = directory / "results" / "waiting.pid"
+        for _ in range(300):
+            if waiting.exists() and waiting.read_text().strip():
+                break
+            time.sleep(0.1)
+        pid = int(waiting.read_text())
+        self.addCleanup(lambda: subprocess.run(["kill", str(pid)], capture_output=True))
+        status_file = directory / "job" / "status"
+        self.assertEqual(status_file.read_text(), f"{'pending':<20}\n")
+        before = status_file.stat()
+        os.kill(pid, signal.SIGTERM)
+        self.assertEqual(fleet.drive(f'host_name {run}; host_side wait "$host_dir"'),
+                         (0, "waiting\nstatus 143\n", ""))
+        self.assertEqual(status_file.read_text(), f"{'143':<20}\n")
+        after = status_file.stat()
+        self.assertEqual((after.st_ino, after.st_size), (before.st_ino, before.st_size))
+        fleet.drive(f'host_name {run}; host_side clean "$host_dir" "$host_repo"')
+
+    def test_two_cleans_of_a_run_at_once_take_turns(self):
+        """TASK-367: a cancel's clean and its waiting driver's both ran rm -r of the run at once,
+        each failing on what the other removed, the run left. They take the runs' lock: both
+        wait for it, then the first removes the run, the second finds nothing left."""
+        fleet, run = self.left({})
+        fleet.drive(f'host_name {run}; host_side wait "$host_dir"')
+        lock = fleet.clone / ".git" / "cladefs-host.lock"
+        holder = subprocess.Popen(
+            [sys.executable, "-c", "import fcntl, sys; f = open(sys.argv[1], 'a'); "
+             "fcntl.flock(f, fcntl.LOCK_EX); print('held', flush=True); sys.stdin.read()", lock],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder.wait)
+        self.addCleanup(holder.stdout.close)
+        self.addCleanup(holder.stdin.close)
+        self.assertEqual(holder.stdout.readline(), "held\n")
+        # Each its own copy of the script on its standard input, as each ssh has.
+        cleans = []
+        for _ in range(2):
+            with open(SCRIPTS / "lib" / "host-remote.sh") as remote:
+                cleans.append(subprocess.Popen(
+                    [sys.executable, str(FAKE_SSH), "host1",
+                     f"bash -s -- clean {fleet.scratch / run} src/fxdax"],
+                    stdin=remote, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                    env=fleet.environment))
+        time.sleep(1)
+        self.assertEqual([clean.poll() for clean in cleans], [None, None])
+        self.assertTrue((fleet.scratch / run).exists())
+        holder.stdin.close()
+        self.assertEqual([clean.communicate() + (clean.returncode,) for clean in cleans],
+                         [("", "", 0), ("", "", 0)])
+        self.assertEqual((fleet.runs(), fleet.worktrees()), ([], []))
 
     def test_a_job_whose_status_is_empty_is_lost(self):
         """TASK-489: on a full disk the job's shell made its status file and could write nothing in

@@ -87,6 +87,8 @@ fi
 # Inside a measurement (fxjob --bench), nothing builds (TASK-368): its artifacts were built as work
 # beforehand, every one there; else it refuses, saying so, before anything runs.
 source "$(dirname "${BASH_SOURCE[0]}")/lib/measurement.sh"
+# user_cache, the downloads' cache, the invoking user's under sudo (TASK-643).
+source "$(dirname "${BASH_SOURCE[0]}")/lib/user-cache.sh"
 if [[ -n $prebuilt ]]; then
     for artifact in "$harness_artifacts/runner" "$harness_artifacts/guest-agent" \
         "$prebuilt/cladefsd" "$prebuilt/cladefsctl" "$prebuilt/cladefs-gc" \
@@ -292,9 +294,8 @@ if [[ -z ${CLADEFS_DOCKER_STATIC:-} ]] && selected fxfs-guest-docker-dax $builds
         x86_64) docker_sha256=c158ecc55adb3afb01bbd3539ed3b997d20c26dbdc418080506cc1bf5243ff57 ;;
         aarch64) docker_sha256=3e93cc6d1a686456a3b18eefdde26467a837a7a2b257af22e27cba1dbc1b2018 ;;
     esac
-    docker_dir="${XDG_CACHE_HOME:-$HOME/.cache}/cladefs/docker-$docker_version"
+    docker_dir=$(user_cache "docker-$docker_version")
     if [[ ! -x $docker_dir/dockerd ]]; then
-        mkdir -p "$docker_dir"
         curl -fsSL -o "$docker_dir.tgz" \
             "https://download.docker.com/linux/static/stable/$(uname -m)/docker-$docker_version.tgz"
         echo "$docker_sha256  $docker_dir.tgz" | sha256sum --check --quiet
@@ -310,9 +311,8 @@ if [[ -z ${CLADEFS_DOCKER_BUILDX:-} ]] && selected $builds; then
         x86_64) buildx_arch=amd64 buildx_sha256=7992ec09413b80ff57ba4e081f56fc833d7bac1d5e71143c6c809e7e6065f6d6 ;;
         aarch64) buildx_arch=arm64 buildx_sha256=46c0f334772de3cb0b341cc415caf7339fb5cfc8b8438ebcb5a10e7f23800d36 ;;
     esac
-    buildx="${XDG_CACHE_HOME:-$HOME/.cache}/cladefs/docker-buildx-$buildx_version"
+    buildx=$(user_cache)/docker-buildx-$buildx_version
     if [[ ! -x $buildx ]]; then
-        mkdir -p "$(dirname "$buildx")"
         curl -fsSL -o "$buildx.download" "https://github.com/docker/buildx/releases/download/v$buildx_version/buildx-v$buildx_version.linux-$buildx_arch"
         echo "$buildx_sha256  $buildx.download" | sha256sum --check --quiet
         chmod +x "$buildx.download"
@@ -413,7 +413,10 @@ daemon_file=${daemon_file:-cladefsd-stats.txt}
 daemon_file=${daemon_file%-stats.txt}
 bucket_dir=
 if [[ -z ${CLADEFSD_BUCKET:-} ]]; then
-    bucket_dir=$(mktemp -d /dev/shm/cladefs-e2e-bucket.XXXXXX)
+    # In memory, owned: the next run removes it if this one is killed outright (e2e-bucket.sh).
+    source "$(dirname "${BASH_SOURCE[0]}")/lib/e2e-bucket.sh"
+    e2e_bucket /dev/shm
+    bucket_dir=$e2e_bucket_dir
 fi
 cache_dir=
 if [[ -z ${CLADEFSD_PART_CACHE+set} ]]; then

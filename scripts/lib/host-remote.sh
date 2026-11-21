@@ -32,20 +32,27 @@
 # vendor/firecracker checked out in each and the patch, if any, applied to tree; the commit each
 # reports its builds of in its source-revision.txt (scripts/build-commit.sh), as the host scripts'
 # copies of the trees have no .git (host_tree); and prints a line for each tree, LABEL (`.` for
-# tree), its commit and vendor/firecracker's. It first cleans the runs of three days ago whose job
-# is not running: their drivers are gone.
+# tree), its commit and vendor/firecracker's. It first removes every run, passed or failed, that
+# runs no job and has changed nothing (its directory, its job's status and log) for six hours
+# (stale): its driver has fetched what it would, or is gone. A run that failed, or whose driver
+# died, kept its tens of GB on the scratch disk for days, until the disk was full (TASK-491); a
+# driver stopped for longer than that finds nothing to resume.
 #
 # launch runs job/command apart from the SSH session, as a dropped connection or the driver's
 # machine sleeping ends nothing, under fxjob (the test host's setup), with --bench if
 # BENCH is 1, with --mem MEMORY if one is given; it returns once the job holds its lock. wait waits
 # for the lock, saying `waiting` once it has a connection, then `status N`, or `lost` if the job
 # ended without its status, as with the test host's restart, or `lost unreadable` if its status file
-# holds no number, as a full disk leaves it (made, nothing written in it: TASK-489), or `none` if
-# no job was launched. fetch
-# writes a gzipped tar of the results to its standard output: but for the guests' root filesystems
-# (rootfs, their images, and jails), which aren't results, and some of whose files (setuid
-# binaries) no one may read, and parts caches. cancel ends the job, and clean removes the run's
-# directory, its worktrees with it, once no job runs there.
+# holds no number, or `none` if no job was launched. The status file is made, its room taken, as
+# the job launches, and the job writes its status over it in place: a full disk at the job's end,
+# which others' runs fill, no longer loses the status of a job whose tests passed (TASK-489,
+# TASK-654). fetch writes a gzipped tar of the results to its standard output: but for what
+# aren't results (unresults): the guests' root filesystems (rootfs, their images, and jails), some
+# of whose files (setuid binaries) no one may read; parts caches; and stores, buckets and images,
+# by the names the cases give them, which a job killed mid-case leaves, gigabytes of them, its
+# script's own pruning never run (TASK-372). cancel ends the job, and clean removes the run's
+# directory, its worktrees with it, once no job runs there; two cleans of one run at once, as a
+# cancel's and its waiting driver's, take turns, the second finding nothing left (TASK-367).
 #
 # sweep removes, as clean does, every run of SCRATCH named for NAME, run-NAME-<time>-<mark>
 # (host_run_name), whose job is not running: the earlier runs of a driver that runs under one
@@ -67,10 +74,11 @@ set -euo pipefail
 
 # The job's command runs as root, sudo's, with the user's Rust (scripts/lib/host.sh's
 # host_command): what it leaves in the user's ~/.cargo and ~/.rustup, the registry's files and a
-# toolchain it installed, becomes the user's again, for the user's builds.
+# toolchain it installed, and in ~/.cache/cladefs, the scripts' downloads (TASK-643), becomes the
+# user's again, for the user's builds and runs.
 give_back() {
     local place
-    for place in "$HOME/.cargo" "$HOME/.rustup"; do
+    for place in "$HOME/.cargo" "$HOME/.rustup" "$HOME/.cache/cladefs"; do
         if [[ -d $place ]]; then
             sudo find "$place" ! -user "$(id -u)" -exec chown -h "$(id -u):$(id -g)" {} +
         fi
@@ -98,6 +106,19 @@ running() {
     [[ -e $1/job/lock ]] && ! flock -n "$1/job/lock" true
 }
 
+# stale DIR succeeds for a run that runs no job and whose directory, job's status and log are all
+# six hours old or more.
+stale() {
+    ! running "$1" && [[ -z $(find "$1" "$1/job" -maxdepth 1 -mmin -360 2> /dev/null) ]]
+}
+
+# host_lock REPO takes, on fd 8, the lock of the runs of the clone REPO: one at a time fetches,
+# adds worktrees, which share the clone's objects and modules, and removes runs.
+host_lock() {
+    exec 8> "$(git -C "$1" rev-parse --path-format=absolute --git-common-dir)/cladefs-host.lock"
+    flock 8
+}
+
 # worktree LABEL prints where the worktree LABEL of prepare's run is: `.`'s, the run's own, is
 # DIR/tree.
 worktree() {
@@ -120,17 +141,13 @@ prepare() {
     [[ $(basename "$dir") == run-* ]] || { echo "prepare: $dir is no run's" >&2; return 2; }
     repo=$(cd && cd "$repo" && pwd)
     mkdir -p "$dir/results" "$dir/work" "$dir/job" "$dir/trees"
-    # The runs of three days ago, whose job ended.
-    while read -r old; do
-        if [[ -n $old ]] && ! running "$old"; then
-            echo "Removing $old, of three days ago." >&2
-            sudo rm -r -- "$old"
+    for old in "$(dirname "$dir")"/run-*; do
+        if [[ $old != "$dir" && -d $old ]] && stale "$old"; then
+            echo "Removing $old, which ran nothing for six hours." >&2
+            clean "$old" "$repo"
         fi
-    done < <(find "$(dirname "$dir")" -mindepth 1 -maxdepth 1 -name 'run-*' -mtime +3)
-    git -C "$repo" worktree prune
-    # One run at a time fetches, and adds worktrees, which share the clone's objects and modules.
-    exec 8> "$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)/cladefs-host.lock"
-    flock 8
+    done
+    host_lock "$repo"
     for pair in "${pairs[@]}"; do
         label=${pair%%=*} commit=${pair#*=}
         if ! git -C "$repo" cat-file -e "$commit^{commit}" 2> /dev/null; then
@@ -169,6 +186,8 @@ launch() {
     exec 9> "$job/lock"
     flock -n 9 || { echo "a job runs in $dir already" >&2; return 1; }
     rm -f "$job/status" "$job/pid"
+    # The status's room, taken now, written over in place (1<>, no truncation) as the job ends.
+    printf '%-20s\n' pending > "$job/status"
     # The lock is fd 9's, which the job's shell inherits and holds until it has written the
     # status, and nothing it runs inherits: a daemon left behind holds no run's lock.
     # shellcheck disable=SC2016 # For the job's shell.
@@ -179,7 +198,7 @@ launch() {
         "$@" 9>&- || status=$?
         reap "$name" 9>&- || status=1
         give_back 9>&- || echo "giving back ~/.cargo and ~/.rustup failed" >&2
-        echo "$status" > "$job/status"' \
+        printf "%-20s\n" "$status" 1<> "$job/status"' \
         job "$job" "$name" "${fxjob[@]}" -- bash "$job/command" > "$job/log" 2>&1 < /dev/null &
     echo "$!" > "$job/pid"
 }
@@ -197,8 +216,11 @@ wait_job() {
         return 0
     fi
     status=$(cat "$job/status" 2> /dev/null) || status=''
+    status=${status//[[:space:]]/}
     if [[ $status =~ ^[0-9]+$ ]]; then
         echo "status $status"
+    elif [[ $status == pending ]]; then
+        echo lost
     else
         echo "lost unreadable"
     fi
@@ -219,14 +241,17 @@ clean() {
     local dir=$1 repo
     [[ $(basename "$dir") == run-* ]] || { echo "clean: $dir is no run's" >&2; return 2; }
     repo=$(cd && cd "$2" && pwd)
+    host_lock "$repo"
     if running "$dir"; then
         echo "clean: a job runs in $dir" >&2
+        flock -u 8
         return 1
     fi
     if [[ -e $dir ]]; then
-        sudo rm -r -- "$dir"
+        sudo rm -r -- "$dir" || { flock -u 8; return 1; }
     fi
     git -C "$repo" worktree prune
+    flock -u 8
 }
 
 sweep() {
@@ -266,8 +291,13 @@ case ${1:-} in
     wait) wait_job "$2" ;;
     log) cat "$2/job/log" ;;
     fetch)
-        sudo tar --exclude=rootfs --exclude='*rootfs.ext4' --exclude=jail --exclude='*-cache' \
-            -czf - -C "$2/results" .
+        # Unresults, by name and kind, as scripts/qualify.sh prunes them: a directory named so,
+        # perf.data or a log among the results stays.
+        (cd "$2/results" && sudo find . -mindepth 1 \( -type d \( -name rootfs -o -name jail \
+            -o -name '*-cache' -o -name '.cladefsd-cache.*' -o -name '*.root' -o -name '*.data' \
+            -o -name '*.base' -o -name '*.bucket' -o -name '*.img' -o -name 'store-*' \
+            -o -name sandbox-image -o -name extents \) -o -name '*rootfs.ext4' \) -prune -o \
+            -print0) | sudo tar -czf - -C "$2/results" --null --no-recursion -T -
         ;;
     cancel) cancel "$2" ;;
     reap) reap "$2" ;;

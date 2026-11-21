@@ -18,8 +18,11 @@
 # The release run, and each platform's archive's SHA-256 (its SHA256SUMS).
 RUSTFS_VERSION=1.0.4
 
+# user_cache, where the release is fetched to.
+source "$(dirname "${BASH_SOURCE[0]}")/user-cache.sh"
+
 # rustfs_binary prints the path of the release's binary for this platform, fetching it once into
-# the cache (XDG_CACHE_HOME's, or ~/.cache's, cladefs/rustfs-VERSION).
+# the cache (XDG_CACHE_HOME's, or ~/.cache's, cladefs/rustfs-VERSION: user-cache.sh's).
 rustfs_binary() {
     if [[ -n ${CLADEFS_RUSTFS_BIN:-} ]]; then
         echo "$CLADEFS_RUSTFS_BIN"
@@ -38,9 +41,8 @@ rustfs_binary() {
             sha256=49057482769d7904ef95dc40457d71122f48cbb8e9e0725a0817a3ec6daf8270 ;;
         *) echo "RustFS $RUSTFS_VERSION has no release for $(uname -s) $(uname -m)" >&2; return 1 ;;
     esac
-    dir="${XDG_CACHE_HOME:-$HOME/.cache}/cladefs/rustfs-$RUSTFS_VERSION-$platform"
+    dir=$(user_cache "rustfs-$RUSTFS_VERSION-$platform") || return
     if [[ ! -x $dir/rustfs ]]; then
-        mkdir -p "$dir" || return
         curl -fsSL --retry 3 -o "$dir.zip" "https://github.com/rustfs/rustfs/releases/download/$RUSTFS_VERSION/rustfs-$platform-v$RUSTFS_VERSION.zip" ||
             return
         echo "$sha256  $dir.zip" | shasum -a 256 --check --quiet || { rm -f "$dir.zip"; return 1; }

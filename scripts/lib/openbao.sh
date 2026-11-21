@@ -12,8 +12,11 @@
 # The release run, and each platform's archive's SHA-256.
 OPENBAO_VERSION=2.7.2
 
+# user_cache, where the release is fetched to.
+source "$(dirname "${BASH_SOURCE[0]}")/user-cache.sh"
+
 # openbao_binary prints the path of the release's binary for this platform, fetching it once into
-# the cache (XDG_CACHE_HOME's, or ~/.cache's, cladefs/openbao-VERSION-PLATFORM).
+# the cache (XDG_CACHE_HOME's, or ~/.cache's, cladefs/openbao-VERSION-PLATFORM: user-cache.sh's).
 openbao_binary() {
     if [[ -n ${CLADEFS_BAO:-} ]]; then
         echo "$CLADEFS_BAO"
@@ -32,9 +35,8 @@ openbao_binary() {
             sha256=2b4fc131910f4b075b2e1c9a9de67c461489491a8f03fbdc73387294d67d9547 ;;
         *) echo "OpenBao $OPENBAO_VERSION has no release for $(uname -s) $(uname -m)" >&2; return 1 ;;
     esac
-    dir="${XDG_CACHE_HOME:-$HOME/.cache}/cladefs/openbao-$OPENBAO_VERSION-$platform"
+    dir=$(user_cache "openbao-$OPENBAO_VERSION-$platform") || return
     if [[ ! -x $dir/bao ]]; then
-        mkdir -p "$dir" || return
         archive="$dir.tar.gz"
         curl -fsSL --retry 3 -o "$archive" "https://github.com/openbao/openbao/releases/download/v$OPENBAO_VERSION/openbao_${OPENBAO_VERSION}_$platform.tar.gz" ||
             return

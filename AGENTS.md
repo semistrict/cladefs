@@ -53,7 +53,12 @@ nothing inside `fxjob --bench`: its run builds first as a job of work, then meas
 built (`host_job`'s `CLADEFS_TEST_HOST_PHASE`), and anything that would build inside a measurement
 refuses to (`scripts/lib/measurement.sh`, TASK-368). Guest kernels come
 from a cache on the test host keyed by their sources (`host_kernel`). A driver stopped mid-run leaves
-the job running: `DRIVER resume RUN RESULTS` fetches it, `DRIVER cancel RUN` ends it. Pass the run
+the job running: `DRIVER resume RUN RESULTS` fetches it, `DRIVER cancel RUN` ends it, within six
+hours of its end, after which the next run removes it, passed or failed (TASK-491). Scratch of your
+own on a test host's scratch disk (a worktree, a target, results, a kernel) goes in your job's
+`TMPDIR` where it can, which fxjob removes with the job; anything that must outlive one job goes in
+one directory named for your task, which you remove once nothing of yours runs there. fxjob refuses
+a job when the scratch disk is nearly full, rather than let it fail midway. Pass the run
 number as `CLADEFS_TEST_HOST_RUN` (e.g. `r1040`). An agent's shell runs under no_new_privs, which stops sudo
 however sudoers reads: run a driver needing root (`CLADEFS_TEST_HOST=local` ones) through
 `systemd-run --user --wait --pipe -- ...`, a service of the user's manager that does not inherit
