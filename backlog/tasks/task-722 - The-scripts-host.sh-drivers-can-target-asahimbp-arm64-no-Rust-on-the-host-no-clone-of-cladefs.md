@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-21 07:02'
-updated_date: '2026-11-21 07:38'
+updated_date: '2026-11-21 07:47'
 labels:
   - asahimbp
 dependencies: []
@@ -24,8 +24,8 @@ Since 2026-11-21 agents send each run to the less loaded of ubu1 and asahimbp (A
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 CLADEFS_TEST_HOST=asahimbp scripts/test-host.sh runs the workspace suite there and copies its results back
-- [ ] #2 A driver whose run cannot work on an arm64 host (x86-64 guest kernel, its guest cases) says so before starting rather than failing mid-run
-- [ ] #3 asahimbp's setup (~/setup/scripts there) installs what the drivers need, not a run
+- [x] #2 A driver whose run cannot work on an arm64 host (x86-64 guest kernel, its guest cases) says so before starting rather than failing mid-run
+- [x] #3 asahimbp's setup (~/setup/scripts there) installs what the drivers need, not a run
 <!-- AC:END -->
 
 ## Definition of Done
@@ -33,3 +33,15 @@ Since 2026-11-21 agents send each run to the less loaded of ubu1 and asahimbp (A
 - [ ] #1 scripts/upstream-changes.py --check passes
 - [ ] #2 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. asahimbp setup step 82-cladefs-dev.sh (the user's ~/setup there): Fedora packages, rustup stable + nextest pinned, ~/src/fxdax made a clone in place. 2. host.sh host_need_arch ARCH WHY; host-remote.sh prepare --arch checks uname -m before making anything. 3. Guest-booting drivers declare x86_64 (test-host.sh unless CLADEFS_GUEST_TESTS=0, bench, bench-ab, migrate, python-sandbox); host_setup takes arm64, host_kernel refuses non-x86-64. 4. Tests: fake uname in fake_ssh and test_linux_host; refusal and arm64 workspace-only cases. 5. Real runs on asahimbp: refusal, then the workspace suite.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Pushed adb4ef14a. Real refusal on asahimbp (CLADEFS_TEST_HOST=asahimbp scripts/test-host.sh): exit 2, "test-host.sh: the guest tests boot an x86-64 guest kernel (CLADEFS_GUEST_TESTS=0 runs the workspace's tests alone): this test host is aarch64, the run needs x86_64"; no run directory or worktree made. Workspace suite run t722 started (queued behind another session's 12G job there).
+<!-- SECTION:NOTES:END -->
