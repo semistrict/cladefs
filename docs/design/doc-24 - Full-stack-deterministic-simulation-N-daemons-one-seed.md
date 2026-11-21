@@ -482,6 +482,54 @@ Within the simulation:
 - Whether `MemDir::crash_corrupting` covers what `AsyncFileNonDurable` models (writes reordered
   unless they overlap, sectors torn) is not checked yet.
 
+## A second pass over FoundationDB (2026-11-21)
+
+Read at origin/main c06497f39c, 104 commits past the first pass, beyond the simulation: the storage
+engine and file layers, object storage and backup, recovery and fencing, overload control, and
+testing and observability. Each claim filed was checked in our code first.
+
+**The open question above, answered.** `MemDir::crash_corrupting`, and `host_fs::sim`'s crash,
+which copies it, model less than `AsyncFileNonDurable`:
+- they tear a chunk only at its midpoint, its left half written; never the right half, a random
+  offset, or valid bytes beside garbage;
+- they chunk at 512 B from a write's offset, not at the file's sector boundaries;
+- a directory made is durable at once, so a `sync_dir` missing is never caught;
+- they inject no read errors, stalls, or bit flips in what was synced (`AsyncFileChaos`,
+  `SimpleFile`'s `io_error` and `io_timeout`).
+Board 5748.
+
+**For the simulation** (posted on board 2830): `buggify!` has four sites in the whole tree, so
+every overload bound runs at its production size in the simulation, where FoundationDB shrinks
+them together (`smallStorageTarget`, `smallTlogTarget`); a simulated host's disk is a fixed 1 TiB,
+so disk pressure never happens; seeds don't fail on errors not injected, and no full-stack
+profile checks it settles clean after its heal (adoptions 3 and 6 above).
+
+**Bugs found, filed:**
+- live migration: a target crash between its rename and `accepted/` (5728); a stale hand-over
+  note deleting a later store at its path (5730); handlers racing, migration IDs unordered
+  (5732); abandoned migrations never reaped while a target runs (5734). Each is a handoff with
+  more than one durable step and no single commit point, or a step a late request can redo: the
+  class of board 2934. FoundationDB rolls a half-done handoff forward on reading it, and orders
+  every supersedable request by generation.
+- the bucket: auth and permission errors retried forever (5736); a lost create answered by
+  downloading the whole object (5738); faults turning paginated listing off (5740).
+- the store: raw and kept segments read with no integrity check, an ephemeral cell's for its
+  whole life (5742); recovery trusting files it never synced (5744), which `DiskQueue::recover`
+  syncs first; a stale tail block after a failed write (5746).
+
+**Worth doing, filed:** one host status with a health tier, active probes and latency past 1 s
+(5750); a bucket audit, scrub and layout-independent digest (5752); pacing writes before ENOSPC,
+fair shares across tenants, an age bound on upload lag (5754); replicated takes not stalling on
+dead members, nor a fenced writer lingering (5756, to verify); one retry loop with jitter and
+Retry-After, PUT checksums, every wire attempt counted (5758).
+
+**What doesn't transfer:** coordinators and their generation register (a cell's head is its
+authority), chains of old log generations (the bucket holds all but the bounded tail), Redwood's
+B-tree and remapping (extents are written once), a cluster-wide Ratekeeper with clients that
+throttle themselves (guests are untrusted; pacing is the daemon's), killing the process at its
+memory limit (it would take every VM on the host), format migrations. FoundationDB has no TLA+
+specs; ours are worth keeping, their atomic steps split where the code's are not (board 5732).
+
 ## Costs and risks
 
 - A second build of the workspace (`--cfg madsim`), in CI and on ubu1.
