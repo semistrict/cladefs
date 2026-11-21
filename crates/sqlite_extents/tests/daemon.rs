@@ -122,7 +122,12 @@ fn reads_in_place_and_survives_reopening(name: &str) -> Vec<String> {
         let read: Vec<u8> =
             connection.query_row("SELECT v FROM t WHERE k = 5000", [], |row| row.get(0)).unwrap();
         assert!(read == marker, "the row of noise reads back otherwise");
-        assert!(file_set.fetched() > before + 100, "{} pages fetched", file_set.fetched() - before);
+        // In place where the host maps the store's blocks into a window; a host of larger pages
+        // has none, its reads copied (sqlite_extents::daemon, board 5232).
+        let fetched = file_set.fetched() - before;
+        let in_place = file_set.is_mapped();
+        assert_eq!(in_place, cladefs::pages::page_size() <= 4096, "a window where it fits");
+        assert!(if in_place { fetched > 100 } else { fetched == 0 }, "{fetched} pages fetched");
         drop(connection);
         drop(registration);
         file_set.close().unwrap();

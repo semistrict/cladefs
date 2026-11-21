@@ -424,6 +424,12 @@ impl FileSet {
         Ok(fetched)
     }
 
+    /// Whether its files are mapped into a window ([`FileSet::open_mapped`]), which reads in place
+    /// ([`FileSet::fetch`]) need.
+    pub fn is_mapped(&self) -> bool {
+        self.window.is_some()
+    }
+
     /// How many times pages were fetched to read in place ([`FileSet::fetch`]).
     pub fn fetched(&self) -> u64 {
         self.fetched.load(Ordering::Relaxed)

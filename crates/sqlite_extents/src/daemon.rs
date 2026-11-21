@@ -8,7 +8,10 @@
 //!
 //! The window is a DAX window in this process's memory, as a VM process's is (doc-13): the daemon
 //! maps its cache's pages there, read-only, and this process's faults there go to it, through
-//! userfaultfd. So a page SQLite reads in place is the cache's page itself.
+//! userfaultfd. So a page SQLite reads in place is the cache's page itself. On a host whose pages
+//! are larger than the store's blocks (an arm64 kernel of 16 KiB pages), no window maps them
+//! (`cladefs::pages::window_fits_host`): the file set has none there, and reads copy from the
+//! device, SQLite reading nothing in place (board 5232).
 
 use crate::{FileSet, Options};
 use anyhow::{Context as _, Error, ensure};
@@ -21,7 +24,8 @@ use storage_device::{Device, DeviceHolder};
 
 /// A file set on the store at `store` that the daemon listening at `socket` serves, made with
 /// `capacity` bytes if it doesn't exist, its files mapped into a window of `window` bytes of this
-/// process's address space, which takes memory only as the daemon maps its pages there.
+/// process's address space, which takes memory only as the daemon maps its pages there: where the
+/// host's pages fit the store's blocks, unmapped elsewhere (see the module docs).
 pub fn open(
     socket: &Path,
     store: &Path,
@@ -37,8 +41,13 @@ pub fn open(
         format!("opening {} on the daemon at {}", store.display(), socket.display())
     })?;
     let store = Arc::new(store);
-    let window = DaemonWindow::new(store.clone(), window)?;
-    let device = DeviceHolder::new(DaemonDevice::new(store)?);
+    let device = DeviceHolder::new(DaemonDevice::new(store.clone())?);
+    let block = device.block_size() as u64;
+    if let Err(error) = cladefs::pages::window_fits_host(block, cladefs::pages::page_size()) {
+        log::info!("sqlite_extents: a file set with no window, reading from the daemon: {error:#}");
+        return FileSet::open(device, options);
+    }
+    let window = DaemonWindow::new(store, window)?;
     FileSet::open_mapped(device, Box::new(window), options)
 }
 

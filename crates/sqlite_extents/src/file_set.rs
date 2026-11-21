@@ -99,6 +99,12 @@ impl FileSet {
         self.files.fetch(name, offset, len)
     }
 
+    /// Whether its files are mapped into a window, which SQLite's reads in place need
+    /// ([`FileSet::fetch`]).
+    pub fn is_mapped(&self) -> bool {
+        self.files.is_mapped()
+    }
+
     /// How many times SQLite fetched pages to read in place ([`FileSet::fetch`]).
     pub fn fetched(&self) -> u64 {
         self.files.fetched()
