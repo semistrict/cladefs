@@ -3,11 +3,11 @@ id: TASK-713
 title: >-
   A migration target's boot gives up a hand-over it accepted, crashed before it
   re-noted the cell
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-20 23:39'
-updated_date: '2026-11-20 23:40'
+updated_date: '2026-11-21 02:17'
 labels:
   - bug
   - ephemeral
@@ -29,3 +29,9 @@ Found by TASK-698.5's ephemeral profile once each simulated host's disk crashes 
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+A migration target's boot notes an accepted migration's cell taken rather than give it up. Verified: ephemeral profile failures from it gone (62 to 58 of 300 then, the rest TASK-715/718). Commit 385446f82.
+<!-- SECTION:FINAL_SUMMARY:END -->

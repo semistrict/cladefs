@@ -1,11 +1,11 @@
 ---
 id: TASK-714
 title: An ephemeral host's journal forgets an entry without syncing its directory
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-20 23:39'
-updated_date: '2026-11-20 23:40'
+updated_date: '2026-11-21 02:17'
 labels:
   - bug
   - ephemeral
@@ -27,3 +27,9 @@ Found by TASK-698.5's ephemeral profile on crashing disks (TASK-685.4; e.g. seed
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Host::forget syncs the journal's directory after removing an entry. Commit 385446f82.
+<!-- SECTION:FINAL_SUMMARY:END -->

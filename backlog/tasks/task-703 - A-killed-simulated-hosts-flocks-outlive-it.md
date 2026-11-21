@@ -1,11 +1,11 @@
 ---
 id: TASK-703
 title: A killed simulated host's flocks outlive it
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-20 20:03'
-updated_date: '2026-11-20 20:04'
+updated_date: '2026-11-21 02:17'
 labels:
   - bug
   - madsim
@@ -26,3 +26,9 @@ Found by the madsim replicated attrition profile (TASK-685.7): a host killed and
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Locks of files are host_fs::Flock: a simulated host's are its disk's, gone with its crash at restart. Verified: host_fs madsim test (locks gone through a kill); restarted hosts reopen their part caches in every attrition seed. Commit 385446f82.
+<!-- SECTION:FINAL_SUMMARY:END -->

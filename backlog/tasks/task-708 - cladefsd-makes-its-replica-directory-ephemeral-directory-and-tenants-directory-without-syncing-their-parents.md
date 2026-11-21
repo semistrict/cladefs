@@ -3,11 +3,11 @@ id: TASK-708
 title: >-
   cladefsd makes its replica directory, ephemeral directory and tenants
   directory without syncing their parents
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-20 21:33'
-updated_date: '2026-11-20 23:48'
+updated_date: '2026-11-21 02:17'
 labels:
   - bug
   - replication
@@ -35,3 +35,9 @@ Found by the madsim replicated partitions profile once each simulated host's dis
 <!-- SECTION:NOTES:BEGIN -->
 Revised 2026-11-20: the simulation's disk now has directories durable once made, as local_cell::MemDir's model, which the stores' own crash tests are written to, and as ext4/XFS make a mkdir durable with the next fsync of anything (the incarnation file's, here). Under that model the replica directory is not lost; the madsim test that showed the loss (11 of 40 seeds) assumed strict POSIX, where a directory is durable once its parent is synced, and was dropped. The fix stays as hardening for strict POSIX: create_dir_all_durably for the replica, ephemeral and tenants directories.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+create_dir_all_durably for the replica, ephemeral and tenants directories (strict-POSIX hardening; the simulation's disk keeps directories once made, local_cell::MemDir's model). Commit 385446f82.
+<!-- SECTION:FINAL_SUMMARY:END -->

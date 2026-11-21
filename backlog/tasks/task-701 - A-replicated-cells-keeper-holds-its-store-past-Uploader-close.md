@@ -1,11 +1,11 @@
 ---
 id: TASK-701
 title: 'A replicated cell''s keeper holds its store past Uploader::close'
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-20 19:43'
-updated_date: '2026-11-20 19:43'
+updated_date: '2026-11-21 02:17'
 labels:
   - bug
   - replication
@@ -27,3 +27,9 @@ Found by the madsim replicated attrition profile (TASK-685.7). Shared::keep, spa
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Shared::run returns once the replicated cell's keeper is done (a oneshot its task drops), the keeper waking at a stop: Uploader::close returns with nothing holding the store. Verified: replicated_commits_survive_attrition, refused EBUSY before, passes 300 seeds. Commit 385446f82.
+<!-- SECTION:FINAL_SUMMARY:END -->

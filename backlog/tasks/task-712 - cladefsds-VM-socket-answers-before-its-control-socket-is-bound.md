@@ -1,11 +1,11 @@
 ---
 id: TASK-712
 title: cladefsd's VM socket answers before its control socket is bound
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-20 22:47'
-updated_date: '2026-11-20 22:47'
+updated_date: '2026-11-21 02:17'
 labels:
   - bug
   - flake
@@ -26,3 +26,9 @@ boot bound the VM socket, then made the tenants directory and bound the control 
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+cladefsd binds its VM socket last, once the control API serves. Verified: peers_are_set_at_runtime passes on ubu1, unit 3062. Commit 385446f82.
+<!-- SECTION:FINAL_SUMMARY:END -->
