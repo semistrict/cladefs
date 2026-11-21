@@ -577,8 +577,20 @@ impl Firecracker {
         &mut self,
         listener: &std::os::unix::net::UnixListener,
     ) -> anyhow::Result<std::os::unix::net::UnixStream> {
+        self.accept_within(listener, None)
+    }
+
+    /// cladefs: as [`Firecracker::accept`], but an error too once `within` passes, if given, with
+    /// neither the connection nor the exit: a guest that hangs as it boots, among hundreds booting
+    /// at once (board 5583).
+    pub fn accept_within(
+        &mut self,
+        listener: &std::os::unix::net::UnixListener,
+        within: Option<std::time::Duration>,
+    ) -> anyhow::Result<std::os::unix::net::UnixStream> {
         use nix::libc;
         use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        let deadline = within.map(|within| std::time::Instant::now() + within);
         // SAFETY: Opens a pidfd of the VM's process, this one's child, which it hasn't waited for.
         let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, self.child.id(), 0) };
         ensure!(pidfd >= 0, "the VM process's pidfd: {}", std::io::Error::last_os_error());
@@ -587,10 +599,29 @@ impl Firecracker {
         let ready = |fd: libc::c_int| libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
         let mut polled = [ready(listener.as_raw_fd()), ready(pidfd.as_raw_fd())];
         loop {
+            let timeout = match deadline {
+                None => -1,
+                Some(deadline) => {
+                    let left = deadline.saturating_duration_since(std::time::Instant::now());
+                    ensure!(
+                        !left.is_zero(),
+                        "the guest didn't connect within {:?}: see {}",
+                        within.unwrap_or_default(),
+                        self.console.display()
+                    );
+                    // Rounded up, so as not to spin on a last part of a millisecond.
+                    left.as_millis().saturating_add(1).min(libc::c_int::MAX as u128) as libc::c_int
+                }
+            };
             // SAFETY: Polls the two descriptors, which outlive the call.
-            if unsafe { libc::poll(polled.as_mut_ptr(), 2, -1) } < 0 {
+            let ready = unsafe { libc::poll(polled.as_mut_ptr(), 2, timeout) };
+            if ready < 0 {
                 let err = std::io::Error::last_os_error();
                 ensure!(err.kind() == std::io::ErrorKind::Interrupted, "polling: {err}");
+                continue;
+            }
+            if ready == 0 {
+                // Timed out: the deadline's check above says so.
                 continue;
             }
             // A guest that connected, then its VM exited, is told of with the exit: it is first.

@@ -58,6 +58,9 @@ use test_fxfs_guest_python_sandbox::TestFxfsGuestPythonSandbox;
 use test_fxfs_guest_sandboxes::TestFxfsGuestSandboxes;
 // cladefs: what a VM costs its host's memory, measured when its guest asks (TASK-164.5).
 mod measure;
+// cladefs: how many VMs on forks of a base a host holds (board 5583).
+mod test_cells_per_host;
+use test_cells_per_host::TestCellsPerHost;
 mod test_fxfs_guest_daemon_lost;
 use test_fxfs_guest_daemon_lost::TestFxfsGuestDaemonLost;
 mod test_fxfs_guest_follow;
@@ -234,6 +237,9 @@ tags! {
     PerfSingle = "perf-single",
     /// scripts/perf-gate-host.sh's density run, VMs on forks of one base.
     PerfDensity = "perf-density",
+    /// scripts/cells-per-host-host.sh's: VMs on forks of one base, added until the host holds no
+    /// more (board 5581).
+    CellsPerHost = "cells-per-host",
     /// scripts/bench.sh's cases unless CLADEFS_BENCH_CASES says others.
     Bench = "bench",
     /// In no suite, run by name alone: measurements of one thing (a profile, a lock's
@@ -516,6 +522,17 @@ pub fn test_cases() -> Vec<TestCase> {
                 TestFxfsGuestPgbench::on(PgbenchStorage::FxfsDax)
                     .with_database(PgbenchDatabase::Density),
             ),
+        ),
+        // cladefs: how many cells a host holds, without DAX and with it (board 5583).
+        TestCase::new(
+            "cells-per-host",
+            &[Tag::CellsPerHost],
+            Box::new(TestCellsPerHost { dax: false }),
+        ),
+        TestCase::new(
+            "cells-per-host-dax",
+            &[Tag::CellsPerHost],
+            Box::new(TestCellsPerHost { dax: true }),
         ),
         TestCase::new(
             "fxfs-guest-bigmap",

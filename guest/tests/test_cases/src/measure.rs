@@ -129,7 +129,7 @@ mod host {
             }
             let daemon = rollup(self.daemon).context("the daemon's memory")?;
             write!(line, " cladefsd_pss={}", daemon.get("Pss").context("no Pss in smaps_rollup")?)?;
-            for (name, value) in gauges(self.metrics)? {
+            for (name, value) in self.gauges()? {
                 write!(line, " {name}={value}")?;
             }
             if !guest.is_empty() {
@@ -137,6 +137,13 @@ mod host {
             }
             eprintln!("{line}");
             Ok(())
+        }
+
+        /// cladefs: the daemon's metrics [`HostMemory::say`] says, by name (`cladefsd_NAME`): what
+        /// cells-per-host sizes its steps by, its memory's pages and those its windows map
+        /// (board 5583).
+        pub fn gauges(&self) -> anyhow::Result<BTreeMap<String, u64>> {
+            Ok(gauges(self.metrics)?.into_iter().collect())
         }
     }
 
