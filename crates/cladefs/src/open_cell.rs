@@ -2564,7 +2564,10 @@ impl Base {
             Some(open) => open(&self.path).await,
             None => {
                 let arena = attached_to.arenas.own.clone();
-                let opened = OpenCell::open_base(&self.path, arena).await.map_err(|err| {
+                // cladefs: boxed, its opening once, which every read's and map's future, and so
+                // every request's, would hold otherwise, some 11 KB (TASK-707).
+                let opening = Box::pin(OpenCell::open_base(&self.path, arena));
+                let opened = opening.await.map_err(|err| {
                     log::warn!("cladefs: opening {}, attached: {err:#}", self.path.display());
                     err.errno().unwrap_or(Errno::EIO)
                 })?;

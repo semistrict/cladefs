@@ -1413,8 +1413,12 @@ impl Connection {
             Ok(Request::Private { window_offset, len }) => {
                 self.clone().make_private(window_offset, len, answer).await
             }
+            // cladefs: boxed, as an opening's future holds all a store's opening awaits, some 22 KB,
+            // which every request's future, commits' and writes' too, would hold and be copied
+            // with, onto the heap in `serve_future`: some 15% of the daemon's CPU under pgbench
+            // (TASK-707).
             Ok(Request::Open { path, opening }) if opening != codec::Opening::ReadOnly => {
-                self.clone().serve_open(path, opening, answer).await
+                Box::pin(self.clone().serve_open(path, opening, answer)).await
             }
             Ok(request) => self.serve(&request, answer).await,
         }
@@ -1488,7 +1492,8 @@ impl Connection {
         fds: &mut Vec<std::os::fd::BorrowedFd<'a>>,
     ) -> Result<(), Errno> {
         if let Request::Open { path, opening: codec::Opening::ReadOnly } = request {
-            let cell = self.follow(path).await?;
+            // Boxed, as a store's opening is (`serve_message`, TASK-707).
+            let cell = Box::pin(self.follow(path)).await?;
             let commit = self.store().ok_or(Errno::EBADF)?.view_commit()?;
             let max_map_count = max_map_count();
             reply.args = Opened { cell, arena: self.arena_id(), commit, max_map_count }.args();
@@ -1585,7 +1590,8 @@ impl Connection {
                 // A VM snapshot's: a version of the store's cell, made here (doc-20), refused while
                 // the window holds private pages, whose bytes no extent holds (TASK-203). Each
                 // refusal says why here, as the VMM's error can't (TASK-92.14).
-                let version = store.make_version(None).await.map_err(|err| {
+                // Boxed, as a store's opening is (`serve_message`, TASK-707).
+                let version = Box::pin(store.make_version(None)).await.map_err(|err| {
                     if err.errno() == Some(Errno::EBUSY) {
                         log::warn!("cladefsd: a version refused: {err:#}");
                     }
@@ -1603,7 +1609,7 @@ impl Connection {
                     return Err(Errno::EPERM);
                 }
                 let ids = std::collections::BTreeSet::from([*version]);
-                store.drop_versions(&ids).await.map_err(|err| {
+                Box::pin(store.drop_versions(&ids)).await.map_err(|err| {
                     cells::errno_of(format_args!("dropping version {version:x}"), err)
                 })?;
                 self.versions_made.with(Mutex::lock).remove(version);
@@ -1612,7 +1618,7 @@ impl Connection {
             // Authorized, as every path a request names ([`Connection::serve_in_turn`]).
             Request::Fork { path } => {
                 // cladefs: a new cell of the store's tenant's, its ID the bucket's (TASK-364).
-                let forked = store.fork(path, store.cell().tenant).await;
+                let forked = Box::pin(store.fork(path, store.cell().tenant)).await;
                 if let Err(err) = &forked
                     && err.errno() == Some(Errno::EBUSY)
                 {
@@ -3079,6 +3085,27 @@ mod acks_tests {
         assert_eq!(acks.unanswered(at(9)), std::time::Duration::from_secs(5));
         acks.acked(second);
         assert_eq!(acks.unanswered(at(10)), std::time::Duration::ZERO);
+    }
+}
+
+/// TASK-707: what a request's future holds, which every request served is moved into, and onto the
+/// heap with (`serve_future`), however little it waits.
+#[cfg(test)]
+mod request_future_tests {
+    use super::*;
+
+    /// The size of the future `f` returns, read from its type: `f` is not called.
+    fn returned_size<A, B, C, F: std::future::Future>(_: impl FnOnce(A, B, C) -> F) -> usize {
+        std::mem::size_of::<F>()
+    }
+
+    /// A request's future is small: as a commit's, not as a store's opening, which it boxes. At
+    /// 23 KB, copied as it was spawned, it cost the daemon some 15% more CPU a transaction under
+    /// pgbench than serving requests in place did (TASK-707).
+    #[test]
+    fn a_requests_future_holds_no_stores_opening() {
+        let request = returned_size(Connection::serve_message);
+        assert!(request <= 4096, "a request's future is {request} bytes");
     }
 }
 
