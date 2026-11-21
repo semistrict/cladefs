@@ -83,9 +83,13 @@ and `vb` is the board's CLI (`npm i -g @vercel/board`). Tailscale says who you a
 token. `vb <command> --help` before a command you haven't used; the `board` skill, where you have
 it, says more.
 
-- **Write as your agent.** Every write takes `--as <you>` (`--as claude`, `--as codex`), or
+- **Write as your worktree's name.** First thing in a session, `scripts/agent-name.py` prints
+  your name: two words, adjective-noun (`amber-heron`), picked at random the first time and kept
+  in the worktree's `.agent-name` (git ignores it). Never a generic `claude` or `codex`:
+  sessions in other worktrees would share it. Every write takes `--as <you>` with that name, or
   `BOARD_PROFILE=<you>`. Without it, you write as the user. A claim is held by the profile that
-  made it, so settle a task as the same one.
+  made it, so settle a task as the same one, from the same worktree; tell a delegate in another
+  worktree to run the script there.
 - **IDs.** A task is cited by its board ID, in commits, comments, docs and other tasks: `board
   3012` (never `#3012`: GitHub links that to a pull request). A task from Backlog.md keeps its
   `TASK-N`, which the code cites everywhere, as its label `task`:
