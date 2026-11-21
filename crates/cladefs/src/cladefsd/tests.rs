@@ -3530,7 +3530,7 @@ async fn counting_followers_walks_no_extents() {
 /// its turn, which hundreds of guests committing together kept as many of as their syncs' waits
 /// took, each idle 10 s after: here each guest commits, ordered, again and again for a second.
 /// At once, `FLUSHES` stores' flushes run at most, each on a thread of the runtime's for its
-/// syncs alone (TASK-685.17), and the 15 they share to sync their files on beside their own
+/// syncs alone (board 2944), and the 15 they share to sync their files on beside their own
 /// (`local_cell`'s `HELPERS`): the most threads seen at once, looking every millisecond, are a
 /// small part of the stores'. Once their commits are durable, the runtime keeps threads for
 /// the requests that ran at once, not for the stores: 2 and a little over 2 for each guest

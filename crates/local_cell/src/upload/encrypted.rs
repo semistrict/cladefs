@@ -39,7 +39,7 @@ fn child_in(tenant: u64, id: u64) -> Child {
 }
 
 /// What the tests' hosts share: a bucket, its objects as object storage holds them, and a KMS,
-/// counting its calls, holding [`TENANT`]'s KEK: a [`LocalKms`], or another (TASK-411.16). Its
+/// counting its calls, holding [`TENANT`]'s KEK: a [`LocalKms`], or another (board 2054). Its
 /// hosts run on the test's runtime.
 struct World<K: Kms = LocalKms> {
     objects: Arc<object_store::memory::InMemory>,

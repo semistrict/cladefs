@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! cladefs: a test's host's runtime, its uploaders' alone, beside the test's own, which the test
-//! awaits on (TASK-685.19): so that a host lost, or crashed, takes its uploads with it.
+//! awaits on (board 2948): so that a host lost, or crashed, takes its uploads with it.
 
 /// A host's runtime of its own, of two threads. Stopped as it is dropped, its tasks let go of where
 /// they are: a runtime's drop, which waits for them, may not happen in a test's async body.

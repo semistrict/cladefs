@@ -172,7 +172,7 @@ impl ImageDevice {
         let _writing = self.writes.write().await;
         let image = self.image.clone();
         // cladefs: its flush's disk work on a thread of its own, as before; the commit's waits
-        // awaited there, an outermost entry's (TASK-685.17).
+        // awaited there, an outermost entry's (board 2944).
         unblock(move || {
             futures::executor::block_on(image.store().commit(root.as_deref()))?;
             image.committed()
@@ -290,7 +290,7 @@ impl Device for ImageDevice {
             if let Some(write) = self.store.try_begin_write(extent, offset, buffer.len() as u64)? {
                 break write;
             }
-            // cladefs: awaited, holding no thread (TASK-685.17).
+            // cladefs: awaited, holding no thread (board 2944).
             self.store.wait_until_writes_resume().await;
         };
         self.write_file(&write, buffer).await?;

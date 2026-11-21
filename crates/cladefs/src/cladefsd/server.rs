@@ -2098,7 +2098,7 @@ impl Drop for TransferArea {
 
 /// cladefs: makes `store`'s commits durable within [`FLUSH_EVERY`] of being ordered, until
 /// `stopped` says to stop: on the daemon's runtime, [`FLUSHES`] stores' flushes at once
-/// ([`FLUSH_TURNS`]), each holding its thread only for its syncs (TASK-685.17). Looking at every turn, every store open
+/// ([`FLUSH_TURNS`]), each holding its thread only for its syncs (board 2944). Looking at every turn, every store open
 /// took a blocking thread at every turn, which hundreds of stores, their turns coming at once,
 /// kept as many of, each idle for a while after (TASK-34). And so did their flushes, every
 /// store's whose guest committed, on the runtime's blocking threads (TASK-92.49): no more threads
@@ -2124,7 +2124,7 @@ async fn flush_behind(store: Arc<OpenCell>, mut stopped: tokio::sync::oneshot::R
                 log::error!("cladefsd: making a store's commits durable: {err:?}");
                 break;
             }
-            // Its panic went through the store (TASK-153.16).
+            // Its panic went through the store (board 1212).
             Err(_) => {
                 store.halt(|| "a panic making its commits durable".into());
                 break;
@@ -2133,8 +2133,8 @@ async fn flush_behind(store: Arc<OpenCell>, mut stopped: tokio::sync::oneshot::R
     }
 }
 
-/// cladefs: how many stores' flushes run at once, at most ([`flush_behind`], TASK-92.49), each on a
-/// thread of the runtime's for its syncs alone (TASK-685.17): as many syncs at once as a host's disk
+/// cladefs: how many stores' flushes run at once, at most ([`flush_behind`], board 744), each on a
+/// thread of the runtime's for its syncs alone (board 2944): as many syncs at once as a host's disk
 /// takes, those past them waiting a few milliseconds for their turn, holding no thread; and the
 /// 15 a flush of many files syncs them on beside its own, which every flush shares
 /// (`local_cell`'s `HELPERS`), 47 threads at most at once, those 15 none once idle. A

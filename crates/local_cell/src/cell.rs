@@ -520,7 +520,7 @@ fn framing_ended<F: File>(
 }
 
 /// cladefs: a store's writes held back ([`Gate`]) by a waiting commit, or closing between commits,
-/// released as its waiting is dropped, should it be, as a cancelled future's is (TASK-685.17).
+/// released as its waiting is dropped, should it be, as a cancelled future's is (board 2944).
 struct HeldWrites<'a, D: Dir>(Option<&'a LocalCell<D>>);
 
 impl<D: Dir> HeldWrites<'_, D> {
@@ -1732,7 +1732,7 @@ impl<D: Dir> LocalCell<D> {
     }
 
     /// cladefs: the state, locked, once `ready` says so of it: waited for holding no thread, as
-    /// what it waits for, done on another thread or task, says it changed (`idle`, TASK-685.17).
+    /// what it waits for, done on another thread or task, says it changed (`idle`, board 2944).
     /// It listens before it looks, so that a change after its look wakes it.
     async fn lock_when(&self, ready: impl Fn(&State<D::File>) -> bool) -> Locked<'_, D::File> {
         loop {
@@ -1897,7 +1897,7 @@ impl<D: Dir> LocalCell<D> {
     /// cladefs: begins a write as [`LocalCell::begin_write`] does, or, while a commit, or a closing
     /// between commits, holds writes back, returns `None` at once: what `begin_write` awaits the
     /// end of ([`LocalCell::wait_until_writes_resume`]), holding no thread, as the writes in
-    /// progress that the commit waits for may need the thread to end (TASK-98, TASK-685.17).
+    /// progress that the commit waits for may need the thread to end (board 820, 2944).
     pub fn try_begin_write(
         &self,
         extent: ExtentId,
@@ -3942,7 +3942,7 @@ impl<D: Dir> Drop for LocalCell<D> {
     fn drop(&mut self) {
         // cladefs: dropped unclosed, closed here: at once, as a close that waits for nothing goes,
         // as one does where the store's work runs on its caller's thread (madsim's); or waiting on
-        // the dropping thread for what it waits on, an outermost entry's (TASK-685.17).
+        // the dropping thread for what it waits on, an outermost entry's (board 2944).
         let mut closing = std::pin::pin!(self.close());
         let waker = std::task::Waker::noop();
         let closed = match closing.as_mut().poll(&mut std::task::Context::from_waker(waker)) {
@@ -4103,7 +4103,7 @@ mod tests {
     }
 
     /// cladefs: the store's futures are `Send`, as the daemon's tasks awaiting them are, which tokio
-    /// moves between its threads (TASK-685.17): a guard of the store's lock held across an await
+    /// moves between its threads (board 2944): a guard of the store's lock held across an await
     /// makes one not, as `close`'s and `wait_framed`'s were. Made, never polled.
     #[test]
     fn the_stores_futures_are_send() {

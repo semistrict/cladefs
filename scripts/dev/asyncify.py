@@ -3,7 +3,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-"""Drives a sync-to-async conversion from the compiler's diagnostics (TASK-685.17): marks a
+"""Drives a sync-to-async conversion from the compiler's diagnostics (board 2944): marks a
 function `async` where an `.await` sits in a sync one (E0728), and applies rustc's "consider
 `await`ing" suggestions, round after round, until a round fixes nothing. What is left is printed,
 for a person. Usage: asyncify.py [cargo check arguments...]."""
@@ -273,7 +273,7 @@ def line_of(file, line):
 
 def ours(file):
     """Whether `file` is the workspace's own source, which this edits: never a registry's, a
-    toolchain's or a vendored tree's, where a macro's span may point (TASK-719)."""
+    toolchain's or a vendored tree's, where a macro's span may point (board 2950)."""
     path = Path(file).resolve()
     root = Path.cwd().resolve()
     if not path.is_relative_to(root):

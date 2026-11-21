@@ -175,7 +175,7 @@ impl<T> CellMutex<T> {
 
 /// A reader-writer lock of a store's, locked only through its halt, as a [`CellMutex`] is.
 /// cladefs: awaited, holding no thread while another holds it, and held across the store's own
-/// awaits, as its holders' work waits for the store's (TASK-685.18): tokio's, whose guards a task
+/// awaits, as its holders' work waits for the store's (board 2946): tokio's, whose guards a task
 /// sends; poisoned never, a panic holding it halting the store as its guard drops.
 pub(crate) struct StoreRwLock<T> {
     /// What the store's log calls it.

@@ -462,7 +462,7 @@ impl<D: Dir> LocalCell<D> {
     pub async fn checkpoint(&self, drain: bool) -> Result<bool, Error> {
         let Some(ephemeral) = &self.ephemeral else { return Ok(false) };
         // cladefs: the flush's lock first, as a flush takes it, then the cell's own: the segments
-        // a checkpoint covers leave the logs a flush holds (TASK-685.17).
+        // a checkpoint covers leave the logs a flush holds (board 2944).
         let mut logs = self.flushing.lock().await;
         let mut ephemeral = ephemeral.lock().unwrap();
         let checkpointed =

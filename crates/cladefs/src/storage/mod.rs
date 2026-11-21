@@ -325,7 +325,7 @@ pub(crate) async fn fork_image(
         .name("cladefs fork".into())
         .spawn(move || {
             // cladefs: outside the simulation: FUSE's storage, on a thread of its own, which awaits
-            // the store's fork there, its outermost entry (TASK-685.17).
+            // the store's fork there, its outermost entry (board 2944).
             let forked = futures::executor::block_on(image.fork(&path, writes.pause()));
             let forked =
                 forked.map_err(|error| error.context(format!("forking to {}", path.display())));

@@ -48,7 +48,7 @@ pub fn held() -> Vec<&'static str> {
 }
 
 /// cladefs: who holds a shared lock taken by awaiting it, which it holds across its awaits
-/// (TASK-685.17): the task, which any of its runtime's threads may poll from one await to the next;
+/// (board 2944): the task, which any of its runtime's threads may poll from one await to the next;
 /// or, polled by no tokio task's, the thread, as a store's drop's close waits on it. Under madsim,
 /// whose tasks name no ids, the simulation's one thread.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -72,7 +72,7 @@ impl Holder {
 static AWAITED: std::sync::Mutex<Vec<(Holder, &'static str)>> = std::sync::Mutex::new(Vec::new());
 
 /// cladefs: a holding of a shared lock taken by awaiting it, as a store's commit's and flush's are
-/// (`AsyncMutex`, TASK-685.17), by its holder: what the panic hook sees held by the task it panics
+/// (`AsyncMutex`, board 2944), by its holder: what the panic hook sees held by the task it panics
 /// in, wherever it was polled, from its making to its drop. A thread's [`Holding`] cannot say so,
 /// as the task moves between threads, holding it, at its awaits.
 pub struct Awaited {
@@ -278,7 +278,7 @@ mod tests {
 
     /// cladefs: a shared lock taken by awaiting it is its task's, which the panic hook sees it hold
     /// whichever thread polls the task, across its awaits, and not once its guard is dropped
-    /// (TASK-685.17): another task's, the same threads polling it, holds none.
+    /// (board 2944): another task's, the same threads polling it, holds none.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn awaited_locks_are_their_tasks_across_awaits() {
         let mutex = std::sync::Arc::new(crate::sync::AsyncMutex::new("awaited", ()));

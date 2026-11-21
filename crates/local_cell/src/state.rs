@@ -518,7 +518,7 @@ impl<'a, F: File, H: Holds> Guarded<'a, F, H> {
     }
 
     /// The state, the check given up: what a wait lets go of, to lock again
-    /// (`LocalCell::lock_when`, TASK-685.17).
+    /// (`LocalCell::lock_when`, board 2944).
     pub fn into_locked(self) -> Locked<'a, F> {
         self.state
     }

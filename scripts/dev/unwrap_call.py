@@ -3,7 +3,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-"""Turns calls of a blocking wrapper into awaits (TASK-685.19): `wait_on(f(x))` becomes
+"""Turns calls of a blocking wrapper into awaits (board 2948): `wait_on(f(x))` becomes
 `f(x).await`, and an argument that is no postfix expression, `(a + b).await`. Usage:
 unwrap_call.py CALLEE FILE..., CALLEE as written at the call, `local_cell::upload::wait_on` say;
 each of its spellings is given on its own."""

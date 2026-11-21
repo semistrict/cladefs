@@ -2508,7 +2508,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let mut segments = Vec::with_capacity(closed.len());
         for closed in closed {
             let (number, tag) = (closed.number, closed.tag());
-            // cladefs: what reads its files, on a blocking thread, as `blocking` gives (TASK-685.17).
+            // cladefs: what reads its files, on a blocking thread, as `blocking` gives (board 2944).
             let own = blocking(|| {
                 let own = closed.own.iter().map(|(key, file)| Ok((key.clone(), stored(file)?)));
                 own.collect::<Result<_, Failure>>()

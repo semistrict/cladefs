@@ -586,7 +586,7 @@ impl Drop for OpenCell {
         }
         drop(self.uploader.take());
         // cladefs: dropped unclosed, outside the simulation, closed here, waiting on the dropping
-        // thread, as its uploader's drop waits (TASK-685.17): what closes a store awaits its close
+        // thread, as its uploader's drop waits (board 2944): what closes a store awaits its close
         // ([`release`]).
         if self.following.is_none()
             && let Err(err) = local_cell::wait_here(self.store.close())

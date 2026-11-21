@@ -315,7 +315,7 @@ fn run_with(Run { steps, follow }: Run) {
                             (extent, location.len, data)
                         });
                         // Each extent its footer names, as its last commit left it: in it, or in a
-                        // file of its own of the write-ahead log, though freed since (TASK-165.9).
+                        // file of its own of the write-ahead log, though freed since (board 562).
                         for (extent, len, uploaded) in in_segment.chain(on_their_own) {
                             assert!(
                                 Some(&uploaded) == holds.get(&extent)
@@ -362,7 +362,7 @@ fn run_with(Run { steps, follow }: Run) {
                 let mut view = Some(store.view());
                 // What it finds wrong, it panics with once its view is gone: a task panicking unwinds
                 // through what it holds, whose drops take Shuttle's locks, which fail in a failed run
-                // with panics that abort the process (TASK-55).
+                // with panics that abort the process (board 336).
                 let followed = (|| -> Result<(), String> {
                     loop {
                         let current = view.as_mut().unwrap();
@@ -599,7 +599,7 @@ fn racing() {
         store.commit(None).await.expect("a write raced a commit");
         store.close_segment().unwrap();
         store.commit(None).await.expect("a write raced a commit");
-        // The framings the closings began end first, as no commit waits for them (TASK-165.9): a
+        // The framings the closings began end first, as no commit waits for them (board 562): a
         // failure found below unwinds with no framer holding the store's locks, which Shuttle, a task
         // panicking, can't wait for, and aborts.
         store.wait_framed().await.expect("a write raced a commit");
@@ -864,8 +864,8 @@ fn failing_during_a_commit() {
         writer.join().unwrap();
         assert!(flusher.join().unwrap().is_err(), "a flush failing succeeded");
         let committed = committer.join().unwrap().map_err(|error| error.to_string());
-        // Saying why: the flush's failure (TASK-165.9), at its first step, appending the records,
-        // which go before the data in a directory that does one thing at a time (TASK-301).
+        // Saying why: the flush's failure (board 562), at its first step, appending the records,
+        // which go before the data in a directory that does one thing at a time (board 1700).
         let failed = "the extent store failed: committing the extent store: appending commits' \
                       records: the file system crashed";
         assert!(

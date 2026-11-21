@@ -42,7 +42,7 @@ use shuttle::sync::atomic::AtomicBool;
 #[cfg(not(feature = "shuttle"))]
 use std::sync::atomic::AtomicBool;
 
-/// cladefs: what the store's waits await, holding no thread (TASK-685.17): said as what they wait
+/// cladefs: what the store's waits await, holding no thread (board 2944): said as what they wait
 /// for changes. A wait listens, then looks, then, if it is to wait, lets its locks go and awaits
 /// the listener, so that a change after its look, made under the lock it looked under, wakes it.
 /// event_listener's, built normally, under madsim and under Shuttle alike: its listeners' wakers
@@ -50,7 +50,7 @@ use std::sync::atomic::AtomicBool;
 pub(crate) use event_listener::Event;
 
 /// cladefs: runs `future` to its end on the calling thread, which it blocks meanwhile: for an
-/// outermost entry alone, as a store dropped unclosed closes there (TASK-685.17). Shuttle's own
+/// outermost entry alone, as a store dropped unclosed closes there (board 2944). Shuttle's own
 /// under Shuttle, which schedules the thread's waiting; else [`wait_here`].
 pub(crate) fn block_on<F: std::future::Future>(future: F) -> F::Output {
     #[cfg(feature = "shuttle")]
@@ -60,7 +60,7 @@ pub(crate) fn block_on<F: std::future::Future>(future: F) -> F::Output {
 }
 
 /// cladefs: runs `future` to its end on the calling thread, parked while it waits, for what it
-/// waits on to wake it (TASK-685.17): what a drop of what was never closed closes with, within
+/// waits on to wake it (board 2944): what a drop of what was never closed closes with, within
 /// whatever polls the drop, an executor's task or a test's thread. Not `futures::executor::block_on`,
 /// which refuses to run within another of its executors, as a drop within one does.
 pub fn wait_here<F: std::future::Future>(future: F) -> F::Output {
@@ -81,11 +81,11 @@ pub fn wait_here<F: std::future::Future>(future: F) -> F::Output {
     }
 }
 
-/// cladefs: a lock its takers await, holding no thread meanwhile (TASK-685.17): for the store's
+/// cladefs: a lock its takers await, holding no thread meanwhile (board 2944): for the store's
 /// locks held across work others wait for, its commit's and its flush's. Taken by one at a time;
 /// its guard, dropped, lets the next take it. Shared beyond one store, as its followers share its
 /// writer's: a panic holding it aborts the extent daemon, as one holding a `SharedLock` does
-/// ([`crate::shared::Awaited`], TASK-149.24).
+/// ([`crate::shared::Awaited`], board 1228).
 pub(crate) struct AsyncMutex<T> {
     /// What the log calls it.
     name: &'static str,

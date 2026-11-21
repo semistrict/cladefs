@@ -3,7 +3,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-"""Moves an `.await` from a future's uses to its binding (TASK-685.17): `let x = f();` then
+"""Moves an `.await` from a future's uses to its binding (board 2944): `let x = f();` then
 `x.await.y` becomes `let x = f().await;` then `x.y`, where rustc's suggestion awaits each use.
 Usage: rebind_await.py FILE IDENT..."""
 
