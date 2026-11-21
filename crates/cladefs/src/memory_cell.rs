@@ -26,6 +26,11 @@
 //! window is a store, and a node's first page alone may be made private for a load. Its private
 //! pages are the guest's memory, reserved nowhere in the daemon: the VM process's cgroup limits
 //! them.
+//!
+//! A window maps the cell's runs as they are, a page a block, 4 KiB, and mmap maps nothing smaller
+//! than a host's page, nor at an offset of an extent that isn't a whole one: so a host whose pages
+//! are larger (an arm64 kernel of 16 KiB pages) restores no window, refused as it is made
+//! ([`crate::pages::window_fits_host`]), rather than at the guest's first fault (TASK-722's run, board 5230).
 
 use crate::error::{Errno, Error};
 use crate::{
@@ -229,6 +234,7 @@ impl MemoryCell {
             return Err(Error::new(Errno::EINVAL)
                 .context(format!("a window of {size} bytes over a memory of {}", self.size)));
         }
+        crate::pages::window_fits_host(self.page_size(), crate::pages::page_size())?;
         let node_bytes = self.files.node_bytes();
         let nodes = size.div_ceil(node_bytes);
         let shared = Arc::new(Nodes {
