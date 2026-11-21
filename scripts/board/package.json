@@ -1,0 +1,13 @@
+{
+  "name": "cladefs-board",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "license": "BSD-3-Clause",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@vercel/board": "0.54.0"
+  }
+}
