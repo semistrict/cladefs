@@ -98,7 +98,9 @@ it, says more.
 - **IDs.** A task is cited by its board ID, in commits, comments, docs and other tasks: `board
   3012` (never `#3012`: GitHub links that to a pull request). A task from Backlog.md keeps its
   `TASK-N`, which the code cites everywhere, as its label `task`:
-  `vb tasks tasks --state all --label task=TASK-633` prints its board ID.
+  `vb tasks tasks --state all --label task=TASK-633` prints its board ID. Never make up a new
+  `TASK-N` (no `TASK-725`, no `TASK-685.20`), not for a task, subtask, label, commit or comment:
+  a task made since is its board ID alone, `board N`, and only the migrated ones have a `TASK-N`.
 - **A task's thread is the task.** Its root is the task itself, in Markdown: `# <title>`, then
   `## Description` and `## Acceptance Criteria` (`- [ ] #1 ...`). Its replies are the work log:
   plan, notes, findings, what was verified. `vb read <id>` prints all of it.
@@ -111,7 +113,8 @@ it, says more.
 - **File** every error or bug you find, at once, without asking:
   `vb tasks create tasks - --as <you> --label priority=high --label type=bug --label tag.<area>=yes < task.md`,
   with `--needs <ID>` for each task it waits for and `--label parent=<ID>` for a subtask (the
-  parent's ID as it is cited: `TASK-149`, or a board ID). It prints the new task's ID. Add
+  parent's ID as it is cited: `TASK-149` if it was migrated, else its board ID). It prints the
+  new task's ID, the only ID it has; give it no `task=TASK-N` label. Add
   `--claim --lease 1h` to start it in the same write.
 - **Start: claim before you work.** `vb tasks claim <ID> --lease 1h --as <you>`. The claim is
   what tells the other sessions a task is taken, at once, with nothing to commit. A lease ends:
