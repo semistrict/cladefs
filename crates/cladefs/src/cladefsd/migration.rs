@@ -49,6 +49,10 @@ use tonic::Status;
 /// The marker of a cell given up to a migration, in its directory ([`Marker`]).
 pub(crate) const MARKER: &str = "migrating";
 
+/// Where the marker is staged as it is written ([`write_durably`]), which a failure or a crash may
+/// leave, as no part of the cell.
+const MARKER_STAGED: &str = "migrating.new";
+
 /// How much of a file a request carries at most.
 const PIECE: usize = 4 << 20;
 
@@ -232,8 +236,8 @@ fn dirs(path: &Path) -> std::io::Result<Vec<String>> {
     Ok(found)
 }
 
-/// The files of the cell at `path`, by their paths in it, with their lengths: all but its marker
-/// and what deleting or replicating leaves.
+/// The files of the cell at `path`, by their paths in it, with their lengths: all but its marker,
+/// staged or not, and what deleting or replicating leaves.
 fn files(path: &Path) -> std::io::Result<Vec<(String, u64)>> {
     let mut found = Vec::new();
     let mut dirs = vec![String::new()];
@@ -242,7 +246,9 @@ fn files(path: &Path) -> std::io::Result<Vec<(String, u64)>> {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
             let relative = if dir.is_empty() { name } else { format!("{dir}/{name}") };
-            if [MARKER, "replica-spool", "store.deleted"].contains(&relative.as_str()) {
+            if [MARKER, MARKER_STAGED, "replica-spool", "store.deleted"]
+                .contains(&relative.as_str())
+            {
                 continue;
             }
             let metadata = entry.metadata()?;
@@ -512,12 +518,31 @@ fn remove_durably(path: &Path) -> std::io::Result<()> {
     host_fs::sync_dir(path.parent().unwrap_or(Path::new(".")))
 }
 
-/// Writes `bytes` to a file at `path`, whole, durably.
+/// Writes `bytes` to a file at `path`, whole, durably: staged beside it ([`staged`]), synced, then
+/// renamed over it, so that `path` holds them whole or as it was, whatever fails or crashes on the
+/// way (board 5721: a hand-over note created and its write failing was left empty, unreadable,
+/// every asking again failing on it; and a marker so, read as none, still refusing the cell's
+/// openings). The staged file goes if a step fails.
 fn write_durably(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let file = host_fs::File::create(path)?;
-    file.write_all_at(bytes, 0)?;
-    file.sync_all()?;
+    let staged = staged(path);
+    let written = (|| {
+        let file = host_fs::File::create(&staged)?;
+        file.write_all_at(bytes, 0)?;
+        file.sync_all()?;
+        host_fs::rename(&staged, path)
+    })();
+    if let Err(err) = written {
+        let _ = host_fs::remove_file(&staged);
+        return Err(err);
+    }
     host_fs::File::open(path.parent().unwrap_or(Path::new(".")))?.sync_all()
+}
+
+/// Where [`write_durably`] stages what it writes at `path`: beside it, its name and `.new`.
+fn staged(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_owned();
+    name.push(".new");
+    path.with_file_name(name)
 }
 
 /// The target's side: what its peer server does of a migration to it.

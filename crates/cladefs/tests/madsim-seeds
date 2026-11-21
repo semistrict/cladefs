@@ -12,3 +12,4 @@
 423     board 5890: a log append written back a page at a time wrote again the end of the record synced before it; a crash before its sync made garbage of that record, a commit told durable lost (decision-3)
 107     board 5721: an accepted hand-over's note unlinked, its directory's sync failing, answered EIO; asking again found nothing (ENOENT)
 755     board 5721: a refused hand-over's marker unlinked, its directory's sync failing, answered EIO; asking again found no migration under way (ENOENT)
+17      board 5721: an accepted hand-over's note created, its write failing (ENOSPC), left empty: every asking again failed to read it, the host never answering
