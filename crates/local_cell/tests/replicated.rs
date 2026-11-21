@@ -373,11 +373,12 @@ impl local_cell::upload::Members for Peers {
         configuration: &'a bucket_cell::layout::Configuration,
         member: &'a bucket_cell::layout::Member,
         log: u64,
+        end: u64,
     ) -> futures::future::BoxFuture<'a, Result<Vec<u8>, String>> {
         Box::pin(async move {
             let replicas = self.reach(&member.address)?;
             let of = (cell, key(configuration), member.incarnation);
-            replicas.read(of, log, 0, u64::MAX).map_err(|err| err.to_string())
+            replicas.read(of, log, 0, end).map_err(|err| err.to_string())
         })
     }
 
@@ -1307,16 +1308,17 @@ impl local_cell::upload::Members for Misreporting {
         configuration: &'a bucket_cell::layout::Configuration,
         member: &'a bucket_cell::layout::Member,
         log: u64,
+        end: u64,
     ) -> futures::future::BoxFuture<'a, Result<Vec<u8>, String>> {
         Box::pin(async move {
             if member.address != self.member {
-                return self.peers.read(cell, configuration, member, log).await;
+                return self.peers.read(cell, configuration, member, log, end).await;
             }
             match self.how {
                 Misreport::Empty if log == EMPTY_LOG => Ok(Vec::new()),
-                Misreport::Empty => self.peers.read(cell, configuration, member, log).await,
+                Misreport::Empty => self.peers.read(cell, configuration, member, log, end).await,
                 Misreport::Garbled => {
-                    let mut bytes = self.peers.read(cell, configuration, member, log).await?;
+                    let mut bytes = self.peers.read(cell, configuration, member, log, end).await?;
                     if log & 1 == 0 {
                         bytes.extend(std::iter::repeat_n(0xa5, PAD));
                     }
@@ -1406,4 +1408,181 @@ async fn take_past(how: Misreport) {
     assert!(taken.last_commit().unwrap() >= last);
     assert_eq!(host.contents(&taken).await, expected);
     drop(uploader);
+}
+
+/// A host's peers as [`Peers`] reaches them, but reads of logs failing as a member stalled or gone
+/// fails them (board 5416): of the members `failing` names, or, of none named, the first member
+/// asked for each log.
+struct Stalling {
+    peers: Peers,
+    failing: Option<String>,
+    asked: Mutex<std::collections::BTreeSet<u64>>,
+    failed: std::sync::atomic::AtomicUsize,
+}
+
+impl Stalling {
+    fn new(peers: Peers, failing: Option<&str>) -> Arc<Self> {
+        let failing = failing.map(str::to_owned);
+        Arc::new(Self { peers, failing, asked: Mutex::default(), failed: Default::default() })
+    }
+
+    fn failed(&self) -> usize {
+        self.failed.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl local_cell::upload::Members for Stalling {
+    fn me(&self) -> Result<bucket_cell::layout::Member, String> {
+        self.peers.me()
+    }
+
+    fn pick<'a>(
+        &'a self,
+        cell: bucket_cell::layout::CellId,
+        number: u64,
+        f: u8,
+        avoid: &'a [String],
+    ) -> futures::future::BoxFuture<'a, Result<Vec<bucket_cell::layout::Member>, String>> {
+        self.peers.pick(cell, number, f, avoid)
+    }
+
+    fn link(
+        &self,
+        cell: bucket_cell::layout::CellId,
+        configuration: &bucket_cell::layout::Configuration,
+        member: &bucket_cell::layout::Member,
+    ) -> Arc<dyn MemberLink> {
+        self.peers.link(cell, configuration, member)
+    }
+
+    fn fence<'a>(
+        &'a self,
+        cell: bucket_cell::layout::CellId,
+        configuration: &'a bucket_cell::layout::Configuration,
+        member: &'a bucket_cell::layout::Member,
+        epoch: u64,
+    ) -> futures::future::BoxFuture<'a, Result<Vec<(u64, u64)>, String>> {
+        self.peers.fence(cell, configuration, member, epoch)
+    }
+
+    fn read<'a>(
+        &'a self,
+        cell: bucket_cell::layout::CellId,
+        configuration: &'a bucket_cell::layout::Configuration,
+        member: &'a bucket_cell::layout::Member,
+        log: u64,
+        end: u64,
+    ) -> futures::future::BoxFuture<'a, Result<Vec<u8>, String>> {
+        let fails = match &self.failing {
+            Some(failing) => *failing == member.address,
+            None => self.asked.lock().unwrap().insert(log),
+        };
+        if fails {
+            self.failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Box::pin(async move { Err(format!("{} stalled", member.address)) });
+        }
+        self.peers.read(cell, configuration, member, log, end)
+    }
+
+    fn drop_before<'a>(
+        &'a self,
+        cell: bucket_cell::layout::CellId,
+        configuration: &'a bucket_cell::layout::Configuration,
+        member: &'a bucket_cell::layout::Member,
+    ) -> futures::future::BoxFuture<'a, Result<(), String>> {
+        self.peers.drop_before(cell, configuration, member)
+    }
+}
+
+/// What [`Host::contents`] reads of a cell.
+type Contents = (BTreeMap<ExtentId, Vec<u8>>, Vec<u8>);
+
+/// A cell written by a, replicated to b and c, with c out of reach for its last commit if
+/// `c_behind`, b alone holding it then; a lost after. The cell's contents, and its last commit.
+async fn written_then_lost(
+    host: &Host,
+    peers: impl Fn(&str) -> Peers,
+    lost: &Lost,
+    c_behind: bool,
+) -> (Contents, u64) {
+    let writer = Host { runtime: host_runtime::HostRuntime::new(), bucket: host.bucket.clone() };
+    let dir = MemDir::new();
+    LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
+    let wish = bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated);
+    let recovering = LocalCell::recover_unmade(dir).unwrap();
+    let (cell, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).await.unwrap();
+    cell.made().unwrap();
+    cell.close_segment().unwrap();
+    uploader.uploaded(cell.last_commit().unwrap()).await.unwrap();
+    assert_eq!(addresses(&configuration_named(host).await), ["a", "b", "c"]);
+    let both = commit(&cell, 0, 2).await;
+    uploader.replicated(both).await.unwrap();
+    if c_behind {
+        lost.lock().unwrap().insert("c".into());
+    }
+    let last = commit(&cell, 2, 3).await;
+    uploader.replicated(last).await.unwrap();
+    assert!(uploader.last_uploaded() < last, "told replicated by members, not the bucket");
+    let expected = writer.contents(&cell).await;
+    let replicator = cell.replicator().unwrap();
+    lose(writer, (uploader, cell, replicator));
+    let mut lost = lost.lock().unwrap();
+    lost.remove("c");
+    lost.insert("a".into());
+    (expected, last)
+}
+
+/// The cell `host`'s bucket holds, taken by d through `members`.
+async fn taken_through(
+    host: &Host,
+    members: Arc<dyn local_cell::upload::Members>,
+) -> Result<(Arc<LocalCell<MemDir>>, Uploader<MemDir>), upload::Failure> {
+    let elsewhere = MemDir::new();
+    LocalCell::make(&elsewhere, DESCRIPTION, Some(URL), None).unwrap();
+    let recovering = LocalCell::recover_unmade(elsewhere).unwrap();
+    let runtime = Runtime {
+        handle: host.runtime.handle().clone(),
+        uploads: Budget::new(Limits::UNBOUNDED),
+        keys: bucket_cell::keys::testing::host(),
+    };
+    let options = upload::Options {
+        interval: Duration::from_secs(3600),
+        members: Some(upload::MembersOf(members)),
+        replace_after: Duration::from_secs(1),
+        ..upload::Options::default()
+    };
+    upload::open(recovering, OPTIONS, host.bucket.clone(), (2, options), &runtime).await
+}
+
+/// board 5416: a take whose read of a member's copy of a log fails, the member stalled, reads
+/// another member's copy as long: the first member asked for each log failing, d takes the cell
+/// a wrote to b and c alike, every commit there.
+#[tokio::test(flavor = "multi_thread")]
+async fn takes_pass_over_members_stalled_for_copies_as_long() {
+    let host = replicated_host().await;
+    let all = directories(&["a", "b", "c", "d", "e"]);
+    let lost = Lost::default();
+    let peers = |me: &str| Peers { me: me.into(), all: all.clone(), lost: lost.clone() };
+    let (expected, last) = written_then_lost(&host, peers, &lost, false).await;
+    let stalling = Stalling::new(peers("d"), None);
+    let (taken, uploader) = taken_through(&host, stalling.clone()).await.unwrap();
+    taken.made().unwrap();
+    assert!(taken.last_commit().unwrap() >= last);
+    assert_eq!(host.contents(&taken).await, expected);
+    assert!(stalling.failed() > 0, "no read failed");
+    drop(uploader);
+}
+
+/// board 5416: a take whose read of the one copy holding a log's last commits fails, the member
+/// stalled, fails: b alone holds a's last commit, and b stalls.
+#[tokio::test(flavor = "multi_thread")]
+async fn takes_fail_with_the_one_longest_copy_stalled() {
+    let host = replicated_host().await;
+    let all = directories(&["a", "b", "c", "d", "e"]);
+    let lost = Lost::default();
+    let peers = |me: &str| Peers { me: me.into(), all: all.clone(), lost: lost.clone() };
+    written_then_lost(&host, peers, &lost, true).await;
+    let taken = taken_through(&host, Stalling::new(peers("d"), Some("b"))).await;
+    let err = taken.map(drop).unwrap_err().to_string();
+    assert!(err.contains("b reading log") && err.contains("no other copy as long"), "{err}");
 }
