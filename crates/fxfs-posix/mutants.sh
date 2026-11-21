@@ -13,7 +13,9 @@
 # suite's own 96 to see. The tree has the mutant in it while it runs, and as it was when it ends,
 # stopped or not. Each patch applies as it is, with no fuzz: one that needs any has drifted from the
 # code it changes. --check runs nothing: it applies and reverses each patch in a copy of what it
-# changes, in a second, as CI does. A patch that doesn't apply fails either.
+# changes, in a second, as CI does. A patch that doesn't apply fails either; so does a mutant whose
+# tests couldn't run (they didn't build, or cargo didn't start: exit 127 on a host whose
+# non-login shell has no cargo), BROKEN, as it was tried by nothing (TASK-642).
 
 set -u -o pipefail
 cd "$(dirname "$0")/../.."
@@ -68,7 +70,7 @@ for name in "${names[@]}"; do
     case $status in
         0) found='not caught' ;;
         100) found=$(grep -m1 -E '^ *(FAIL|SIGABRT|TIMEOUT) ' "$log" | sed 's/.*fxfs-posix //') ;;
-        *) found="exit $status: $(grep -m1 -E '^error' "$log")" ;;
+        *) found="BROKEN: exit $status: $(grep -m1 -E '^error' "$log")"; broken=1 ;;
     esac
     printf '%-42s %-8s %s\n' "$name" "$((SECONDS - began))s" "$found"
     rm -f "$log"

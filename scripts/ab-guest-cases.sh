@@ -23,6 +23,14 @@
 # with its process group as the run ends: load the rounds bear, as other VMs' writes on the host's disk
 # (TASK-369). Inside the job, as the bench holds no disk for itself: a loader run as other work
 # loads whatever measurement holds the bench meanwhile.
+#
+# CLADEFS_AB_RAM_DISK, a size (truncate's, as 12G), runs each run in a directory of ext4 on a loop
+# device over a file in /dev/shm, made inside its `fxjob --bench` job (its memory the job's) and gone
+# as it ends, its TMPDIR in it too: its stores', part cache's and VMs' disks, which the host's
+# scratch disk otherwise
+# holds, whose speed drifts up to 4x within a job (ubu1's, ext4 on a ZFS zvol), so that a side's
+# syncs taking longer is its own doing (TASK-707). What the run leaves is copied to its results but
+# what CLADEFS_AB_KEEP_DATA would keep.
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 (( $# >= 5 )) || { sed -n '6,17p' "$0" >&2; exit 2; }
@@ -59,6 +67,32 @@ run() {
             "$@"; status=$?
             kill -- -"$loader" 2> /dev/null; wait "$loader" 2> /dev/null
             exit "$status"' loaded "${command[@]}")
+    fi
+    if [[ -n ${CLADEFS_AB_RAM_DISK:-} ]]; then
+        # In the job's TMPDIR, short enough for the daemon's control socket; the data left out of
+        # the copy as the run's own cleanup below leaves it out.
+        # shellcheck disable=SC2016 # expanded by the job's shell
+        command=(bash -c 'set -euo pipefail
+            results=$1 keep=$2; shift 2
+            image=$(mktemp /dev/shm/ab-ram.XXXXXX) disk=$TMPDIR/ram
+            mkdir "$disk"
+            unmount() { sudo umount "$disk" 2> /dev/null || true; rm -f "$image"; }
+            trap unmount EXIT
+            truncate -s "$CLADEFS_AB_RAM_DISK" "$image"
+            mkfs.ext4 -q -F "$image"
+            sudo mount -o loop "$image" "$disk"
+            sudo chown "$(id -u):$(id -g)" "$disk"
+            # The run'"'"'s temporary files there too: a daemon keeps a store at a version for forks
+            # in its TMPDIR, refused off its part cache'"'"'s filesystem (TASK-726).
+            mkdir "$disk/tmp"
+            status=0
+            CLADEFS_E2E_RESULTS=$disk TMPDIR=$disk/tmp "$@" || status=$?
+            left_out=(--exclude /lost+found --exclude /tmp)
+            [[ -n $keep ]] || left_out+=(--exclude "store-*" --exclude "*.bucket" \
+                --exclude cladefsd-cache --exclude "extent[d]-cache" --exclude rootfs \
+                --exclude "*.rootfs.ext4")
+            rsync -a "${left_out[@]}" "$disk/" "$results/"
+            exit "$status"' in-ram "$results" "${CLADEFS_AB_KEEP_DATA:-}" "${command[@]}")
     fi
     if ! env "${env[@]}" CLADEFS_E2E_PREBUILT="$artifacts" CLADEFS_E2E_RESULTS="$results" \
         fxjob --bench --name "ab-$name-$round" --mem "${CLADEFS_AB_MEM:-20G}" -- \
