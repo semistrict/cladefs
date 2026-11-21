@@ -401,7 +401,9 @@ impl Vm {
             // Not a block device's: the kernel mounts it by its source, the device's tag.
             Some(tag) => format!("root={tag} rootfstype=cladefs rw {CMDLINE}"),
             None => {
-                self.add_root_image(root)?;
+                if !self.has_root_image() {
+                    self.add_root_image(root)?;
+                }
                 CMDLINE.to_owned()
             }
         };
@@ -430,6 +432,20 @@ impl Vm {
         boot_args.push_str(test_case);
         self.config["boot-source"]["boot_args"] = boot_args.into();
         Ok(self.config)
+    }
+
+    /// Makes the ext4 image of `root` it boots from now, not as it boots: a test timing its boot
+    /// times no image's making.
+    pub fn make_root_image(&mut self, root: &Path) -> anyhow::Result<()> {
+        ensure!(self.fxfs_root.is_none(), "it boots on its Fxfs root, not an image");
+        ensure!(!self.has_root_image(), "its root's image is made");
+        self.add_root_image(root)
+    }
+
+    /// Whether its root's image is made, its first disk.
+    fn has_root_image(&self) -> bool {
+        let drives = self.config["drives"].as_array().expect("an array");
+        drives.iter().any(|drive| drive["drive_id"] == "rootfs")
     }
 
     /// Makes an ext4 image of `root`, and boots from it, its first disk.
