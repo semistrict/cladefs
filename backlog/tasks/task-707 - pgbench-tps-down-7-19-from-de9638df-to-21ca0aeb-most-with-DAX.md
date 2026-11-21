@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-20 21:24'
-updated_date: '2026-11-21 05:33'
+updated_date: '2026-11-21 07:41'
 labels:
   - perf
   - regression
@@ -46,4 +46,6 @@ Reported by the sandbox team (GCE 16 vCPU, Firecracker nested, 4-vCPU VM, pgbenc
 2026-11-20 ubu1, main f247775cf, fxfs-guest-pgbench-dax, 3x30 s, same binary, interleaved, fxjob --bench: spans recorded (unset) 2853/2918/2832 and 2690/2960/2864 tps, mean 2853; CLADEFSD_TRACES=off (daemon logged 'spans off') 2808/2938/2924 and 2287/2922/2828, mean 2785 (2884 without the 2287 first run). No difference beyond noise: span recording does not explain the drop on ubu1 (not nested virt; their GCE is). CLADEFSD_TRACES=off landed anyway (f247775cf) for the sandbox team's retest. Every run failed its encryption check after pgbench: TASK-711.
 
 2026-11-21: ubu1 reproduces it on its file bucket (no GCS spacing): interleaved A/B, fxfs-guest-pgbench-dax 3x30 s, de9638df 2987/2972/3049 (round 2 lost to systemd 'Transport endpoint is not connected'), main 7b6195f54 2229/2705/2833 and 2667/2808/2620: about 12% down. Not GCS's head cadence then (21ca0aeb's 1/s head swap, before TASK-691's slots, may add to it on GCS). Bisecting first-parent at 882e2daf8 (after zpages + replicated commits), e21e4efc4 (after per-node statics), 305aa2033 (after TASK-690), 21ca0aeb7 (after the async merge 5f65a04ee): ubu1 ~/src/fxdax-pgb-bisect.sh.
+
+2026-11-21: the ubu1 A/B's drop may be the scratch disk's: old-1 and the later sides wrote the same (io_write_bytes ~15.7 GB, ~700k writes), but their syncs took 3-4x as long (flush_sum_logs_us 12.6 s vs 34-48 s; durable_sum_files_us 2.7 s vs 12-20 s; raw_sync_max 149 ms vs 0.6-2.9 s): ubu1's scratch is ext4 on a ZFS zvol, which drifts up to 4x. The four-point bisect's rounds were on it too (882e2daf8 2737/2811/2995, e21e4efc4 2813/2980/2800): stopped. Rerunning de9638df vs 21ca0aeb7 with each run's stores on ext4 over a RAM-backed loop device inside its bench job (new: scripts/ab-guest-cases.sh CLADEFS_AB_RAM_DISK).
 <!-- SECTION:NOTES:END -->
