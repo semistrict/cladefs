@@ -292,7 +292,7 @@ fn sweeps_drop_what_heads_name_no_more() {
         let held = bucket_cell::head::take(
             &bucket,
             cell,
-            bucket_cell::head::read(&bucket, cell).await,
+            bucket_cell::head::read(&bucket, cell).await.unwrap(),
             &taking,
         )
         .await
@@ -307,7 +307,7 @@ fn sweeps_drop_what_heads_name_no_more() {
         // A replicated cell whose head names no configuration yet: its first may be installed
         // now, and nothing of it goes (TASK-537.3.2's review).
         bucket_cell::lifecycle::create(&bucket, unconfigured, 1).await.unwrap();
-        let read = bucket_cell::head::read(&bucket, unconfigured).await;
+        let read = bucket_cell::head::read(&bucket, unconfigured).await.unwrap();
         bucket_cell::head::take(&bucket, unconfigured, read, &taking).await.unwrap();
         // Nor of one whose head, read, is not replicated: a take may make it so, and install its
         // first configuration, before the sweep acts (Codex's review).

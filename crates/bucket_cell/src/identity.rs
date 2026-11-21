@@ -198,7 +198,7 @@ pub fn given(number: u16) -> bool {
 
 /// The bucket's identity, if it was formatted or added.
 pub async fn get(bucket: &impl Bucket) -> Result<Option<Identity>, Error> {
-    match bucket::get(bucket, layout::IDENTITY).await {
+    match bucket::get(bucket, layout::IDENTITY).await? {
         Some(object) => decode(&object.bytes).map(Some),
         None => Ok(None),
     }
@@ -213,7 +213,7 @@ pub async fn registry(bucket: &impl Bucket) -> Result<Option<Registry>, Error> {
 async fn registry_versioned(
     bucket: &impl Bucket,
 ) -> Result<Option<(Registry, bucket::Version)>, Error> {
-    match bucket::get(bucket, layout::BUCKETS).await {
+    match bucket::get(bucket, layout::BUCKETS).await? {
         Some(object) => Ok(Some((decode(&object.bytes)?, object.meta.version))),
         None => Ok(None),
     }
@@ -235,7 +235,7 @@ pub async fn format(
             let settings = Settings::formatted(asked)?;
             let made =
                 Identity { format: layout::FORMAT, number: ROOT, id: rand::random(), settings };
-            match bucket::create(bucket, layout::IDENTITY, layout::encode(&made)).await {
+            match bucket::create(bucket, layout::IDENTITY, layout::encode(&made)).await? {
                 Created::Created(_) => made,
                 // Another formatting's, or addition's, first.
                 Created::Exists(object) => decode(&object.bytes)?,
@@ -251,7 +251,7 @@ pub async fn format(
         };
         let registry = Registry { format: layout::FORMAT, version: 1, buckets: vec![entry] };
         // Another formatting's, first, if it exists: of the same identity.
-        bucket::create(bucket, layout::BUCKETS, layout::encode(&registry)).await;
+        bucket::create(bucket, layout::BUCKETS, layout::encode(&registry)).await?;
     }
     Ok(identity)
 }
@@ -304,7 +304,7 @@ pub async fn add(
         }
         changed.buckets.push(entry.clone());
         let bytes = layout::encode(&changed);
-        match bucket::update(root, layout::BUCKETS, bytes, &version).await {
+        match bucket::update(root, layout::BUCKETS, bytes, &version).await? {
             Updated::Updated(_) => break (entry, changed),
             // Another's addition, first: the next number.
             Updated::Changed => {}
@@ -316,7 +316,7 @@ pub async fn add(
         id: entry.id,
         settings: entry.settings,
     };
-    match bucket::create(new, layout::IDENTITY, layout::encode(&identity)).await {
+    match bucket::create(new, layout::IDENTITY, layout::encode(&identity)).await? {
         Created::Created(_) => Ok((identity, registry)),
         Created::Exists(object) => match decode::<Identity>(&object.bytes)? {
             found if found == identity => Ok((identity, registry)),
@@ -342,12 +342,12 @@ pub async fn spread(registry: &Registry, bucket: &impl Bucket) -> Result<(), Err
         match registry_versioned(bucket).await? {
             Some((copy, _)) if copy.version >= registry.version => return Ok(()),
             Some((_, version)) => {
-                match bucket::update(bucket, layout::BUCKETS, bytes.clone(), &version).await {
+                match bucket::update(bucket, layout::BUCKETS, bytes.clone(), &version).await? {
                     Updated::Updated(_) => return Ok(()),
                     Updated::Changed => {}
                 }
             }
-            None => match bucket::create(bucket, layout::BUCKETS, bytes.clone()).await {
+            None => match bucket::create(bucket, layout::BUCKETS, bytes.clone()).await? {
                 Created::Created(_) => return Ok(()),
                 Created::Exists(_) => {}
             },
@@ -457,7 +457,7 @@ mod tests {
                 id: 0x51,
                 settings: Settings::default(),
             };
-            bucket::create(&bucket, layout::IDENTITY, layout::encode(&left)).await;
+            bucket::create(&bucket, layout::IDENTITY, layout::encode(&left)).await.unwrap();
             assert_eq!(registry(&bucket).await, Ok(None));
             assert_eq!(format(&bucket, &Details::default(), Asked::default()).await, Ok(left));
             let registry = registry(&bucket).await.unwrap().unwrap();
@@ -602,7 +602,7 @@ mod tests {
                 add(&root, &Details::default(), &new, details.clone(), Asked::default())
                     .await
                     .unwrap();
-            bucket::delete(&new, layout::IDENTITY).await;
+            bucket::delete(&new, layout::IDENTITY).await.unwrap();
             let (again, registry) =
                 add(&root, &Details::default(), &new, details.clone(), Asked::default())
                     .await
@@ -657,7 +657,9 @@ mod tests {
                 details: Details::default(),
                 settings: Settings::default(),
             });
-            bucket::update(&full, layout::BUCKETS, layout::encode(&registry), &version).await;
+            bucket::update(&full, layout::BUCKETS, layout::encode(&registry), &version)
+                .await
+                .unwrap();
             let refused = add(
                 &full,
                 &Details::default(),
@@ -700,7 +702,7 @@ mod tests {
                 id: 1,
                 settings: Settings::default(),
             };
-            bucket::create(&bucket, layout::IDENTITY, layout::encode(&other)).await;
+            bucket::create(&bucket, layout::IDENTITY, layout::encode(&other)).await.unwrap();
             let refused = Error::BucketFormat(layout::FORMAT - 1);
             assert_eq!(get(&bucket).await, Err(refused.clone()));
             assert_eq!(format(&bucket, &Details::default(), Asked::default()).await, Err(refused));

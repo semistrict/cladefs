@@ -380,7 +380,7 @@ async fn make_keys(bucket: &ObjectBucket, cell: CellId) -> Result<(), Failure> {
 /// Whether the bucket has `cell`: its head, read to see, is what the cell's opening, next, would
 /// read first, learned for it, a read less (`bucket_cell::known`, TASK-449).
 async fn learn_taken(bucket: &ObjectBucket, cell: CellId) -> Result<bool, Failure> {
-    let read = bucket_cell::head::read(bucket, cell).await;
+    let read = bucket_cell::head::read(bucket, cell).await?;
     let found = read.head(cell)?.is_some();
     if let Some(known) = bucket_cell::Bucket::known(bucket)
         && found
@@ -992,7 +992,7 @@ mod tests {
         let block = first.id / bucket_cell::objectid::ID_BLOCK;
         let bucket = bucket(&url).unwrap();
         let taken = bucket_cell::layout::objectid_block(block);
-        assert!(bucket_cell::bucket::get(&*bucket, &taken).await.is_some());
+        assert!(bucket_cell::bucket::get(&*bucket, &taken).await.unwrap().is_some());
 
         let absent = CellId { tenant: DEFAULT_TENANT, id: second.id + 1 };
         let path = dir.path().join("absent");

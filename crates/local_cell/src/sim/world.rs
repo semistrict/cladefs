@@ -3076,7 +3076,8 @@ impl World {
                 Entry::Occupied(known) => known.into_mut(),
                 Entry::Vacant(unknown) => {
                     let key = layout::segment(cell, segment, epoch);
-                    let Some(object) = block_on(bucket_cell::bucket::get(direct, &key)) else {
+                    let got = block_on(bucket_cell::bucket::get(direct, &key));
+                    let Some(object) = got.map_err(|err| err.to_string())? else {
                         return Err(format!(
                             "cell {}: segment {segment} gone",
                             Short(cell.id),

@@ -5420,7 +5420,8 @@ fn ephemeral_cells_fork_from_versions_and_retire_their_references() {
     let references = || {
         let listing =
             bucket_cell::lifecycle::ephemeral_references(&*bucket, ephemeral.incarnation());
-        let mut children: Vec<_> = control(listing).into_iter().map(|(_, child)| child).collect();
+        let mut children: Vec<_> =
+            control(listing).unwrap().into_iter().map(|(_, child)| child).collect();
         children.sort();
         children
     };
@@ -5465,7 +5466,7 @@ fn ephemeral_cells_fork_from_versions_and_retire_their_references() {
     assert_eq!(references(), vec![kept]);
     assert!(ephemeral.entry(gone).is_none());
     let retired = control(bucket_cell::lifecycle::decommission(&*bucket, ephemeral.incarnation()));
-    assert_eq!(retired, 1);
+    assert_eq!(retired, Ok(1));
     assert_eq!(references(), vec![]);
 }
 
@@ -5501,7 +5502,7 @@ fn targets_take_a_cells_migrations_by_its_epoch() {
     let references = || {
         let listing =
             bucket_cell::lifecycle::ephemeral_references(&*bucket, ephemeral.incarnation());
-        control(listing).into_iter().map(|(_, child)| child).collect::<Vec<_>>()
+        control(listing).unwrap().into_iter().map(|(_, child)| child).collect::<Vec<_>>()
     };
 
     let (incarnation, token) = control(target::prepare(prepare(0x11, 2))).unwrap();

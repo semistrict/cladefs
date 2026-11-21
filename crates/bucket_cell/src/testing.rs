@@ -440,6 +440,10 @@ impl Inner {
 
     /// Applies `op` to the bucket of region `region`.
     fn apply(&mut self, region: u16, op: Op) -> Result<Reply, Error> {
+        // cladefs: a key longer than buckets take, refused as they refuse it (board 5861).
+        if op.key().len() > layout::MAX_KEY {
+            return Err(Error::Refused(crate::bucket::Refusal::Request));
+        }
         let at = |key: &str| stored_at(region, key);
         // The key of an object kept at `stored`, under `prefix`, kept at `kept`.
         let key_of =
@@ -608,30 +612,39 @@ impl Bucket for SimBucket {
 /// cladefs: the mirrors in its host's bucket, in its own bucket (TASK-633.8), as
 /// `ObjectBucket`'s.
 impl crate::mirror::Here for SimBucket {
-    fn marked(&self, parent: CellId, at: u64) -> futures::future::BoxFuture<'_, bool> {
+    fn marked(
+        &self,
+        parent: CellId,
+        at: u64,
+    ) -> futures::future::BoxFuture<'_, Result<bool, crate::bucket::Refused>> {
         let own = self.own();
         let mine = self.region_of(&parent.prefix()) == self.home;
         Box::pin(async move {
-            !mine && crate::bucket::get(&*own, &layout::mirror(parent, at)).await.is_some()
+            Ok(!mine && crate::bucket::get(&*own, &layout::mirror(parent, at)).await?.is_some())
         })
     }
 
-    fn create<'a>(&'a self, key: &'a str, bytes: Vec<u8>) -> futures::future::BoxFuture<'a, ()> {
+    fn create<'a>(
+        &'a self,
+        key: &'a str,
+        bytes: Vec<u8>,
+    ) -> futures::future::BoxFuture<'a, Result<(), crate::bucket::Refused>> {
         let own = self.own();
-        Box::pin(async move {
-            crate::bucket::create(&*own, key, bytes).await;
-        })
+        Box::pin(async move { crate::bucket::create(&*own, key, bytes).await.map(drop) })
     }
 
-    fn retire<'a>(&'a self, keys: &'a [&'a str]) -> futures::future::BoxFuture<'a, usize> {
+    fn retire<'a>(
+        &'a self,
+        keys: &'a [&'a str],
+    ) -> futures::future::BoxFuture<'a, Result<usize, crate::bucket::Refused>> {
         let own = self.own();
         let theirs: Vec<&str> =
             keys.iter().copied().filter(|key| self.region_of(key) != self.home).collect();
         Box::pin(async move {
             if !theirs.is_empty() {
-                crate::lifecycle::retire(&*own, &theirs).await;
+                crate::lifecycle::retire(&*own, &theirs).await?;
             }
-            theirs.len()
+            Ok(theirs.len())
         })
     }
 
@@ -642,9 +655,11 @@ impl crate::mirror::Here for SimBucket {
             if mine {
                 return;
             }
-            for meta in crate::bucket::list(&*own, &layout::mirrors(cell)).await {
+            for meta in crate::bucket::list(&*own, &layout::mirrors(cell)).await.unwrap() {
                 let Kind::Mirror { at, .. } = layout::kind(&meta.key) else { continue };
-                let Some(found) = crate::bucket::get(&*own, &meta.key).await else { continue };
+                let Some(found) = crate::bucket::get(&*own, &meta.key).await.unwrap() else {
+                    continue;
+                };
                 if let Ok(marker) = layout::decode::<layout::Mirror>(&found.bytes) {
                     self.known.named(cell, at, marker.epoch);
                 }
@@ -800,7 +815,9 @@ pub async fn forked_at(bucket: &impl Bucket, child: CellId, origin: layout::Orig
     let parents = crate::keys::Parents::Kms(&kms, None);
     crate::recovery::checkpoint_at(bucket, origin.parent, origin.at, parents).await.unwrap();
     let reference = layout::reference(origin.parent, origin.at, child);
-    crate::bucket::create(bucket, &reference, layout::encode(&layout::Reference::of(0))).await;
+    crate::bucket::create(bucket, &reference, layout::encode(&layout::Reference::of(0)))
+        .await
+        .unwrap();
     let head = layout::Head::of(crate::record::Made::Clone(origin), 0);
     make_head(bucket, child, head).await;
 }
@@ -824,7 +841,7 @@ pub async fn take(
     token: u64,
 ) -> Result<crate::head::Held, crate::Error> {
     let taking = crate::head::Taking { holder, token, ..crate::head::Taking::default() };
-    crate::head::take(bucket, cell, crate::head::read(bucket, cell).await, &taking).await
+    crate::head::take(bucket, cell, crate::head::read(bucket, cell).await?, &taking).await
 }
 
 /// cladefs: the live cells of every cell of `bucket`, as `cladefs-gc --cells` lists them
@@ -834,7 +851,8 @@ pub async fn live(bucket: &impl Bucket) -> Result<BTreeMap<CellId, layout::Head>
     let mut live = BTreeMap::new();
     let mut cells = std::pin::pin!(crate::cell::listed(bucket));
     while let Some(cell) = cells.next().await {
-        let read = crate::head::read(bucket, cell).await.slots();
+        let cell = cell?;
+        let read = crate::head::read(bucket, cell).await?.slots();
         read.head(cell)?;
         // cladefs: and a head being made, or its maker dead making it, as a fork being made is
         // live: an orphan to delete, which fails it (TASK-691).
@@ -903,7 +921,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
     use layout::Head;
     use storage_device::ExtentId;
     let keys: BTreeSet<String> =
-        crate::bucket::list(bucket, "").await.into_iter().map(|meta| meta.key).collect();
+        crate::bucket::list(bucket, "").await.unwrap().into_iter().map(|meta| meta.key).collect();
     let mut records: BTreeMap<CellId, Head> = BTreeMap::new();
     let mut references = Vec::new();
     // cladefs: the holds of mirrors of its cells' versions in other buckets, each kept for as long
@@ -1099,14 +1117,15 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
             // cladefs: a failed head's marks, a day, and a head its maker left unmade, an hour,
             // till the collector fails it (TASK-691).
             Kind::Head { cell, .. } => {
-                let found = crate::head::read(bucket, cell).await.slots();
-                match (crate::bucket::get(bucket, key).await, found.found()) {
+                let found = crate::head::read(bucket, cell).await.unwrap().slots();
+                match (crate::bucket::get(bucket, key).await.unwrap(), found.found()) {
                     (Some(object), crate::head::Found::Failed) => {
                         let mark = Head::decode(cell, &object.bytes).is_ok_and(|head| head.failed);
                         mark && object.meta.modified + crate::head::MARKS_KEPT > bucket.now()
                     }
                     (Some(_), crate::head::Found::Unmade(_)) => {
-                        let first = crate::bucket::get(bucket, &layout::head(cell, 0)).await;
+                        let first =
+                            crate::bucket::get(bucket, &layout::head(cell, 0)).await.unwrap();
                         first.is_some_and(|first| {
                             first.meta.modified + crate::head::UNMADE_FOR > bucket.now()
                         })
@@ -1125,7 +1144,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         if !compactable || touched.contains(&key) || !moves_of(&key).is_empty() {
             continue;
         }
-        let Some(object) = crate::bucket::get(bucket, &key).await else { continue };
+        let Some(object) = crate::bucket::get(bucket, &key).await.unwrap() else { continue };
         // cladefs: its data's length, as its trailer says, read holding no key (TASK-411.28).
         let Ok(frame) = layout::Frame::of(&object.bytes) else { continue };
         let used: u64 = extents.values().sum();
@@ -1162,7 +1181,7 @@ pub async fn uncollected_copies(
     use crate::layout::Origin;
     let mut left = Vec::new();
     let here: BTreeSet<String> =
-        crate::bucket::list(own, "").await.into_iter().map(|meta| meta.key).collect();
+        crate::bucket::list(own, "").await.unwrap().into_iter().map(|meta| meta.key).collect();
     let mut copies: BTreeMap<CellId, Vec<&String>> = BTreeMap::new();
     for key in &here {
         if layout::routed_to(key).is_some_and(|of| of != number)
@@ -1215,7 +1234,7 @@ pub async fn uncollected_copies(
     }
     // Its holds in other buckets, every one's own cells' listed; and its own cells.
     let mut children = BTreeSet::new();
-    for meta in crate::bucket::list(bucket, "").await {
+    for meta in crate::bucket::list(bucket, "").await.unwrap() {
         match layout::kind(&meta.key) {
             Kind::Hold { parent, at, bucket: of }
                 if of == number && !here.contains(&layout::mirror(parent, at)) =>
@@ -1248,7 +1267,7 @@ pub async fn uncollected_copies(
 /// its versions in another bucket, in its own bucket, where `bucket` routes it ([`uncollected`]'s
 /// dead cell, whose records are deleted).
 async fn dead(bucket: &impl Bucket, cell: CellId) -> bool {
-    let listed = crate::bucket::list(bucket, &cell.prefix()).await;
+    let listed = crate::bucket::list(bucket, &cell.prefix()).await.unwrap();
     !listed.iter().any(|meta| {
         matches!(
             layout::kind(&meta.key),
@@ -1269,10 +1288,10 @@ async fn copied_whole(
     here: &BTreeSet<String>,
 ) -> Result<(), String> {
     let hold = layout::hold(cell, at, number);
-    if crate::bucket::get(bucket, &hold).await.is_none() {
+    if crate::bucket::get(bucket, &hold).await.unwrap().is_none() {
         return Err(format!("its hold {hold} gone"));
     }
-    let marker = crate::bucket::get(own, &layout::mirror(cell, at)).await;
+    let marker = crate::bucket::get(own, &layout::mirror(cell, at)).await.unwrap();
     let marker = marker.ok_or("gone")?;
     let epoch =
         layout::decode::<layout::Mirror>(&marker.bytes).map_err(|err| err.to_string())?.epoch;
@@ -1505,6 +1524,24 @@ mod tests {
         assert_eq!(sim.read("empty", &ByteRange::Suffix(10)), Err(Error::Unavailable));
     }
 
+    /// board 5861: the simulation refuses a request of a key longer than buckets take, for good,
+    /// as they refuse it: a create, a read, a listing; one of the longest it serves.
+    #[test]
+    fn keys_past_the_longest_are_refused_as_buckets_refuse_them() {
+        use crate::bucket::{Bucket as _, PutMode, Refusal};
+        use futures::executor::block_on;
+        let bucket = Direct(SimBucket::new());
+        let long = "k".repeat(layout::MAX_KEY + 1);
+        let refused = Err(Error::Refused(Refusal::Request));
+        let put = block_on(bucket.put(&long, vec![1].into(), PutMode::Create)).map(drop);
+        assert_eq!(put, refused);
+        assert_eq!(block_on(bucket.get(&long)).map(drop), refused);
+        assert_eq!(block_on(bucket.list(&long)).map(drop), refused);
+        let longest = &long[1..];
+        block_on(bucket.put(longest, vec![1].into(), PutMode::Create)).unwrap();
+        assert_eq!(block_on(bucket.get(longest)).unwrap().bytes, [1]);
+    }
+
     /// TASK-79.73: a create of a cell's segment, its writer's creates held, waits until a delete
     /// of an object at its key takes effect, then waits as any request does; a delete of none
     /// lets it go no more than any other request does.
@@ -1547,7 +1584,7 @@ mod tests {
             let (sim, results) = (sim.clone(), results.clone());
             pool.spawner()
                 .spawn_local(async move {
-                    let created = create(&*sim, key, bytes.to_vec()).await;
+                    let created = create(&*sim, key, bytes.to_vec()).await.unwrap();
                     results.borrow_mut().push((key, matches!(created, Created::Created(_))));
                 })
                 .unwrap();

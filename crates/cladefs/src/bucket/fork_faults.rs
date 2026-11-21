@@ -297,7 +297,7 @@ impl World {
 
     /// cladefs: whether `cell`'s head is failed, its marks standing (TASK-691).
     fn failed(&self, cell: crate::CellId) -> bool {
-        let read = block_on(bucket_cell::head::read(&*self.bucket, cell)).slots();
+        let read = block_on(bucket_cell::head::read(&*self.bucket, cell)).unwrap().slots();
         *read.found() == bucket_cell::head::Found::Failed
     }
 

@@ -308,6 +308,13 @@ impl From<anyhow::Error> for Failure {
     }
 }
 
+/// cladefs: a request the bucket refuses for good, as `bucket_cell` says it (board 5861).
+impl From<bucket_cell::bucket::Refused> for Failure {
+    fn from(refused: bucket_cell::bucket::Refused) -> Self {
+        Self::Bucket(refused.into())
+    }
+}
+
 /// cladefs: how long a take waits for the members of its new configuration to hold what the one
 /// before held, before it fails (doc-21, TASK-537.3.4).
 const SEEDING: Duration = Duration::from_secs(60);
@@ -2618,7 +2625,7 @@ async fn first_read<B: bucket_cell::Bucket>(
 ) -> Result<head::Read, Failure> {
     let read = match learned {
         Some(Learned { head }) => head::Read::found(head),
-        None => head::read(bucket, cell).await,
+        None => head::read(bucket, cell).await?,
     };
     if !read.head(cell)?.is_some_and(|head| !head.deleted() && head.forking().is_some()) {
         return Ok(read);
@@ -2629,7 +2636,7 @@ async fn first_read<B: bucket_cell::Bucket>(
     match lifecycle::resume_version_fork(bucket, cell, start, keys::Parents::Kms(kms, None)).await?
     {
         Some(left) => Ok(head::Read::found(left)),
-        None => Ok(head::read(bucket, cell).await),
+        None => Ok(head::read(bucket, cell).await?),
     }
 }
 

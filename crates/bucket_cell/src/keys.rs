@@ -1359,7 +1359,7 @@ pub async fn taking(
             Ok(held) => return Ok((held.clone(), kept(kms, cell, &held.head, kek))),
             Err(Error::Raced) => {
                 drop(given_back(kms, cell, kek, Error::Raced));
-                read = head::read(bucket, cell).await;
+                read = head::read(bucket, cell).await?;
             }
             Err(err) => return Err(given_back(kms, cell, kek, err)),
         }
@@ -1900,7 +1900,7 @@ mod tests {
         // on a host unwrapping anew, needs its own KEK alone, and reads no ancestor's head.
         counted.inner().destroy(TEST_CELL.tenant).unwrap();
         for slot in 0..crate::identity::DEFAULT_HEAD_SLOTS {
-            block_on(crate::bucket::delete(&bucket, &layout::head(parent, slot)));
+            block_on(crate::bucket::delete(&bucket, &layout::head(parent, slot))).unwrap();
         }
         counted.reset();
         let (_, fresh) = kms_over(&counted);
@@ -2168,7 +2168,7 @@ mod tests {
         let refused = Error::Kms("tenant 1: cell 1/1 is shredded, its KEK gone".into());
         let taking = head::Taking { holder: 7, token: 7, ..head::Taking::default() };
         let took = block_on(async {
-            head::take(&bucket, ours, head::read(&bucket, ours).await, &taking).await
+            head::take(&bucket, ours, head::read(&bucket, ours).await.unwrap(), &taking).await
         });
         assert_eq!(took.map(|held| held.head), Err(refused.clone()));
         assert_eq!(
@@ -2215,7 +2215,7 @@ mod tests {
         cell: CellId,
         taking: head::Taking,
     ) -> Result<(head::Held, CellKeys), Error> {
-        super::taking(bucket, kms, cell, head::read(bucket, cell).await, taking).await
+        super::taking(bucket, kms, cell, head::read(bucket, cell).await.unwrap(), taking).await
     }
 
     /// A host's KMS over `counted`, unwrapping anew.

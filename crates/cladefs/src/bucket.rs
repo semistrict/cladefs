@@ -167,6 +167,12 @@ pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
         Failure::Bucket(Error::Unmade(_)) => Some(Errno::ENOENT),
         Failure::Bucket(Error::IdTaken(_) | Error::OtherKind(_)) => Some(Errno::EEXIST),
         Failure::Bucket(Error::NotShared(_)) => Some(Errno::EACCES),
+        // cladefs: a bucket refusing the host's credentials, for good, or a request of its own:
+        // never retried (board 5861).
+        Failure::Bucket(Error::Refused(refused)) => Some(match refused.refusal {
+            bucket_cell::bucket::Refusal::Denied => Errno::EACCES,
+            bucket_cell::bucket::Refusal::Request => Errno::EIO,
+        }),
         // cladefs: a tenant's KEK the KMS refused, revoked, destroyed, or unreached: its open cells
         // open no more until it is given back (TASK-411.3).
         Failure::Bucket(Error::Kms(_)) => Some(Errno::EACCES),
@@ -447,7 +453,9 @@ pub async fn shred_tenant(
     let shredded = match (keys.and_then(|keys| keys.by_bucket.as_ref()), bucket_kms()) {
         (Some(by_bucket), _) => by_bucket.shred(tenant).await,
         (None, Some(kms)) => {
-            Shredded { destroyed: vec![(0, kms.destroy(tenant).await)], ..Shredded::default() }
+            let mut shredded = Shredded::default();
+            shredded.destroying(0, kms.destroy(tenant).await);
+            shredded
         }
         (None, None) => Shredded::default(),
     };
@@ -3679,7 +3687,7 @@ mod tests {
         let kek = |tenant| {
             let key = layout::kek(tenant);
             let got = futures::executor::block_on(bucket_cell::bucket::get(&*bucket, &key));
-            got.map(|object| object.bytes)
+            got.unwrap().map(|object| object.bytes)
         };
         assert_eq!(kek(1).map(|bytes| bytes.len()), Some(extent_keys::kms::bucket::KEK_OBJECT_LEN));
         let read = async |at: usize| {

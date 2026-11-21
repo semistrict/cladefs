@@ -550,6 +550,15 @@ acknowledged, and since when). *Added 2026-11-10 (TASK-314):* the cell counts th
 fail by kind and logs each kind's run of failures with the bucket's own error, as it starts, every
 30 s, and as it ends, so that a bucket failing for good (full, out of reach, refusing its
 credentials) says why its guests' commits wait; doc-12 says what the guest sees.
+*Added 2026-11-21 (board 5861):* a failure no retry changes is not retried: a bucket refusing the
+request for good, its credentials (HTTP 401 or 403, a file bucket's permissions) or the request
+itself (another 4xx but 408, 409 and 429; a key past the 1,024 bytes buckets take, `layout::MAX_KEY`),
+is `Error::Refused`, which every retrying helper of `bucket_cell::bucket` returns at once, naming
+the key (`bucket::Refused`), and its callers fail with: a pass of the collector, a sweep's listing,
+a cell's upload (`EACCES` for credentials, `EIO` for a request). A bucket out of reach, a server's
+error (5xx), a throttle, stays a failure that passes, retried as above. Before, both were retried
+for ever: a key the collector made too long hung its sweeps (TASK-572), credentials an addition of
+a bucket opened wrong hung it (board 5550).
 A failure of its writer's, a swap of the head refused as another took the branch among them, stops
 the uploader, and its commits waiting to be uploaded fail. (A writer displaced by a late segment
 took the branch again until TASK-407: no segment lands where another's goes now.)

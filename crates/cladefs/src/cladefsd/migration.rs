@@ -951,11 +951,16 @@ pub(super) mod target {
         let incarnation = host.incarnation();
         let referring =
             bucket_cell::lifecycle::refer_ephemeral(&*bucket, origin, incarnation, child);
-        if tokio::time::timeout(BUCKET_BOUND, referring).await.is_err() {
+        let failed = match tokio::time::timeout(BUCKET_BOUND, referring).await {
+            Ok(Ok(())) => None,
+            Ok(Err(err)) => Some(status("its reference", err)),
+            Err(_) => Some(Status::unavailable(format!("referring to {origin:?} timed out"))),
+        };
+        if let Some(failed) = failed {
             // Referred or not: given up, its reference retired, or, that timing out too, left to
             // the reaping of migrations idle too long.
             refuse(&host, &entry).await?;
-            return Err(Status::unavailable(format!("referring to {origin:?} timed out")));
+            return Err(failed);
         }
         // Staged afresh but by this daemon: what a daemon before it staged, it may have lost part
         // of, unsynced, at its host's restart (board 5721).
@@ -1115,8 +1120,11 @@ pub(super) mod target {
         let (origin, child) = (taken.origin, taken.child);
         let referring =
             bucket_cell::lifecycle::refer_ephemeral(&*bucket, origin, host.incarnation(), child);
-        if tokio::time::timeout(BUCKET_BOUND, referring).await.is_err() {
-            return Err(Status::unavailable(format!("referring to {origin:?} timed out")));
+        match tokio::time::timeout(BUCKET_BOUND, referring).await {
+            Ok(referred) => referred.map_err(|err| status("its reference", err))?,
+            Err(_) => {
+                return Err(Status::unavailable(format!("referring to {origin:?} timed out")));
+            }
         }
         host.accept(migration, taken.child)
             .map_err(|err| status("remembering it accepted", err))?;

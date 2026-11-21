@@ -129,7 +129,7 @@ impl<B: Bucket> BucketKms<B> {
     }
 
     /// Shreds `tenant` ([`destroy`]), and forgets its KEK here.
-    pub async fn destroy(&self, tenant: u64) -> Destroyed {
+    pub async fn destroy(&self, tenant: u64) -> Result<Destroyed, bucket::Refused> {
         let destroyed = destroy(&*self.bucket, tenant).await;
         self.forget(tenant);
         destroyed
@@ -162,7 +162,8 @@ impl<B: Bucket> BucketKms<B> {
     /// finding another host's object there takes that.
     async fn read(&self, tenant: u64, make: bool) -> Result<Arc<TenantKek>, Error> {
         let key = layout::kek(tenant);
-        if let Some(object) = bucket::get(&*self.bucket, &key).await {
+        let refused = |refused| refused_kms(tenant, refused);
+        if let Some(object) = bucket::get(&*self.bucket, &key).await.map_err(refused)? {
             return self.opened(tenant, &object.bytes);
         }
         // A key wrapped under a KEK names one that was there: deleted since, by someone other than
@@ -172,7 +173,8 @@ impl<B: Bucket> BucketKms<B> {
         }
         let kek = TenantKek::random();
         let newest = self.keys.newest();
-        match bucket::create(&*self.bucket, &key, KekObject::seal(newest, tenant, &kek)).await {
+        let sealed = KekObject::seal(newest, tenant, &kek);
+        match bucket::create(&*self.bucket, &key, sealed).await.map_err(refused)? {
             Created::Created(_) => {
                 log::info!(
                     "cladefs: tenant {tenant}: its KEK made, {key}, under master key {}",
@@ -228,6 +230,16 @@ impl<B: Bucket> Kms for BucketKms<B> {
     }
 }
 
+/// cladefs: what the KMS answers when the bucket refuses `tenant`'s KEK object's request for good
+/// (board 5861): the KMS failed, as it does when out of reach, saying why, never a revocation.
+fn refused_kms(tenant: u64, refused: bucket::Refused) -> Error {
+    let kind = match refused.refusal {
+        bucket::Refusal::Denied => std::io::ErrorKind::PermissionDenied,
+        bucket::Refusal::Request => std::io::ErrorKind::InvalidInput,
+    };
+    Error::Io { tenant, source: std::io::Error::new(kind, refused) }
+}
+
 /// What [`destroy`] did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Destroyed {
@@ -242,23 +254,24 @@ pub enum Destroyed {
 /// master key. Every host reading it from then on refuses the tenant as destroyed: those holding
 /// its KEK within [`FRESH_FOR`], or at once once told (`ForgetTenantKeys`). Only as strong as the
 /// bucket keeps no older version of the object: with versioning on, a lifecycle rule must expire
-/// non-current versions of `tenants/<tenant>/kek`.
-pub async fn destroy(bucket: &impl Bucket, tenant: u64) -> Destroyed {
+/// non-current versions of `tenants/<tenant>/kek`. cladefs: refused by the bucket, [`bucket::Refused`]
+/// (board 5861).
+pub async fn destroy(bucket: &impl Bucket, tenant: u64) -> Result<Destroyed, bucket::Refused> {
     let key = layout::kek(tenant);
     loop {
-        let Some(object) = bucket::get(bucket, &key).await else {
-            match bucket::create(bucket, &key, KekObject::tombstone(tenant)).await {
-                Created::Created(_) => return Destroyed::Now,
+        let Some(object) = bucket::get(bucket, &key).await? else {
+            match bucket::create(bucket, &key, KekObject::tombstone(tenant)).await? {
+                Created::Created(_) => return Ok(Destroyed::Now),
                 Created::Exists(_) => continue,
             }
         };
         // A KEK object, or bytes that are none: a tombstone in their place all the same.
         if let Ok(KekObject::Tombstone { .. }) = KekObject::decode(tenant, &object.bytes) {
-            return Destroyed::Already;
+            return Ok(Destroyed::Already);
         }
         let tombstone = KekObject::tombstone(tenant);
-        match bucket::update(bucket, &key, tombstone, &object.meta.version).await {
-            Updated::Updated(_) => return Destroyed::Now,
+        match bucket::update(bucket, &key, tombstone, &object.meta.version).await? {
+            Updated::Updated(_) => return Ok(Destroyed::Now),
             Updated::Changed => {}
         }
     }
@@ -282,15 +295,17 @@ pub struct Rotated {
 /// KMS): each one under an older key, one of `keys`, by a conditional update, read again and done
 /// again if another changed it meanwhile. The KEKs stay as they are. Once done, refusing none,
 /// hosts need the newest key alone: the others may be dropped from `CLADEFS_MASTER_KEY`. Tenants
-/// are listed a page at a time; done again, it rewraps nothing more.
-pub async fn rotate<B: Bucket>(bucket: &B, keys: &MasterKeys) -> Rotated {
+/// are listed a page at a time; done again, it rewraps nothing more. cladefs: refused by the bucket,
+/// [`bucket::Refused`] (board 5861), what it rewrapped before rewrapped.
+pub async fn rotate<B: Bucket>(bucket: &B, keys: &MasterKeys) -> Result<Rotated, bucket::Refused> {
     let mut rotated = Rotated::default();
     let mut tenants = std::pin::pin!(bucket::prefixes(bucket, layout::TENANTS.to_owned()));
     while let Some(prefix) = tenants.next().await {
+        let prefix = prefix?;
         let Some(tenant) = layout::tenant_of_prefix(&prefix) else { continue };
         let key = layout::kek(tenant);
         loop {
-            let Some(object) = bucket::get(bucket, &key).await else { break };
+            let Some(object) = bucket::get(bucket, &key).await? else { break };
             let resealed = KekObject::decode(tenant, &object.bytes)
                 .and_then(|kek| Ok((kek.resealed(keys)?, kek)));
             match resealed {
@@ -298,7 +313,7 @@ pub async fn rotate<B: Bucket>(bucket: &B, keys: &MasterKeys) -> Rotated {
                 Ok((None, KekObject::Tombstone { .. })) => rotated.destroyed += 1,
                 Ok((None, KekObject::Kek { .. })) => rotated.newest += 1,
                 Ok((Some(bytes), _)) => {
-                    match bucket::update(bucket, &key, bytes, &object.meta.version).await {
+                    match bucket::update(bucket, &key, bytes, &object.meta.version).await? {
                         Updated::Updated(_) => rotated.rewrapped += 1,
                         Updated::Changed => continue,
                     }
@@ -307,7 +322,7 @@ pub async fn rotate<B: Bucket>(bucket: &B, keys: &MasterKeys) -> Rotated {
             break;
         }
     }
-    rotated
+    Ok(rotated)
 }
 
 /// A host's KMS, as [`from_env`] chose it.
@@ -470,7 +485,7 @@ impl ByBucket {
         };
         match &self.own {
             HostKms::Bucket(kms) => {
-                shredded.destroyed.push((own.unwrap_or(NAMED), kms.destroy(tenant).await))
+                shredded.destroying(own.unwrap_or(NAMED), kms.destroy(tenant).await)
             }
             HostKms::Named(url, _) => shredded.named.push((own.unwrap_or(NAMED), url.clone())),
         }
@@ -497,7 +512,7 @@ impl ByBucket {
                 Ok((key, _)) => {
                     let kms = self.buckets.lock().unwrap().get(&number).cloned();
                     match kms {
-                        Some(kms) => shredded.destroyed.push((number, kms.destroy(tenant).await)),
+                        Some(kms) => shredded.destroying(number, kms.destroy(tenant).await),
                         None => shredded.named.push((number, key.0.to_string())),
                     }
                 }
@@ -588,6 +603,17 @@ pub struct Shredded {
     pub failed: Vec<(u16, String)>,
 }
 
+impl Shredded {
+    /// Notes what destroying the tenant's KEK object in bucket `number` did: destroyed, or
+    /// refused by the bucket (board 5861), shredding again to finish it.
+    pub fn destroying(&mut self, number: u16, destroyed: Result<Destroyed, bucket::Refused>) {
+        match destroyed {
+            Ok(destroyed) => self.destroyed.push((number, destroyed)),
+            Err(refused) => self.failed.push((number, refused.to_string())),
+        }
+    }
+}
+
 impl Kmses for ByBucket {
     fn of(&self, bucket: u16) -> BoxFuture<'_, Result<(KmsKey, kms::Shared), String>> {
         Box::pin(async move {
@@ -646,7 +672,7 @@ mod tests {
 
     /// The bytes of `tenant`'s KEK object, if any.
     fn object(bucket: &impl Bucket, tenant: u64) -> Option<Vec<u8>> {
-        block_on(bucket::get(bucket, &layout::kek(tenant))).map(|object| object.bytes)
+        block_on(bucket::get(bucket, &layout::kek(tenant))).unwrap().map(|object| object.bytes)
     }
 
     fn keys(bucket: &impl Bucket) -> Vec<String> {
@@ -702,7 +728,7 @@ mod tests {
         let key = Secret::random();
         let wrapped = wrap(&before, 7, &key).unwrap();
         let shredded = wrap(&before, 9, &key).unwrap();
-        block_on(destroy(&*bucket, 9));
+        block_on(destroy(&*bucket, 9)).unwrap();
         let made = object(&*bucket, 7).unwrap();
 
         let both = host(&bucket, &[&new, &old]);
@@ -717,7 +743,7 @@ mod tests {
         );
         assert_eq!(refusal(unwrap(&host(&bucket, &[&new]), 7, &wrapped)), refused);
 
-        let rotated = block_on(rotate(&*bucket, &keys_of(&[&new, &old])));
+        let rotated = block_on(rotate(&*bucket, &keys_of(&[&new, &old]))).unwrap();
         let expected = Rotated { rewrapped: 1, newest: 1, destroyed: 1, refused: vec![] };
         assert_eq!(rotated, expected);
         assert_eq!(&object(&*bucket, 7).unwrap()[22..30], &new_id.0);
@@ -731,11 +757,11 @@ mod tests {
              {old_id}): CLADEFS_MASTER_KEY"
         );
         assert_eq!(refusal(unwrap(&host(&bucket, &[&old]), 7, &wrapped)), refused);
-        let again = block_on(rotate(&*bucket, &keys_of(&[&new, &old])));
+        let again = block_on(rotate(&*bucket, &keys_of(&[&new, &old]))).unwrap();
         assert_eq!(again, Rotated { rewrapped: 0, newest: 2, destroyed: 1, refused: vec![] });
 
         // A rotation given keys none of which opens an object leaves it, naming it.
-        let lost = block_on(rotate(&*bucket, &keys_of(&[&Secret::random()])));
+        let lost = block_on(rotate(&*bucket, &keys_of(&[&Secret::random()]))).unwrap();
         assert_eq!((lost.rewrapped, lost.newest, lost.destroyed, lost.refused.len()), (0, 0, 1, 2));
         assert!(
             lost.refused[0].starts_with("tenant 7: its KEK is wrapped by master key "),
@@ -764,7 +790,7 @@ mod tests {
             assert_eq!(unwrap(kms, 7, &wrapped).unwrap().expose(), key.expose());
         }
 
-        assert_eq!(block_on(shredder.destroy(7)), Destroyed::Now);
+        assert_eq!(block_on(shredder.destroy(7)), Ok(Destroyed::Now));
         assert_eq!(object(&*bucket, 7), Some(b"fxkt\x01\x02\0\0\0\0\0\0\0\x07".to_vec()));
         for kms in [&shredder, &fresh] {
             assert_eq!(refusal(unwrap(kms, 7, &wrapped)), "tenant 7: its KEK is destroyed");
@@ -779,9 +805,9 @@ mod tests {
             "tenant 7: its KEK is destroyed"
         );
         assert_eq!(object(&*bucket, 7), Some(KekObject::tombstone(7)));
-        assert_eq!(block_on(destroy(&*bucket, 7)), Destroyed::Already);
+        assert_eq!(block_on(destroy(&*bucket, 7)).unwrap(), Destroyed::Already);
 
-        assert_eq!(block_on(destroy(&*bucket, 9)), Destroyed::Now);
+        assert_eq!(block_on(destroy(&*bucket, 9)).unwrap(), Destroyed::Now);
         assert_eq!(refusal(wrap(&shredder, 9, &key)), "tenant 9: its KEK is destroyed");
         assert_eq!(keys(&*bucket), [layout::kek(7), layout::kek(9)]);
         assert_eq!(object(&*bucket, 9), Some(KekObject::tombstone(9)));
@@ -852,10 +878,10 @@ mod tests {
         wrap(&both, 4, &key).unwrap();
         refusals.push(refusal(unwrap(&host(&bucket, &[&wrong]), 1, &wrapped[0])));
         refusals.push(refusal(wrap(&host(&bucket, &[&new]), 2, &key)));
-        let rotated = block_on(rotate(&*bucket, &keys_of(&[&new, &old])));
+        let rotated = block_on(rotate(&*bucket, &keys_of(&[&new, &old]))).unwrap();
         assert_eq!(rotated.rewrapped, 3);
-        refusals.extend(block_on(rotate(&*bucket, &keys_of(&[&wrong]))).refused);
-        block_on(both.destroy(3));
+        refusals.extend(block_on(rotate(&*bucket, &keys_of(&[&wrong]))).unwrap().refused);
+        block_on(both.destroy(3)).unwrap();
         refusals.push(refusal(unwrap(&both, 3, &wrapped[2])));
         refusals.push(format!("{:?}", keys_of(&[&new, &old])));
         assert_eq!(refusals.len(), 8, "{refusals:?}");
@@ -863,7 +889,7 @@ mod tests {
 
         let objects: Vec<Vec<u8>> = keys(&*bucket)
             .iter()
-            .map(|key| block_on(bucket::get(&*bucket, key)).unwrap().bytes)
+            .map(|key| block_on(bucket::get(&*bucket, key)).unwrap().unwrap().bytes)
             .collect();
         assert_eq!(objects.len(), 4);
         let logged = LOGGED.lock().unwrap().clone();
@@ -955,7 +981,7 @@ mod tests {
                 kms.new_kek(cell).await.unwrap();
             }
             async fn kek(bucket: &ObjectBucket) -> Option<Vec<u8>> {
-                bucket::get(bucket, &layout::kek(7)).await.map(|object| object.bytes)
+                bucket::get(bucket, &layout::kek(7)).await.unwrap().map(|object| object.bytes)
             }
             let opens = |bytes: &[u8], hex: &str| {
                 KekObject::decode(7, bytes).unwrap().open(&parsed(hex)).is_ok()
@@ -980,7 +1006,7 @@ mod tests {
             );
             assert!(second.unwrap_dyn(8, &wrapped).await.is_ok());
 
-            assert_eq!(destroy(&other, 7).await, Destroyed::Now);
+            assert_eq!(destroy(&other, 7).await.unwrap(), Destroyed::Now);
             let fresh = host(&theirs);
             let mut made = Vec::new();
             for cell in cells {
