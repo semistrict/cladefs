@@ -40,7 +40,9 @@ use tonic::transport::NamedService;
 /// number.
 pub const ERRNO: &str = "cladefs-errno";
 
-/// How many threads serve the API's calls, and their waits, which hold none (TASK-43.6).
+/// How many threads serve the API's calls, and their waits, which hold none (TASK-43.6). cladefs:
+/// under madsim, the simulated host's one, its runtime's.
+#[cfg(not(madsim))]
 const THREADS: usize = 2;
 
 /// How many threads the calls' cells' I/O runs on at most: what waits holds none of them, so that

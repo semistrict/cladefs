@@ -488,7 +488,11 @@ pub mod timer {
         type Output = ();
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
             if self.inner.is_none() {
-                self.inner = Some(Box::pin(rt::time::sleep_until(self.deadline.into())))
+                // cladefs: the deadline as the runtime's sleep takes it: tokio's own Instant, or,
+                // under madsim, std's, the deadline as it is (board 5652).
+                #[allow(clippy::useless_conversion, reason = "madsim's Instant is std's")]
+                let deadline: rt::time::Instant = self.deadline.into();
+                self.inner = Some(Box::pin(rt::time::sleep_until(deadline)))
             }
             self.inner.as_mut().unwrap().poll_unpin(cx).map(drop)
         }

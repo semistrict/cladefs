@@ -18,7 +18,6 @@ use crate::{CellId, CellOf, Filesystem, SetAttr, Storage};
 use base32_id::Padded;
 use bucket_cell::cell::Kind;
 use proto::mount_client::MountClient;
-use proto::mount_server::MountServer;
 use proto::*;
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -47,9 +46,14 @@ pub struct CellSource {
 pub(crate) fn service(
     server: &Arc<Server>,
     source: CellSource,
-) -> MountServer<impl proto::mount_server::Mount + use<>> {
+) -> mount_server::MountServer<impl mount_server::Mount + use<>> {
     let (server, source) = (Arc::downgrade(server), Arc::new(source));
-    MountServer::new(Control { server, source, cells: Arc::default(), holds: Arc::default() })
+    mount_server::MountServer::new(Control {
+        server,
+        source,
+        cells: Arc::default(),
+        holds: Arc::default(),
+    })
 }
 
 /// The path `cell`'s filesystem has in the mount, and in its directory of cells: `TENANT/CELL`,
@@ -90,25 +94,21 @@ struct Control {
 /// detached, written back and closed, or failed to attach.
 type Holds = Arc<Mutex<BTreeMap<PathBuf, crate::cladefsd::cells::MountHold>>>;
 
-/// Opens the cell directory at `path` as [`mount_cell`] does, held for the mount first ([`Holds`]),
-/// the hold awaited, holding no thread (board 2946): `open` opens it, on a blocking thread, and the
-/// hold is kept in `holds` if it opens.
+/// Opens the cell directory at `path` as `open`, [`mount_cell`]'s, does, held for the mount first
+/// ([`Holds`]), the hold awaited, holding no thread (board 2946), and kept in `holds` if it opens.
 async fn held_open(
     holds: Holds,
     path: PathBuf,
-    open: impl FnOnce(&Path) -> Result<Filesystem, Error> + Send + 'static,
+    open: impl Future<Output = Result<Filesystem, Error>>,
 ) -> Result<Filesystem, Error> {
     let hold = crate::cladefsd::cells::hold_mounted(&path).await.map_err(|errno| {
         Error::new(
             anyhow::Error::new(errno).context(format!("holding {} for the mount", path.display())),
         )
     })?;
-    let opened = tokio::task::spawn_blocking(move || {
-        let fs = open(&path)?;
-        holds.lock().unwrap().insert(path, hold);
-        Ok(fs)
-    });
-    opened.await.map_err(Error::new)?
+    let fs = open.await?;
+    holds.lock().unwrap().insert(path, hold);
+    Ok(fs)
 }
 
 /// The cell `cell` of `cells` as `reserving` finds it: marked `marked` if it says so, else left be.
@@ -125,8 +125,11 @@ fn reserve(
 
 /// Takes a cell's filesystem, the cell `of` says, into a cell directory at `path` in the bucket at
 /// `url`, of `capacity` bytes until its cell says its own, placed at `token` if given, and mounts
-/// it: made empty if new, its root the mounting user's, as the mount is.
-fn mount_cell(
+/// it: made empty if new, its root the mounting user's, as the mount is. cladefs: awaited, as the
+/// daemon's control API serves it, holding no thread: its disk work
+/// [`local_cell::upload::blocking`]'s, its bucket's on the bucket runtime ([`Storage::take`]),
+/// Fxfs's device I/O the I/O engine's.
+async fn mount_cell(
     path: &Path,
     url: &str,
     (of, capacity): (CellOf, u64),
@@ -135,11 +138,10 @@ fn mount_cell(
     let new = matches!(of, CellOf::New(_) | CellOf::Named(_));
     // Its tenant's directory, made once for all its cells.
     if let Some(tenant) = path.parent() {
-        std::fs::create_dir_all(tenant)
+        local_cell::upload::blocking(|| std::fs::create_dir_all(tenant))
             .map_err(|err| Error::new(err).context(format!("making {}", tenant.display())))?;
     }
-    // An outermost entry, a FUSE call's: waits on the bucket runtime (board 2948).
-    let storage = local_cell::upload::wait_on(Storage::take(path, (of, capacity), url, token))?;
+    let storage = Storage::take(path, (of, capacity), url, token).await?;
     let mounting = async {
         if !new {
             return Filesystem::mount(storage).await;
@@ -151,8 +153,7 @@ fn mount_cell(
         fs.root().setattr(&owner).await?;
         Ok(fs)
     };
-    futures::executor::block_on(mounting)
-        .map_err(|err| err.context(format!("mounting {}", path.display())))
+    mounting.await.map_err(|err| err.context(format!("mounting {}", path.display())))
 }
 
 /// The capacity a cell taking a cell's filesystem is made with, until its cell says its own,
@@ -185,10 +186,10 @@ impl Control {
         };
         let shown = cell_path(cell);
         let path = self.source.dir.join(&shown);
-        let (url, holds, held) = (self.source.bucket.clone(), self.holds.clone(), path.clone());
-        let open = held_open(holds, path, move |path| mount_cell(path, &url, of, token));
+        let mounting = mount_cell(&path, &self.source.bucket, of, token);
+        let open = held_open(self.holds.clone(), path.clone(), mounting);
         if let Err(err) = server.attach(&shown, open).await {
-            self.holds.lock().unwrap().remove(&held);
+            self.holds.lock().unwrap().remove(&path);
             return Err(err);
         }
         Ok(true)
@@ -230,25 +231,12 @@ impl proto::mount_server::Mount for Control {
         };
         let attached = whole(async move {
             let attached = async {
-                let url = control.source.bucket.clone();
                 // A cell of the bucket's, its head read for its kind: its cell's opening takes it,
                 // as a new one's makes it, encrypted (TASK-411.28, TASK-515).
-                let read = tokio::task::spawn_blocking(move || {
-                    if make {
-                        return Ok(None);
-                    }
-                    let bucket = crate::host_cell::bucket(&url).map_err(Error::new)?;
-                    let found =
-                        local_cell::upload::block_on(bucket_cell::head::get(&*bucket, cell))
-                            .map_err(Error::new)?;
-                    let head = found.and_then(|found| found.ok_or(bucket_cell::Error::NoCell));
-                    let head = head.map_err(|err| {
-                        let errno = cell_errno(&err);
-                        Error::new(anyhow::Error::new(err).context(errno))
-                    })?;
-                    Ok::<_, Error>(head.kind)
-                });
-                let kind = read.await.map_err(Error::new)??;
+                let kind = match make {
+                    true => None,
+                    false => cell_kind(&control.source.bucket, cell).await?,
+                };
                 control.attach_cell(cell, kind, (make, capacity), token).await
             }
             .await;
@@ -325,6 +313,18 @@ impl proto::mount_server::Mount for Control {
             .collect();
         Ok(Response::new(ListResponse { cells }))
     }
+}
+
+/// The kind of `cell`, a cell of the bucket at `url`, if its head says one: `ENOENT` if it has no
+/// head.
+async fn cell_kind(url: &str, cell: CellId) -> Result<Option<Kind>, Error> {
+    let bucket = crate::host_cell::bucket(url).map_err(Error::new)?;
+    let found = bucket_cell::head::get(&*bucket, cell).await;
+    let head = found.and_then(|found| found.ok_or(bucket_cell::Error::NoCell)).map_err(|err| {
+        let errno = cell_errno(&err);
+        Error::new(anyhow::Error::new(err).context(errno))
+    })?;
+    Ok(head.kind)
 }
 
 /// The errno a failure to hold a cell says, as the extent daemon's API has it: `ENOENT` for a cell

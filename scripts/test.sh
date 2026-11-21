@@ -63,6 +63,12 @@ if part clippy; then
         -p follower -p follower_sim --features shuttle --tests -- -A clippy::all -D warnings
     cargo clippy --manifest-path "$root/Cargo.toml" -p physmem -p cladefs -p virtio_extent \
         --features loom --tests -- -A clippy::all -D warnings
+    # The madsim build's (doc-24): the simulated crates and their tests under madsim, built as the
+    # madsim part builds them, whose code no other build compiles either: its warnings, 13 on
+    # Linux, went unseen there behind a `cargo check` (board 5652).
+    env RUSTFLAGS="--cfg madsim" CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}/madsim" \
+        cargo clippy --manifest-path "$root/Cargo.toml" -p node_local -p host_fs -p physmem \
+        -p bucket_cell -p local_cell -p cladefs --lib --test madsim -- -A clippy::all -D warnings
 fi
 # The simulation of bucket_cell's protocol over local_cell's extent stores (TASK-88): its profiles'
 # soaks, and its rules' seed searches, each until a seed with the rule off finds what the rule

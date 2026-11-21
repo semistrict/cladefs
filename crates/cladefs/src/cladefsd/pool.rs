@@ -10,18 +10,32 @@
 //! for the work every cell's flushes do behind it (`server::flush_behind`, TASK-92.49), as many
 //! threads as do it at once, up to a bound, not one each.
 
-use std::collections::VecDeque;
-use std::sync::{Condvar, Mutex, OnceLock};
-use std::time::Duration;
+use std::sync::OnceLock;
+#[cfg(not(madsim))]
+use {
+    std::collections::VecDeque,
+    std::sync::{Condvar, Mutex},
+    std::time::Duration,
+};
 
 /// A request to run, and what follows it.
 pub(super) type Job = Box<dyn FnOnce() + Send>;
 
 /// How long a thread waits for work before it goes.
+#[cfg(not(madsim))]
 const IDLE: Duration = Duration::from_secs(10);
 
 /// The pool. See the module's docs.
 pub(super) struct Pool {
+    /// Its threads. cladefs: none under madsim, whose one thread runs its jobs as tasks of the
+    /// simulated host's (doc-24 step 11).
+    #[cfg(not(madsim))]
+    threads: Threads,
+}
+
+/// A pool's threads, and the jobs waiting for them.
+#[cfg(not(madsim))]
+struct Threads {
     state: Mutex<State>,
     work: Condvar,
     /// The most threads it runs.
@@ -30,6 +44,7 @@ pub(super) struct Pool {
     name: &'static str,
 }
 
+#[cfg(not(madsim))]
 #[derive(Default)]
 struct State {
     jobs: VecDeque<Job>,
@@ -41,7 +56,15 @@ struct State {
 impl Pool {
     /// A pool of up to `max` threads, named `name`.
     pub(super) fn new(name: &'static str, max: usize) -> Self {
-        Self { state: Mutex::default(), work: Condvar::new(), max, name }
+        #[cfg(not(madsim))]
+        return Self {
+            threads: Threads { state: Mutex::default(), work: Condvar::new(), max, name },
+        };
+        #[cfg(madsim)]
+        {
+            let _ = (name, max);
+            Self {}
+        }
     }
 
     /// The process's, which requests run on, of up to 16 threads a processor, and 64 at least.
@@ -66,12 +89,36 @@ impl Pool {
             true
         }
         #[cfg(not(madsim))]
-        self.run_on_threads(job)
+        self.threads.run(job)
     }
 
-    /// Runs `job` as [`Pool::run`] does, on a thread of the pool.
-    #[cfg(not(madsim))]
-    fn run_on_threads(&'static self, job: Job) -> bool {
+    /// cladefs: runs `work` on a thread of the pool, as [`Pool::run`] runs a job, and returns what it
+    /// returns, once it has, holding no thread while it waits: none if it panicked or could not
+    /// start. The tests' way to see what a job did (board 744, 2406).
+    #[cfg(test)]
+    pub(super) async fn call<T: Send + 'static>(
+        &'static self,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> Option<T> {
+        let (done, returned) = tokio::sync::oneshot::channel();
+        self.run(Box::new(move || {
+            // Unheard if its caller gave up on it.
+            let _ = done.send(work());
+        }));
+        returned.await.ok()
+    }
+
+    /// How many threads it runs now.
+    #[cfg(test)]
+    pub(super) fn threads(&self) -> usize {
+        self.threads.state.lock().unwrap().threads
+    }
+}
+
+#[cfg(not(madsim))]
+impl Threads {
+    /// Runs `job` as [`Pool::run`] does, on one of them.
+    fn run(&'static self, job: Job) -> bool {
         let mut state = self.state.lock().unwrap();
         if state.idle <= state.jobs.len() && state.threads < self.max {
             // cladefs: the daemon's seam: a pool's threads, its jobs tasks under madsim (doc-24).
@@ -90,22 +137,6 @@ impl Pool {
         state.jobs.push_back(job);
         self.work.notify_one();
         true
-    }
-
-    /// cladefs: runs `work` on a thread of the pool, as [`Pool::run`] runs a job, and returns what
-    /// it returns, once it has, holding no thread while it waits: none if it panicked or could not
-    /// start. The tests' way to see what a job did (board 744, 2406).
-    #[cfg(test)]
-    pub(super) async fn call<T: Send + 'static>(
-        &'static self,
-        work: impl FnOnce() -> T + Send + 'static,
-    ) -> Option<T> {
-        let (done, returned) = tokio::sync::oneshot::channel();
-        self.run(Box::new(move || {
-            // Unheard if its caller gave up on it.
-            let _ = done.send(work());
-        }));
-        returned.await.ok()
     }
 
     /// A thread's work: the jobs, until it waits for one longer than [`IDLE`]. A job that panics
@@ -133,12 +164,6 @@ impl Pool {
                 return;
             }
         }
-    }
-
-    /// How many threads it runs now.
-    #[cfg(test)]
-    pub(super) fn threads(&self) -> usize {
-        self.state.lock().unwrap().threads
     }
 }
 

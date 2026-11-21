@@ -21,7 +21,7 @@ use crate::{DaxWindow, Errno, OpenCell, SecondStage};
 use bucket_cell::trace;
 use local_cell::shared::SharedLock;
 use std::os::fd::AsFd;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak, mpsc};
@@ -422,7 +422,7 @@ fn reopen_read_only(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<std::os:
 /// connection, or exits: then its cell and window go. Returns then: for tests, which serve
 /// connections one by one.
 #[cfg(test)]
-pub(crate) fn serve_connection(stream: UnixStream, tenant: Arc<Tenant>) {
+pub(crate) fn serve_connection(stream: std::os::unix::net::UnixStream, tenant: Arc<Tenant>) {
     let _ = start_connection(stream.into(), tenant).recv();
 }
 
@@ -997,22 +997,20 @@ fn serve_future(turn: Turn, serving: impl std::future::Future<Output = ()> + Sen
         let mut context = std::task::Context::from_waker(&waker);
         if future.as_mut().poll(&mut context).is_pending() {
             drop(tokio::spawn(future));
-            if let Some(turn) = turn.lock().unwrap().as_mut() {
-                turn.defer();
-            }
         }
-        #[allow(clippy::needless_return)]
-        return;
     }
-    let poll = |runnable: async_task::Runnable| {
-        let _io = io().enter();
-        runnable.run();
-    };
-    let (runnable, task) = async_task::spawn(future, move |runnable| {
-        Pool::get().run(Box::new(move || poll(runnable)));
-    });
-    task.detach();
-    poll(runnable);
+    #[cfg(not(madsim))]
+    {
+        let poll = |runnable: async_task::Runnable| {
+            let _io = io().enter();
+            runnable.run();
+        };
+        let (runnable, task) = async_task::spawn(future, move |runnable| {
+            Pool::get().run(Box::new(move || poll(runnable)));
+        });
+        task.detach();
+        poll(runnable);
+    }
     // Unless answered already.
     if let Some(turn) = turn.lock().unwrap().as_mut() {
         turn.defer();
@@ -2691,7 +2689,7 @@ fn peer_process(_: &super::wire::Stream) -> std::io::Result<Option<VmProcess>> {
 }
 
 #[cfg(not(madsim))]
-fn peer_process(stream: &UnixStream) -> std::io::Result<Option<VmProcess>> {
+fn peer_process(stream: &super::wire::Stream) -> std::io::Result<Option<VmProcess>> {
     use std::os::fd::{AsRawFd, FromRawFd};
     let fd = stream.as_raw_fd();
     let mut credentials = libc::ucred { pid: 0, uid: 0, gid: 0 };
