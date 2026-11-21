@@ -84,6 +84,33 @@ fn promises_survive_crashes() {
     }
 }
 
+/// Board 5420: a fence failing at any of its steps, made again, then the next, fence as they
+/// would have: its promise kept once its file was made, its file made again if a step after failed,
+/// and the promises before it removed by a later fence if their removal failed; reopened, the
+/// promise is the last.
+#[test]
+fn fences_failing_partway_are_made_again() {
+    for failing in 1..=6 {
+        let dir = MemDir::serial();
+        let replicas = Replicas::open(dir.clone(), MOST).unwrap();
+        let me = (CELL, key(1, 4), replicas.incarnation());
+        replicas.append(me, 1, 0, b"acked").unwrap();
+        replicas.fence(me, 4).unwrap();
+        dir.fail_after(Some(failing));
+        let failed = replicas.fence(me, 5);
+        dir.fail_after(None);
+        assert_eq!(replicas.fence(me, 5).unwrap(), [(1, 5)], "{failing}: {failed:?}");
+        assert_eq!(replicas.fence(me, 6).unwrap(), [(1, 5)], "{failing}");
+        let promises: Vec<String> = (dir.files().into_iter())
+            .map(|(name, _)| name)
+            .filter(|name| name.contains(".promise."))
+            .collect();
+        assert_eq!(promises, [promise_path(CELL, 6)], "{failing}");
+        let reopened = Replicas::open(dir.clone(), MOST).unwrap();
+        assert_eq!(refused(reopened.fence(me, 5)), Refused::Fenced { promise: 6 }, "{failing}");
+    }
+}
+
 /// A call naming another incarnation is refused, whatever it is: a directory made anew, its disk
 /// lost, is another member, whose promises are not the old one's (doc-21, Incarnations).
 #[test]
