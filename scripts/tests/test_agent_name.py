@@ -55,6 +55,13 @@ class AgentNameTest(unittest.TestCase):
         self.assertEqual((other / ".agent-name").read_text(), f"{name}\n")
         self.assertEqual((self.main / ".agent-name").read_text(), "quiet-otter\n")
 
+    def test_word_lists_are_two_hundred_distinct_lowercase_words_or_more(self):
+        for words in (agent_name.ADJECTIVES, agent_name.NOUNS):
+            self.assertGreaterEqual(len(words), 200)
+            self.assertEqual(len(set(words)), len(words))
+            self.assertEqual([w for w in words if not (w.isascii() and w.isalpha() and w.islower())],
+                             [])
+
     def test_git_ignores_the_file(self):
         self.assertIn(".agent-name", (ROOT / ".gitignore").read_text().splitlines())
 
