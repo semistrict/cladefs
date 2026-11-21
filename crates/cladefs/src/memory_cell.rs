@@ -3,9 +3,9 @@
 // found in the LICENSE file.
 
 //! A VM's memory as a cell of its own (TASK-456.2): one the host's extent daemon makes as
-//! a memory cell (`OPEN_MEMORY`), kept as an `extent_files` file set of one file, [`IMAGE`], the
+//! a memory cell (`OPEN_MEMORY`), kept as a block device (`block_device`) whose contents are the
 //! image of the guest's memory, a page a block. A snapshot writes the pages its guest wrote and
-//! makes the zero ones holes, which store nothing, and commits them at once ([`MemoryCell`]); a
+//! discards the zero ones, holes, which store nothing, and commits them at once ([`MemoryCell`]); a
 //! restored VM's next snapshot goes into a fork of its parent's memory ([`MemoryCell::fork`]),
 //! which reads the parent's pages and stores only its own.
 //!
@@ -38,7 +38,7 @@ use crate::{
     CellClient, CellVersion, DaemonConnection, DaemonDevice, MappingContents, Prefault, Unmapped,
     WindowMapping,
 };
-use extent_files::{Contents, FileSet, Options};
+use block_device::{BlockDevice, Contents, Options};
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
@@ -46,9 +46,6 @@ use std::path::Path;
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex, Weak, mpsc};
 use storage_device::DeviceHolder;
-
-/// The file of a memory cell that is the guest's memory.
-pub const IMAGE: &str = "memory";
 
 /// The cell capacity a memory of `size` bytes takes at most: its pages, the tree naming them (a
 /// node of 170 refs a page) and their owners (8 bytes a page), and room for a commit's worth of
@@ -60,7 +57,7 @@ pub fn capacity(size: u64) -> u64 {
 /// A VM's memory, a cell of its own. See the module docs.
 pub struct MemoryCell {
     client: Arc<CellClient>,
-    files: Arc<FileSet>,
+    blocks: Arc<BlockDevice>,
     size: u64,
 }
 
@@ -89,12 +86,11 @@ impl MemoryCell {
     fn over(opened: CellClient, size: u64) -> Result<Self, Error> {
         let client = Arc::new(opened);
         let device = DeviceHolder::new(DaemonDevice::new(client.clone()).map_err(Error::new)?);
-        let files = FileSet::open(device, Options::default()).map_err(Error::new)?;
-        files.open_file(IMAGE, true).map_err(Error::new)?;
-        match files.size(IMAGE).map_err(Error::new)? {
+        let blocks = BlockDevice::open(device, Options::default()).map_err(Error::new)?;
+        match blocks.size().map_err(Error::new)? {
             0 if size > 0 => {
-                files.truncate(IMAGE, size).map_err(Error::new)?;
-                files.sync(IMAGE).map_err(Error::new)?;
+                blocks.resize(size).map_err(Error::new)?;
+                blocks.flush().map_err(Error::new)?;
             }
             held if held == size => {}
             held => {
@@ -102,7 +98,7 @@ impl MemoryCell {
                     .context(format!("a memory of {held} bytes, not {size}")));
             }
         }
-        Ok(Self { client, files, size })
+        Ok(Self { client, blocks, size })
     }
 
     /// The bytes of the guest's memory.
@@ -112,7 +108,7 @@ impl MemoryCell {
 
     /// The bytes of a page, which reads, writes and holes are whole ones of.
     pub fn page_size(&self) -> u64 {
-        self.files.device().block_size() as u64
+        self.blocks.block_size()
     }
 
     /// Its cell.
@@ -123,25 +119,25 @@ impl MemoryCell {
     /// Writes `pages` at `offset`, whole pages, to be committed by [`MemoryCell::commit`].
     pub fn write(&self, offset: u64, pages: &[u8]) -> Result<(), Error> {
         self.whole(offset, pages.len() as u64)?;
-        self.files.write(IMAGE, offset, pages).map_err(Error::new)
+        self.blocks.write(offset, pages).map_err(Error::new)
     }
 
-    /// Makes the `len` bytes at `offset`, whole pages, holes, which read as zeros and store
+    /// Discards the `len` bytes at `offset`, whole pages: holes, which read as zeros and store
     /// nothing, once committed.
-    pub fn punch(&self, offset: u64, len: u64) -> Result<(), Error> {
+    pub fn discard(&self, offset: u64, len: u64) -> Result<(), Error> {
         self.whole(offset, len)?;
-        self.files.punch(IMAGE, offset, len).map_err(Error::new)
+        self.blocks.discard(offset, len).map_err(Error::new)
     }
 
-    /// Commits what was written and punched since the last commit, at once, durably on the
+    /// Commits what was written and discarded since the last commit, at once, durably on the
     /// host's disk: a crash leaves the memory as one commit or the other.
     pub fn commit(&self) -> Result<(), Error> {
-        self.files.sync(IMAGE).map_err(Error::new)
+        self.blocks.flush().map_err(Error::new)
     }
 
     /// Reads into `buf` from `offset`, as written.
     pub fn read(&self, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
-        let read = self.files.read(IMAGE, offset, buf).map_err(Error::new)?;
+        let read = self.blocks.read(offset, buf).map_err(Error::new)?;
         match read == buf.len() {
             true => Ok(()),
             false => Err(Error::new(crate::Errno::EINVAL).context(format!(
@@ -172,7 +168,7 @@ impl MemoryCell {
             for (at, run) in runs_of_zeros(chunk, page) {
                 let at = offset + at as u64;
                 match run {
-                    Run::Zeros(len) => self.punch(at, len as u64)?,
+                    Run::Zeros(len) => self.discard(at, len as u64)?,
                     Run::Data(bytes) => self.write(at, bytes)?,
                 }
             }
@@ -208,13 +204,12 @@ impl MemoryCell {
     /// The extents the cell holds, read whole: those its image's last commit names, and those
     /// it has yet to free.
     pub fn extents(&self) -> Result<Vec<storage_device::ExtentId>, Error> {
-        self.files.extents().map_err(Error::new)
+        self.blocks.extents().map_err(Error::new)
     }
 
     /// Closes the cell, every commit durable already.
     pub fn close(self) -> Result<(), Error> {
-        self.files.close_file(IMAGE);
-        self.files.close().map_err(Error::new)
+        self.blocks.close().map_err(Error::new)
     }
 
     /// Makes the `size` bytes at `base`, the memory's own size, the cell's window: a VM's memory
@@ -236,7 +231,7 @@ impl MemoryCell {
                 .context(format!("a window of {size} bytes over a memory of {}", self.size)));
         }
         crate::pages::window_fits_host(self.page_size(), crate::pages::page_size())?;
-        let node_bytes = self.files.node_bytes();
+        let node_bytes = self.blocks.node_bytes();
         let nodes = size.div_ceil(node_bytes);
         let shared = Arc::new(Nodes {
             node_bytes,
@@ -249,7 +244,7 @@ impl MemoryCell {
         let (asks, asked) = mpsc::channel();
         let mapper = Mapper {
             nodes: shared.clone(),
-            files: Arc::downgrade(&self.files),
+            blocks: Arc::downgrade(&self.blocks),
             client: Arc::downgrade(&self.client),
         };
         std::thread::Builder::new()
@@ -352,7 +347,7 @@ impl Unmapped for Reach {
 /// until the window's faults, and with them the [`Reach`], go.
 struct Mapper {
     nodes: Arc<Nodes>,
-    files: Weak<FileSet>,
+    blocks: Weak<BlockDevice>,
     client: Weak<CellClient>,
 }
 
@@ -381,13 +376,13 @@ impl Mapper {
     /// installed takes a load of the guest's no fault here (see the module docs).
     fn map(&self, node: u64) -> Result<(), Error> {
         let gone = || Error::new(Errno::EIO).context("the memory cell went");
-        let (files, client) =
-            (self.files.upgrade().ok_or_else(gone)?, self.client.upgrade().ok_or_else(gone)?);
+        let (blocks, client) =
+            (self.blocks.upgrade().ok_or_else(gone)?, self.client.upgrade().ok_or_else(gone)?);
         let start = node * self.nodes.node_bytes;
         let len = self.nodes.node_bytes.min(self.nodes.size - start);
         let mut read = vec![0; len as usize];
-        files.read(IMAGE, start, &mut read).map_err(Error::new)?;
-        let runs = files.runs(IMAGE, start, len).map_err(Error::new)?;
+        blocks.read(start, &mut read).map_err(Error::new)?;
+        let runs = blocks.runs(start, len).map_err(Error::new)?;
         let mappings: Vec<WindowMapping> = (runs.into_iter())
             .filter_map(|(range, contents)| {
                 let contents = match contents? {

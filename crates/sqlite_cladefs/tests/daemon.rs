@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! SQLite on a file set on a cell an extent daemon serves, in this process, as a host's would
+//! SQLite on a cell an extent daemon serves, in this process, as a host's would
 //! serve it from its own (TASK-300): pages read in place in the daemon's window.
 
 #![cfg(target_os = "linux")]
@@ -11,7 +11,7 @@ mod common;
 
 use futures::executor::block_on;
 use rusqlite::{Connection, OpenFlags, params};
-use sqlite_cladefs::{FileSet, Options, Registration, daemon, register};
+use sqlite_cladefs::{Database, Options, Registration, daemon, register};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -83,9 +83,9 @@ fn reads_in_place_and_survives_reopening(name: &str) -> Vec<String> {
 
     for round in 0..2i64 {
         let options = Options::default();
-        let file_set = daemon::open(&socket, &cell_dir, 1 << 30, 1 << 30, options).unwrap();
+        let database = daemon::open(&socket, &cell_dir, 1 << 30, 1 << 30, options).unwrap();
         let vfs = format!("cladefs-daemon-{name}-{round}");
-        let registration = register(&vfs, file_set.clone()).unwrap();
+        let registration = register(&vfs, database.clone()).unwrap();
         let connection =
             Connection::open_with_flags_and_vfs("app.db", OpenFlags::default(), vfs.as_str())
                 .unwrap();
@@ -108,7 +108,7 @@ fn reads_in_place_and_survives_reopening(name: &str) -> Vec<String> {
         connection
             .execute("INSERT OR REPLACE INTO t VALUES (?1, ?2)", params![5000, marker])
             .unwrap();
-        let before = file_set.fetched();
+        let before = database.fetched();
         let check: String =
             connection.query_row("PRAGMA integrity_check", [], |row| row.get(0)).unwrap();
         assert_eq!(check, "ok");
@@ -125,23 +125,23 @@ fn reads_in_place_and_survives_reopening(name: &str) -> Vec<String> {
         assert!(read == marker, "the row of noise reads back otherwise");
         // In place where the host maps the cell's blocks into a window; a host of larger pages
         // has none, its reads copied (sqlite_cladefs::daemon, board 5232).
-        let fetched = file_set.fetched() - before;
-        let in_place = file_set.is_mapped();
+        let fetched = database.fetched() - before;
+        let in_place = database.is_mapped();
         assert_eq!(in_place, cladefs::pages::page_size() <= 4096, "a window where it fits");
         assert!(if in_place { fetched > 100 } else { fetched == 0 }, "{fetched} pages fetched");
         drop(connection);
         drop(registration);
-        file_set.close().unwrap();
+        database.close().unwrap();
     }
     // Beside the daemon's cell, which works on behind its API (TASK-463).
     cladefs::testing::files_holding_beside(&cell_dir, &[&marker[..64]])
 }
 
-/// A file set on the cell at `cell_dir`, mapped, registered as the VFS `vfs`, a connection to its
-/// database reading it in place, and the cell, to fork.
+/// The database on the cell at `cell_dir`, mapped, registered as the VFS `vfs`, a connection to it
+/// reading it in place, and the cell, to fork.
 struct Mounted {
     cell: Arc<cladefs::CellClient>,
-    file_set: Arc<FileSet>,
+    database: Arc<Database>,
     _registration: Registration,
     connection: Connection,
 }
@@ -151,33 +151,33 @@ impl Mounted {
         let cell = Arc::new(cladefs::CellClient::connect(socket, cell_dir, 1 << 30).unwrap());
         let window = daemon::DaemonWindow::new(cell.clone(), 1 << 30).unwrap();
         let device = DeviceHolder::new(cladefs::DaemonDevice::new(cell.clone()).unwrap());
-        let file_set = FileSet::open_mapped(device, Box::new(window), Options::default()).unwrap();
-        let registration = register(vfs, file_set.clone()).unwrap();
+        let database = Database::open_mapped(device, Box::new(window), Options::default()).unwrap();
+        let registration = register(vfs, database.clone()).unwrap();
         let connection =
             Connection::open_with_flags_and_vfs("app.db", OpenFlags::default(), vfs).unwrap();
         connection.execute_batch("PRAGMA mmap_size = 1073741824").unwrap();
-        Self { cell, file_set, _registration: registration, connection }
+        Self { cell, database, _registration: registration, connection }
     }
 
-    /// Checks the device holds every extent the file set names, those it references and those it
+    /// Checks the device holds every extent the database names, those it references and those it
     /// has yet to free: so that none it frees, or failed to, is one the device never held, which
-    /// it would try to free again at each commit; and closes the file set.
+    /// it would try to free again at each commit; and closes the database.
     fn close(self) {
-        let Self { cell, file_set, _registration, connection } = self;
+        let Self { cell, database, _registration, connection } = self;
         drop(connection);
-        let device = file_set.device();
+        let device = database.device();
         let mut buffer = block_on(device.allocate_buffer(device.block_size() as usize));
-        for extent in file_set.extents().unwrap() {
+        for extent in database.extents().unwrap() {
             block_on(device.read(extent, 0, buffer.as_mut()))
-                .unwrap_or_else(|error| panic!("{extent:?} the file set names: {error:#}"));
+                .unwrap_or_else(|error| panic!("{extent:?} the database names: {error:#}"));
         }
         drop((cell, _registration));
-        file_set.close().unwrap();
+        database.close().unwrap();
     }
 }
 
 /// A fork of a cell on the daemon, as of its last commit, holds the database as it was, inherited
-/// with the cell's extents and pages, while the file set on the cell is open, frees in its root
+/// with the cell's extents and pages, while the database on the cell is open, frees in its root
 /// still to make; the two then change apart, the fork rewriting and so freeing all it inherited,
 /// and each reads its own, in place, before and after opening again.
 #[test]
@@ -225,8 +225,8 @@ fn a_database_is_fenced_with_its_cell() {
     let control = cladefs::cladefsd::control::Client::connect(&control_socket).unwrap();
 
     let cell_dir = dir.path().join("store");
-    let file_set = daemon::open(&socket, &cell_dir, 1 << 30, 1 << 30, Options::default()).unwrap();
-    let _registration = register("cladefs-fenced", file_set.clone()).unwrap();
+    let database = daemon::open(&socket, &cell_dir, 1 << 30, 1 << 30, Options::default()).unwrap();
+    let _registration = register("cladefs-fenced", database.clone()).unwrap();
     let connection =
         Connection::open_with_flags_and_vfs("app.db", OpenFlags::default(), "cladefs-fenced")
             .unwrap();
@@ -260,41 +260,33 @@ fn a_database_is_fenced_with_its_cell() {
     );
 }
 
-/// TASK-551: a SQLite cell on the daemon holding more databases than its root holds the names of
-/// (80 of 30-byte names, past the daemon's 4 KiB root) commits each, and every one reads back
-/// after the file set is closed and opened again: the root lists its files in an extent of their
-/// own, where it once failed the file set, every database's connections getting SQLITE_IOERR.
+/// A SQLite cell on the daemon holds one database (board 5790), once many named files (TASK-551):
+/// a second name is refused, and closed and opened again, the database opens by any name, as the
+/// cell keeps none, reading and committing as it did.
 #[test]
-fn a_cell_of_many_databases_commits_each_and_opens_again() {
+fn a_cell_holds_one_database_by_any_name() {
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let (_sockets, socket) = serve();
     let cell_dir = dir.path().join("store");
-    let names: Vec<String> = (0..80).map(|n| format!("{n:0>27}.db")).collect();
-    assert!(names.iter().all(|name| name.len() == 30));
-    let file_set = daemon::open(&socket, &cell_dir, 1 << 30, 1 << 30, Options::default()).unwrap();
-    let registration = register("cladefs-many", file_set.clone()).unwrap();
-    for (n, name) in names.iter().enumerate() {
-        let connection =
-            Connection::open_with_flags_and_vfs(name, OpenFlags::default(), "cladefs-many")
-                .unwrap();
-        connection.execute_batch("CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)").unwrap();
-        connection.execute("INSERT INTO t VALUES (1, ?1)", params![n as i64]).unwrap();
-    }
-    assert_eq!(file_set.files().unwrap().len(), names.len());
+    let database = daemon::open(&socket, &cell_dir, 1 << 30, 1 << 30, Options::default()).unwrap();
+    let registration = register("cladefs-one", database.clone()).unwrap();
+    let connection =
+        Connection::open_with_flags_and_vfs("a.db", OpenFlags::default(), "cladefs-one").unwrap();
+    connection.execute_batch("CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)").unwrap();
+    connection.execute("INSERT INTO t VALUES (1, 7)", []).unwrap();
+    let second = Connection::open_with_flags_and_vfs("b.db", OpenFlags::default(), "cladefs-one");
+    assert_eq!(second.unwrap_err().sqlite_error_code(), Some(rusqlite::ErrorCode::CannotOpen));
+    drop(connection);
     drop(registration);
-    file_set.close().unwrap();
-    drop(file_set);
+    database.close().unwrap();
+    drop(database);
 
-    let file_set = daemon::open(&socket, &cell_dir, 1 << 30, 1 << 30, Options::default()).unwrap();
-    let _registration = register("cladefs-many-again", file_set.clone()).unwrap();
-    for (n, name) in names.iter().enumerate() {
-        let connection =
-            Connection::open_with_flags_and_vfs(name, OpenFlags::default(), "cladefs-many-again")
-                .unwrap();
-        let v: i64 =
-            connection.query_row("SELECT v FROM t WHERE k = 1", [], |row| row.get(0)).unwrap();
-        assert_eq!(v, n as i64, "{name}");
-        // And commits again, its root still listing its files.
-        connection.execute("UPDATE t SET v = v + 1", []).unwrap();
-    }
+    let database = daemon::open(&socket, &cell_dir, 1 << 30, 1 << 30, Options::default()).unwrap();
+    let _registration = register("cladefs-one-again", database.clone()).unwrap();
+    let connection =
+        Connection::open_with_flags_and_vfs("b.db", OpenFlags::default(), "cladefs-one-again")
+            .unwrap();
+    let v: i64 = connection.query_row("SELECT v FROM t WHERE k = 1", [], |row| row.get(0)).unwrap();
+    assert_eq!(v, 7);
+    connection.execute("UPDATE t SET v = v + 1", []).unwrap();
 }

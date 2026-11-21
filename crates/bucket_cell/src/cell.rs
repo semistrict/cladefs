@@ -21,7 +21,7 @@ pub enum Kind {
     Fxfs,
     /// A database of `sqlite_cladefs`.
     Sqlite,
-    /// A VM's memory: an `extent_files` file set of one file, its image (TASK-456).
+    /// A VM's memory: a `block_device` whose contents are its image (TASK-456).
     Memory,
 }
 

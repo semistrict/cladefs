@@ -2,14 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! SQLite on a file set on an cladefs image: an extent store on disk, its cell kept in a bucket
+//! SQLite on a cladefs image: an extent store on disk, its cell kept in a bucket
 //! beside it (TASK-296).
 
 mod common;
 
 use cladefs::Storage;
 use rusqlite::{Connection, OpenFlags, params};
-use sqlite_cladefs::{FileSet, Options, Registration, register};
+use sqlite_cladefs::{Database, Options, Registration, register};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -56,12 +56,12 @@ async fn survives_closing(name: &str) -> Vec<String> {
     let (write, read) =
         (format!("cladefs-image-write-{name}"), format!("cladefs-image-read-{name}"));
     {
-        let file_set = FileSet::open(
+        let database = Database::open(
             Storage::create(&path, 256 << 20).await.unwrap().into_device(),
             Options::default(),
         )
         .unwrap();
-        let registration = register(&write, file_set.clone()).unwrap();
+        let registration = register(&write, database.clone()).unwrap();
         let connection =
             Connection::open_with_flags_and_vfs("app.db", OpenFlags::default(), write.as_str())
                 .unwrap();
@@ -81,14 +81,13 @@ async fn survives_closing(name: &str) -> Vec<String> {
         connection.execute("INSERT INTO t VALUES (?1, ?2)", params![1000, marker]).unwrap();
         drop(connection);
         drop(registration);
-        file_set.close().unwrap();
+        database.close().unwrap();
     }
 
-    let file_set =
-        FileSet::open(Storage::open(&path).await.unwrap().into_device(), Options::default())
+    let database =
+        Database::open(Storage::open(&path).await.unwrap().into_device(), Options::default())
             .unwrap();
-    assert_eq!(file_set.files().unwrap(), vec!["app.db".to_owned()]);
-    let registration = register(&read, file_set.clone()).unwrap();
+    let registration = register(&read, database.clone()).unwrap();
     let connection =
         Connection::open_with_flags_and_vfs("app.db", OpenFlags::default(), read.as_str()).unwrap();
     let check: String =
@@ -107,37 +106,37 @@ async fn survives_closing(name: &str) -> Vec<String> {
     assert!(read_marker == marker, "the row of noise reads back otherwise");
     drop(connection);
     drop(registration);
-    file_set.close().unwrap();
+    database.close().unwrap();
 
     cladefs::testing::files_holding(dir.path(), &[&marker[..64]])
 }
 
-/// A file set on `storage`, registered as the VFS `vfs`, and a connection to its database.
-fn mount(storage: Storage, vfs: &str) -> (Arc<FileSet>, Registration, Connection) {
-    let file_set = FileSet::open(storage.into_device(), Options::default()).unwrap();
-    let registration = register(vfs, file_set.clone()).unwrap();
+/// A database on `storage`, registered as the VFS `vfs`, and a connection to its database.
+fn mount(storage: Storage, vfs: &str) -> (Arc<Database>, Registration, Connection) {
+    let database = Database::open(storage.into_device(), Options::default()).unwrap();
+    let registration = register(vfs, database.clone()).unwrap();
     let connection =
         Connection::open_with_flags_and_vfs("app.db", OpenFlags::default(), vfs).unwrap();
-    (file_set, registration, connection)
+    (database, registration, connection)
 }
 
-fn unmount((file_set, registration, connection): (Arc<FileSet>, Registration, Connection)) {
+fn unmount((database, registration, connection): (Arc<Database>, Registration, Connection)) {
     drop(connection);
-    held(&file_set);
+    held(&database);
     drop(registration);
-    file_set.close().unwrap();
+    database.close().unwrap();
 }
 
-/// Checks the device holds every extent the file set names, those it references and those it has
+/// Checks the device holds every extent the database names, those it references and those it has
 /// yet to free: so that none it frees, or failed to, is one the device never held, which it would
 /// try to free again at each commit.
-fn held(file_set: &FileSet) {
-    let device = file_set.device();
+fn held(database: &Database) {
+    let device = database.device();
     let mut buffer =
         futures::executor::block_on(device.allocate_buffer(device.block_size() as usize));
-    for extent in file_set.extents().unwrap() {
+    for extent in database.extents().unwrap() {
         futures::executor::block_on(device.read(extent, 0, buffer.as_mut()))
-            .unwrap_or_else(|error| panic!("{extent:?} the file set names: {error:#}"));
+            .unwrap_or_else(|error| panic!("{extent:?} the database names: {error:#}"));
     }
 }
 

@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use futures::executor::block_on;
 use storage_device::Device;
 
-use crate::{Contents, FileSetWindow, Run};
+use crate::{Contents, Run, Window};
 
 /// What a [`CopyingWindow`] holds where nothing is mapped: no page a test writes holds it whole.
 pub const UNMAPPED: u8 = 0xab;
@@ -26,14 +26,14 @@ pub struct CopyingWindow {
     failing: Arc<AtomicBool>,
 }
 
-// SAFETY: written only as the file set maps, under its lock.
+// SAFETY: written only as the block device maps, under its lock.
 unsafe impl Send for CopyingWindow {}
-// SAFETY: as Send's: shared, its memory is written only under the file set's lock.
+// SAFETY: as Send's: shared, its memory is written only under the block device's lock.
 unsafe impl Sync for CopyingWindow {}
 
 impl CopyingWindow {
-    /// A window of `size` bytes, aligned to `block_size`: no more than a test's file set maps, as
-    /// each is filled when made, and a test may make one each time it opens its file set.
+    /// A window of `size` bytes, aligned to `block_size`: no more than a test's block device maps, as
+    /// each is filled when made, and a test may make one each time it opens its block device.
     pub fn new(size: u64, block_size: u32) -> Self {
         let layout = Layout::from_size_align(size as usize, block_size as usize);
         let layout = layout.expect("a layout");
@@ -45,8 +45,8 @@ impl CopyingWindow {
         Self { memory, layout, failing: Arc::default() }
     }
 
-    /// What makes its maps fail while it is set, which the test keeps once the window is the file
-    /// set's.
+    /// What makes its maps fail while it is set, which the test keeps once the window is the block
+    /// device's.
     pub fn failing(&self) -> Arc<AtomicBool> {
         self.failing.clone()
     }
@@ -58,7 +58,7 @@ impl CopyingWindow {
     #[allow(clippy::mut_from_ref)]
     fn bytes(&self, at: u64, len: u64) -> &mut [u8] {
         assert!(at + len <= self.size());
-        // SAFETY: within the memory, which the file set changes under its lock alone.
+        // SAFETY: within the memory, which the block device changes under its lock alone.
         unsafe {
             std::slice::from_raw_parts_mut(self.memory.as_ptr().add(at as usize), len as usize)
         }
@@ -72,7 +72,7 @@ impl Drop for CopyingWindow {
     }
 }
 
-impl FileSetWindow for CopyingWindow {
+impl Window for CopyingWindow {
     fn memory(&self) -> (NonNull<u8>, u64) {
         (self.memory, self.size())
     }

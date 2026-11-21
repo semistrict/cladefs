@@ -2536,7 +2536,7 @@ fn memory_cells_commit_pages_and_holes_and_forks_store_only_their_own() {
     assert_eq!(page, 4096);
     let filled = |byte: u8, pages: u64| vec![byte; (pages * page) as usize];
     memory.write(0, &filled(1, PAGES)).unwrap();
-    memory.punch(100 * page, 20 * page).unwrap();
+    memory.discard(100 * page, 20 * page).unwrap();
     memory.commit().unwrap();
     let parent_extents = memory.extents().unwrap();
     let fork = dir.path().join("fork");
@@ -2557,7 +2557,7 @@ fn memory_cells_commit_pages_and_holes_and_forks_store_only_their_own() {
     child.read(0, &mut image).unwrap();
     assert!(image == expected, "the fork reads its parent's pages");
     child.write(3 * page, &filled(2, 4)).unwrap();
-    child.punch(10 * page, page).unwrap();
+    child.discard(10 * page, page).unwrap();
     child.commit().unwrap();
     expected[(3 * page) as usize..(7 * page) as usize].fill(2);
     expected[(10 * page) as usize..(11 * page) as usize].fill(0);
@@ -2595,7 +2595,7 @@ fn a_memory_cell_opens_again_after_a_commit_freeing_many_extents() {
     }
     let extents = memory.extents().unwrap().len();
     assert!(extents > 64, "{extents} extents, too few to list");
-    memory.punch(0, PAGES * page).unwrap();
+    memory.discard(0, PAGES * page).unwrap();
     memory.commit().unwrap();
     memory.close().unwrap();
 
@@ -2631,7 +2631,7 @@ fn memory_windows_map_what_faults_reach_and_share_their_pages() {
         image.extend(pattern(page as u8, ps as usize));
     }
     memory.write(0, &image).unwrap();
-    memory.punch(200 * ps, 30 * ps).unwrap();
+    memory.discard(200 * ps, 30 * ps).unwrap();
     image[(200 * ps) as usize..(230 * ps) as usize].fill(0);
     memory.commit().unwrap();
     let (one, two) = (dir.path().join("one"), dir.path().join("two"));
