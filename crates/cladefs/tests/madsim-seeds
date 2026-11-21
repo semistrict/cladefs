@@ -10,3 +10,4 @@
 310     board 2934: the same, the target then refusing every later migration of the cell (ALREADY_EXISTS)
 30      board 5668: a CreateCell whose making's last sync failed left its store looking made, every take after it refused (EEXIST)
 423     board 5890: a log append written back a page at a time wrote again the end of the record synced before it; a crash before its sync made garbage of that record, a commit told durable lost (decision-3)
+107     board 5721: an accepted hand-over's note unlinked, its directory's sync failing, answered EIO; asking again found nothing (ENOENT)

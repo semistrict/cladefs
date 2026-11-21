@@ -414,7 +414,10 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
 
 /// Lets go of the cell at `path`, handed over as `noted` says, noted at `handed`: its cell
 /// directory goes, then this host's reference (`sourceRetiresLast`), then the note. `EIO` if the
-/// directory or the note does not go, the note left, from which asking again goes on.
+/// directory or the note does not go, the note left, from which asking again goes on. The note
+/// gone, its directory's sync failing answers `Ok` all the same (board 5721): the cell is handed
+/// over and let go of, and asking again would find nothing to go on from (`ENOENT`); a crash may
+/// bring the note back, of a cell directory gone and a reference retired.
 async fn let_go(
     host: &ephemeral_host::Host,
     path: &Path,
@@ -430,10 +433,14 @@ async fn let_go(
     {
         log::warn!("cladefsd: retiring {}'s reference, handed over: {err:#}", entry.child);
     }
-    remove_durably(handed).map_err(|err| {
+    host_fs::remove_file(handed).map_err(|err| {
         log::warn!("cladefsd: {}, let go of: {err}", handed.display());
         Errno::EIO
-    })
+    })?;
+    if let Err(err) = host_fs::sync_dir(handed.parent().unwrap_or(Path::new("."))) {
+        log::warn!("cladefsd: {} let go of, not durably: {err}", handed.display());
+    }
+    Ok(())
 }
 
 /// Sends what `outgoing` has not sent of the cell at `path`, given up: its directories; the kept
