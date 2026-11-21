@@ -1,0 +1,14 @@
+# A region's collector deletes the copy of another bucket's cell but not its mirrors' holds in that
+# cell's bucket (TASK-633.8): holds left, keeping there what nothing reads, which the check at the end
+# finds (TASK-633.10).
+# Killer: sim::versions_mirrored_across_regions
+--- a/crates/bucket_cell/src/collector.rs
++++ b/crates/bucket_cell/src/collector.rs
+@@ -518,7 +518,6 @@
+         // its mirrors'; then its markers here, then what they named, then the marks.
+         let holds: Vec<String> = ats.iter().map(|&at| layout::hold(cell, at, number)).collect();
+         let holds: Vec<&str> = holds.iter().map(String::as_str).collect();
+-        bucket::delete_all(bucket, &holds).await;
+         let of = |kind: fn(&Kind) -> bool| -> Vec<&Meta> {
+             listed.iter().filter(|meta| kind(&layout::kind(&meta.key))).collect()
+         };

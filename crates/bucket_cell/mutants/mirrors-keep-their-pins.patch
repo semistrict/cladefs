@@ -1,0 +1,14 @@
+# A done mirror never lets its pin go (TASK-633.8, mirrorPins): its copy kept for ever, as a
+# pin under way says, which the check at the end finds (TASK-633.10).
+# Killer: sim::versions_mirrored_across_regions
+--- a/crates/bucket_cell/src/mirror.rs
++++ b/crates/bucket_cell/src/mirror.rs
+@@ -255,7 +255,7 @@
+     // stand, and a mirror begun again lists them again.
+     let referred = refer_here(bucket, own, number, parent, at).await;
+     failpoint!("mirror::referred");
+-    pin.release(own).await;
++    drop(pin);
+     Ok(Mirrored::Done { copied, referred: referred? })
+ }
+ 

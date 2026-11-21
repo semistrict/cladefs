@@ -137,7 +137,7 @@ impl SimBucket {
     }
 
     /// cladefs: how many slots its cells' heads are kept in.
-    fn slots(&self) -> u64 {
+    pub fn slots(&self) -> u64 {
         self.inner.lock().unwrap().head_slots.unwrap_or(crate::identity::DEFAULT_HEAD_SLOTS)
     }
 
@@ -321,12 +321,8 @@ impl SimBucket {
     /// The keys of every object, of every region's bucket, as its bucket has it, in order.
     pub fn keys(&self) -> Vec<String> {
         let inner = self.inner.lock().unwrap();
-        let mut keys: Vec<String> = (inner.objects.keys())
-            .map(|stored| match stored.strip_prefix('@').and_then(|rest| rest.split_once('/')) {
-                Some((_, key)) => key.to_owned(),
-                None => stored.clone(),
-            })
-            .collect();
+        let mut keys: Vec<String> =
+            inner.objects.keys().map(|stored| key_of(stored).to_owned()).collect();
         keys.sort();
         keys
     }
@@ -334,6 +330,22 @@ impl SimBucket {
     /// cladefs: where every object is kept, a region's bucket but 0's under `@REGION/`.
     pub fn stored(&self) -> Vec<String> {
         self.inner.lock().unwrap().objects.keys().cloned().collect()
+    }
+
+    /// cladefs: the size of every object, by where it is kept ([`SimBucket::stored`]): a copy in one
+    /// region's bucket and its original in another's apart.
+    pub fn sizes(&self) -> BTreeMap<String, u64> {
+        let inner = self.inner.lock().unwrap();
+        (inner.objects.iter()).map(|(at, stored)| (at.clone(), stored.bytes.len() as u64)).collect()
+    }
+}
+
+/// cladefs: the key of the object kept at `stored` ([`SimBucket::stored`]), whichever region's
+/// bucket keeps it.
+pub fn key_of(stored: &str) -> &str {
+    match stored.strip_prefix('@').and_then(|rest| rest.split_once('/')) {
+        Some((_, key)) => key,
+        None => stored,
     }
 }
 
@@ -610,7 +622,7 @@ impl crate::mirror::Here for SimBucket {
         })
     }
 
-    fn retire<'a>(&'a self, keys: &'a [&'a str]) -> futures::future::BoxFuture<'a, ()> {
+    fn retire<'a>(&'a self, keys: &'a [&'a str]) -> futures::future::BoxFuture<'a, usize> {
         let own = self.own();
         let theirs: Vec<&str> =
             keys.iter().copied().filter(|key| self.region_of(key) != self.home).collect();
@@ -618,6 +630,7 @@ impl crate::mirror::Here for SimBucket {
             if !theirs.is_empty() {
                 crate::lifecycle::retire(&*own, &theirs).await;
             }
+            theirs.len()
         })
     }
 
@@ -646,19 +659,25 @@ pub struct Direct(pub Arc<SimBucket>);
 
 impl Direct {
     /// cladefs: a listing of a prefix of no cell's lists every region's bucket, as one: the
-    /// simulation's view of them all (TASK-633.10).
+    /// simulation's view of them all (TASK-633.10), each object where its key routes it, as a
+    /// routed bucket's requests reach it: not the copies a region's bucket keeps of other
+    /// buckets' cells (TASK-633.8), which a view of its own store lists ([`SimBucket::own`]).
     fn apply(&self, op: Op) -> Result<Reply, Error> {
         let region = self.0.region_of(op.key());
         let mut inner = self.0.inner.lock().unwrap();
         match op {
-            Op::List(prefix) if self.0.home != 0 && layout::routed_to(&prefix).is_none() => {
+            Op::List(prefix)
+                if self.0.home != 0 && !self.0.pinned && layout::routed_to(&prefix).is_none() =>
+            {
                 let regions: BTreeSet<u16> = (inner.objects.keys())
                     .filter_map(|stored| stored.strip_prefix('@')?.split_once('/')?.0.parse().ok())
                     .collect();
                 let mut all = Vec::new();
                 for region in regions {
                     match inner.apply(region, Op::List(prefix.clone()))? {
-                        Reply::List(listed) => all.extend(listed),
+                        Reply::List(listed) => all.extend(listed.into_iter().filter(|meta| {
+                            layout::routed_to(&meta.key).is_none_or(|of| of == region)
+                        })),
                         _ => unreachable!("a listing"),
                     }
                 }
@@ -886,6 +905,10 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         crate::bucket::list(bucket, "").await.into_iter().map(|meta| meta.key).collect();
     let mut records: BTreeMap<CellId, Head> = BTreeMap::new();
     let mut references = Vec::new();
+    // cladefs: the holds of mirrors of its cells' versions in other buckets, each kept for as long
+    // as its mirror's copy there (TASK-633.8, [`uncollected_copies`]): which keep their versions
+    // whole here, as references do.
+    let mut holds = BTreeSet::new();
     for key in &keys {
         match layout::kind(key) {
             Kind::Head { cell, .. } if !records.contains_key(&cell) => {
@@ -894,6 +917,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
                 }
             }
             Kind::Reference { parent, at, child } => references.push((key, parent, at, child)),
+            Kind::Hold { parent, at, .. } => drop(holds.insert(Origin { parent, at })),
             _ => {}
         }
     }
@@ -901,6 +925,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
     let dead = |cell: layout::CellId| {
         records.iter().filter(|(of, _)| **of == cell).all(|(_, record)| record.deleted())
             && !references.iter().any(|(_, parent, _, _)| *parent == cell)
+            && !holds.iter().any(|origin| origin.parent == cell)
     };
     // Whether a cell goes whole: dead, no mark under it, its head one it may go with.
     let marked_under = |cell: layout::CellId| {
@@ -1012,6 +1037,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
             unnamed.insert(key.clone());
         }
     }
+    versions.extend(holds.iter().copied());
     // Each origin kept whole, once (TASK-395.4).
     let checkpoints = crate::recovery::Checkpoints::new(bucket, 0);
     for origin in versions {
@@ -1060,6 +1086,8 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
             | Kind::Marks { .. }
             | Kind::Marking
             | Kind::Retired { .. } => true,
+            // cladefs: as its mirror's copy says ([`uncollected_copies`]).
+            Kind::Hold { .. } => true,
             Kind::Reference { .. } => !retirable.contains(key) && !unnamed.contains(key),
             // Moves naming nothing live stay while what they are of stays, as a pass deletes them
             // only once it is gone (specs/bucket's doomedKey): of one a fork's ways from seals keep,
@@ -1108,6 +1136,151 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         }
     }
     left
+}
+
+/// cladefs: what bucket `number`, whose own store is `own`, keeps of other buckets' cells that it
+/// should not, its collectors done ([`uncollected`]'s, of the copies of mirrors, TASK-633.8), and
+/// what it keeps short: `bucket` routed, as its host's requests go, its listing of no cell's
+/// prefix every bucket's own cells' objects, as [`Direct`]'s.
+///
+/// The copy of a cell of another bucket goes whole once its cell is dead (no head, or a deleted
+/// one), no mirror pins it, and no child here refers to it (`collect_copy`): until then it stays,
+/// but its references whose children are gone or name another origin, which each pass retires.
+/// A pin is garbage once nothing runs, as every mirror lets its pin go and a collector begins a
+/// stale one's again. A hold of this bucket's in another stays while its version is marked here,
+/// and no longer; a marker is never without its hold (`HoldsMarked`, which keeps there what the
+/// version inherits), nor its copy short: the checkpoint at the version, what recovering it read
+/// of its cell, and each of its cell's extents its state names, where it is here or where its
+/// moves here lead. And a version marked here leaves no live child here depending on its cell's
+/// bucket alone (specs/buckets): each refers here.
+pub async fn uncollected_copies(
+    bucket: &impl Bucket,
+    own: &impl Bucket,
+    number: u16,
+) -> Vec<String> {
+    use crate::layout::Origin;
+    let mut left = Vec::new();
+    let here: BTreeSet<String> =
+        crate::bucket::list(own, "").await.into_iter().map(|meta| meta.key).collect();
+    let mut copies: BTreeMap<CellId, Vec<&String>> = BTreeMap::new();
+    for key in &here {
+        if layout::routed_to(key).is_some_and(|of| of != number)
+            && let Some(cell) = layout::owner(key)
+        {
+            copies.entry(cell).or_default().push(key);
+        }
+    }
+    for (&cell, keys) in &copies {
+        let alive =
+            matches!(crate::head::get(bucket, cell).await, Ok(Some(head)) if !head.deleted());
+        let mut pinned = false;
+        let mut stray = Vec::new();
+        for &key in keys {
+            match layout::kind(key) {
+                Kind::Pin { .. } => {
+                    pinned = true;
+                    left.push(format!("pin left: @{number}/{key}"));
+                }
+                Kind::Reference { parent, at, child } => {
+                    let marked = here.contains(&layout::retired(parent, at, child));
+                    let names = matches!(
+                        crate::head::get(bucket, child).await,
+                        Ok(Some(head)) if head.origin() == Some(Origin { parent, at })
+                    );
+                    if marked || !names {
+                        stray.push(key);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let references =
+            keys.iter().filter(|key| matches!(layout::kind(key), Kind::Reference { .. }));
+        let standing = references.count() > stray.len();
+        if !(alive || pinned || standing) {
+            left.extend(keys.iter().map(|key| format!("copy left: @{number}/{key}")));
+            continue;
+        }
+        left.extend(stray.iter().map(|key| format!("garbage left: @{number}/{key}")));
+        for &key in keys {
+            let Kind::Mirror { at, .. } = layout::kind(key) else { continue };
+            if let Err(short) = copied_whole(bucket, own, number, cell, at, &here).await {
+                left.push(format!("marker @{number}/{key}: {short}"));
+            }
+        }
+    }
+    // Its holds in other buckets, every one's own cells' listed; and its own cells.
+    let mut children = BTreeSet::new();
+    for meta in crate::bucket::list(bucket, "").await {
+        match layout::kind(&meta.key) {
+            Kind::Hold { parent, at, bucket: of }
+                if of == number && !here.contains(&layout::mirror(parent, at)) =>
+            {
+                left.push(format!("hold left: {}", meta.key));
+            }
+            Kind::Head { cell, .. } if layout::routed_to(&meta.key) == Some(number) => {
+                children.insert(cell);
+            }
+            _ => {}
+        }
+    }
+    for child in children {
+        let Ok(Some(head)) = crate::head::get(bucket, child).await else { continue };
+        let Some(Origin { parent, at }) = head.origin().filter(|_| !head.deleted()) else {
+            continue;
+        };
+        if here.contains(&layout::mirror(parent, at))
+            && !here.contains(&layout::reference(parent, at, child))
+        {
+            left.push(format!(
+                "{child} refers to {parent}'s version at {at:x} in its bucket alone, marked here"
+            ));
+        }
+    }
+    left
+}
+
+/// cladefs: whether the copy in bucket `number`, whose own store is `own`, holding `here`, of
+/// `cell`'s version at `at` is whole, as its marker says ([`uncollected_copies`]): what it lacks if
+/// not, or the hold missing.
+async fn copied_whole(
+    bucket: &impl Bucket,
+    own: &impl Bucket,
+    number: u16,
+    cell: CellId,
+    at: u64,
+    here: &BTreeSet<String>,
+) -> Result<(), String> {
+    let hold = layout::hold(cell, at, number);
+    if crate::bucket::get(bucket, &hold).await.is_none() {
+        return Err(format!("its hold {hold} gone"));
+    }
+    let marker = crate::bucket::get(own, &layout::mirror(cell, at)).await;
+    let marker = marker.ok_or("gone")?;
+    let epoch =
+        layout::decode::<layout::Mirror>(&marker.bytes).map_err(|err| err.to_string())?.epoch;
+    // The version, as its cell's bucket keeps it whole, its hold there.
+    let checkpoints = crate::recovery::Checkpoints::new(bucket, 0);
+    let (state, read) = crate::recovery::recover_at(&checkpoints, cell, at)
+        .await
+        .map_err(|err| format!("its version not to be recovered: {err}"))?;
+    let ours = |key: &String| layout::owner(key) == Some(cell);
+    let mut needed: Vec<String> = read.into_iter().filter(ours).collect();
+    needed.push(layout::checkpoint(cell, at, epoch));
+    if let Some(lacking) = needed.iter().find(|key| !here.contains(*key)) {
+        return Err(format!("{lacking} not copied"));
+    }
+    let mut maps = MovesMaps::default();
+    for (&extent, location) in state.extents.iter().filter(|(_, location)| ours(&location.key)) {
+        let mut key = location.key.clone();
+        while !here.contains(&key) {
+            match maps.moved(own, extent, &key).await {
+                Ok(Moved::To(to)) => key = to.key,
+                _ => return Err(format!("{extent:?} at {} not copied", location.key)),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// cladefs: the DEK tests frame objects under outside a writer, of every cell (TASK-411.28:
@@ -1259,6 +1432,36 @@ mod tests {
         let alone = SimBucket::new();
         assert_eq!(put(&alone, &head), [format!("put {head}")]);
         assert_eq!(alone.keys(), [head]);
+    }
+
+    /// TASK-633.10: a mirror is wanted in its child's bucket alone, of a version of another
+    /// bucket's cell ([`crate::mirror::wanted`]): a host of a third bucket opening the child, or
+    /// one of the parent's, asks nothing of any bucket; one of the child's mirrors the version,
+    /// which, not there, is unnamed.
+    #[test]
+    fn mirrors_are_wanted_in_their_childs_bucket_alone() {
+        use crate::mirror::{Mirrored, wanted};
+        let sim = SimBucket::new();
+        let cell = |id| CellId { tenant: 1, id };
+        let (parent, child) = (cell(1 << 48 | 5), cell(2 << 48 | 6));
+        let origin = layout::Origin { parent, at: 3 };
+        let wanted_by = |number: u16, child: CellId| {
+            let bucket = sim.at(number);
+            let (wanted, asked) =
+                bucket.served(wanted(&*bucket, &*bucket.own(), number, child, origin));
+            (wanted.unwrap(), asked)
+        };
+        assert_eq!(wanted_by(3, child), (None, Vec::new()), "a third bucket's host");
+        assert_eq!(wanted_by(1, cell(1 << 48 | 7)), (None, Vec::new()), "the parent's bucket");
+        let (wanted, asked) = wanted_by(2, child);
+        assert_eq!(wanted, Some(Mirrored::Unnamed));
+        assert_eq!(
+            asked[..2],
+            [
+                format!("@2 get {}", layout::mirror(parent, 3)),
+                format!("@2 put {}", layout::pin(parent, 3))
+            ]
+        );
     }
 
     /// TASK-79.40: the simulation refuses the ranged reads `object_store` refuses, as it does, as

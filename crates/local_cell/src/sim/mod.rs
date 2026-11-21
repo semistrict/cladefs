@@ -263,6 +263,7 @@ fn one() {
         "late_checkpoints" => late_checkpoints(),
         "versions" => versions(),
         "regions" => regions(),
+        "mirrors" => mirrors(),
         "replicated" => replicated(),
         "retakes" => retakes(),
         other => panic!("no profile {other}"),
@@ -290,6 +291,7 @@ fn seeds_replay() {
         recreated(),
         twin_restores(),
         regions(),
+        mirrors(),
         replicated(),
     ];
     for profile in profiles {
@@ -435,6 +437,49 @@ fn regions() -> Profile {
 }
 
 test_holds!(cells_across_regions, regions(), [2325]);
+
+/// cladefs: versions mirrored across the buckets of three regions (TASK-633.10, TASK-633.8): restores
+/// as [`restores`] makes them, by hosts each of a region of its own, so that most land in another
+/// bucket than their versions' cells', whose hosts begin their versions' mirrors there, as their
+/// children's openings do; hosts crashing midway, their pins left to go stale; versions dropped
+/// and bases deleted under them; collectors of each region passing over copies; and at its end every
+/// cell deleted, every copy collected with them.
+fn mirrors() -> Profile {
+    let mut profile = Profile { regions: 3, steps: 1000, teardown: true, ..restores() };
+    profile.weights.complete = 200;
+    profile.weights.version = 8;
+    profile.weights.restore_version = 2;
+    profile.weights.drop_version = 2;
+    profile.weights.crash = 1;
+    profile.weights.write = 2;
+    profile.weights.commit = 4;
+    profile.weights.checkpoint = 1;
+    profile.weights.collect = 3;
+    profile.weights.open = 3;
+    profile
+}
+
+test_holds!(versions_mirrored_across_regions, mirrors());
+
+/// cladefs: the mirrors' runs reach mirrors (TASK-633.10): versions forked into other regions'
+/// buckets mirrored there, some by a second host as one is under way, others dropped first, their
+/// mirrors finding them unnamed, and copies collected once nothing needs them, as a site no run
+/// reaches makes no run test it.
+#[test]
+fn mirrors_are_reached_across_regions() {
+    let mut reached = std::collections::BTreeMap::<&str, usize>::new();
+    for seed in 0..20 {
+        let mut world = World::new(seed, mirrors());
+        world.run();
+        for (outcome, count) in world.mirrored {
+            *reached.entry(outcome).or_default() += count;
+        }
+    }
+    println!("mirrors of 20 seeds: {reached:?}");
+    for outcome in ["done", "unnamed", "under way", "collected"] {
+        assert!(reached.get(outcome).is_some_and(|&n| n > 0), "no mirror {outcome}: {reached:?}");
+    }
+}
 // A child in another region's bucket than its parent's keeps what it reads of the parent by its
 // reference, in the parent's bucket, and the parent's collector keeps its origins.
 test_needs!(references_hold_across_regions, references, regions());

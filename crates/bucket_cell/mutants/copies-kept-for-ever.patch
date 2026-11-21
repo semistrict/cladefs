@@ -1,0 +1,15 @@
+# A region's collector keeps the copy of another bucket's cell for ever, its cell dead, no mirror
+# pinning it, no child here referring to it (TASK-633.8, collect_copy): copies left, which the
+# check at the end finds once every cell is deleted (TASK-633.10, Profile::teardown).
+# Killer: sim::versions_mirrored_across_regions
+--- a/crates/bucket_cell/src/collector.rs
++++ b/crates/bucket_cell/src/collector.rs
+@@ -510,7 +510,7 @@
+                 report.retired += referred;
+             }
+         }
+-        if alive || pinned || !stale.is_empty() || standing {
++        if alive || pinned || !stale.is_empty() || standing || true {
+             return Ok(report);
+         }
+         // Nothing of it needed: its mirrors' holds there first, which keep there what it inherits,

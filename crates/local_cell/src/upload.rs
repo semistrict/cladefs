@@ -77,13 +77,13 @@ const SEGMENT: u64 = 32 << 20;
 pub const CHECKPOINT_EVERY: u64 = 64;
 
 /// cladefs: the mirror in `bucket` of the version `origin` names, begun in the background on the
-/// bucket runtime, a fork of it into `bucket` made (doc-23: the first fork of a version into a
-/// bucket starts its mirror there; TASK-633.8): nothing for a version of a cell of `bucket`'s own,
-/// or one mirrored there already ([`ObjectBucket::mirror_wanted`]), which takes its turn before
-/// this returns. What it came to is logged.
-fn mirror_wanted(bucket: &Arc<ObjectBucket>, origin: Origin) -> Result<(), Failure> {
+/// bucket runtime, its fork to `child` made (doc-23: the first fork of a version into a bucket
+/// starts its mirror there; TASK-633.8): nothing unless `child` is of `bucket` and the version of
+/// another's cell, nor for one mirrored there already ([`ObjectBucket::mirror_wanted`]), which
+/// takes its turn before this returns. What it came to is logged.
+fn mirror_wanted(bucket: &Arc<ObjectBucket>, child: CellId, origin: Origin) -> Result<(), Failure> {
     let Origin { parent, at } = origin;
-    let mirroring = bucket.mirror_wanted(parent, at);
+    let mirroring = bucket.mirror_wanted(child, origin);
     bucket_runtime()?.spawn(async move { logged(mirroring.await, parent, at) });
     Ok(())
 }
@@ -1048,7 +1048,7 @@ impl<D: Dir> Uploader<D> {
                 known.learn(child.cell, Learned { head });
             }
         }
-        mirror_wanted(&self.bucket, at.origin)?;
+        mirror_wanted(&self.bucket, child.cell, at.origin)?;
         Ok(())
     }
 

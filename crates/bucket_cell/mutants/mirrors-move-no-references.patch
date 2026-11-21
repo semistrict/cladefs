@@ -1,0 +1,15 @@
+# A mirror marks its copy but moves no reference of a child of its bucket there (TASK-633.8,
+# mirrorListsAfterMark): a done mirror leaves children depending on their parents' bucket alone,
+# against specs/buckets, which the check at the quiescent end finds (TASK-633.10).
+# Killer: sim::versions_mirrored_across_regions
+--- a/crates/bucket_cell/src/mirror.rs
++++ b/crates/bucket_cell/src/mirror.rs
+@@ -253,7 +253,7 @@
+     };
+     // Its pin let go whatever the listing came to: the marker, and the references written here,
+     // stand, and a mirror begun again lists them again.
+-    let referred = refer_here(bucket, own, number, parent, at).await;
++    let referred: Result<usize, Error> = Ok(0);
+     failpoint!("mirror::referred");
+     pin.release(own).await;
+     Ok(Mirrored::Done { copied, referred: referred? })

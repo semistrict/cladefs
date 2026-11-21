@@ -759,24 +759,24 @@ impl ObjectBucket {
         self.own.get_or_init(own)
     }
 
-    /// cladefs: the mirror here of `parent`'s version at `at`, which a fork of it into this bucket
-    /// asks for (doc-23: the first fork of a version into a bucket starts its mirror there;
-    /// TASK-633.8): none if `parent` is of this bucket, this bucket routes nothing, or the mirror
-    /// is marked here. This process's mirrors of a version take turns, each taking its own as it is
-    /// asked for, before its future first runs: one asked for later waits for it, and finds it
-    /// marked. Under way from another process, or begun again, the mirror says so
-    /// ([`crate::mirror::mirror`]).
+    /// cladefs: the mirror here of the version `child` was forked from, `origin`, which `child`'s
+    /// fork into this bucket asks for (TASK-633.8, [`crate::mirror::wanted`]): none if this bucket
+    /// routes nothing, or the mirror is known marked or known unnamed. This process's mirrors of a
+    /// version take turns, each taking its own as it is asked for, before its future first runs:
+    /// one asked for later waits for it, and finds it marked. Under way from another process, or
+    /// begun again, the mirror says so ([`crate::mirror::mirror`]).
     pub fn mirror_wanted(
         self: &Arc<Self>,
-        parent: layout::CellId,
-        at: u64,
+        child: layout::CellId,
+        origin: layout::Origin,
     ) -> impl Future<Output = Result<Option<crate::mirror::Mirrored>, crate::Error>> + Send + 'static
     {
+        let version = (origin.parent, origin.at);
         let known = {
             let mirrors = self.mirrors.lock().unwrap();
-            mirrors.marked.contains(&(parent, at)) || mirrors.unnamed.contains(&(parent, at))
+            mirrors.marked.contains(&version) || mirrors.unnamed.contains(&version)
         };
-        let turn = (self.route.is_some() && !known).then(|| MirrorTurn::take(self, (parent, at)));
+        let turn = (self.route.is_some() && !known).then(|| MirrorTurn::take(self, version));
         async move {
             let Some(mut turn) = turn else { return Ok(None) };
             turn.wait().await;
@@ -786,23 +786,18 @@ impl ObjectBucket {
             let number =
                 number.map_err(|err| crate::Error::Read(format!("its identity: {err}")))?;
             let Some(number) = number else { return Ok(None) };
-            if layout::routed_to(&parent.prefix()).is_none_or(|of| of == number)
-                || crate::mirror::Here::marked(&**bucket, parent, at).await
-            {
-                return Ok(None);
-            }
             let own = bucket.twin();
-            let mirrored = crate::mirror::mirror(&**bucket, &**own, number, parent, at).await?;
-            if mirrored == crate::mirror::Mirrored::Unnamed {
-                bucket.mirrors.lock().unwrap().unnamed.insert((parent, at));
+            let mirrored = crate::mirror::wanted(&**bucket, &**own, number, child, origin).await?;
+            if mirrored == Some(crate::mirror::Mirrored::Unnamed) {
+                bucket.mirrors.lock().unwrap().unnamed.insert(version);
             }
-            Ok(Some(mirrored))
+            Ok(mirrored)
         }
     }
 
-    /// cladefs: the mirror here of the version `cell` was forked from, if a cell's of another
-    /// bucket ([`ObjectBucket::mirror_wanted`]): what a host opening `cell`'s store asks for, the
-    /// host that forked it perhaps dead before it did (TASK-633.8). With the version, its origin.
+    /// cladefs: the mirror here of the version `cell` was forked from
+    /// ([`ObjectBucket::mirror_wanted`]): what a host opening `cell`'s store asks for, the host
+    /// that forked it perhaps dead before it did (TASK-633.8). With the version, its origin.
     pub async fn mirror_for(
         self: Arc<Self>,
         cell: layout::CellId,
@@ -814,7 +809,7 @@ impl ObjectBucket {
         else {
             return Ok(None);
         };
-        let mirrored = self.mirror_wanted(origin.parent, origin.at).await?;
+        let mirrored = self.mirror_wanted(cell, origin).await?;
         Ok(mirrored.map(|mirrored| (origin, mirrored)))
     }
 
@@ -1772,17 +1767,18 @@ impl crate::mirror::Here for ObjectBucket {
         })
     }
 
-    fn retire<'a>(&'a self, keys: &'a [&'a str]) -> futures::future::BoxFuture<'a, ()> {
+    fn retire<'a>(&'a self, keys: &'a [&'a str]) -> futures::future::BoxFuture<'a, usize> {
         Box::pin(async move {
-            let Some(route) = &self.route else { return };
+            let Some(route) = &self.route else { return 0 };
             // Its own number not to be read: retired by the copy's pass, its children gone.
-            let Ok(Some(number)) = self.own_number(route).await else { return };
+            let Ok(Some(number)) = self.own_number(route).await else { return 0 };
             let theirs: Vec<&str> = (keys.iter().copied())
                 .filter(|key| layout::routed_to(key).is_some_and(|of| of != number))
                 .collect();
             if !theirs.is_empty() {
                 crate::lifecycle::retire(&**self.twin(), &theirs).await;
             }
+            theirs.len()
         })
     }
 
@@ -1971,7 +1967,8 @@ pub(crate) mod tests {
                 crate::collector::collect_cell(&*fresh, child, holder, &options).await.unwrap();
             }
             let report = pass.collect_copy(&*fresh, &*fresh_own, 1, parent).await.unwrap();
-            assert_eq!((report.deleted, report.retired), (2, 0), "nothing needing it");
+            // Its copy and its marker.
+            assert_eq!((report.deleted, report.retired), (3, 0), "nothing needing it");
             assert_eq!(two.home.store_list(&parent.prefix()).await.unwrap(), [], "left here");
             assert!(two.other.store_get(&hold).await.is_err(), "the hold stands");
         });
@@ -2345,14 +2342,16 @@ pub(crate) mod tests {
             let (at, ..) = Two::versioned(&bucket, parent).await;
             let child = test_cell(1 << 48 | 2);
             fork_version_given(&*bucket, child, VERSION, Origin { parent, at }, 7).await.unwrap();
+            let origin = Origin { parent, at };
             let (first, second) =
-                (bucket.mirror_wanted(parent, at), bucket.mirror_wanted(parent, at));
+                (bucket.mirror_wanted(child, origin), bucket.mirror_wanted(child, origin));
             // The second polled first: it waits for the first's turn, taken as it was asked for.
             let (second, first) = futures::join!(second, first);
             assert!(matches!(first.unwrap(), Some(Mirrored::Done { referred: 1, .. })));
             assert_eq!(second.unwrap(), None, "the second's turn");
             assert!(bucket.mirrors.lock().unwrap().making.is_empty(), "turns left");
-            assert_eq!(bucket.mirror_wanted(test_cell(1 << 48 | 9), 3).await.unwrap(), None);
+            let own = Origin { parent: test_cell(1 << 48 | 9), at: 3 };
+            assert_eq!(bucket.mirror_wanted(child, own).await.unwrap(), None);
         });
     }
 
@@ -2793,7 +2792,8 @@ pub(crate) mod tests {
             let watched_own =
                 Watched { deleted: log.clone(), ..Watched::new(own.clone(), 0, None) };
             let report = pass().collect_copy(&watched, &watched_own, 1, parent).await.unwrap();
-            assert_eq!(report.deleted, copied.len());
+            // Its copy and its marker.
+            assert_eq!(report.deleted, copied.len() + 1);
             assert_eq!(listed(home, parent).await, Vec::<String>::new(), "left here");
             assert_eq!(listed(other, parent).await, heads_of(parent), "touched there");
             let mark = layout::retired(parent, 3, child);
@@ -2847,11 +2847,12 @@ pub(crate) mod tests {
             let there: Vec<String> = there.into_iter().map(|meta| meta.key).collect();
             assert_eq!(there, heads_of(parent), "marked there");
             let swept = sweep(Mode::Delete).run_with_own(&routed, Some(&own), |_| {}).await;
-            assert_eq!((swept.report.deleted, left().await), (1, 0), "swept");
+            // Its copy and its marker.
+            assert_eq!((swept.report.deleted, left().await), (2, 0), "swept");
             copy().await;
             let collected =
                 Collector::new(options).collect_with_own(&*routed, Some(&*own), 9).await;
-            assert_eq!((collected.unwrap().deleted, left().await), (1, 0), "collected");
+            assert_eq!((collected.unwrap().deleted, left().await), (2, 0), "collected");
         });
     }
 

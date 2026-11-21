@@ -26,7 +26,7 @@ use base32_id::Short;
 use bucket_cell::collector::{self, Options};
 use bucket_cell::fetch::{Budget, Limits};
 use bucket_cell::layout::{self, Origin, epoch_of, writer_of};
-use bucket_cell::testing::{Direct, Fault, SimBucket};
+use bucket_cell::testing::{Direct, Fault, SimBucket, key_of};
 use bucket_cell::{Error, Recovered, Writer, lifecycle, recovery};
 use extent_frame::spent::Spent;
 use futures::channel::oneshot;
@@ -134,6 +134,10 @@ pub struct Profile {
     /// cladefs: whether a crash corrupts what a disk kept of the writes its files never synced
     /// ([`MemDir::crash_corrupting`]), its stores' and replica directories', at random.
     pub corrupting: bool,
+    /// cladefs: whether its end deletes every cell, once checked, and sweeps until the collectors
+    /// do nothing more, checking then that nothing is left ([`World::tear_down`]): the copies of
+    /// mirrors, kept while their cells' children live, reached in every run (TASK-633.10).
+    pub teardown: bool,
     pub weights: Weights,
     pub options: Options,
 }
@@ -198,6 +202,7 @@ impl Default for Profile {
             replicated: 0.0,
             net_faults: 0.0,
             corrupting: false,
+            teardown: false,
             weights: Weights {
                 complete: 60,
                 write: 6,
@@ -718,6 +723,8 @@ struct Host {
     /// cladefs: its keys, its KMS the tests' and its fetchers' keys its own, which its stores share,
     /// as a daemon's do: every store encrypted (TASK-411.28).
     keys: bucket_cell::keys::Host,
+    /// cladefs: its mirrors under way, by ID ([`World::spawn_mirror`]), which its crash stops.
+    mirrors: BTreeMap<u64, AbortHandle>,
 }
 
 impl Default for Host {
@@ -726,7 +733,8 @@ impl Default for Host {
         let (disks, sessions) = (HashMap::new(), BTreeMap::new());
         let held = crate::HeldParts::new();
         let keys = bucket_cell::keys::testing::host();
-        Self { disks, sessions, uploads: Budget::new(limits), held, keys }
+        let mirrors = BTreeMap::new();
+        Self { disks, sessions, uploads: Budget::new(limits), held, keys, mirrors }
     }
 }
 
@@ -796,6 +804,12 @@ enum Event {
     Twinned {
         child: u64,
         made: [(Restore, Result<(), Error>); 2],
+    },
+    /// cladefs: what host `host`'s mirror `id` came to ([`World::spawn_mirror`]).
+    Mirrored {
+        host: usize,
+        id: u64,
+        result: Result<Option<bucket_cell::mirror::Mirrored>, Error>,
     },
     /// cladefs: what a writer's dropping of a version gave, its session's, on `host`.
     VersionDropped {
@@ -888,6 +902,9 @@ pub struct World {
     /// cells may be replicated ([`Profile::replicated`]).
     net: Option<Arc<Mutex<Net>>>,
     pub violations: Vec<String>,
+    /// cladefs: what the hosts' mirrors came to, by outcome, and the copies sweeps alone deleted
+    /// ("collected"): what a run reached of mirrors (TASK-633.10).
+    pub mirrored: BTreeMap<&'static str, usize>,
 }
 
 /// A task's place in [`World::tasks`], which it gives up as it is dropped: done, or aborted.
@@ -899,6 +916,16 @@ struct Running {
 impl Drop for Running {
     fn drop(&mut self) {
         self.tasks.borrow_mut().remove(&self.number);
+    }
+}
+
+/// A sweep of the collector over every cell of `bucket`, as `id`. cladefs: of a region's bucket, by
+/// a collector of its region, its own store's copies of other buckets' cells passed over as such
+/// (TASK-633.8).
+async fn sweep(bucket: &SimBucket, id: u64, options: &Options) -> Result<collector::Report, Error> {
+    match bucket.home() {
+        0 => collector::collect(bucket, id, options).await,
+        _ => collector::collect_with_own(bucket, &*bucket.own(), id, options).await,
     }
 }
 
@@ -943,6 +970,7 @@ impl World {
             next_task: 0,
             net: None,
             violations: Vec::new(),
+            mirrored: BTreeMap::new(),
         };
         if profile.replicated > 0.0 {
             let rng = StdRng::seed_from_u64(world.rng.random());
@@ -956,11 +984,41 @@ impl World {
             let net = Net { rng, faults, replicas, dirs, blocked, late, replicators };
             world.net = Some(Arc::new(Mutex::new(net)));
         }
+        world.format_regions();
         let (root, owner) = (world.cell_id(1), world.id());
         block_on(lifecycle::create(&Direct(world.bucket.clone()), sim_cell(root), owner)).unwrap();
         let found = world.new_cell(None, None);
         world.cells.insert(root, found);
         world
+    }
+
+    /// cladefs: with regions, the first region's bucket formatted, the root, and each other's added
+    /// to it in turn, numbered as its region, every one holding the root's registry, as an operator
+    /// sets up a bucket a region (TASK-633.3): what a region's collector reads its number from.
+    /// Its heads' slots as the world's buckets keep them.
+    fn format_regions(&self) {
+        use bucket_cell::identity::{self, Asked, Details};
+        if self.profile.regions == 0 {
+            return;
+        }
+        let details =
+            |region: u16| Details { url: Some(format!("sim://{region}")), ..Details::default() };
+        let asked = Asked { head_slots: Some(self.bucket.slots()) };
+        let (root, root_details) = (Direct(self.bucket.at(1)), details(1));
+        block_on(identity::format(&root, &root_details, asked)).unwrap();
+        let mut registry = None;
+        for region in 2..=self.profile.regions {
+            let added = Direct(self.bucket.at(region));
+            let adding = identity::add(&root, &root_details, &added, details(region), asked);
+            let (identity, added) = block_on(adding).unwrap();
+            assert_eq!(identity.number, region, "region {region}'s bucket's number");
+            registry = Some(added);
+        }
+        for region in 1..=self.profile.regions {
+            if let Some(registry) = &registry {
+                block_on(identity::spread(registry, &Direct(self.bucket.at(region)))).unwrap();
+            }
+        }
     }
 
     /// cladefs: a cell forked from `origin`, of its parent's commit `base`: replicated, as the
@@ -1169,6 +1227,25 @@ impl World {
                     child = Short(child)
                 ));
             }
+            Event::Mirrored { host, id, result } => {
+                self.hosts[host].mirrors.remove(&id);
+                trace!("host {host}: mirror {id}: {result:?}");
+                use bucket_cell::mirror::Mirrored;
+                let outcome = match &result {
+                    Ok(None) => "not wanted",
+                    Ok(Some(Mirrored::Done { .. })) => "done",
+                    Ok(Some(Mirrored::Unnamed)) => "unnamed",
+                    Ok(Some(Mirrored::GaveUp(_))) => "gave up",
+                    Ok(Some(Mirrored::UnderWay)) => "under way",
+                    Err(_) => "failed",
+                };
+                *self.mirrored.entry(outcome).or_default() += 1;
+                // Its requests failing, as its bucket's may: begun again by the next fork, or
+                // opening, or collector, that wants it.
+                if let Err(Error::Lost(_) | Error::Corrupt(_)) = result {
+                    self.violation(format!("host {host}'s mirror: {result:?}"));
+                }
+            }
             Event::VersionDropped { id, result, host, session } => {
                 trace!("version {id} dropped: {result:?}", id = Short(id));
                 let cut = self.versions.get_mut(&id).unwrap();
@@ -1211,11 +1288,20 @@ impl World {
 
     /// What `restore`, a fork of a version to `child`, gave.
     fn restored(&mut self, child: u64, restore: Restore, result: Result<(), Error>) {
+        trace!(
+            "host {}: fork of version {} to {}: {result:?}",
+            restore.host,
+            Short(restore.version),
+            Short(child)
+        );
         match result {
             // Told to its VM's manager: a cell from now on, whatever comes of the version.
+            // cladefs: its host begins the version's mirror into its bucket, as `Uploader::forked`
+            // does (TASK-633.8).
             Ok(()) => {
                 let found = self.new_cell(Some(restore.origin), restore.base);
-                drop(self.cells.insert(child, found))
+                self.cells.insert(child, found);
+                self.spawn_mirror(restore.host, child, Some(restore.origin));
             }
             // The version went, or the fork was given up on: its host deletes it.
             Err(Error::Deleted) => self.fail_restore(child, restore),
@@ -1551,6 +1637,9 @@ impl World {
         session.lineage = lineage;
         session.guest = Guest { head, held, written: BTreeMap::new(), next_sequence };
         session.store = Some(store);
+        // cladefs: its host begins the mirror of the version it was forked from, if any, as
+        // `upload::open` does, the host that forked it perhaps dead before it did (TASK-633.8).
+        self.spawn_mirror(host, cell, None);
     }
 
     /// `cell`'s store on `host` did not open, for `failure`: its log diverged, another writer's
@@ -2096,6 +2185,10 @@ impl World {
                 running.abort();
             }
         }
+        // cladefs: its mirrors, their pins left to go stale (TASK-633.8).
+        for (_, running) in std::mem::take(&mut self.hosts[host].mirrors) {
+            running.abort();
+        }
     }
 
     /// cladefs: a member of a live replicator's configuration takes a turn: sent what it lacks
@@ -2186,6 +2279,7 @@ impl World {
     /// Makes the fork `child`, or goes on with one a crash stopped, as opening its handle does.
     fn spawn_restore(&mut self, child: u64) {
         let Restore { version, origin, owner, host, .. } = self.restores[&child];
+        trace!("host {host}: forks version {} to {}", Short(version), Short(child));
         let (bucket, events) = (self.host_bucket(host), self.events.clone());
         let running = self.spawn(async move {
             let child = sim_cell(child);
@@ -2197,6 +2291,36 @@ impl World {
             events.borrow_mut().push(Event::Restored { child, result });
         });
         self.restores.get_mut(&child).unwrap().running = Some(running);
+    }
+
+    /// cladefs: host `host`'s mirror into its bucket of the version `child` was forked from: `origin`,
+    /// or as `child`'s head names it (`bucket_cell::mirror::wanted`, TASK-633.8), as the child's
+    /// fork on the host, or its store's opening there, begins it; stopped by the host's crash.
+    /// Nothing without regions.
+    fn spawn_mirror(&mut self, host: usize, child: u64, origin: Option<Origin>) {
+        if self.profile.regions == 0 {
+            return;
+        }
+        let (id, number) = (self.id(), self.region_of(host));
+        trace!(
+            "host {host}: mirror {id} of the version {child} was forked from, {origin:?}",
+            child = Short(child)
+        );
+        let (bucket, events) = (self.host_bucket(host), self.events.clone());
+        let running = self.spawn(async move {
+            let child = sim_cell(child);
+            let result = async {
+                let origin = match origin {
+                    Some(origin) => Some(origin),
+                    None => bucket_cell::head::get(&*bucket, child).await?.and_then(|h| h.origin()),
+                };
+                let Some(origin) = origin else { return Ok(None) };
+                bucket_cell::mirror::wanted(&*bucket, &*bucket.own(), number, child, origin).await
+            };
+            let result = result.await;
+            events.borrow_mut().push(Event::Mirrored { host, id, result });
+        });
+        self.hosts[host].mirrors.insert(id, running);
     }
 
     /// cladefs: a cell's writer cuts a version (doc-18, TASK-476), its store quiescent, its guest
@@ -2473,7 +2597,7 @@ impl World {
         let handle = self.spawn(async move {
             let result = match cell {
                 Some(cell) => collector::collect_cell(&*bucket, cell, id, &options).await,
-                None => collector::collect(&*bucket, id, &options).await,
+                None => sweep(&bucket, id, &options).await,
             };
             events.borrow_mut().push(Event::Collected { id, result });
         });
@@ -2663,15 +2787,34 @@ impl World {
         before: &BTreeMap<String, u64>,
         report: Option<Result<collector::Report, Error>>,
     ) {
-        let after: BTreeSet<String> = self.bucket.keys().into_iter().collect();
-        let moves = |key: &&String| matches!(layout::kind(key), layout::Kind::Moves { .. });
-        let reference = |key: &&String| matches!(layout::kind(key), layout::Kind::Reference { .. });
-        // The collector's leases, its own, which it reports not.
-        let lease =
-            |key: &&String| matches!(layout::kind(key), layout::Kind::CollectorLease { .. });
+        // cladefs: by where each is kept ([`SimBucket::stored`]): a copy in one region's bucket and
+        // its original in another's apart (TASK-633.8).
+        let after: BTreeSet<String> = self.bucket.stored().into_iter().collect();
+        fn kind(stored: &str) -> layout::Kind<'_> {
+            layout::kind(key_of(stored))
+        }
+        let moves = |key: &&String| matches!(kind(key), layout::Kind::Moves { .. });
+        let reference = |key: &&String| matches!(kind(key), layout::Kind::Reference { .. });
+        // The collector's leases, its own, which it reports not. cladefs: and the pins and holds of
+        // mirrors, theirs, which a pass over a copy deletes, or a mirror it begins again lets go,
+        // and the marks of references retired in a copy (TASK-633.8), unreported:
+        // [`bucket_cell::testing::uncollected_copies`] checks them.
+        let copy = |stored: &str| {
+            let region = stored.strip_prefix('@').and_then(|rest| rest.split_once('/'));
+            let region = region.and_then(|(region, _)| region.parse::<u16>().ok());
+            layout::routed_to(key_of(stored)).is_some_and(|of| Some(of) != region)
+        };
+        let lease = |key: &&String| match kind(key) {
+            layout::Kind::CollectorLease { .. } | layout::Kind::Pin { .. } => true,
+            layout::Kind::Hold { .. } => true,
+            layout::Kind::Retired { .. } => copy(key),
+            _ => false,
+        };
         let gone = || before.keys().filter(|key| !after.contains(*key) && !lease(key));
         let made = || after.iter().filter(|key| !before.contains_key(*key));
         let retired = gone().filter(reference).count();
+        let markers = gone().filter(|key| matches!(kind(key), layout::Kind::Mirror { .. }));
+        *self.mirrored.entry("collected").or_default() += markers.count();
         let expected = |reported: &collector::Report| collector::Report {
             deleted: gone().filter(|key| !reference(key)).count(),
             compacted: made().filter(moves).count(),
@@ -2679,7 +2822,10 @@ impl World {
             deleted_bytes: gone().filter(|key| !reference(key)).map(|key| before[key]).sum(),
             // Each moves of what was there then, the object it is of.
             compacted_bytes: (made().filter(moves))
-                .filter_map(|moves| before.get(&layout::moved_from(moves)?))
+                .filter_map(|moves| {
+                    let of = layout::moved_from(key_of(moves))?;
+                    before.get(&format!("{}{of}", &moves[..moves.len() - key_of(moves).len()]))
+                })
                 .sum(),
             // Which passes skipped their cells, unchanged, the bucket can't tell (TASK-395.6).
             skipped: reported.skipped,
@@ -2690,7 +2836,7 @@ impl World {
             // cladefs: the cells whose heads went, as only a dead cell's removal deletes them
             // (TASK-455): every slot of each (TASK-691).
             removed: gone()
-                .filter_map(|key| match layout::kind(key) {
+                .filter_map(|key| match kind(key) {
                     layout::Kind::Head { cell, .. } => Some(cell),
                     _ => None,
                 })
@@ -2701,7 +2847,10 @@ impl World {
             Some(Ok(report)) if report == expected(&report) => {}
             Some(Ok(report)) => {
                 let expected = expected(&report);
-                self.violation(format!("collector reported {report:?}, having done {expected:?}"))
+                let gone: Vec<&String> = gone().collect();
+                self.violation(format!(
+                    "collector reported {report:?}, having done {expected:?}: gone {gone:#?}"
+                ))
             }
             Some(Err(error)) => self.violation(format!("collector: {error}")),
             None => self.violation("a collector alone did not finish".to_owned()),
@@ -2789,6 +2938,14 @@ impl World {
         let compact_below = self.profile.options.compact_below;
         for left in block_on(bucket_cell::testing::uncollected(&direct, compact_below)) {
             self.violation(left);
+        }
+        // cladefs: and what each region's bucket keeps of other buckets' cells (TASK-633.8).
+        for region in (1..=self.profile.regions).collect::<Vec<_>>() {
+            let (routed, own) =
+                (Direct(self.bucket.at(region)), Direct(self.bucket.at(region).own()));
+            for left in block_on(bucket_cell::testing::uncollected_copies(&routed, &own, region)) {
+                self.violation(left);
+            }
         }
     }
 
@@ -3306,12 +3463,10 @@ impl World {
         let options = self.profile.options;
         let reported = Rc::new(RefCell::new(None));
         let report = reported.clone();
-        // Every region's objects ([`Direct`] lists them all).
-        let listed = block_on(bucket_cell::Bucket::list(&Direct(self.bucket.clone()), ""));
-        let before: BTreeMap<String, u64> =
-            listed.unwrap().into_iter().map(|meta| (meta.key, meta.size)).collect();
+        // Every region's objects, by where each is kept.
+        let before = self.bucket.sizes();
         self.spawn(async move {
-            *report.borrow_mut() = Some(collector::collect(&*bucket, id, &options).await);
+            *report.borrow_mut() = Some(sweep(&bucket, id, &options).await);
         });
         self.settle();
         let reported = reported.take();
@@ -3342,6 +3497,11 @@ impl World {
             self.bucket.down(region, false);
         }
         self.settle();
+        // cladefs: long enough that the pins of mirrors a crash stopped are stale, which the next
+        // opening of a child, or collector, takes over (TASK-633.8).
+        if self.profile.regions > 0 {
+            self.bucket.advance(bucket_cell::mirror::PIN_STALE + 1);
+        }
         // Forks of versions a crash stopped, or a lost disk left with no host: deleted.
         let stopped = self.restores.keys().copied().collect::<Vec<_>>();
         for child in stopped {
@@ -3414,9 +3574,19 @@ impl World {
             self.settle();
             self.sweep_alone();
         }
-        // cladefs: then sweeps until two in a row delete and compact nothing: a dead cell's pass
-        // retires the references its parents' cells keep origins for, which their next passes
-        // reclaim, a sweep a generation of a chain (TASK-395.4).
+        self.sweep_until_quiet();
+        self.check_woken();
+        self.check();
+        self.check_collected();
+        if self.profile.teardown {
+            self.tear_down();
+        }
+    }
+
+    /// Sweeps until two in a row delete and compact nothing: a dead cell's pass retires the
+    /// references its parents' cells keep origins for, which their next passes reclaim, a sweep a
+    /// generation of a chain (TASK-395.4).
+    fn sweep_until_quiet(&mut self) {
         let mut quiet = 0;
         for _ in 0..16 {
             let Some(report) = self.sweep_alone() else { break };
@@ -3428,8 +3598,33 @@ impl World {
         if quiet < 2 {
             self.violation("16 sweeps of the collector alone, which kept doing something".into());
         }
+    }
+
+    /// cladefs: the end of the world, once checked ([`Profile::teardown`]): every session stopped,
+    /// every live cell deleted by its latest placement, then sweeps alone until they do nothing
+    /// more, which leave nothing a live cell needs, there being none: every copy of a mirror gone,
+    /// with its cell and its children (TASK-633.10).
+    fn tear_down(&mut self) {
+        trace!("tearing down");
+        for host in 0..self.hosts.len() {
+            for (cell, session) in std::mem::take(&mut self.hosts[host].sessions) {
+                self.stop(host, cell, session);
+            }
+        }
+        self.settle();
+        for cell in self.live() {
+            let found = self.cells.get_mut(&cell).unwrap();
+            found.deleting = true;
+            let token = found.taken;
+            self.spawn_delete(cell, token, false);
+        }
+        self.settle();
+        let left = self.live();
+        if !left.is_empty() {
+            self.violation(format!("cells {left:?} live on, deleted"));
+        }
+        self.sweep_until_quiet();
         self.check_woken();
-        self.check();
         self.check_collected();
     }
 }

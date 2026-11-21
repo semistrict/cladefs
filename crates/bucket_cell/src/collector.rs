@@ -258,6 +258,19 @@ pub async fn collect(
     Collector::new(*options).kms(kms).collect(bucket, holder).await
 }
 
+/// cladefs: [`collect`], of a bucket whose own store is `own` (TASK-633.8): its copies of other
+/// buckets' cells passed over as such ([`Collector::collect_with_own`]).
+#[cfg(any(test, feature = "testing"))]
+pub async fn collect_with_own(
+    bucket: &impl Bucket,
+    own: &impl Bucket,
+    holder: u64,
+    options: &Options,
+) -> Result<Report, Error> {
+    let kms = Some(crate::keys::testing::kms());
+    Collector::new(*options).kms(kms).collect_with_own(bucket, Some(own), holder).await
+}
+
 /// cladefs: one pass of the collector over `cell`, as `holder`, which must differ from every other
 /// pass's over the cell: of a collector of its own, which remembers nothing of it; tests', as
 /// [`collect`] is.
@@ -448,7 +461,7 @@ impl Collector {
         let mut report = Report::default();
         let alive = crate::head::get(bucket, cell).await?.is_some_and(|head| !head.deleted());
         let listed = bucket::list(own, &cell.prefix()).await;
-        let (mut markers, mut pinned, mut referring) = (Vec::new(), false, Vec::new());
+        let (mut pinned, mut referring) = (false, Vec::new());
         let mut stale = Vec::new();
         // The versions of the copy, by what is listed of them: whose mirrors' holds go with it.
         let mut ats = BTreeSet::new();
@@ -466,7 +479,6 @@ impl Collector {
                 _ => {}
             }
             match layout::kind(&meta.key) {
-                Kind::Mirror { at, .. } => markers.push((at, meta.key.as_str())),
                 Kind::Pin { at, .. } if crate::mirror::stale(own, meta) => stale.push(at),
                 Kind::Pin { .. } => pinned = true,
                 Kind::Reference { at, child, .. } => referring.push((at, child, meta.key.as_str())),
@@ -493,40 +505,50 @@ impl Collector {
         for at in &stale {
             let resumed = crate::mirror::mirror(bucket, own, number, cell, *at).await?;
             log::info!("collector: {cell}'s mirror at {at:x}, its pin stale, again: {resumed:?}");
+            // The references it moved here, retired there, whether there or not.
+            if let crate::mirror::Mirrored::Done { referred, .. } = resumed {
+                report.retired += referred;
+            }
         }
         if alive || pinned || !stale.is_empty() || standing {
             return Ok(report);
         }
         // Nothing of it needed: its mirrors' holds there first, which keep there what it inherits,
-        // of every version of it here, a mirror's that marked none too; then its markers here, then
-        // what they named, then the marks.
+        // of every version of it here, a mirror's that marked none too, unreported, as they are
+        // its mirrors'; then its markers here, then what they named, then the marks.
         let holds: Vec<String> = ats.iter().map(|&at| layout::hold(cell, at, number)).collect();
         let holds: Vec<&str> = holds.iter().map(String::as_str).collect();
         bucket::delete_all(bucket, &holds).await;
-        let markers: Vec<&str> = markers.iter().map(|(_, key)| *key).collect();
-        bucket::delete_all(own, &markers).await;
-        let copied: Vec<&Meta> = (listed.iter())
-            .filter(|meta| {
-                matches!(
-                    layout::kind(&meta.key),
-                    Kind::Segment { .. }
-                        | Kind::Extent { .. }
-                        | Kind::Checkpoint { .. }
-                        | Kind::Moves { .. }
-                        // cladefs: a fork's read evidence written here, routed nowhere else
-                        // (TASK-702.2).
-                        | Kind::Evidence { .. }
-                )
-            })
-            .collect();
-        let keys: Vec<&str> = copied.iter().map(|meta| meta.key.as_str()).collect();
-        bucket::delete_all(own, &keys).await;
-        report.deleted += copied.len();
-        report.deleted_bytes += copied.iter().map(|meta| meta.size).sum::<u64>();
+        let of = |kind: fn(&Kind) -> bool| -> Vec<&Meta> {
+            listed.iter().filter(|meta| kind(&layout::kind(&meta.key))).collect()
+        };
+        let markers = of(|kind| matches!(kind, Kind::Mirror { .. }));
+        let copied = of(|kind| {
+            matches!(
+                kind,
+                Kind::Segment { .. }
+                    | Kind::Extent { .. }
+                    | Kind::Checkpoint { .. }
+                    | Kind::Moves { .. }
+                    // cladefs: a fork's read evidence written here, routed nowhere else
+                    // (TASK-702.2).
+                    | Kind::Evidence { .. }
+            )
+        });
+        for metas in [&markers, &copied] {
+            let keys: Vec<&str> = metas.iter().map(|meta| meta.key.as_str()).collect();
+            bucket::delete_all(own, &keys).await;
+        }
         let written: Vec<String> = gone.iter().filter_map(|key| layout::retired_of(key)).collect();
         let marks: BTreeSet<&str> =
             marks.into_iter().chain(written.iter().map(String::as_str)).collect();
         bucket::delete_all(own, &marks.into_iter().collect::<Vec<_>>()).await;
+        // What it deleted of the copy, not the marks, its own, which a pass over a child here may
+        // have written as this one ran.
+        for metas in [markers, copied] {
+            report.deleted += metas.len();
+            report.deleted_bytes += metas.iter().map(|meta| meta.size).sum::<u64>();
+        }
         Ok(report)
     }
 
@@ -753,10 +775,11 @@ impl Collector {
         bucket::delete_all(bucket, &unmarked.iter().map(String::as_str).collect::<Vec<_>>()).await;
         // cladefs: and here, under cells of other buckets, where a mirror moved them, or forks wrote
         // them, those cells' versions mirrored here (TASK-633.8): the copy's pass keeps a reference
-        // of a child deleted standing, until this one, its cell dead, retires it.
+        // of a child deleted standing, until this one, its cell dead, retires it, counted apart from
+        // its original there.
         if let Some(here) = bucket.mirrors() {
             let all: Vec<&str> = marked.iter().chain(&unmarked).map(String::as_str).collect();
-            here.retire(&all).await;
+            report.retired += here.retire(&all).await;
         }
         let stale: Vec<&str> = pass.recording.stale.iter().map(String::as_str).collect();
         bucket::delete_all(bucket, &stale).await;

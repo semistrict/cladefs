@@ -104,8 +104,9 @@ pub trait Here: Send + Sync {
 
     /// Retires the references at `keys` of cells of other buckets in this bucket, marked first
     /// ([`lifecycle::retire`]): those of children of this bucket a mirror moved here, or forks
-    /// wrote here, their cells dead. Others it leaves.
-    fn retire<'a>(&'a self, keys: &'a [&'a str]) -> BoxFuture<'a, ()>;
+    /// wrote here, their cells dead. Others it leaves. How many it retired, whether there or not,
+    /// as a pass counts its retirements ([`crate::collector::Report::retired`]).
+    fn retire<'a>(&'a self, keys: &'a [&'a str]) -> BoxFuture<'a, usize>;
 
     /// Learns the epochs of the checkpoints at the versions of `cell`, a cell of another bucket,
     /// whose mirrors here are marked, from their markers ([`crate::known::Known::named`]): a
@@ -180,6 +181,29 @@ impl Pin {
 
 /// How many objects a mirror copies at once.
 const COPIES_AT_ONCE: usize = 8;
+
+/// The mirror into this bucket, numbered `number`, whose own store is `own`, of the version
+/// `child` was forked from, `origin`, which the child's fork, or its store's opening, asks for
+/// (doc-23: the first fork of a version into a bucket starts its mirror there): none unless `child`
+/// is of this bucket and `origin`'s parent of another, as a host of a third bucket opening `child`
+/// copies nothing its own bucket's children read; none if `bucket` routes nothing, or the version
+/// is marked here already. Else [`mirror`].
+pub async fn wanted(
+    bucket: &impl Bucket,
+    own: &impl Bucket,
+    number: u16,
+    child: CellId,
+    origin: layout::Origin,
+) -> Result<Option<Mirrored>, Error> {
+    let layout::Origin { parent, at } = origin;
+    let ours = layout::routed_to(&child.prefix()) == Some(number);
+    let theirs = layout::routed_to(&parent.prefix()).is_some_and(|of| of != number);
+    let Some(here) = bucket.mirrors().filter(|_| ours && theirs) else { return Ok(None) };
+    if here.marked(parent, at).await {
+        return Ok(None);
+    }
+    mirror(bucket, own, number, parent, at).await.map(Some)
+}
 
 /// Mirrors `parent`'s version at `at` into this bucket, whose own store is `own` and number
 /// `number`, through `bucket`, routed, which reads the parent's bucket (see the module). Begun again
