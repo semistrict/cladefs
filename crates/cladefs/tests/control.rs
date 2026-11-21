@@ -322,7 +322,9 @@ fn imports_given_up_on_hold_their_paths_to_their_end() {
     go.send(()).unwrap();
     assert_eq!(failure(daemon.import(&store, &image)), (Code::AlreadyExists, Errno::EEXIST));
     let size = futures::executor::block_on(async {
-        let fs = cladefs::Filesystem::mount(cladefs::Storage::open(&store).unwrap()).await.unwrap();
+        let fs = cladefs::Filesystem::mount(cladefs::Storage::open(&store).await.unwrap())
+            .await
+            .unwrap();
         let (_, attr) = fs.root().lookup(b"hello").await.unwrap();
         fs.close().await.unwrap();
         attr.size
