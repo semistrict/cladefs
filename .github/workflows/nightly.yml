@@ -137,6 +137,38 @@ jobs:
           echo "seeds from $base"
           MADSIM_TEST_SEED=$base CLADEFS_MADSIM_SEEDS=2000 CLADEFS_TEST_PARTS=madsim scripts/test.sh
 
+  # The simulations' branch coverage (board 2842, TASK-685.10): which branches of the protocol's
+  # code no seed of the full-stack simulation reaches, over 50 of the night's seeds, and none of
+  # local_cell::sim's profiles; each report a Markdown file of the branches no seed took
+  # (scripts/sim-coverage.sh).
+  sim-coverage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install the build's tools
+        uses: ./.github/actions/apt-install
+        with:
+          packages: clang elfutils sqlite3 fuse3 libseccomp-dev
+      # Branch coverage is nightly's (-Z coverage-options=branch).
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: llvm-tools
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,cargo-llvm-cov
+      - name: The full-stack simulation's coverage, 50 seeds
+        run: |
+          base=$(( $(date -u +%Y%m%d) * 10000 ))
+          MADSIM_TEST_SEED=$base CLADEFS_MADSIM_SEEDS=50 scripts/sim-coverage.sh madsim
+      - name: local_cell::sim's coverage
+        run: scripts/sim-coverage.sh local
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: sim-coverage
+          path: target/sim-coverage/*/branches.md
+
   # guest/sim's 3,000 seeds, as CI runs them when what they test changed (TASK-149.14).
   guest-sim:
     runs-on: ubuntu-24.04
