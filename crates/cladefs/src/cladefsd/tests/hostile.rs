@@ -699,6 +699,8 @@ fn hostile() -> impl Strategy<Value = Hostile> {
     let ps = page_size();
     let window = prop_oneof![4 => Just(WINDOW_BYTES), 1 => Just(MAX_WINDOW), 1 => Just(MAX_WINDOW + ps), 1 => Just(1 << 60)];
     let private_max = prop_oneof![1 => Just(0u64), 6 => 1u64..16, 1 => Just(u64::MAX)];
+    // One the daemon grants: no larger than it allows, its private pages bounded.
+    let granted = (prop_oneof![4 => Just(WINDOW_BYTES), 1 => Just(MAX_WINDOW)], 1u64..16);
     let elsewhere = prop_oneof![
         Just(Place::Escaped),
         Just(Place::Linked),
@@ -732,7 +734,7 @@ fn hostile() -> impl Strategy<Value = Hostile> {
     ];
     (
         opens,
-        (window, private_max),
+        ((window, private_max), granted),
         proptest::option::of(area()),
         acking,
         proptest::collection::vec(act(), 1..64),
@@ -740,21 +742,29 @@ fn hostile() -> impl Strategy<Value = Hostile> {
         proptest::bool::weighted(0.15),
         last_words,
     )
-        .prop_map(|(opens, window, area, acking, mut acts, waits, flood, last_words)| {
-            // A flood is of a connection that has a store of its own and waits for its answers,
-            // whose credit, of the window it asked for, is no more than a few hundred mebibytes:
-            // one it doesn't change, as another window, asked for later, may; nor its store's
-            // capacity, which its fills would reach, refusing its flood's write.
-            let flood = flood && opens == Opens::Own && waits && window.0 != MAX_WINDOW;
-            if flood {
-                acts.retain(|act| match act {
-                    Act::Say(said) => said.kind != WINDOW,
-                    Act::Fill { .. } => false,
-                    _ => true,
-                });
-            }
-            Hostile { opens, window, area, acking, acts, waits, flood, last_words }
-        })
+        .prop_map(
+            |(opens, (window, granted), area, acking, mut acts, waits, flood, last_words)| {
+                // A restore floods its version with page-ins, as a restored VM's first faults
+                // do, through the window such a VM has: one granted. Refused, its MAPs would be
+                // refused ENOSYS before they paged in, as those of connections opening other
+                // stores are; and a run whose few restores all drew refused windows flooded
+                // nothing (TASK-717).
+                let window = if opens == Opens::Restores { granted } else { window };
+                // A flood is of a connection that has a store of its own and waits for its
+                // answers, whose credit, of the window it asked for, is no more than a few hundred
+                // mebibytes: one it doesn't change, as another window, asked for later, may; nor
+                // its store's capacity, which its fills would reach, refusing its flood's write.
+                let flood = flood && opens == Opens::Own && waits && window.0 != MAX_WINDOW;
+                if flood {
+                    acts.retain(|act| match act {
+                        Act::Say(said) => said.kind != WINDOW,
+                        Act::Fill { .. } => false,
+                        _ => true,
+                    });
+                }
+                Hostile { opens, window, area, acking, acts, waits, flood, last_words }
+            },
+        )
 }
 
 /// The bytes alice or bob write of `tag`, `len` of them: each 16 `mark` and a word of `tag` and
@@ -1403,8 +1413,9 @@ struct Seen {
     /// What each of its `OPEN`s named, and how it was answered: what its last commit's failure
     /// says.
     opens: Vec<(PathBuf, u32, i32)>,
-    /// The extents its floods of page-ins mapped, to fault on.
-    flooded: u64,
+    /// How the `MAP`s of its floods of page-ins were answered, by status, `None` for those never
+    /// answered: those answered 0 mapped their extents, to fault on.
+    page_ins: BTreeMap<Option<i32>, u64>,
     /// Its fills' writes' statuses (TASK-94).
     filled: Vec<Option<i32>>,
 }
@@ -1522,8 +1533,8 @@ fn receive(
                     shared.paths.lock().unwrap().get(&header.id).cloned().unwrap_or_default();
                 seen.opens.push((path, request.flags, header.status));
             }
-            if header.status == 0 && shared.flooding.lock().unwrap().contains(&header.id) {
-                seen.flooded += 1;
+            if shared.flooding.lock().unwrap().contains(&header.id) {
+                *seen.page_ins.entry(Some(header.status)).or_default() += 1;
             }
             shared.answers.answer(header.id, header.status);
             if header.id == LAST && stop_at_last {
@@ -1772,6 +1783,11 @@ fn run_hostile(
     // Shut down for writing too: the daemon may be sending it what it never reads.
     let _ = stream.shutdown(std::net::Shutdown::Both);
     let mut seen = receiving.join().unwrap();
+    let answered: u64 = seen.page_ins.values().sum();
+    let unanswered = shared.flooding.lock().unwrap().len() as u64 - answered;
+    if unanswered > 0 {
+        seen.page_ins.insert(None, unanswered);
+    }
     seen.flood = flood.map(|written| (written, let_go));
     seen.committed = committed;
     seen.filled = filled;
@@ -1887,7 +1903,8 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
     let numbered = AtomicU64::new(0);
     let (served, restored, floods) = (AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0));
     let commits = AtomicU64::new(0);
-    let flooded = AtomicU64::new(0);
+    let page_ins = Mutex::new(BTreeMap::<Option<i32>, u64>::new());
+    let restores = Mutex::new(Vec::new());
     let (fills_written, fills_refused) = (AtomicU64::new(0), AtomicU64::new(0));
     let strategy =
         (proptest::collection::vec(hostile(), 1..=3), proptest::collection::vec(alice_op(), 0..32));
@@ -1970,7 +1987,19 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
                     floods.fetch_add(1, Ordering::Relaxed);
                 }
                 served.fetch_add(seen.served, Ordering::Relaxed);
-                flooded.fetch_add(seen.flooded, Ordering::Relaxed);
+                if hostile.opens == Opens::Restores {
+                    restores.lock().unwrap().push(format!(
+                        "window {:?}, acking {:?}, last words {:?}, restored {}, page-ins {:?}",
+                        hostile.window,
+                        hostile.acking,
+                        hostile.last_words,
+                        seen.restored,
+                        seen.page_ins
+                    ));
+                }
+                for (status, count) in &seen.page_ins {
+                    *page_ins.lock().unwrap().entry(*status).or_default() += count;
+                }
                 restored.fetch_add(seen.restored, Ordering::Relaxed);
             }
             // Every memory it was given, read whole, holds nothing of theirs.
@@ -2067,13 +2096,14 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
     // and floods are let go.
     let (served, restored, floods, commits) =
         (served.into_inner(), restored.into_inner(), floods.into_inner(), commits.into_inner());
-    let flooded = flooded.into_inner();
+    let page_ins = page_ins.into_inner().unwrap();
+    let flooded = page_ins.get(&Some(0)).copied().unwrap_or(0);
     let (fills_written, fills_refused) = (fills_written.into_inner(), fills_refused.into_inner());
     println!(
         "{served} of mallory's requests served, {restored} of them restores; {commits} of its \
-         stores committed at the end; {floods} floods let go; {} extents cold, flooded with \
-         page-ins; {fills_written} MiB filled, {fills_refused} refused at its disk's limit",
-        flooded,
+         stores committed at the end; {floods} floods let go; {flooded} extents cold, flooded \
+         with page-ins, their MAPs answered {page_ins:?}; {fills_written} MiB filled, \
+         {fills_refused} refused at its disk's limit",
     );
     assert!(served > 8 * u64::from(cases), "{served} requests served");
     assert!(restored > 0, "{restored} restores served");
@@ -2081,7 +2111,12 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
     // the rest, as one of another wire version did (TASK-141.3).
     assert!(commits > 0, "{commits} of its stores committed");
     // And its floods of page-ins page in cold extents.
-    assert!(flooded > 0, "{flooded} extents flooded with page-ins");
+    assert!(
+        flooded > 0,
+        "{flooded} extents flooded with page-ins; their MAPs answered, by status (None: never): \
+         {page_ins:?}; the restores': {:#?}",
+        restores.into_inner().unwrap()
+    );
     // And its fills write, and are refused at its disk's limit.
     assert!(
         fills_written > 0 && fills_refused > 0,
