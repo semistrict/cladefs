@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-21 07:39'
+updated_date: '2026-11-21 07:39'
 labels:
   - bug
   - arm64
@@ -25,3 +26,9 @@ Seen 2026-11-21 in the podman image on asahimbp (rootless, label=disable, seccom
 - [ ] #1 scripts/upstream-changes.py --check passes
 - [ ] #2 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Correction: 'ubu1 passes it' is unverified as of filing; ubu1's unit runs were green before 2026-11-21, not checked for this test since.
+<!-- SECTION:NOTES:END -->

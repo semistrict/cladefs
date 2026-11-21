@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-21 07:39'
+updated_date: '2026-11-21 07:39'
 labels:
   - bug
   - arm64
@@ -25,3 +26,9 @@ Seen 2026-11-21 on asahimbp's podman image, on the pre-async base 1b3b5a991 too.
 - [ ] #1 scripts/upstream-changes.py --check passes
 - [ ] #2 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Correction: 'Passes on ubu1' is unverified as of filing; not run there for this task.
+<!-- SECTION:NOTES:END -->
