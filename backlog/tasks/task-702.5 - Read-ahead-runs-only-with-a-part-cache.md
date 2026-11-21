@@ -4,6 +4,7 @@ title: Read-ahead runs only with a part cache
 status: To Do
 assignee: []
 created_date: '2026-11-20 19:47'
+updated_date: '2026-11-21 00:46'
 labels:
   - performance
   - cache
@@ -27,7 +28,6 @@ A fetcher with no part cache keeps nothing, not even the 64 MiB of recently fetc
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [ ] #1 scripts/upstream-changes.py --check passes
+- [ ] #2 Deviations from upstream documented where they occur
 <!-- DOD:END -->

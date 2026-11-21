@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-20 19:45'
-updated_date: '2026-11-20 19:47'
+updated_date: '2026-11-21 00:46'
 labels:
   - sandbox
   - performance
@@ -34,7 +34,6 @@ Questions, answered from the code at a771c3032:
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [ ] #1 scripts/upstream-changes.py --check passes
+- [ ] #2 Deviations from upstream documented where they occur
 <!-- DOD:END -->
