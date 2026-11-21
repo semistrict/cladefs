@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: a follower's mount (backlog doc-8): Fxfs, read-only, on a device that follows a store
+//! cladefs: a follower's mount (backlog doc-8): Fxfs, read-only, on a device that follows a cell
 //! another VM writes, applying the writer's commits as they come, while readers read.
 //!
 //! The concurrency protocol (crates/follower, TASK-42.5, TASK-42.10) keeps readers and the
@@ -16,8 +16,8 @@
 //! The files the kernel has open are held (`Fxfs::hold`): one the writer deletes reads as it was
 //! until the last close, as POSIX has it (doc-8's graveyard).
 //!
-//! A batch that fails ends the follower: what reads the trees fails with ESTALE (`follower::Failed`)
-//! until it is remounted, which opens the store anew.
+//! A batch that fails ends the follower: what reads the trees fails with ESTALE
+//! (`follower::Failed`) until it is remounted, which opens the cell anew.
 
 use crate::fs::{Attr, Fxfs, GuestFxfs};
 use anyhow::{Error, ensure};

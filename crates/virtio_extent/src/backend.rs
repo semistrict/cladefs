@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! What serving the device's requests asks of its backend, its store: on Linux, cladefs's
+//! What serving the device's requests asks of its backend, its cell: on Linux, cladefs's
 //! `CellClient`, the device's connection to the extent daemon; a fake one in tests.
 
 use std::future::Future;
@@ -11,13 +11,13 @@ use cladefs::{
     Commit, Errno, ExtentId, ExtentInfo, VolatileSlice, VolatileSliceMut, WriteBarriers,
 };
 
-/// The store a device's requests are served with ([`handle`](crate::handle)), its backend: each
+/// The cell a device's requests are served with ([`handle`](crate::handle)), its backend: each
 /// method one of the device's requests, as cladefs's `CellClient` serves it, which its
 /// documentation describes. Errors are the request's status.
 pub trait Backend: Send + Sync {
     /// The cell the guest mints extents of.
     fn cell(&self) -> u64;
-    /// Whether the store's window copies on write: a writer's (backlog doc-13).
+    /// Whether the cell's window copies on write: a writer's (backlog doc-13).
     fn copies_on_write(&self) -> bool;
     /// `READ`: the bytes at `offset` in `extent` into `buffers`, in order.
     fn read(
@@ -71,7 +71,7 @@ pub trait Backend: Send + Sync {
     ) -> impl Future<Output = Result<(), Errno>> + Send;
     /// `ROOT`: the root, as last committed.
     fn root(&self) -> impl Future<Output = Result<Vec<u8>, Errno>> + Send;
-    /// `INFO`: the store's capacity, use and sequence numbers.
+    /// `INFO`: the cell's capacity, use and sequence numbers.
     fn info(&self) -> impl Future<Output = Result<ExtentInfo, Errno>> + Send;
     /// `STATS`: the guest's answer to the daemon's ask `ask`, its stats as text.
     fn answer_stats(

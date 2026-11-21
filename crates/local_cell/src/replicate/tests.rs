@@ -292,7 +292,7 @@ fn own_extents_go_before_their_records() {
     assert_eq!(*ordered.0.lock().unwrap(), [own_of(3), log_of(3)]);
 }
 
-/// TASK-537.3.4's review: a store's own log is recovered unless its members' go past it: a later
+/// TASK-537.3.4's review: a cell's own log is recovered unless its members' go past it: a later
 /// writer's commits, or the same writer's beyond its own log (sent before its own sync).
 #[test]
 fn members_go_past_own_logs_by_writer_then_commit() {

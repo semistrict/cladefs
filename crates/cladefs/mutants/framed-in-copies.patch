@@ -5,7 +5,7 @@
 # framings' writes queued behind the raw files' on a disk the VMs and the bucket share: their
 # framings took 3.3-9.6 s, their sandboxes' commands seconds, their tests timed out. Main frames
 # them in place when compressing saves less than an eighth (TASK-310, TASK-92.41), their data
-# written once. The sandboxes' run, their topology, fails: its hosts' stores write 1.83-1.91
+# written once. The sandboxes' run, their topology, fails: its hosts' cells write 1.83-1.91
 # times their guests' bytes, past 1.5, and frame for up to 2.3 s, past a second (TASK-330.1).
 # Kind: writes
 # Killer: scripts/sandboxes.sh short
@@ -31,4 +31,4 @@
 -            }
              let file = match &mut framed {
                  Some(file) => file,
-                 // Its raw parts before are no parts of a store at a version's, encrypted with AES-GCM: framed anew,
+                 // Its raw parts before are no parts of a cell at a version's, encrypted with AES-GCM: framed anew,

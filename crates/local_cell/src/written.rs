@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: the bytes this process's stores wrote to their files, by kind (TASK-310): what a host's
-//! disk is asked to take of a store, each byte a guest writes once in a segment's raw file, as the
+//! cladefs: the bytes this process's cells wrote to their files, by kind (TASK-310): what a host's
+//! disk is asked to take of a cell, each byte a guest writes once in a segment's raw file, as the
 //! write-ahead log, and once more framed, in the closed segment's framed file, which object storage
 //! keeps. Written through the host's page cache: what of a raw file goes before it is written back,
 //! its segment framed, its pages leave dirty, never reaching the disk (the process's
@@ -11,7 +11,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// What a store wrote.
+/// What a cell wrote.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
     /// A guest's writes, as it writes them: to the open segment's raw file, or to an open extent's
@@ -27,7 +27,7 @@ pub(crate) enum Kind {
     Log,
 }
 
-/// The bytes this process's stores wrote, by kind ([`written`]).
+/// The bytes this process's cells wrote, by kind ([`written`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Written {
     pub raw: u64,
@@ -57,13 +57,13 @@ impl Written {
 static WRITTEN: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
 static WRITES: AtomicU64 = AtomicU64::new(0);
 
-/// A store of this process's wrote `bytes` of `kind`, in one write.
+/// A cell of this process's wrote `bytes` of `kind`, in one write.
 pub(crate) fn wrote(kind: Kind, bytes: usize) {
     WRITTEN[kind as usize].fetch_add(bytes as u64, Ordering::Relaxed);
     WRITES.fetch_add(1, Ordering::Relaxed);
 }
 
-/// The bytes this process's stores wrote since it started, by kind.
+/// The bytes this process's cells wrote since it started, by kind.
 pub fn written() -> Written {
     let load = |kind: Kind| WRITTEN[kind as usize].load(Ordering::Relaxed);
     Written {

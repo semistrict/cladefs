@@ -25,8 +25,8 @@ pub struct TestFxfsGuestChecks {
     /// cladefs: whether the DAX window is small, 32 MiB, as the checks' files fill it: ranges are
     /// reclaimed under load (TASK-119.12).
     pub small_window: bool,
-    /// cladefs: whether the suite runs the checks made to fail ([`Suites::Failing`]) before the page
-    /// cache's: one crashes, and one hangs in the kernel past its budget, which the guest ends
+    /// cladefs: whether the suite runs the checks made to fail ([`Suites::Failing`]) before the
+    /// page cache's: one crashes, and one hangs in the kernel past its budget, which the guest ends
     /// (TASK-168). Each fails alone, by name, and the rest pass (TASK-160.30).
     pub overrun: bool,
 }
@@ -123,7 +123,7 @@ impl Suites {
 /// took there, in any suite (GCE r560's page cache, r563's DAX), and 3 s at least, which the host
 /// scales for other kernels and storage (`host::TestFxfsGuestChecks::run`). The guest's time is
 /// the time but for what the guest waited for the host, its device's requests in flight, little of
-/// it with stores in the daemon's memory, as the budgets were measured (`guest::run`'s `Clock`,
+/// it with cells in the daemon's memory, as the budgets were measured (`guest::run`'s `Clock`,
 /// TASK-263). One that runs on past it, the guest kills, its stacks dumped, and fails by name:
 /// rather than the suite outrunning a limit of its own, which a few slow checks crossed and named
 /// none of them (TASK-168). A suite's limit is its checks' budgets', and more, for its VM's boot.
@@ -189,9 +189,9 @@ macro_rules! checks {
             append_stopped_short_in_a_page: All, 3 => test_append_stopped_short_in_a_page;
             write_past_end_copies_nothing: All, 3 => test_write_past_end_copies_nothing;
             direct_read_past_end: All, 3 => test_direct_read_past_end;
-            store_past_end: All, 3 => test_store_past_end;
-            store_past_end_then_written: All, 3 => test_store_past_end_then_written;
-            store_past_end_then_cloned: All, 3 => test_store_past_end_then_cloned;
+            mapped_write_past_end: All, 3 => test_mapped_write_past_end;
+            mapped_write_past_end_then_written: All, 3 => test_mapped_write_past_end_then_written;
+            mapped_write_past_end_then_cloned: All, 3 => test_mapped_write_past_end_then_cloned;
             read_into_own_mapping: All, 3 => test_read_into_own_mapping;
             write_over_mapped_hole: All, 3 => test_write_over_mapped_hole;
             file_handles: All, 3 => test_file_handles;
@@ -225,7 +225,7 @@ macro_rules! checks {
             map_many_failed: Dax, 3 => test_map_many_failed;
             write_killed: Dax, 3 => test_write_killed;
             // Copying on write's own (doc-13, TASK-164.2, 164.3).
-            cow_store_persists: Dax, 3 => test_cow_store_persists;
+            cow_write_persists: Dax, 3 => test_cow_write_persists;
             cow_unwritten_stay_shared: Dax, 3 => test_cow_unwritten_stay_shared;
             cow_dirty_truncate_punch_clone: Dax, 3 => test_cow_dirty_truncate_punch_clone;
             cow_commit_after_bytes: Dax, 3 => test_cow_commit_after_bytes;
@@ -233,8 +233,8 @@ macro_rules! checks {
             cow_fork_after_a_split_pmd: Dax, 3 => test_cow_fork_after_a_split_pmd;
             cow_mremap_after_a_split_pmd: Dax, 3 => test_cow_mremap_after_a_split_pmd;
             cow_mprotect_after_a_split_pmd: Dax, 3 => test_cow_mprotect_after_a_split_pmd;
-            rebind_against_loads_and_stores: Dax, 3 => test_rebind_against_loads_and_stores;
-            stores_under_rebinds: Dax, 5 => test_stores_under_rebinds;
+            rebind_against_loads_and_writes: Dax, 3 => test_rebind_against_loads_and_writes;
+            writes_under_rebinds: Dax, 5 => test_writes_under_rebinds;
             // Of files in the page cache, which a DAX mount's created files are too, copying on
             // write (TASK-149.20.3).
             large_folios: All, 3 => test_large_folios;
@@ -293,8 +293,8 @@ fn torture(n: usize) -> String {
 /// Size of the image, which is sparse.
 #[cfg_attr(feature = "guest", allow(dead_code))]
 const IMAGE_SIZE: u64 = 256 << 20;
-/// cladefs: the directory a coverage kernel's counts of fs/cladefs's sources `COVERED` are left in for
-/// the host, as the guest's checks end (TASK-119.14).
+/// cladefs: the directory a coverage kernel's counts of fs/cladefs's sources `COVERED` are left in
+/// for the host, as the guest's checks end (TASK-119.14).
 const COVERAGE: &str = "coverage";
 const COVERED: [&str; 3] = ["dax", "device", "super"];
 
@@ -305,7 +305,7 @@ fn punched_contents(len: usize, zeroed: usize) -> Vec<u8> {
 }
 
 /// Content of the guest's mmapped file at `offset`. cladefs: the guest tests' known plaintext
-/// (`crate::canary`), which no file of an encrypted run's stores holds (TASK-411.15).
+/// (`crate::canary`), which no file of an encrypted run's cells holds (TASK-411.15).
 fn pattern(offset: usize) -> u8 {
     crate::canary::at(offset)
 }
@@ -355,7 +355,7 @@ mod tests {
         assert_eq!(
             last(&DAX, 8),
             [
-                "stores_under_rebinds",
+                "writes_under_rebinds",
                 "large_folios",
                 "scattered_writeback",
                 "partial_writeback",
@@ -368,7 +368,7 @@ mod tests {
         assert_eq!(
             last(&SMALL, 10),
             [
-                "stores_under_rebinds",
+                "writes_under_rebinds",
                 "large_folios",
                 "scattered_writeback",
                 "partial_writeback",

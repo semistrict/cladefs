@@ -95,8 +95,8 @@ class Ci(unittest.TestCase):
     def test_the_vmms_own_tests_run_with_a_bucket(self):
         """TASK-220: the firecracker part runs the VMM's extent device's tests and its vCPUs'
         exits', from vendor/firecracker as cladefs builds it (scripts/firecracker-cargo.sh, TASK-269),
-        each extent test's daemon a host's, its stores' branches in a bucket in memory: with none
-        named, every store's opening fails EIO, which 8 of its 21 did, run by nothing but
+        each extent test's daemon a host's, its cells' branches in a bucket in memory: with none
+        named, every cell's opening fails EIO, which 8 of its 21 did, run by nothing but
         scripts/test-e2e.sh on GCE. And the cache keeps its builds, in target/firecracker."""
         script = TEST_SH.read_text()
         body = re.search(r"^if part firecracker; then\n(.*?)^fi$", script,

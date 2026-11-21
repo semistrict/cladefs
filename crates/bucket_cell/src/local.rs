@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs's own: a bucket on the host's filesystem (`file:///dir`, TASK-165.1, backlog doc-14), for
-//! development, tests and images: objects are files under a directory, as `object_store`'s
-//! [`LocalFileSystem`] keeps them, durably (`fsync` on), with the conditional updates cells rely
-//! on (doc-7, The head), which `LocalFileSystem` refuses.
+//! cladefs's own: a bucket on the host's filesystem (`file:///dir`, TASK-165.1, backlog doc-14),
+//! for development, tests and images: objects are files under a directory, as `object_store`'s
+//! [`LocalFileSystem`] keeps them, durably (`fsync` on), with the conditional updates cells rely on
+//! (doc-7, The head), which `LocalFileSystem` refuses.
 //!
 //! What replaces or removes an object, an update, an overwrite, a delete, a copy or a rename, holds
 //! the lock of the object's directory, an exclusive `flock` of one of [`LOCKS`] files in the
@@ -23,14 +23,15 @@
 //! few times, and deleting, waited for one another's on one lock, a sweep at 16 passes at once
 //! slower than at 4. Objects of one directory share their lock, so that a batch of deletes, mostly
 //! of a few directories, takes a few locks; objects of others mostly don't. Every process of a
-//! bucket must lock so: one of a build before, locking `.cladefs-lock` alone, excludes none of them.
+//! bucket must lock so: one of a build before, locking `.cladefs-lock` alone, excludes none of
+//! them.
 //!
 //! Deletes in a stream take each lock once for each [`DELETES_LOCKED`] of them ready at once, the
 //! objects under one lock deleted several at once under it, as `LocalFileSystem` deletes, and the
 //! locks taken at once (TASK-395.5): a collector's batch of deletes takes a lock a directory, not
 //! one an object. A delete removes the directories it leaves empty (`LocalFileSystem`'s automatic
-//! cleanup), which a listing by delimiter would list as prefixes of nothing, as no other store does,
-//! and which piled up before, a directory a cell, for good. A create racing it is unharmed:
+//! cleanup), which a listing by delimiter would list as prefixes of nothing, as no other backend
+//! does, and which piled up before, a directory a cell, for good. A create racing it is unharmed:
 //! `LocalFileSystem` makes its directory again where it finds none, and a directory holding its
 //! staged file is not empty.
 

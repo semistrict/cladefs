@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: a store the daemon serves as a device (`storage_device::Device`), the interface a
+//! cladefs: a cell the daemon serves as a device (`storage_device::Device`), the interface a
 //! filesystem keeps itself on: for what keeps itself on the host's daemon from outside a VM, as a
 //! SQLite cell does (crates/sqlite_cladefs, TASK-300). Its reads of sealed extents are the
-//! daemon's, from its cache, which every store and VM it serves shares; its writes, frees and
+//! daemon's, from its cache, which every cell and VM it serves shares; its writes, frees and
 //! commits are requests of the daemon, as a VM's device's are. Its commits and flushes are local,
 //! synced to the host's disk (`COMMIT_LOCAL`), as a database's on a local filesystem are, not
 //! waiting for the bucket (the user, 2026-11-09, TASK-301); closing it waits for that.
@@ -22,26 +22,26 @@ use storage_device::{Device, ExtentId, ReadOptions, WriteFlags, WriteOptions};
 /// The size of the transfer buffers' memory.
 const TRANSFER_HEAP_SIZE: usize = 32 << 20;
 
-/// A store the daemon serves, as a device. See the module docs.
+/// A cell the daemon serves, as a device. See the module docs.
 pub struct DaemonDevice {
-    store: Arc<CellClient>,
+    client: Arc<CellClient>,
     allocator: BufferAllocator,
     block_count: u64,
 }
 
 impl DaemonDevice {
-    /// `store` as a device.
-    pub fn new(store: Arc<CellClient>) -> Result<Self, Error> {
+    /// `client` as a device.
+    pub fn new(client: Arc<CellClient>) -> Result<Self, Error> {
         let block_size = crate::host_cell::BLOCK_SIZE;
-        let capacity = store.info().map_err(Error::new).context("the store's capacity")?.capacity;
+        let capacity = client.info().map_err(Error::new).context("the cell's capacity")?.capacity;
         let allocator =
             BufferAllocator::new(block_size as usize, BufferSource::new(TRANSFER_HEAP_SIZE));
-        Ok(Self { store, allocator, block_count: capacity / block_size as u64 })
+        Ok(Self { client, allocator, block_count: capacity / block_size as u64 })
     }
 
-    /// The store.
-    pub fn store(&self) -> &Arc<CellClient> {
-        &self.store
+    /// Its client of the cell.
+    pub fn client(&self) -> &Arc<CellClient> {
+        &self.client
     }
 }
 
@@ -68,7 +68,7 @@ impl Device for DaemonDevice {
     ) -> Result<(), Error> {
         let bytes = buffer.try_as_mut_slice().expect("a buffer of the heap's");
         let mut slices = [VolatileSliceMut::from(bytes)];
-        let read = self.store.read_async(extent, offset, &mut slices).await;
+        let read = self.client.read_async(extent, offset, &mut slices).await;
         read.map_err(Error::new).with_context(|| format!("reading {extent:?} at {offset}"))
     }
 
@@ -91,54 +91,54 @@ impl Device for DaemonDevice {
         };
         let bytes = buffer.try_as_slice().expect("a buffer of the heap's");
         let slices = [VolatileSlice::from(bytes)];
-        let written = self.store.write_with_barriers_async(extent, offset, &slices, barriers);
+        let written = self.client.write_with_barriers_async(extent, offset, &slices, barriers);
         written.await.map_err(Error::new).with_context(|| format!("writing {extent:?} at {offset}"))
     }
 
     fn cell(&self) -> u64 {
-        self.store.cell()
+        self.client.cell()
     }
 
     async fn next_sequence(&self) -> Result<u64, Error> {
-        Ok(self.store.info_async().await.map_err(Error::new)?.next_sequence)
+        Ok(self.client.info_async().await.map_err(Error::new)?.next_sequence)
     }
 
     async fn sequence_floor(&self) -> Result<u64, Error> {
-        Ok(self.store.info_async().await.map_err(Error::new)?.sequence_floor)
+        Ok(self.client.info_async().await.map_err(Error::new)?.sequence_floor)
     }
 
     async fn free(&self, extent: ExtentId) -> Result<(), Error> {
-        self.store.free_async(extent).await.map_err(Error::new)
+        self.client.free_async(extent).await.map_err(Error::new)
     }
 
     /// In as few requests as the daemon takes (`FREE_MANY`): if one fails, each is said to have,
     /// those freed before it too, which freeing again does nothing to.
     async fn free_extents(&self, extents: &[ExtentId]) -> Vec<Result<(), Error>> {
-        match self.store.free_many_async(extents).await {
+        match self.client.free_many_async(extents).await {
             Ok(()) => extents.iter().map(|_| Ok(())).collect(),
             Err(errno) => extents.iter().map(|_| Err(Error::new(errno))).collect(),
         }
     }
 
     async fn root(&self) -> Result<Vec<u8>, Error> {
-        self.store.root_async().await.map_err(Error::new)
+        self.client.root_async().await.map_err(Error::new)
     }
 
     async fn commit_root(&self, root: &[u8]) -> Result<(), Error> {
-        self.store.commit_async(Some(root), Commit::Local).await.map_err(Error::new)
+        self.client.commit_async(Some(root), Commit::Local).await.map_err(Error::new)
     }
 
     /// Waits for what it committed to be in object storage, as a closed image's cell is whole
     /// in its bucket.
     async fn close(&self) -> Result<(), Error> {
-        self.store.commit_async(None, Commit::Uploaded).await.map_err(Error::new)
+        self.client.commit_async(None, Commit::Uploaded).await.map_err(Error::new)
     }
 
     async fn flush(&self) -> Result<(), Error> {
-        self.store.commit_async(None, Commit::Local).await.map_err(Error::new)
+        self.client.commit_async(None, Commit::Local).await.map_err(Error::new)
     }
 
     fn is_read_only(&self) -> bool {
-        self.store.is_read_only()
+        self.client.is_read_only()
     }
 }

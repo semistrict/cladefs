@@ -28,7 +28,7 @@ export const invariants: Invariant[] = [
       "The host sees extents and bytes, never files. The guest's Fxfs owns all metadata; the " +
       "device's requests name extents by (cell, sequence).",
     why:
-      "The host stays a store of immutable pieces: no filesystem semantics to get right twice, and " +
+      "The host stays a keeper of immutable pieces: no filesystem semantics to get right twice, and " +
       "a guest's metadata is as private as its data.",
     enforcedBy: ["device_trait", "extent_id", "extent_device"],
     evidence: [{ kind: "doc", id: "doc-2" }, { kind: "doc", id: "doc-4" }],
@@ -57,10 +57,10 @@ export const invariants: Invariant[] = [
     layer: "daemon",
     claim:
       "A window page is one of three: a sealed extent's page, shared by every window that maps " +
-      "it; zeros; or a private page, the VM's own, which no extent names. A store makes a page " +
+      "it; zeros; or a private page, the VM's own, which no extent names. A write makes a page " +
       "private at the same window address; only the guest's MAP or UNMAP over it ends it.",
     why:
-      "No store moves a page, so no guest PTE changes for a store, and the host can copy on write " +
+      "No write moves a page, so no guest PTE changes for a write, and the host can copy on write " +
       "without the guest's page tables knowing.",
     enforcedBy: ["window_make_private", "cow", "second_stage"],
     evidence: [{ kind: "doc", id: "doc-13", heading: "Invariants" }],
@@ -71,10 +71,10 @@ export const invariants: Invariant[] = [
     layer: "guest",
     claim:
       "Before the guest puts a page in its dirty set, it has the host make the page private " +
-      "(PRIVATE). A store never makes the host copy a page.",
+      "(PRIVATE). A write never makes the host copy a page.",
     why:
-      "A fault's store lands after its iomap_end, maybe after a writeback moved the page's block " +
-      "and a seal freed the old one: a copy made at the store would copy that freed block's zeros.",
+      "A fault's write lands after its iomap_end, maybe after a writeback moved the page's block " +
+      "and a seal freed the old one: a copy made at the write would copy that freed block's zeros.",
     enforcedBy: ["guest_dirty", "guest_device_private", "server_make_private"],
     evidence: [
       { kind: "mutation", spec: "dax-cow", name: "NoPrivateAtIomap" },
@@ -107,7 +107,7 @@ export const invariants: Invariant[] = [
     layer: "vmm",
     claim:
       "A device holds at most private_max private pages, 1 GiB unless configured, whatever the " +
-      "window's size. The guest counts its pages and waits for room; the host refuses a store past " +
+      "window's size. The guest counts its pages and waits for room; the host refuses a write past " +
       "the bound, and that VM alone stops.",
     why: "Memory for writes is bounded per VM, reserved against its tenant, without asking any other VM.",
     enforcedBy: ["vmm_private_max", "guest_dirty"],
@@ -133,7 +133,7 @@ export const invariants: Invariant[] = [
     id: "fsync-ordered",
     layer: "daemon",
     claim:
-      "An fsync returns once its commit is ordered: in cladefsd, its data in the store's files. It " +
+      "An fsync returns once its commit is ordered: in cladefsd, its data in the cell directory's files. It " +
       "is local, on the host's disk, within 50 ms at the median, 1 s at most; sync, syncfs, " +
       "unmount and freeze wait for local, and with a bucket, for uploaded.",
     why:
@@ -148,7 +148,7 @@ export const invariants: Invariant[] = [
     layer: "memory",
     claim:
       "A sealed extent's pages are cached once per host, keyed by its ID, and shared by every " +
-      "store, window and fork that maps it.",
+      "open cell, window and fork that maps it.",
     why:
       "Hundreds of forks of one base cost one copy of what they share: each VM pays only for what " +
       "it alone reaches, and for its private pages.",

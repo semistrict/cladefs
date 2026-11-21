@@ -323,7 +323,7 @@ host_command() {
 # write; sent, every build, test and daemon on the test host would use them in place of its own.
 # Those the host scripts always set themselves, such as CLADEFS_FIRECRACKER and CLADEFSD
 # (scripts/test-e2e.sh), need no place here. The others go: knobs a driver's caller sets for the
-# test host, what runs and how, and where its stores keep their cells and its daemons what they
+# test host, what runs and how, and where its cell directories are and its daemons what they
 # read from them (CLADEFSD_BUCKET, CLADEFS_S3_URL, CLADEFSD_PART_CACHE), or a driver's own,
 # which nothing there reads.
 host_env_local() {
@@ -340,10 +340,10 @@ host_env_local() {
         # all of them would serve at the one socket and address, and write the
         # one file.
         CLADEFSD_GRPC | CLADEFSD_STATS | CLADEFSD_METRICS) ;;
-        # The directories a daemon serves stores in and puts its tenants'
+        # The directories a daemon serves cells in and puts its tenants'
         # sockets in: every extent daemon there would take them, those the
-        # tests start too, whose stores are in directories of their own, and
-        # with none of these roots there, a daemon refuses every store.
+        # tests start too, whose cells are in directories of their own, and
+        # with none of these roots there, a daemon refuses every cell.
         CLADEFSD_ROOTS | CLADEFSD_TENANTS) ;;
         # Where the benchmark's cases write their measurements, wherever they
         # run; bench-linux-host.sh alone sets it.

@@ -2,20 +2,20 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: a store's raw files, as it writes and reads them (backlog doc-16, TASK-411.5): an open
+//! cladefs: a cell's raw files, as it writes and reads them (backlog doc-16, TASK-411.5): an open
 //! segment's (`open-segments/`) and a large extent's own while it is open (`open-extents/`), which
-//! hold a guest's writes until they are framed, read back by offset meanwhile. Every store is
-//! encrypted (TASK-411.28), its raw files encrypted a sector at a time ([`SECTOR`]), AES-256-XTS, the sector's place in the file its
-//! tweak, under a key of the file's own: derived from the cell's DEK, the newest, and a salt
-//! drawn for the file ([`RawEncryption`]). Every write reaching such a file is whole sectors
-//! (TASK-411.8), so none reads, changes and writes a sector again. An open segment's salt and DEK
-//! are in its log's header, which is MACed, as its records are, under another subkey of the same
-//! DEK and salt (`wal::LogHeader`); a large extent's raw file never outlives its process (opening
-//! a store removes those left), so its salt is kept in memory alone.
+//! hold a guest's writes until they are framed, read back by offset meanwhile. Every cell is
+//! encrypted (TASK-411.28), its raw files encrypted a sector at a time ([`SECTOR`]), AES-256-XTS,
+//! the sector's place in the file its tweak, under a key of the file's own: derived from the cell's
+//! DEK, the newest, and a salt drawn for the file ([`RawEncryption`]). Every write reaching such a
+//! file is whole sectors (TASK-411.8), so none reads, changes and writes a sector again. An open
+//! segment's salt and DEK are in its log's header, which is MACed, as its records are, under
+//! another subkey of the same DEK and salt (`wal::LogHeader`); a large extent's raw file never
+//! outlives its process (opening a cell removes those left), so its salt is kept in memory alone.
 //!
 //! cladefs: the file's key is an object's ([`extent_frame::ObjectKey::sectors`], TASK-411.23): a
-//! encrypted raw file framed in place is an object of its sectors as they are, its trailer naming the
-//! DEK and the salt, each part tagged under another subkey of them ([`RawFile::sectors`]).
+//! encrypted raw file framed in place is an object of its sectors as they are, its trailer naming
+//! the DEK and the salt, each part tagged under another subkey of them ([`RawFile::sectors`]).
 
 use crate::dir::File;
 use crate::framed::Aligned;
@@ -34,8 +34,8 @@ pub const SECTOR: u64 = extent_keys::xts::SECTOR as u64;
 const ENCRYPTING_MOST: usize = 1 << 20;
 const _: () = assert!((ENCRYPTING_MOST as u64).is_multiple_of(SECTOR));
 
-/// cladefs: how an encrypted store's raw file is encrypted, and its log authenticated: under subkeys of
-/// its cell's DEK `key`, from a salt of the file's own, `salt` (TASK-411.5). Its sectors' key is
+/// cladefs: how an encrypted cell's raw file is encrypted, and its log authenticated: under subkeys
+/// of its cell's DEK `key`, from a salt of the file's own, `salt` (TASK-411.5). Its sectors' key is
 /// the key of the object the file is once framed in place (TASK-411.23).
 pub(crate) struct RawEncryption {
     pub key: KeyId,
@@ -87,7 +87,7 @@ fn at_bytes(at: u64, bytes: &[u8]) -> Vec<u8> {
     all
 }
 
-/// cladefs: a raw file of a store's (see the module's docs): its bytes as written, encrypted a
+/// cladefs: a raw file of a cell's (see the module's docs): its bytes as written, encrypted a
 /// sector at a time. As a [`File`] it reads and writes what was written, encrypting and
 /// decrypting: it takes writes of whole sectors alone, and reads the sectors a read is in whole.
 /// What it stores, as stored, is [`RawFile::file`]'s.
@@ -175,9 +175,10 @@ impl<F: File> File for RawFile<F> {
     }
 
     /// Writes `buf` at `offset`, encrypted through a buffer of its own, whole sectors: of
-    /// [`ENCRYPTING_MOST`] bytes at most, a write larger written a piece at a time, so that it holds
-    /// that much more, not its own size again, outside what its caller bounds (the extent daemon's
-    /// room for requests' buffers). A crash may leave some pieces written, as it may of any write.
+    /// [`ENCRYPTING_MOST`] bytes at most, a write larger written a piece at a time, so that it
+    /// holds that much more, not its own size again, outside what its caller bounds (the extent
+    /// daemon's room for requests' buffers). A crash may leave some pieces written, as it may of
+    /// any write.
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
         let mut encrypted = Aligned::new(buf.len().min(ENCRYPTING_MOST));
         for (piece, at) in buf.chunks(ENCRYPTING_MOST).zip((offset..).step_by(ENCRYPTING_MOST)) {
@@ -247,8 +248,8 @@ mod tests {
         assert!(read == data, "read back otherwise than written");
     }
 
-    /// An encrypted raw file stores no byte of what was written, and reads it back, at any offset and
-    /// length, whole sectors or not; refuses writes of parts of sectors.
+    /// An encrypted raw file stores no byte of what was written, and reads it back, at any offset
+    /// and length, whole sectors or not; refuses writes of parts of sectors.
     #[test]
     fn encrypted_raw_files_store_ciphertext_and_read_plaintext() {
         let dir = MemDir::new();

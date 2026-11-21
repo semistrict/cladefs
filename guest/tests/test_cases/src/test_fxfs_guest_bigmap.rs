@@ -2,22 +2,22 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: the case copy-on-write DAX is for (doc-13, TASK-164.5), the user's 400 GB file, scaled to
-//! a host of 4 vCPUs and 16 GB: a file four times the guest's memory, in a base, mapped `MAP_SHARED`
-//! read-write by a VM on a fork of it, read all over at random, then 5% of its pages written, at
-//! random, and synced. A base VM writes the file, through its page cache; the host forks the base;
-//! a VM on the fork, through a DAX window (fxfs-guest-bigmap-dax), its stores copying on write, or
-//! without a window (fxfs-guest-bigmap), maps the file whole, and:
+//! cladefs: the case copy-on-write DAX is for (doc-13, TASK-164.5), the user's 400 GB file, scaled
+//! to a host of 4 vCPUs and 16 GB: a file four times the guest's memory, in a base, mapped
+//! `MAP_SHARED` read-write by a VM on a fork of it, read all over at random, then 5% of its pages
+//! written, at random, and synced. A base VM writes the file, through its page cache; the host
+//! forks the base; a VM on the fork, through a DAX window (fxfs-guest-bigmap-dax), its writes
+//! copying on write, or without a window (fxfs-guest-bigmap), maps the file whole, and:
 //!
 //! 1. reads a word of each page once, in a random order (`read-cold`), then of pages at random for
 //!    CLADEFS_BIGMAP_READ_SECS (10, `read-warm`);
-//! 2. stores a word to CLADEFS_BIGMAP_WRITE_PERCENT (5) of its pages, in a random order, each store
+//! 2. writes a word to CLADEFS_BIGMAP_WRITE_PERCENT (5) of its pages, in a random order, each write
 //!    timed, the first to a page faulting (`written`);
 //! 3. msyncs it (`synced`);
 //! 4. checks each page's words through the mapping, and the written pages' through read(2)
 //!    (`end`).
 //!
-//! The guest says each step's throughput, faults and stores' latencies on its console, as
+//! The guest says each step's throughput, faults and writes' latencies on its console, as
 //! `bigmap: NAME VALUE`, and asks the host to measure its memory and the host's after each
 //! (`crate::measure`). scripts/pgbench-gate.py gates them (docs/measurements/dax-cow-gate.md).
 //! CLADEFS_BIGMAP_MIB sizes the file (4096), CLADEFS_BIGMAP_MEMORY_MIB the VMs' memory (1024).
@@ -58,18 +58,18 @@ mod host {
         Ok(u32::try_from(setting("CLADEFS_BIGMAP_MEMORY_MIB", 1024)?)?)
     }
 
-    /// A VM, its guest in role `role` (`base` or `map`), on the store at `store`, of `capacity`
+    /// A VM, its guest in role `role` (`base` or `map`), on the cell at `cell_dir`, of `capacity`
     /// bytes, which the daemon at `cladefsd` serves, with a DAX window of `window` bytes if not 0.
     fn machine(
         role: &str,
-        store: &Path,
+        cell_dir: &Path,
         cladefsd: &Path,
         capacity: u64,
         window: u64,
     ) -> anyhow::Result<Vm> {
         let mut vm = Vm::new(2, memory()?)?;
         vm.guest_kernel()?;
-        vm.cell_served("extents", store, capacity, window, cladefsd);
+        vm.cell_served("extents", cell_dir, capacity, window, cladefsd);
         vm.env(&CString::new(format!("CLADEFS_BIGMAP_ROLE={role}"))?);
         vm.env(&CString::new(format!("CLADEFS_BIGMAP_BYTES={}", file_bytes()?))?);
         for var in ["CLADEFS_BIGMAP_READ_SECS", "CLADEFS_BIGMAP_WRITE_PERCENT"] {
@@ -312,7 +312,7 @@ mod guest {
             unsafe { self.words.add(page * WORDS + word).read_volatile() }
         }
 
-        /// Stores `value` at the word `word` of page `page`.
+        /// Writes `value` at the word `word` of page `page`.
         fn write(&self, page: usize, word: usize, value: u64) {
             assert!((page * WORDS + word) * 8 < self.bytes);
             // SAFETY: Within the mapping, as asserted.
@@ -387,7 +387,7 @@ mod guest {
         say("read_warm_mib_s", read / MIB / start.elapsed().as_secs_f64());
         measure("read-warm");
 
-        // Some of the pages, at random, each store timed.
+        // Some of the pages, at random, each write timed.
         let percent = count("CLADEFS_BIGMAP_WRITE_PERCENT", 5).clamp(1, 100) as usize;
         let order = random.shuffled(pages);
         let chosen = &order[..(pages * percent / 100).max(1)];
@@ -396,9 +396,9 @@ mod guest {
         let (then, start) = (faults(), Instant::now());
         for &page in chosen {
             let page = page as usize;
-            let store = Instant::now();
+            let began = Instant::now();
             mapping.write(page, 1, written(page));
-            took.push(store.elapsed());
+            took.push(began.elapsed());
             is_written[page] = true;
         }
         say("write_pages", chosen.len() as f64);

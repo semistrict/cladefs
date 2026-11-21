@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! SQLite on a file set on a store an extent daemon serves, in this process, as a host's would
+//! SQLite on a file set on a cell an extent daemon serves, in this process, as a host's would
 //! serve it from its own (TASK-300): pages read in place in the daemon's window.
 
 #![cfg(target_os = "linux")]
@@ -44,10 +44,10 @@ fn a_database_on_the_daemon_reads_in_place_and_survives_reopening() {
     reads_in_place_and_survives_reopening("plain");
 }
 
-/// TASK-411.7 (TASK-411's AC #3, SQLite cells, Linux): a database on a store of an encrypted cell
+/// TASK-411.7 (TASK-411's AC #3, SQLite cells, Linux): a database on a cell of an encrypted cell
 /// the daemon serves, its tenant's KEK in the host's KMS (the default tenant's, whose cells the
-/// daemon makes for stores no tenant's grant names), reads in place and survives reopening as one
-/// in the clear does; and no file of the store's directory holds a row of noise it wrote in the
+/// daemon makes for cells no tenant's grant names), reads in place and survives reopening as one
+/// in the clear does; and no file of the cell directory holds a row of noise it wrote in the
 /// clear.
 #[test]
 fn an_encrypted_database_on_the_daemon_reads_in_place_and_survives_reopening() {
@@ -72,17 +72,18 @@ fn noise(len: usize) -> Vec<u8> {
         .collect()
 }
 
-/// A database on a store the daemon serves, written, read in place, closed and opened again, its
-/// VFSs named after `name`: returns the files of the store's directory that hold a row of
+/// A database on a cell the daemon serves, written, read in place, closed and opened again, its
+/// VFSs named after `name`: returns the files of the cell directory that hold a row of
 /// [`noise`] it wrote in the clear.
 fn reads_in_place_and_survives_reopening(name: &str) -> Vec<String> {
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let (_sockets, socket) = serve();
-    let store = dir.path().join("store");
+    let cell_dir = dir.path().join("store");
     let marker = noise(4096);
 
     for round in 0..2i64 {
-        let file_set = daemon::open(&socket, &store, 1 << 30, 1 << 30, Options::default()).unwrap();
+        let options = Options::default();
+        let file_set = daemon::open(&socket, &cell_dir, 1 << 30, 1 << 30, options).unwrap();
         let vfs = format!("cladefs-daemon-{name}-{round}");
         let registration = register(&vfs, file_set.clone()).unwrap();
         let connection =
@@ -122,7 +123,7 @@ fn reads_in_place_and_survives_reopening(name: &str) -> Vec<String> {
         let read: Vec<u8> =
             connection.query_row("SELECT v FROM t WHERE k = 5000", [], |row| row.get(0)).unwrap();
         assert!(read == marker, "the row of noise reads back otherwise");
-        // In place where the host maps the store's blocks into a window; a host of larger pages
+        // In place where the host maps the cell's blocks into a window; a host of larger pages
         // has none, its reads copied (sqlite_cladefs::daemon, board 5232).
         let fetched = file_set.fetched() - before;
         let in_place = file_set.is_mapped();
@@ -132,37 +133,37 @@ fn reads_in_place_and_survives_reopening(name: &str) -> Vec<String> {
         drop(registration);
         file_set.close().unwrap();
     }
-    // Beside the daemon's store, which works on behind its API (TASK-463).
-    cladefs::testing::files_holding_beside(&store, &[&marker[..64]])
+    // Beside the daemon's cell, which works on behind its API (TASK-463).
+    cladefs::testing::files_holding_beside(&cell_dir, &[&marker[..64]])
 }
 
-/// A file set on the store at `store`, mapped, registered as the VFS `vfs`, a connection to its
-/// database reading it in place, and the store, to fork.
+/// A file set on the cell at `cell_dir`, mapped, registered as the VFS `vfs`, a connection to its
+/// database reading it in place, and the cell, to fork.
 struct Mounted {
-    store: Arc<cladefs::CellClient>,
+    cell: Arc<cladefs::CellClient>,
     file_set: Arc<FileSet>,
     _registration: Registration,
     connection: Connection,
 }
 
 impl Mounted {
-    fn new(socket: &Path, store: &Path, vfs: &str) -> Self {
-        let store = Arc::new(cladefs::CellClient::connect(socket, store, 1 << 30).unwrap());
-        let window = daemon::DaemonWindow::new(store.clone(), 1 << 30).unwrap();
-        let device = DeviceHolder::new(cladefs::DaemonDevice::new(store.clone()).unwrap());
+    fn new(socket: &Path, cell_dir: &Path, vfs: &str) -> Self {
+        let cell = Arc::new(cladefs::CellClient::connect(socket, cell_dir, 1 << 30).unwrap());
+        let window = daemon::DaemonWindow::new(cell.clone(), 1 << 30).unwrap();
+        let device = DeviceHolder::new(cladefs::DaemonDevice::new(cell.clone()).unwrap());
         let file_set = FileSet::open_mapped(device, Box::new(window), Options::default()).unwrap();
         let registration = register(vfs, file_set.clone()).unwrap();
         let connection =
             Connection::open_with_flags_and_vfs("app.db", OpenFlags::default(), vfs).unwrap();
         connection.execute_batch("PRAGMA mmap_size = 1073741824").unwrap();
-        Self { store, file_set, _registration: registration, connection }
+        Self { cell, file_set, _registration: registration, connection }
     }
 
     /// Checks the device holds every extent the file set names, those it references and those it
     /// has yet to free: so that none it frees, or failed to, is one the device never held, which
     /// it would try to free again at each commit; and closes the file set.
     fn close(self) {
-        let Self { store, file_set, _registration, connection } = self;
+        let Self { cell, file_set, _registration, connection } = self;
         drop(connection);
         let device = file_set.device();
         let mut buffer = block_on(device.allocate_buffer(device.block_size() as usize));
@@ -170,23 +171,23 @@ impl Mounted {
             block_on(device.read(extent, 0, buffer.as_mut()))
                 .unwrap_or_else(|error| panic!("{extent:?} the file set names: {error:#}"));
         }
-        drop((store, _registration));
+        drop((cell, _registration));
         file_set.close().unwrap();
     }
 }
 
-/// A fork of a store on the daemon, as of its last commit, holds the database as it was, inherited
-/// with the store's extents and pages, while the file set on the store is open, frees in its root
+/// A fork of a cell on the daemon, as of its last commit, holds the database as it was, inherited
+/// with the cell's extents and pages, while the file set on the cell is open, frees in its root
 /// still to make; the two then change apart, the fork rewriting and so freeing all it inherited,
 /// and each reads its own, in place, before and after opening again.
 #[test]
-fn a_fork_of_a_store_and_the_store_go_their_own_ways() {
+fn a_fork_of_a_cell_and_the_cell_go_their_own_ways() {
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let (_sockets, socket) = serve();
     let (path, forked) = (dir.path().join("store"), dir.path().join("fork"));
     let parent = Mounted::new(&socket, &path, "cladefs-daemon-parent");
     let mut parent_rows = common::fill(&parent.connection);
-    parent.store.fork(&forked).unwrap();
+    parent.cell.fork(&forked).unwrap();
     let fork = Mounted::new(&socket, &forked, "cladefs-daemon-fork");
     let mut fork_rows = parent_rows.clone();
     common::check(&fork.connection, &fork_rows);
@@ -223,16 +224,16 @@ fn a_database_is_fenced_with_its_cell() {
     std::thread::spawn(move || cladefs::cladefsd::control::serve_control(listener, tenants));
     let control = cladefs::cladefsd::control::Client::connect(&control_socket).unwrap();
 
-    let store = dir.path().join("store");
-    let file_set = daemon::open(&socket, &store, 1 << 30, 1 << 30, Options::default()).unwrap();
+    let cell_dir = dir.path().join("store");
+    let file_set = daemon::open(&socket, &cell_dir, 1 << 30, 1 << 30, Options::default()).unwrap();
     let _registration = register("cladefs-fenced", file_set.clone()).unwrap();
     let connection =
         Connection::open_with_flags_and_vfs("app.db", OpenFlags::default(), "cladefs-fenced")
             .unwrap();
     connection.execute_batch("CREATE TABLE t (k INTEGER PRIMARY KEY, v TEXT)").unwrap();
     connection.execute("INSERT INTO t VALUES (1, 'ours')", []).unwrap();
-    control.sync_cell(&store).unwrap();
-    let ours = control.cell(&store).unwrap();
+    control.sync_cell(&cell_dir).unwrap();
+    let ours = control.cell(&cell_dir).unwrap();
     let objects = bucket_cell::object_bucket::ObjectBucket::from_url(&url).unwrap();
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     let held = runtime.block_on(bucket_cell::head::get(&objects, ours)).unwrap().unwrap();
@@ -249,7 +250,7 @@ fn a_database_is_fenced_with_its_cell() {
         drop(writer.await.unwrap());
     });
     connection.execute("INSERT INTO t VALUES (2, 'cut off')", []).unwrap();
-    let fenced = control.sync_cell(&store).unwrap_err();
+    let fenced = control.sync_cell(&cell_dir).unwrap_err();
     assert_eq!(fenced.errno(), Some(cladefs::Errno::EROFS), "{fenced:#}");
     let refused = connection.execute("INSERT INTO t VALUES (3, 'refused')", []).unwrap_err();
     assert_eq!(
@@ -267,10 +268,10 @@ fn a_database_is_fenced_with_its_cell() {
 fn a_cell_of_many_databases_commits_each_and_opens_again() {
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let (_sockets, socket) = serve();
-    let store = dir.path().join("store");
+    let cell_dir = dir.path().join("store");
     let names: Vec<String> = (0..80).map(|n| format!("{n:0>27}.db")).collect();
     assert!(names.iter().all(|name| name.len() == 30));
-    let file_set = daemon::open(&socket, &store, 1 << 30, 1 << 30, Options::default()).unwrap();
+    let file_set = daemon::open(&socket, &cell_dir, 1 << 30, 1 << 30, Options::default()).unwrap();
     let registration = register("cladefs-many", file_set.clone()).unwrap();
     for (n, name) in names.iter().enumerate() {
         let connection =
@@ -284,7 +285,7 @@ fn a_cell_of_many_databases_commits_each_and_opens_again() {
     file_set.close().unwrap();
     drop(file_set);
 
-    let file_set = daemon::open(&socket, &store, 1 << 30, 1 << 30, Options::default()).unwrap();
+    let file_set = daemon::open(&socket, &cell_dir, 1 << 30, 1 << 30, Options::default()).unwrap();
     let _registration = register("cladefs-many-again", file_set.clone()).unwrap();
     for (n, name) in names.iter().enumerate() {
         let connection =

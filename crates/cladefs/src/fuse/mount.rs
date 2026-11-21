@@ -71,23 +71,23 @@ impl MountOptions {
     /// sends no request until the mount is made, and holds those made meanwhile until the mount
     /// answers: the filesystem may be used from the moment this returns.
     ///
-    /// The filesystem is its store's only writer, as the store's directory is its process's
+    /// The filesystem is its cell's only writer, as the cell directory is its process's
     /// alone, which the kernel's caches count on: they are kept as long as it likes.
     pub fn mount(&self, fs: Filesystem, mountpoint: impl AsRef<Path>) -> Result<Mount, Error> {
         let served = self.serve(mountpoint.as_ref(), |device| Server::new(fs, notifier(device)))?;
         Ok(Mount { served })
     }
 
-    /// Mounts a directory of stores at `mountpoint`, none attached yet (TASK-302): stores are
-    /// attached in it and detached by [`StoresMount::server`]'s [`Server::attach`] and
-    /// [`Server::detach`], one mount however many. It is the mounting user's, as its stores' roots
+    /// Mounts a directory of cell directories at `mountpoint`, none attached yet (TASK-302): cells
+    /// are attached in it and detached by [`CellsMount::server`]'s [`Server::attach`] and
+    /// [`Server::detach`], one mount however many. It is the mounting user's, as its cells' roots
     /// say who else may use them. Served until it is unmounted, as [`MountOptions::mount`]'s.
-    pub fn mount_stores(&self, mountpoint: impl AsRef<Path>) -> Result<StoresMount, Error> {
+    pub fn mount_cells(&self, mountpoint: impl AsRef<Path>) -> Result<CellsMount, Error> {
         // SAFETY: Plain calls returning the process's IDs.
         let owner = unsafe { Owner { uid: libc::getuid(), gid: libc::getgid() } };
         let served =
-            self.serve(mountpoint.as_ref(), |device| Server::stores(owner, notifier(device)))?;
-        Ok(StoresMount { served })
+            self.serve(mountpoint.as_ref(), |device| Server::cells(owner, notifier(device)))?;
+        Ok(CellsMount { served })
     }
 
     /// Mounts a FUSE filesystem at `mountpoint`, and serves it with the server `server` makes,
@@ -162,23 +162,23 @@ impl Mount {
     }
 }
 
-/// A directory of stores mounted with FUSE ([`MountOptions::mount_stores`]), served until it is
-/// unmounted, as a [`Mount`] is; [`join`](Self::join) then unmounts the stores attached.
+/// A directory of cells mounted with FUSE ([`MountOptions::mount_cells`]), served until it is
+/// unmounted, as a [`Mount`] is; [`join`](Self::join) then unmounts the cells attached.
 ///
 /// Dropped before it is joined, it unmounts it lazily, waits until the kernel is done with it, and
-/// unmounts the stores.
+/// unmounts the cells.
 #[derive(Debug)]
-pub struct StoresMount {
+pub struct CellsMount {
     served: Served,
 }
 
-impl StoresMount {
+impl CellsMount {
     /// Where it is mounted.
     pub fn mountpoint(&self) -> &Path {
         &self.served.unmounter.mountpoint
     }
 
-    /// The server, which attaches stores, detaches them and lists them.
+    /// The server, which attaches cells, detaches them and lists them.
     pub fn server(&self) -> &Arc<Server> {
         self.served.server.as_ref().expect("served until joined")
     }
@@ -193,8 +193,8 @@ impl StoresMount {
         self.served.unmounter.unmount(lazily)
     }
 
-    /// Waits until it is unmounted and the kernel is done with it, then unmounts the stores still
-    /// attached, writing back what is dirty, and closes their stores: once those sharing the
+    /// Waits until it is unmounted and the kernel is done with it, then unmounts the cells still
+    /// attached, writing back what is dirty, and closes their cells: once those sharing the
     /// server, which attach no more, have let it go. Fails with the first unmount's error.
     pub fn join(self) -> Result<(), Error> {
         let server = self.served.join_shared();

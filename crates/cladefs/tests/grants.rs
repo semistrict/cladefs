@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! TASK-43.4: tenants granted VM sockets of their own through the control API. A connection's
-//! tenant is the socket it came in on: its VM process names stores in the tenant's directory
+//! tenant is the socket it came in on: its VM process names cells in the tenant's directory
 //! alone. A revoked tenant's socket takes no more connections. A tenant's socket works
 //! bind-mounted into a jail, as the host's VM manager mounts it. TASK-154: a tenant reaches of the
 //! bucket what the VM manager puts in its directory. TASK-155: the daemon's own socket is its
@@ -19,16 +19,16 @@ use common::{cache, copies, pattern};
 use std::path::{Path, PathBuf};
 use tonic::Code;
 
-/// The errno a VM process connecting to `socket` to open the store at `path` is refused with.
+/// The errno a VM process connecting to `socket` to open the cell at `path` is refused with.
 fn refused(socket: &Path, path: &Path) -> Option<Errno> {
     CellClient::connect(socket, path, CAPACITY).err().and_then(|err| err.errno())
 }
 
-/// Each tenant's VM processes open stores in its directory, and are refused another's, by
+/// Each tenant's VM processes open cells in its directory, and are refused another's, by
 /// whatever path; granting again returns the socket, named by the tenant's ID; the default tenant
 /// is granted nothing.
 #[test]
-fn tenants_name_stores_in_their_directory_alone() {
+fn tenants_name_cells_in_their_directory_alone() {
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
     let (acme, globex) = (dir.path().join("acme"), dir.path().join("globex"));
@@ -64,11 +64,11 @@ fn tenants_name_stores_in_their_directory_alone() {
     assert_eq!(failure(daemon.grant(3, &none, None)), (Code::NotFound, Errno::ENOENT));
 }
 
-/// TASK-364: a granted tenant's ID is its tenant in the bucket. The stores its VM processes make,
+/// TASK-364: a granted tenant's ID is its tenant in the bucket. The cells its VM processes make,
 /// and those its VM manager makes or forks in its directory, are cells of its own; its
 /// VM manager makes it no new cell of another tenant's.
 #[test]
-fn tenants_stores_are_their_own_cells() {
+fn tenants_cells_are_their_own() {
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
     let (acme, globex) = (dir.path().join("acme"), dir.path().join("globex"));
@@ -85,9 +85,9 @@ fn tenants_stores_are_their_own_cells() {
     assert_eq!(daemon.create(&acme.join("named"), new(0xa), None).unwrap().tenant, 0xa);
     let theirs = daemon.create(&acme.join("theirs"), new(0xb), None);
     assert_eq!(failure(theirs), (Code::PermissionDenied, Errno::EPERM));
-    assert!(!acme.join("theirs").exists(), "a store of another tenant's cell was made");
-    // Forked from a store of the default tenant's: into its directory, a cell of its own;
-    // elsewhere, of the store's tenant.
+    assert!(!acme.join("theirs").exists(), "a cell of another tenant was made");
+    // Forked from a cell of the default tenant's: into its directory, a cell of its own;
+    // elsewhere, of the source's tenant.
     let base = dir.path().join("base");
     daemon.create(&base, new(0), None).unwrap();
     assert_eq!(daemon.fork(&base, &acme.join("fork")).unwrap().tenant, 0xa);
@@ -99,11 +99,11 @@ fn tenants_stores_are_their_own_cells() {
     assert_eq!(failure(daemon.grant(0, &initech, None)), (Code::InvalidArgument, Errno::EINVAL));
 }
 
-/// TASK-364: a tenant's VM processes reach no store of another tenant's cell, though it be in
+/// TASK-364: a tenant's VM processes reach no cell of another tenant, though it be in
 /// their tenant's directory, put there by other means than the daemon's: refused before it is
-/// opened, the other tenant's store stays theirs, written as it was.
+/// opened, the other tenant's cell stays theirs, written as it was.
 #[test]
-fn tenants_reach_no_store_of_another_tenants_cell() {
+fn tenants_reach_no_cell_of_another_tenant() {
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
     let (acme, globex) = (dir.path().join("acme"), dir.path().join("globex"));
@@ -210,7 +210,7 @@ fn shared_versions_of_bases_fork_into_other_tenants() {
     let refused = globex.join("refused");
     let forked = fork(&mut here.daemon, &refused);
     assert_eq!(failure(forked), (Code::PermissionDenied, Errno::EACCES));
-    assert!(!refused.exists(), "a refused fork made a store");
+    assert!(!refused.exists(), "a refused fork made a cell");
     fork(&mut here.daemon, &here.acme.join("ours")).unwrap();
     here.daemon.share(&base, version.version, true).unwrap();
     assert_eq!(here.daemon.fork_version(version, &globex.join("theirs")).unwrap().tenant, 2);
@@ -224,11 +224,11 @@ fn shared_versions_of_bases_fork_into_other_tenants() {
     assert_eq!(failure(unnamed), (Code::NotFound, Errno::ENOENT));
 }
 
-/// TASK-395.9: a tenant's store with a writer forks into no other tenant's directory (ForkCell),
-/// refused with EACCES, making nothing; into its own tenant's it forks. A store
+/// TASK-395.9: a tenant's cell with a writer forks into no other tenant's directory (ForkCell),
+/// refused with EACCES, making nothing; into its own tenant's it forks. A cell
 /// of the default tenant's (0) forks into both tenants' directories, a cell of each's.
 #[test]
-fn tenants_stores_with_writers_fork_into_no_other_tenants_directory() {
+fn tenants_cells_with_writers_fork_into_no_other_tenants_directory() {
     let dir = tempfile::tempdir().unwrap();
     let mut here = Host::new(dir.path(), "here");
     let globex = dir.path().join("here/globex");
@@ -240,7 +240,7 @@ fn tenants_stores_with_writers_fork_into_no_other_tenants_directory() {
     let refused = globex.join("refused");
     let forked = here.daemon.fork(&vm, &refused);
     assert_eq!(failure(forked), (Code::PermissionDenied, Errno::EACCES));
-    assert!(!refused.exists(), "a refused fork made a store");
+    assert!(!refused.exists(), "a refused fork made a cell");
     assert_eq!(here.daemon.fork(&vm, &here.acme.join("ours")).unwrap().tenant, 1);
 
     let base = dir.path().join("here/base");
@@ -252,7 +252,7 @@ fn tenants_stores_with_writers_fork_into_no_other_tenants_directory() {
 }
 
 /// A revoked tenant's socket goes, and takes no more connections, while its VM processes
-/// connected keep their stores; granted again, its VM processes open its stores again.
+/// connected keep their cells; granted again, its VM processes open its cells again.
 #[test]
 fn revoked_tenants_take_no_new_connections() {
     let dir = tempfile::tempdir().unwrap();
@@ -278,7 +278,7 @@ fn revoked_tenants_take_no_new_connections() {
 }
 
 /// TASK-79.36: a tenant revoked whose VM processes live on, granted again, is the tenant they are
-/// of: the VM processes it connects share its arena with them, and with it the pages of the stores
+/// of: the VM processes it connects share its arena with them, and with it the pages of the cells
 /// they have open, which they follow.
 #[test]
 fn tenants_granted_again_while_alive_go_on() {
@@ -298,14 +298,14 @@ fn tenants_granted_again_while_alive_go_on() {
 }
 
 /// The environment of this test's process run in a jail ([`jailed`]): the socket's path there,
-/// the tenant's socket's path on the host, and the store to open.
+/// the tenant's socket's path on the host, and the cell directory to open.
 const JAIL_SOCKET: &str = "CLADEFS_TEST_JAIL_SOCKET";
 const HOST_SOCKET: &str = "CLADEFS_TEST_HOST_SOCKET";
-const JAIL_STORE: &str = "CLADEFS_TEST_JAIL_STORE";
+const JAIL_CELL_DIR: &str = "CLADEFS_TEST_JAIL_CELL_DIR";
 
 /// A tenant's socket, given to its jails' user and bind-mounted into a jail, as the host's VM
 /// manager does with Firecracker's jailer: in a mount namespace of its own, where the tenants'
-/// sockets' directory is hidden, a VM process of that user opens the tenant's store through it.
+/// sockets' directory is hidden, a VM process of that user opens the tenant's cell through it.
 /// Needs `sudo -n`, as Lima's VMs have it.
 #[test]
 fn tenant_sockets_work_bind_mounted_into_jails() {
@@ -323,7 +323,7 @@ fn tenant_sockets_work_bind_mounted_into_jails() {
     std::fs::create_dir(&jail).unwrap();
     let jail_socket = jail.join("cladefsd.sock");
     std::fs::write(&jail_socket, b"").unwrap();
-    let store = acme.join("vm");
+    let cell_dir = acme.join("vm");
 
     let script = r#"mount --bind "$1" "$2" && mount -t tmpfs none "$3" &&
         exec setpriv --reuid "$4" --regid "$5" --clear-groups \
@@ -332,7 +332,7 @@ fn tenant_sockets_work_bind_mounted_into_jails() {
     let environment = [
         format!("{JAIL_SOCKET}={}", jail_socket.display()),
         format!("{HOST_SOCKET}={}", socket.display()),
-        format!("{JAIL_STORE}={}", store.display()),
+        format!("{JAIL_CELL_DIR}={}", cell_dir.display()),
     ];
     let status = std::process::Command::new("sudo")
         .args(["-n", "unshare", "--mount", "--propagation", "private", "sh", "-c", script, "sh"])
@@ -346,16 +346,16 @@ fn tenant_sockets_work_bind_mounted_into_jails() {
         .status()
         .unwrap();
     assert!(status.success(), "the jailed VM process failed: {status}");
-    assert_eq!(daemon.stat(&store).unwrap().used, 64 << 10);
+    assert_eq!(daemon.stat(&cell_dir).unwrap().used, 64 << 10);
 }
 
-/// The VM process in the jail: the tenants' sockets hidden, it opens its store through the one
+/// The VM process in the jail: the tenants' sockets hidden, it opens its cell through the one
 /// bind-mounted at `socket`, and writes it.
 fn jailed(socket: &Path) {
     let host_socket = std::env::var_os(HOST_SOCKET).unwrap();
     assert!(!Path::new(&host_socket).exists(), "the tenants' sockets are not hidden");
-    let store = std::env::var_os(JAIL_STORE).unwrap();
-    let vm = CellClient::connect(socket, store, CAPACITY).unwrap();
+    let cell_dir = std::env::var_os(JAIL_CELL_DIR).unwrap();
+    let vm = CellClient::connect(socket, cell_dir, CAPACITY).unwrap();
     write(&vm, &pattern(3), b"jailed");
 }
 
@@ -396,32 +396,32 @@ impl Host {
     }
 }
 
-/// What a snapshot holds of its VM's store: the version of its cell (TASK-364), and the extent the
+/// What a snapshot holds of its VM: the version of its cell (TASK-364), and the extent the
 /// VM wrote.
 struct Snapshot {
     version: cladefs::CellVersion,
     extent: ExtentId,
 }
 
-/// A VM process's restore through `socket`, into a store of its own at `store`, of `version`: the
+/// A VM process's restore through `socket`, into a cell of its own at `cell_dir`, of `version`: the
 /// request Firecracker's restore makes.
 fn restore(
     socket: &Path,
-    store: &Path,
+    cell_dir: &Path,
     version: cladefs::CellVersion,
 ) -> Result<CellClient, Option<Errno>> {
-    CellClient::connect_forked(socket, store, version, CAPACITY).map_err(|err| err.errno())
+    CellClient::connect_forked(socket, cell_dir, version, CAPACITY).map_err(|err| err.errno())
 }
 
-/// The bytes of the VM's `extent`, as the snapshot holds them, read through `store`.
-fn snapshotted(store: &CellClient, extent: ExtentId) -> bool {
-    read(store, extent) == pattern(5)
+/// The bytes of the VM's `extent`, as the snapshot holds them, read through `client`.
+fn snapshotted(client: &CellClient, extent: ExtentId) -> bool {
+    read(client, extent) == pattern(5)
 }
 
-/// What `store` holds of `extent`, a block.
-fn read(store: &CellClient, extent: ExtentId) -> Vec<u8> {
+/// What `client` holds of `extent`, a block.
+fn read(client: &CellClient, extent: ExtentId) -> Vec<u8> {
     let mut read = vec![0; 64 << 10];
-    store.read(extent, 0, &mut [VolatileSliceMut::from(&mut read[..])]).unwrap();
+    client.read(extent, 0, &mut [VolatileSliceMut::from(&mut read[..])]).unwrap();
     read
 }
 
@@ -574,7 +574,7 @@ fn versions_restore_whatever_placement_took_them() {
     assert_eq!(own.unwrap().root().unwrap(), b"snapshotted");
 }
 
-/// TASK-158: a version of a base, as of any store, forks on several hosts at once, as a
+/// TASK-158: a version of a base, as of any cell, forks on several hosts at once, as a
 /// snapshot's restores do (ForkCell's `version`): into cells of their own, which read the base
 /// and write on their own. The base is its writer's still: what it writes after reaches no fork of
 /// the version.

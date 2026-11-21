@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: a store's directory with its data files through a page cache of the process's
-//! ([`crate::pages`], TASK-433): what every directory a store opens is, the host's
-//! ([`crate::HostDir`]) and one in memory ([`crate::MemDir`]) alike, so that no store, a test's
+//! cladefs: a cell directory with its data files through a page cache of the process's
+//! ([`crate::pages`], TASK-433): what every directory a cell opens is, the host's
+//! ([`crate::HostDir`]) and one in memory ([`crate::MemDir`]) alike, so that no cell, a test's
 //! no more than a host's, runs around it.
 //!
 //! Its extents' files (`data`) are held in the cache, one set of pages a file however many times
@@ -65,7 +65,7 @@ impl<D: Dir> CachedDir<D> {
         self.shared.files.lock().unwrap().get(path).and_then(WeakCached::upgrade)
     }
 
-    /// `file`, opened at `path`, as the store's: through the cache if it is an extents' file, or
+    /// `file`, opened at `path`, as the cell's: through the cache if it is an extents' file, or
     /// if an opening of it is.
     fn file(&self, path: &str, file: D::File, data: bool) -> io::Result<CachedFile<D::File>> {
         let mut files = self.shared.files.lock().unwrap();

@@ -46,7 +46,7 @@
 (* starts its recovery (the head's checkpoint, or the origin's state),     *)
 (* then reads the segments the head names; then the writer mints from its  *)
 (* epoch's range, and puts its WAL after the cell's end (doc-14, Opening a *)
-(* store: wal::rebase): the WAL's segments the head names are              *)
+(* cell: wal::rebase): the WAL's segments the head names are               *)
 (* acknowledged, and the rest restamped after the head's end, if the       *)
 (* cell's last segment is the last of those, or the cell's last commit the *)
 (* commit the WAL started from; otherwise the WAL diverged, and is         *)
@@ -66,13 +66,13 @@
 (* Versions (TASK-476, doc-18): a version is a name for a cell's state as  *)
 (* of a segment its head names, read-only, kept while the head names it,   *)
 (* in the cell's own prefix and of no record. Its commit, of a quiescent   *)
-(* store, sealing nothing, closes a segment whose footer names it (its ID, *)
+(* cell, sealing nothing, closes a segment whose footer names it (its ID,  *)
 (* the commit's tag here); the acknowledgement naming the segment names it *)
 (* in the head; its writer drops it by a swap; a deletion's final head     *)
 (* names none. The only fork is a version's (a restore), into a new cell,  *)
 (* its ID an allocator's: the child's record first, saying the fork is     *)
 (* being made, then its reference, then the head naming the version read,  *)
-(* then the record made; a store opening the child may resume a fork its   *)
+(* then the record made; a cell opening the child may resume a fork its    *)
 (* restore left. Cells' cuts, versions of several cells cut at one moment, *)
 (* are a host's work alone (doc-18): not modelled.                         *)
 (*                                                                         *)
@@ -141,7 +141,7 @@
 (* - wholeCommitsKept (NoWholeCommitsKept): a host's local recovery keeps  *)
 (*   a commit spanning segments only if consecutive segments end it, and   *)
 (*   closes the first again without it otherwise (local_cell's             *)
-(*   wal::recover): a store whose log ends inside a commit refuses to      *)
+(*   wal::recover): a cell whose log ends inside a commit refuses to       *)
 (*   open.                                                                 *)
 (* - references (NoReferences): a fork of a version has a reference under  *)
 (*   its parent's cell, which that cell's passes keep the parent's state   *)
@@ -183,7 +183,7 @@
 (*   the parent's cell keeps no mark of a fork made and gone (TASK-455).   *)
 (*   Without the rule, none is marked.                                     *)
 (* - resumesRefer (NoResumesRefer): a fork of a version resumed by another *)
-(*   than the restore that began it, a store opening its child, writes its *)
+(*   than the restore that began it, a cell opening its child, writes its  *)
 (*   reference before it makes it, as the restore does. Without it, a      *)
 (*   restore dying between its record and its reference leaves a fork made *)
 (*   of no reference, whose origin's state no pass keeps once the version  *)
@@ -682,14 +682,14 @@ SegCommit(o) == IF o.commit # 0 THEN o.commit ELSE o.cont.commit
 \* the cell's end (wal::rebase), by commits: the WAL's segments to the one ending the cell's last
 \* commit, if it is one of the WAL's, acknowledged; the rest restamped after the head's end, if
 \* the cell's last commit is one of the WAL's or the commit the WAL started from (walFollows);
-\* otherwise the WAL diverged, and is dropped. By commits, not by the keys the head names: a store
+\* otherwise the WAL diverged, and is dropped. By commits, not by the keys the head names: a cell
 \* keeps what it restamps in memory alone, its footers on disk naming the keys of an earlier
 \* stamping after a crash. The commit the WAL started from, its first segment's commit's parent,
-\* the WAL keeps. The store keeps the restamped footers in memory alone (TASK-165.9): a crash
+\* the WAL keeps. The cell keeps the restamped footers in memory alone (TASK-165.9): a crash
 \* after finds them stamped as before, which the next opening restamps by the same commits, its
 \* own chain, and Max2 with a later floor, to what this would have: so the WAL here holds them
 \* restamped. The WAL's segments replayed over the state must end every commit they go on with,
-\* or the store refuses to open (store.rs: "log ends inside a commit"), its local recovery having
+\* or the cell refuses to open (cell.rs: "log ends inside a commit"), its local recovery having
 \* kept a commit begun.
 Opened(h, b, s) ==
     LET floor == IF R("epochSequences") THEN <<s.epoch, 0>> ELSE <<0, 0>>
@@ -754,7 +754,7 @@ Mint(h, b) ==
        /\ UNCHANGED <<commits, nextTag, acked, makers, doomed, taken, placed, errors>>
        /\ UNCHANGED <<gen, takes, passes, places, crashes>>
 
-\* What a commit does, besides committing: make a version, the store quiescent, sealing nothing;
+\* What a commit does, besides committing: make a version, the cell quiescent, sealing nothing;
 \* seal an open extent into its segment or on its own; free an extent its guest holds; or seal one
 \* or two open extents where they were written, in segments filled since the last commit that go
 \* on with it, one each, the commit ending in the next (a commit spanning segments: TASK-92.41,
@@ -772,7 +772,7 @@ Ops(h, b) ==
                               THEN {TRUE} ELSE {})
         open == IF "span" \in Can THEN s.open ELSE {}
     IN (IF "commit" \in Can THEN {op("plain", None)} ELSE {})
-       \* A version's commit (TASK-476): of a quiescent store, sealing nothing.
+       \* A version's commit (TASK-476): of a quiescent cell, sealing nothing.
        \cup (IF "version" \in Can /\ s.open = {} THEN {op("version", None)} ELSE {})
        \cup {op("seg", x) : x \in IF "seg" \in Can THEN s.open ELSE {}}
        \cup {op("own", x) : x \in IF "own" \in Can THEN s.open ELSE {}}
@@ -1055,7 +1055,7 @@ StartRestore(h, c, b) ==
                        tk |-> tok[h][c], og |-> <<b, v.at>>, bs |-> v.id, v |-> <<b, v.id>>])
 
 \* With "resume", the fork of a version to c, being made, resumed by another than the restore that
-\* began it: a store opening c, its restore's host dead or slow (upload.rs's record). Its record
+\* began it: a cell opening c, its restore's host dead or slow (upload.rs's record). Its record
 \* said resumed first, with a condition, unless made or deleted (resumesMarked); then, as a
 \* restore goes on, its reference (resumesRefer), the head naming the version read, and the fork
 \* made. Without resumesRefer, no reference: the fork made as the version is read.
@@ -1509,7 +1509,7 @@ DeletedOnlyByDeletes ==
 \* One making, not deleted, is told it made each cell.
 OneMaker == \A b \in Cells : Cardinality(makers[b] \ doomed) <= 1
 
-\* Nothing failed that must not: a pass of the collector, a store opened (its log ending inside a
+\* Nothing failed that must not: a pass of the collector, a cell opened (its log ending inside a
 \* commit), a WAL diverging from a cell whose last commit is its own.
 NoErrors == errors = {}
 

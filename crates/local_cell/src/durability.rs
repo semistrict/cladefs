@@ -4,10 +4,10 @@
 
 //! cladefs: when a cell's commits are durable (see the crate's docs). Commits are ordered as they
 //! are made, and a flush makes those ordered so far durable, in order, together
-//! ([`LocalCell::flush`](crate::LocalCell::flush)): it takes them first, and syncs what they wrote then,
-//! the store's state not locked meanwhile, so that commits go on behind it. The commits it took are
-//! not durable until it has: the last durable is one value, which the uploader, which takes only
-//! durable commits, reads.
+//! ([`LocalCell::flush`](crate::LocalCell::flush)): it takes them first, and syncs what they wrote
+//! then, the cell's state not locked meanwhile, so that commits go on behind it. The commits it
+//! took are not durable until it has: the last durable is one value, which the uploader, which
+//! takes only durable commits, reads.
 
 use crate::dir::{Dir, File};
 use crate::sync::Mutex;
@@ -83,7 +83,7 @@ impl Lags {
 }
 
 node_local::node_local! {
-    /// [`Lags`] of this process's stores.
+    /// [`Lags`] of this process's cells.
     static LAGS: std::sync::Mutex<Lags> = std::sync::Mutex::new(Lags {
         count: 0,
         max_us: 0,
@@ -92,7 +92,7 @@ node_local::node_local! {
     });
 }
 
-/// cladefs: how long this process's stores' commits waited to be made durable ([`Lags`]).
+/// cladefs: how long this process's cells' commits waited to be made durable ([`Lags`]).
 pub fn durability_lags() -> Lags {
     *LAGS.get().lock().unwrap()
 }
@@ -161,12 +161,12 @@ impl<T> Durability<T> {
     }
 }
 
-/// cladefs: how many of a flush's files it syncs at once, and of its directories (TASK-92.42). One at
-/// a time, each sync waited for those before it, though none needs another. On macOS (APFS), where
-/// each was an `F_FULLFSYNC`, which std's `sync_all` is there, flushing the drive's cache too,
-/// cell-bench's `burst`, whose commit seals 640 extents in files of their own, spent 2.0 s syncing
-/// them, nearly all of its flush, about 3 ms a file; 4 at once 1.2 s, 8 0.93 s, 16 0.89 s, 32
-/// 0.87 s, 64 0.75 s. Its `durable` case's flushes of two such files took as long as before, of
+/// cladefs: how many of a flush's files it syncs at once, and of its directories (TASK-92.42). One
+/// at a time, each sync waited for those before it, though none needs another. On macOS (APFS),
+/// where each was an `F_FULLFSYNC`, which std's `sync_all` is there, flushing the drive's cache
+/// too, cell-bench's `burst`, whose commit seals 640 extents in files of their own, spent 2.0 s
+/// syncing them, nearly all of its flush, about 3 ms a file; 4 at once 1.2 s, 8 0.93 s, 16 0.89 s,
+/// 32 0.87 s, 64 0.75 s. Its `durable` case's flushes of two such files took as long as before, of
 /// fifteen half as long. Each an `F_BARRIERFSYNC` since, which leaves the drive's cache to the
 /// flush's barrier (`HostDir`, TASK-92.48), sixteen at once still shorten a flush. Run interleaved
 /// with one at a time, twenty runs of each, by their medians and quartiles, as each way has
@@ -182,14 +182,14 @@ const AT_ONCE: usize = 16;
 /// cladefs: how many threads, beside the flushes' own, every flush of the process syncs on at once,
 /// at most (TASK-92.49): as many as one flush syncs on beside its own ([`AT_ONCE`]), which a flush
 /// alone gets, and flushes together share. Were they each flush's, the extent daemon's 32 threads
-/// of flushes would sync on as many as 512 threads at once, and its stores' commits wait behind as
+/// of flushes would sync on as many as 512 threads at once, and its cells' commits wait behind as
 /// many syncs.
 pub(crate) const HELPERS: usize = AT_ONCE - 1;
 
-/// cladefs: how many of [`HELPERS`] sync now: the process's; with the `shuttle` feature, each Shuttle
-/// execution's own, so that how many helpers an execution's flushes get is of its own flushes
-/// alone, as the scheduler sees them, not another execution's run beside it in the process: a
-/// test's two runs of a round at once got helpers by each other's flushes, outside the scheduler,
+/// cladefs: how many of [`HELPERS`] sync now: the process's; with the `shuttle` feature, each
+/// Shuttle execution's own, so that how many helpers an execution's flushes get is of its own
+/// flushes alone, as the scheduler sees them, not another execution's run beside it in the process:
+/// a test's two runs of a round at once got helpers by each other's flushes, outside the scheduler,
 /// and diverged (crash::crashes_recover_prefixes_of_their_commits_concurrently, round 228, CI
 /// 42463756531, TASK-221).
 fn helping() -> &'static std::sync::atomic::AtomicUsize {
@@ -370,8 +370,8 @@ impl<F: File> Syncs<F> {
     }
 }
 
-/// cladefs: `sync`s each of `items`, `most` at a time, on as many threads, the caller's one of them,
-/// each taking the next as it is done with one; and returns once each is synced, or once one
+/// cladefs: `sync`s each of `items`, `most` at a time, on as many threads, the caller's one of
+/// them, each taking the next as it is done with one; and returns once each is synced, or once one
 /// failed and those in flight returned, with that failure, logging any other. A failure empties the
 /// queue, so that no sync begins once it has, though other threads may take one before: what they
 /// sync then does no harm, as the flush fails. The others are of [`HELPERS`], those other flushes
@@ -502,11 +502,12 @@ mod tests {
         use std::collections::BTreeMap;
         use std::io;
 
-        /// cladefs: each Shuttle execution has helpers of its own: one, holding every helper, leaves
-        /// another, run beside it in the process, as many as it asks for. Shared, an execution's
-        /// helpers depended on another's flushes, outside the scheduler, and a test's two runs of a
-        /// round at once diverged (crash::crashes_recover_prefixes_of_their_commits_concurrently,
-        /// round 228, CI 42463756531, TASK-221). Red with one count for the process.
+        /// cladefs: each Shuttle execution has helpers of its own: one, holding every helper,
+        /// leaves another, run beside it in the process, as many as it asks for. Shared, an
+        /// execution's helpers depended on another's flushes, outside the scheduler, and a test's
+        /// two runs of a round at once diverged
+        /// (crash::crashes_recover_prefixes_of_their_commits_concurrently, round 228, CI
+        /// 42463756531, TASK-221). Red with one count for the process.
         #[test]
         fn executions_have_helpers_of_their_own() {
             use std::sync::mpsc::channel;
@@ -555,7 +556,7 @@ mod tests {
             synced: BTreeMap<usize, Vec<bool>>,
         }
 
-        /// A store's directory whose files' and directories' syncs say what they saw, and fail if
+        /// A cell directory whose files' and directories' syncs say what they saw, and fail if
         /// a directory's comes before the files are synced, or more than `at_once` are in flight,
         /// as each lets others begin before it ends; and, if `gathering`, go in groups of
         /// `at_once`, or all those left, in the order they begin: each waits until all of its
@@ -750,7 +751,7 @@ mod tests {
         }
 
         /// TASK-92.49: flushes syncing at once sync on their own threads and [`HELPERS`] at most,
-        /// which they share: not as many as [`AT_ONCE`] each, as every store's flushes would, many
+        /// which they share: not as many as [`AT_ONCE`] each, as every cell's flushes would, many
         /// at once. Each syncs each of its files once.
         #[test]
         fn flushes_together_share_their_helpers() {

@@ -38,7 +38,7 @@ struct Daemon {
     stats: PathBuf,
 }
 
-/// A daemon serving in `dir`, keeping its stores' cells in the file bucket at `bucket`, and its
+/// A daemon serving in `dir`, keeping its cells in the file bucket at `bucket`, and its
 /// part cache in `dir`; serving its peers at `peers`' first address, and asking them all, if given.
 fn daemon(dir: &Path, bucket: &Path, peers: Option<&[String]>) -> Daemon {
     let (vms, control, stats) =
@@ -130,14 +130,14 @@ fn run(peered: bool) -> (u64, u64, u64, u64) {
     let second = daemon(&hosts[1], &bucket, peered.then_some(&second_peers[..]));
 
     let base = hosts[0].join("base");
-    let store = CellClient::connect(&first.vms, &base, CAPACITY).unwrap();
-    let cell = store.cell();
+    let client = CellClient::connect(&first.vms, &base, CAPACITY).unwrap();
+    let cell = client.cell();
     for sequence in 1..=EXTENTS {
         let extent = ExtentId { cell, sequence };
-        store.write(extent, 0, &[VolatileSlice::from(&data(sequence)[..])]).unwrap();
+        client.write(extent, 0, &[VolatileSlice::from(&data(sequence)[..])]).unwrap();
     }
-    store.commit(None).unwrap();
-    drop(store);
+    client.commit(None).unwrap();
+    drop(client);
     first.control.sync_cell(&base).unwrap();
     let version = first.control.make_version(&base, None).unwrap();
     first.control.sync_cell(&base).unwrap();
@@ -146,14 +146,14 @@ fn run(peered: bool) -> (u64, u64, u64, u64) {
 
     let fork = hosts[1].join("fork");
     second.control.fork_version(from, &fork).unwrap();
-    let store = CellClient::connect(&second.vms, &fork, CAPACITY).unwrap();
+    let client = CellClient::connect(&second.vms, &fork, CAPACITY).unwrap();
     for sequence in 1..=EXTENTS {
         let mut read = vec![0; EXTENT];
         let extent = ExtentId { cell, sequence };
-        store.read(extent, 0, &mut [VolatileSliceMut::from(&mut read[..])]).unwrap();
+        client.read(extent, 0, &mut [VolatileSliceMut::from(&mut read[..])]).unwrap();
         assert!(read == data(sequence), "extent {sequence} read otherwise");
     }
-    drop(store);
+    drop(client);
     settled(&second.stats);
     settled(&first.stats);
     let gets = |daemon: &Daemon| stat(&daemon.stats, "object-store", "get-range");
@@ -165,8 +165,8 @@ fn run(peered: bool) -> (u64, u64, u64, u64) {
 }
 
 /// The second host fetches from the bucket only the parts it owns: the first gives it the rest,
-/// from its part cache, fetching none of them: no GET more than it makes alone. A version's base read
-/// on another host comes from the bucket once, not once on each host that reads it.
+/// from its part cache, fetching none of them: no GET more than it makes alone. A version's base
+/// read on another host comes from the bucket once, not once on each host that reads it.
 #[test]
 fn a_copy_read_on_another_host_comes_from_its_peer() {
     let (alone, first_alone, _, _) = run(false);

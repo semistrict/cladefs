@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: a bucket as a degraded one is, between a store and its objects ([`Faulty`]): each
+//! cladefs: a bucket as a degraded one is, between a backend and its objects ([`Faulty`]): each
 //! request waits so long first, and fails as it is told, its writes as a full disk's do or every
 //! request as an object store out of service answers, until it is told otherwise (TASK-330.3).
 //! What a host's daemon does meanwhile, its memory, its stalled commits and what it says of the
@@ -339,9 +339,9 @@ impl ObjectStore for Faulty {
 /// cladefs: how often a [`Seeded`] bucket does what to a request (TASK-685.5, doc-24): each request
 /// waits up to `delay_most`, as the seed draws it; then, as it draws, fails before it lands
 /// (`fail_before`), or lands and fails after (`fail_after`), as a request answered with an error or
-/// lost on its way back does, its write in the bucket all the same; and the bucket goes out of reach
-/// for `out_for` at a time (`out_of_reach`, at each request), every request failing meanwhile, as a
-/// region's link does.
+/// lost on its way back does, its write in the bucket all the same; and the bucket goes out of
+/// reach for `out_for` at a time (`out_of_reach`, at each request), every request failing
+/// meanwhile, as a region's link does.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Odds {
     pub delay_most: Duration,
@@ -474,16 +474,16 @@ impl std::fmt::Display for Seeded {
 /// cladefs: a [`Seeded`] bucket, shared: what an [`ObjectStore`] is made of where its streams
 /// outlive the call that made them.
 #[derive(Clone, Debug)]
-pub struct SeededStore(pub Arc<Seeded>);
+pub struct SeededBackend(pub Arc<Seeded>);
 
-impl std::fmt::Display for SeededStore {
+impl std::fmt::Display for SeededBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
     }
 }
 
 #[async_trait::async_trait]
-impl ObjectStore for SeededStore {
+impl ObjectStore for SeededBackend {
     async fn put_opts(
         &self,
         location: &Path,
@@ -582,10 +582,10 @@ mod tests {
     async fn writes_of_an_object_too_soon_are_refused() {
         let faults = Faults::new(Duration::ZERO, None);
         faults.set(Fault { rewrite_every: Duration::from_secs(1), ..Fault::default() });
-        let store = Faulty::new(Arc::new(object_store::memory::InMemory::new()), faults);
+        let faulty = Faulty::new(Arc::new(object_store::memory::InMemory::new()), faults);
         let put = async |key: &str| {
             let (path, payload) = (Path::from(key), PutPayload::from_static(b"1"));
-            store.put_opts(&path, payload, PutOptions::default()).await
+            faulty.put_opts(&path, payload, PutOptions::default()).await
         };
         put("head").await.unwrap();
         tokio::time::sleep(Duration::from_millis(999)).await;
@@ -608,36 +608,36 @@ mod tests {
         let file = dir.path().join("faults");
         let faults = Faults::new(Duration::ZERO, Some(file.clone()));
         let objects = Arc::new(object_store::memory::InMemory::new());
-        let store = Faulty::new(objects, faults.clone());
+        let faulty = Faulty::new(objects, faults.clone());
         let path = Path::from("a");
-        let put = || store.put_opts(&path, PutPayload::from_static(b"1"), PutOptions::default());
+        let put = || faulty.put_opts(&path, PutPayload::from_static(b"1"), PutOptions::default());
         put().await.unwrap();
 
         std::fs::write(&file, "failing=no-space").unwrap();
         tokio::time::sleep(READ_EVERY).await;
         let error = put().await.unwrap_err().to_string();
         assert_eq!(error, "Generic Faulty error: No space left on device (os error 28)");
-        assert_eq!(store.get_opts(&path, GetOptions::default()).await.unwrap().meta.size, 1);
+        assert_eq!(faulty.get_opts(&path, GetOptions::default()).await.unwrap().meta.size, 1);
 
         std::fs::write(&file, "latency-ms=200 failing=unavailable").unwrap();
         tokio::time::sleep(READ_EVERY).await;
         let started = Instant::now();
-        let error = store.get_opts(&path, GetOptions::default()).await.unwrap_err();
+        let error = faulty.get_opts(&path, GetOptions::default()).await.unwrap_err();
         assert!(started.elapsed() >= Duration::from_millis(200), "{:?}", started.elapsed());
         assert_eq!(
             error.to_string(),
             "Generic Faulty error: HTTP status server error (503 Service Unavailable)"
         );
-        let listed: Vec<_> = store.list(None).collect().await;
+        let listed: Vec<_> = faulty.list(None).collect().await;
         assert_eq!(listed.len(), 1);
         assert!(listed[0].is_err());
         // cladefs: listings by delimiter and batches of deletes fail as every request (TASK-395.5).
         let unavailable =
             "Generic Faulty error: HTTP status server error (503 Service Unavailable)";
-        let level = store.list_with_delimiter(None).await.unwrap_err();
+        let level = faulty.list_with_delimiter(None).await.unwrap_err();
         assert_eq!(level.to_string(), unavailable);
         let deleting = futures::stream::iter([Ok(path.clone()), Ok(Path::from("b"))]).boxed();
-        let deleted: Vec<String> = (store.delete_stream(deleting).collect::<Vec<_>>().await)
+        let deleted: Vec<String> = (faulty.delete_stream(deleting).collect::<Vec<_>>().await)
             .into_iter()
             .map(|deleted| deleted.unwrap_err().to_string())
             .collect();
@@ -647,18 +647,18 @@ mod tests {
         tokio::time::sleep(READ_EVERY).await;
         assert_eq!(faults.now(), Fault::default());
         put().await.unwrap();
-        let listed: Vec<_> = store.list(None).collect().await;
+        let listed: Vec<_> = faulty.list(None).collect().await;
         assert_eq!(
             listed.into_iter().map(|meta| meta.unwrap().location).collect::<Vec<_>>(),
             std::slice::from_ref(&path)
         );
-        let level = store.list_with_delimiter(None).await.unwrap();
+        let level = faulty.list_with_delimiter(None).await.unwrap();
         let objects: Vec<Path> = level.objects.into_iter().map(|meta| meta.location).collect();
         assert_eq!((level.common_prefixes, objects), (vec![], vec![path.clone()]));
         let deleting = futures::stream::iter([Ok(path.clone())]).boxed();
         let deleted: Vec<Path> =
-            store.delete_stream(deleting).map(|deleted| deleted.unwrap()).collect().await;
+            faulty.delete_stream(deleting).map(|deleted| deleted.unwrap()).collect().await;
         assert_eq!(deleted, [path]);
-        assert_eq!(store.list(None).collect::<Vec<_>>().await.len(), 0);
+        assert_eq!(faulty.list(None).collect::<Vec<_>>().await.len(), 0);
     }
 }

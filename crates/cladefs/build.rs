@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Generates the extent daemon's gRPC API (`proto/cladefs/cladefsd/v1/cladefsd.proto`), what daemons
-//! sharing a bucket serve each other (`proto/cladefs/peer/v1/peer.proto`, TASK-406.2), and the API of
-//! FUSE mounts of many stores (`proto/cladefs/mount/v1/mount.proto`), with protox,
-//! which compiles protobuf in Rust: no protoc needed; for tonic, and for madsim's tonic. cladefs: and stamps the build with the commit it
-//! is of (`CLADEFS_BUILD_COMMIT`, [`crate::BUILD_COMMIT`]), as scripts/build-commit.sh says, which
-//! every build of the tree reports (TASK-111.7).
+//! Generates the extent daemon's gRPC API (`proto/cladefs/cladefsd/v1/cladefsd.proto`), what
+//! daemons sharing a bucket serve each other (`proto/cladefs/peer/v1/peer.proto`, TASK-406.2), and
+//! the API of FUSE mounts of many cells (`proto/cladefs/mount/v1/mount.proto`), with protox, which
+//! compiles protobuf in Rust: no protoc needed; for tonic, and for madsim's tonic. cladefs: and
+//! stamps the build with the commit it is of (`CLADEFS_BUILD_COMMIT`, [`crate::BUILD_COMMIT`]), as
+//! scripts/build-commit.sh says, which every build of the tree reports (TASK-111.7).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -40,8 +40,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Has the crate's `CLADEFS_BUILD_COMMIT` be the commit scripts/build-commit.sh says the tree is
 /// of, and the build stamp it again as that changes: as the checkout moves to another commit, or
-/// the crate's own sources change, which may make it dirty; or the source a host run's worktree carries says
-/// another (`source-revision.txt`).
+/// the crate's own sources change, which may make it dirty; or the source a host run's worktree
+/// carries says another (`source-revision.txt`).
 fn stamp_commit() -> Result<(), Box<dyn std::error::Error>> {
     let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?).join("../..");
     let script = root.join("scripts/build-commit.sh");

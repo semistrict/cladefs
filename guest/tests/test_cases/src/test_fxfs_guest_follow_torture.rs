@@ -19,24 +19,24 @@
 //!   after it, as POSIX has it.
 //!
 //! Each of the writer's writes is written back before its next operation, so that its operations
-//! reach its store in the order it makes them, as the history checker's model has it (below).
+//! reach its cell in the order it makes them, as the history checker's model has it (below).
 //!
 //! Once the writer is done, it writes what it left (the token's N, the blocks' generations), and
 //! the followers, once they find it, must hold exactly that.
 //!
 //! The VMs send the host their histories, which it checks once they are done with TASK-42.1's
 //! checker (`follower_history`): the writer's operations, each with the files it changed, and the
-//! store's latest commit as each of its syncs returned; and its followers' reads, each with the
-//! commits its follower may have been as of (fs/cladefs's CLADEFS_IOC_FOLLOW_COMMITS). Each reader must
-//! find what a prefix of the writer's operations those commits may hold left, a prefix no shorter
-//! than its last read's. A reader records each read that found what it last found of the file
-//! otherwise, and the others every RECORD_EVERY.
+//! cell's latest commit as each of its syncs returned; and its followers' reads, each with the
+//! commits its follower may have been as of (fs/cladefs's CLADEFS_IOC_FOLLOW_COMMITS). Each reader
+//! must find what a prefix of the writer's operations those commits may hold left, a prefix no
+//! shorter than its last read's. A reader records each read that found what it last found of the
+//! file otherwise, and the others every RECORD_EVERY.
 //!
-//! The kernel's command line may widen
-//! the protocol's windows (fs/cladefs's `follow_apply_delay_us`, `follow_iomap_delay_us`), and no VM's
-//! kernel may complain (a debug kernel's lockdep, KCSAN and DEBUG_ATOMIC_SLEEP, or the follower's
-//! own WARN_ONs). A mutant, with one window widened and the rule that closes it switched off, must
-//! be caught: its followers report what is stale, and its history is wrong.
+//! The kernel's command line may widen the protocol's windows (fs/cladefs's
+//! `follow_apply_delay_us`, `follow_iomap_delay_us`), and no VM's kernel may complain (a debug
+//! kernel's lockdep, KCSAN and DEBUG_ATOMIC_SLEEP, or the follower's own WARN_ONs). A mutant, with
+//! one window widened and the rule that closes it switched off, must be caught: its followers
+//! report what is stale, and its history is wrong.
 
 use macros::{guest, host};
 
@@ -79,7 +79,7 @@ const PORT: u32 = 5054;
 
 /// The vsock port each VM sends its history on, which the host checks (TASK-42.1's checker,
 /// `follower_history`), one record a line: the writer's operations (`op AFTER NAME=OBJECT:CONTENTS
-/// ...`, `NAME=-` for none) and syncs (`sync`, which the host answers with the store's latest
+/// ...`, `NAME=-` for none) and syncs (`sync`, which the host answers with the cell's latest
 /// commit's number); a follower's reads (`read READER FROM TO NAME FOUND`) and reads of files it
 /// held open (`held READER FROM TO OBJECT FOUND`), FOUND a number, `-` for nothing, or `!WHAT` for
 /// what isn't whole, made as of a commit from FROM to TO.
@@ -115,7 +115,8 @@ mod host {
     /// has to hold what its writer left, and its watchdog's report of where it is stuck.
     const HUNG_AFTER: std::time::Duration = std::time::Duration::from_secs(100);
 
-    /// How long the writer changes its filesystem: CLADEFS_FOLLOW_SECONDS, for a soak; 20 by default.
+    /// How long the writer changes its filesystem: CLADEFS_FOLLOW_SECONDS, for a soak; 20 by
+    /// default.
     fn seconds() -> u64 {
         std::env::var("CLADEFS_FOLLOW_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(20)
     }
@@ -126,7 +127,7 @@ mod host {
             test_setup: &TestSetup,
             root: &Path,
             role: &str,
-            store: &Path,
+            cell_dir: &Path,
             uds: &Path,
         ) -> anyhow::Result<Firecracker> {
             let mut vm = Vm::new(2, 768)?;
@@ -135,9 +136,9 @@ mod host {
             let window =
                 if self.dax { crate::common::dax_window(crate::common::Window::Large)? } else { 0 };
             if role == "writer" {
-                vm.cell("extents", store, CAPACITY, window)?;
+                vm.cell("extents", cell_dir, CAPACITY, window)?;
             } else {
-                vm.cell_following("extents", store, window)?;
+                vm.cell_following("extents", cell_dir, window)?;
             }
             vm.env(&CString::new(format!("CLADEFS_FOLLOW={role}"))?);
             vm.env(&CString::new(format!("CLADEFS_FOLLOW_SECONDS={}", seconds()))?);
@@ -171,7 +172,7 @@ mod host {
         fn run(&self, test_setup: &TestSetup) -> anyhow::Result<()> {
             let dir = &test_setup.tmp_dir;
             let root = setup_rootfs(test_setup)?;
-            let store = dir.join("store");
+            let cell_dir = dir.join("store");
             let uds = |role: &str| -> PathBuf {
                 std::env::temp_dir()
                     .join(format!("cladefs-torture-{}-{role}.vsock", std::process::id()))
@@ -184,10 +185,10 @@ mod host {
             let listen =
                 |role: &str| UnixListener::bind(format!("{}_{HISTORY_PORT}", uds(role).display()));
             let writing = listen("writer")?;
-            let mut writer = self.spawn(test_setup, &root, "writer", &store, &uds("writer"))?;
+            let mut writer = self.spawn(test_setup, &root, "writer", &cell_dir, &uds("writer"))?;
             let writing = writer.accept(&writing)?;
             let mut recording =
-                vec![histories(writing, &records("writer"), history.clone(), Some(store.clone()))?];
+                vec![histories(writing, &records("writer"), history.clone(), Some(cell_dir.clone()))?];
             let stream = writer.accept(&listener)?;
             let mut said = String::new();
             BufReader::new(stream).read_line(&mut said)?;
@@ -195,7 +196,7 @@ mod host {
             let followers = FOLLOWERS
                 .iter()
                 .map(|role| {
-                    Ok((listen(role)?, self.spawn(test_setup, &root, role, &store, &uds(role))?))
+                    Ok((listen(role)?, self.spawn(test_setup, &root, role, &cell_dir, &uds(role))?))
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
             let followers = FOLLOWERS
@@ -261,17 +262,17 @@ mod host {
 
     /// Takes the history a VM sends on `stream`, from its vsock, into `history`, and to the file at
     /// `records` as it was sent, on a thread of its own, until the VM is done: the writer's,
-    /// answering its syncs with the latest commit of the store at `store`, or a follower's. Whole
+    /// answering its syncs with the latest commit of the cell at `cell_dir`, or a follower's. Whole
     /// lines alone: a VM ended at once may have sent half of its last.
     fn histories(
         stream: std::os::unix::net::UnixStream,
         records: &Path,
         history: Arc<Mutex<History<String, u64>>>,
-        store: Option<PathBuf>,
+        cell_dir: Option<PathBuf>,
     ) -> anyhow::Result<std::thread::JoinHandle<anyhow::Result<()>>> {
         let mut records = std::io::BufWriter::new(std::fs::File::create(records)?);
         Ok(std::thread::spawn(move || {
-            let control = match &store {
+            let control = match &cell_dir {
                 Some(_) => {
                     let cladefsd = std::env::var_os("CLADEFSD").expect("CLADEFSD set");
                     Some(crate::common::control(Path::new(&cladefsd))?)
@@ -288,8 +289,8 @@ mod host {
                 let Some(line) = line.strip_suffix('\n') else { break };
                 writeln!(records, "{line}")?;
                 record(line, &history, &mut || {
-                    let (control, store) = (control.as_ref().unwrap(), store.as_ref().unwrap());
-                    let commit = control.committed(store)?;
+                    let (control, cell_dir) = (control.as_ref().unwrap(), cell_dir.as_ref().unwrap());
+                    let commit = control.committed(cell_dir)?;
                     writeln!(answers, "{commit}")?;
                     Ok(commit)
                 })
@@ -555,7 +556,7 @@ mod guest {
             records.write_all(b"\n").unwrap();
         }
 
-        /// The writer's operation, which began with the store at `after`, and changed the files
+        /// The writer's operation, which began with the cell at `after`, and changed the files
         /// named in `changes`: to `(object, contents)`, or none.
         fn op(&self, after: u64, changes: &[(String, Option<(u64, u64)>)]) {
             let changes: Vec<String> = changes
@@ -568,7 +569,7 @@ mod guest {
             self.record(format_args!("op {after} {}", changes.join(" ")));
         }
 
-        /// The writer's sync, returned: the number of the store's latest commit, as the host says.
+        /// The writer's sync, returned: the number of the cell's latest commit, as the host says.
         fn synced(&self) -> u64 {
             self.record(format_args!("sync"));
             self.flush();
@@ -587,8 +588,8 @@ mod guest {
     const BLOCK_OBJECTS: u64 = 1 << 62;
     const SHAPE_OBJECTS: u64 = 1 << 61;
 
-    /// The commits a follower's state is as of (fs/cladefs's CLADEFS_IOC_FOLLOW_COMMITS): every batch up
-    /// to `settled`'s settled, none past `applied`'s applied.
+    /// The commits a follower's state is as of (fs/cladefs's CLADEFS_IOC_FOLLOW_COMMITS): every
+    /// batch up to `settled`'s settled, none past `applied`'s applied.
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
     struct FollowCommits {
@@ -685,7 +686,7 @@ mod guest {
     }
 
     /// Writes back `file`'s `len` bytes at `offset`, written, before the writer's next operation:
-    /// so that its operations reach its store's journal in the order it makes them, as the history
+    /// so that its operations reach its cell's journal in the order it makes them, as the history
     /// checker's model has it, a prefix of them in each commit. Written only to the page cache,
     /// without DAX, a write reaches the journal as it is written back, after the operations made
     /// meanwhile: a size changed since commits before a page written before it, and a file deleted
@@ -705,7 +706,7 @@ mod guest {
     /// writes what it left, in `done`.
     fn writer() {
         let history = History::connect();
-        // The store's latest commit, as of its last sync: each operation since begins after it.
+        // The cell's latest commit, as of its last sync: each operation since begins after it.
         let mut after = 0;
         fs::create_dir(path("tok")).unwrap();
         fs::write(path("tok/token.0"), b"").unwrap();

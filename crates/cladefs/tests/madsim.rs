@@ -38,7 +38,7 @@ fn peer(host: u8) -> SocketAddr {
     SocketAddr::new(control(host).ip(), PEERS)
 }
 
-/// What hosts' daemons keep, beyond their stores and their control API.
+/// What hosts' daemons keep, beyond their cells and their control API.
 #[derive(Clone, Copy)]
 struct Kept {
     /// Of how many hosts, 1 to it, all serving their peers and asking each other: every host given
@@ -65,8 +65,8 @@ impl Kept {
     }
 }
 
-/// Boots host `host`'s daemon, its stores under `root`, its cells in `bucket`, at placement token
-/// `host`, keeping what `kept` says, and serves for as long as the host runs.
+/// Boots host `host`'s daemon, its cell directories under `root`, its cells in `bucket`, at
+/// placement token `host`, keeping what `kept` says, and serves for as long as the host runs.
 async fn boot(host: u8, root: &Path, bucket: Arc<ObjectBucket>, kept: Kept) {
     // As a host's process boots: its statics anew, its node started again after a kill too.
     node_local::starting();
@@ -144,12 +144,12 @@ fn world() -> (tempfile::TempDir, Arc<ObjectBucket>, Arc<bucket_cell::faults::Se
     };
     let objects = Arc::new(object_store::memory::InMemory::new());
     let seeded = Arc::new(bucket_cell::faults::Seeded::new(objects, madsim::rand::random(), odds));
-    let store = bucket_cell::faults::SeededStore(seeded.clone());
-    (tempfile::tempdir().unwrap(), Arc::new(ObjectBucket::new(Arc::new(store), "")), seeded)
+    let backend = bucket_cell::faults::SeededBackend(seeded.clone());
+    (tempfile::tempdir().unwrap(), Arc::new(ObjectBucket::new(Arc::new(backend), "")), seeded)
 }
 
-/// Hosts 1 to `count`, booted, their stores under `dir`'s `hostN`, their cells in `bucket`: their
-/// nodes, and their roots.
+/// Hosts 1 to `count`, booted, their cell directories under `dir`'s `hostN`, their cells in
+/// `bucket`: their nodes, and their roots.
 fn hosts(
     count: u8,
     dir: &Path,
@@ -273,7 +273,8 @@ async fn a_guests_commit_uploaded_on_one_host_reads_back_on_another() {
                 cell,
                 ..CreateCellRequest::default()
             };
-            // Its first host's teardown may hold the cell's head a while yet: taken once it lets go.
+            // Its first host's teardown may hold the cell's head a while yet: taken once it lets
+            // go.
             loop {
                 match two.create_cell(taking.clone()).await {
                     Ok(_) => break,
@@ -320,13 +321,13 @@ fn block_of(round: u64, sequence: u64) -> Vec<u8> {
     (0..4096u64).map(|at| ((round * 31 + sequence * 7 + at) % 251) as u8).collect()
 }
 
-/// A writer guest's round on its host: opens the store at `path`, of `cell` if given (taken there
-/// already), and writes blocks from its store's next sequence on, each committed uploaded and
-/// noted in `told` once the daemon says so, `writes` of them, or until a write or commit fails, as
-/// a writer fenced does; and, if `told` says writers do, makes a version after a commit, as the
-/// seed says, noted there with what was told uploaded before once a commit after it is told
-/// uploaded. The cell's ID; or none, if its open was refused, as a later placement's taking,
-/// before it opened, has it refused (`ESTALE`).
+/// A writer guest's round on its host: opens the cell directory at `path`, of `cell` if given
+/// (taken there already), and writes blocks from its cell's next sequence on, each committed
+/// uploaded and noted in `told` once the daemon says so, `writes` of them, or until a write or
+/// commit fails, as a writer fenced does; and, if `told` says writers do, makes a version after a
+/// commit, as the seed says, noted there with what was told uploaded before once a commit after it
+/// is told uploaded. The cell's ID; or none, if its open was refused, as a later placement's
+/// taking, before it opened, has it refused (`ESTALE`).
 async fn write_round(path: PathBuf, round: u64, writes: u64, told: Arc<Told>) -> Option<u64> {
     use madsim::rand::Rng as _;
     let guest = guest().await;
@@ -367,8 +368,8 @@ async fn write_round(path: PathBuf, round: u64, writes: u64, told: Arc<Told>) ->
     Some(cell)
 }
 
-/// Takes `cell` into the store at `path` on host `host`, at placement `token`, as the VM manager
-/// does, trying again while the bucket refuses, as a manager would.
+/// Takes `cell` into the cell directory at `path` on host `host`, at placement `token`, as the VM
+/// manager does, trying again while the bucket refuses, as a manager would.
 async fn take(host: u8, path: &Path, cell: u64, token: u64) {
     let mut daemon = connect(host).await;
     let taking = CreateCellRequest {
@@ -483,8 +484,8 @@ fn attrition_needs_head_swaps() {
     eprintln!("seed {} lost: {}", found.0, found.1);
 }
 
-/// Makes a cell replicated at f 1 (doc-21) in the store at `path` on host `host`, at placement
-/// `token`, trying again while the bucket refuses: its ID.
+/// Makes a cell replicated at f 1 (doc-21) in the cell directory at `path` on host `host`, at
+/// placement `token`, trying again while the bucket refuses: its ID.
 async fn create_replicated(host: u8, path: &Path, token: u64) -> u64 {
     let mut daemon = connect(host).await;
     let creating = CreateCellRequest {
@@ -525,8 +526,8 @@ impl Profile {
     const PLAIN: Self = Self { kept: Kept::NONE, partitions: false, versions: false, disk: false };
 }
 
-/// Reads the blocks of `told`, `cell`'s, in the store at `path` on this host, which a guest opens:
-/// those lost, or read other than they were written, by their sequences.
+/// Reads the blocks of `told`, `cell`'s, in the cell directory at `path` on this host, which a
+/// guest opens: those lost, or read other than they were written, by their sequences.
 async fn lost_in(path: PathBuf, cell: u64, told: Blocks) -> Vec<u64> {
     let guest = guest().await;
     guest.open(&path, 64 << 20).await.unwrap();
@@ -541,8 +542,8 @@ async fn lost_in(path: PathBuf, cell: u64, told: Blocks) -> Vec<u64> {
     lost
 }
 
-/// Forks version `version` of `cell` into the store at `path` on host `host`, as the VM manager
-/// does, trying again while the bucket refuses.
+/// Forks version `version` of `cell` into the cell directory at `path` on host `host`, as the VM
+/// manager does, trying again while the bucket refuses.
 async fn fork_version(host: u8, path: &Path, cell: u64, version: u64) {
     let mut daemon = connect(host).await;
     let forking = ForkCellRequest {
@@ -640,7 +641,7 @@ async fn attrition(Profile { kept, partitions, versions, disk }: Profile) -> Res
             Err(_) => {
                 if cell.is_none() {
                     cell = written.await.unwrap();
-                    assert!(cell.is_some(), "the first round's writer opened no store");
+                    assert!(cell.is_some(), "the first round's writer opened no cell");
                 } else if madsim::rand::thread_rng().gen_bool(0.5) {
                     handle.kill(nodes[host].id());
                     killed = Some(nodes[host].clone());

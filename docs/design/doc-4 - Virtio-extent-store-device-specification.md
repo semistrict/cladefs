@@ -37,7 +37,7 @@ It is a paravirtual device for an object store, in place of a block device, for 
 
 ## The model
 
-The store holds **extents**: immutable pieces of data, each named by an ID the guest mints. There
+The cell holds **extents**: immutable pieces of data, each named by an ID the guest mints. There
 are no addresses, no free space and no device size.
 
 - **IDs.** An extent ID is 128 bits: the branch's 64-bit ID, which the host assigns when it creates
@@ -131,7 +131,7 @@ struct virtio_extent_config {
 	le32 max_root;            /* the most bytes the root holds: at least 512 */
 	le64 branch;              /* the branch's ID: the first half of every extent the guest mints */
 	le64 max_extent;          /* the most bytes one extent holds: at least 64 MiB */
-	le64 capacity;            /* F_RESIZE: the store's capacity, as INFO's */
+	le64 capacity;            /* F_RESIZE: the cell's capacity, as INFO's */
 	le64 asked;               /* F_RESIZE: the shrink the guest is asked to take, or 0 */
 	le64 committed;           /* F_READ_ONLY: the number of the writer's latest commit */
 	le64 private_max;         /* F_DAX: the most private pages the window holds at once, in
@@ -142,18 +142,18 @@ struct virtio_extent_config {
 
 The configuration never changes while the device runs, but for `capacity` and `asked`, with
 `F_RESIZE`, `committed`, with `F_READ_ONLY`, and `stats_asked`, with `F_STATS`. The host sets
-`private_max` as it opens the device, and reserves that much memory for the VM then, so that a store never waits for memory.
+`private_max` as it opens the device, and reserves that much memory for the VM then, so that a write never waits for memory.
 
 ### Resizing
 
-*Added 2026-10-17 (TASK-37).* The host resizes a store while its guest runs (`cladefsctl
+*Added 2026-10-17 (TASK-37).* The host resizes a cell while its guest runs (`cladefsctl
 resize`, through the extent daemon). It grows it at once, sets `capacity`, and raises a
 configuration change: the guest's filesystem takes the larger size, its device's block count and
 its allocator's budget, while mounted. A shrink needs the guest, whose filesystem may have
-reserved more than the store holds: the host sets `asked` and raises a configuration change; the
+reserved more than the cell holds: the host sets `asked` and raises a configuration change; the
 guest shrinks if its filesystem holds less than `asked`, with room left for its transactions
-(16 MiB, in cladefs's Fxfs), and answers with `RESIZED`, whether it took it; the store shrinks only
-then, never below what its extents hold. The host waits 10 s for the answer. A store no VM has
+(16 MiB, in cladefs's Fxfs), and answers with `RESIZED`, whether it took it; the cell shrinks only
+then, never below what its extents hold. The host waits 10 s for the answer. A cell no VM has
 open grows, and does not shrink.
 
 ### Stats
@@ -189,10 +189,10 @@ With `VIRTIO_EXTENT_F_DAX`, shared memory region 0 is the DAX window: guest-phys
 contents `MAP` sets. The transport gives its size, as virtio-fs's does.
 
 Every window page is one of three: a sealed extent's page, which every window that maps it shares;
-zeros; or a **private page**, the VM's own, which no extent names. A store to either of the first
+zeros; or a **private page**, the VM's own, which no extent names. A write to either of the first
 two makes it private, holding what it held, at the same address, mapped writable: nothing the guest
-maps moves, and no guest page table changes for a store. Only a `MAP` or `UNMAP` over a private
-page, which the guest sends, ends it. The device holds at most `private_max` private pages: a store
+maps moves, and no guest page table changes for a write. Only a `MAP` or `UNMAP` over a private
+page, which the guest sends, ends it. The device holds at most `private_max` private pages: a write
 past them is refused, and the VM stops (cladefs's Firecracker: 159, `AccessRefused`). The guest keeps
 under the bound, and writes back what it stored: its dirty pages' bytes, read from the window, are
 `WRITE`s to new extents, then a commit; once a commit seals those, it rebinds the pages to them,
@@ -253,7 +253,7 @@ within `max_extent`.
   it.
 - An extent's length is the end of its furthest write. Blocks within it that were never written
   read as zeros.
-- The data is in the store, and visible to reads and mappings, when the request completes. It is
+- The data is in the cell, and visible to reads and mappings, when the request completes. It is
   local, or uploaded, with the commit after it (see Ordering and durability).
 - With `WRITE_BARRIER` (bit 0), the write follows a barrier, as if a `COMMIT` were submitted just
   before it: Fxfs's `PRE_BARRIER` writes.
@@ -276,18 +276,18 @@ extent's data, then commits the transaction that refers to it, so this holds.
 
 Reads `len` bytes at `offset` in extent `id`. Both are multiples of `block_size`, and the range lies
 within the extent's length. The extent is the guest's, one its branch inherited from the branch
-it was forked from, or one a fork attached to the store holds (Branches and forks). A `READ` sees
-every `WRITE` completed before it was submitted. Stores to the window reach no extent: they are in
+it was forked from, or one a fork attached to the cell holds (Branches and forks). A `READ` sees
+every `WRITE` completed before it was submitted. Writes to the window reach no extent: they are in
 private pages until the guest writes them.
 
-Reading an extent the store doesn't hold, one never written or one freed, fails with `ENOENT`. The
+Reading an extent the cell doesn't hold, one never written or one freed, fails with `ENOENT`. The
 guest's Fxfs reads such an extent as zeros where it may never have been written: preallocated
 extents, and blocks of them not yet written (TASK-26.3).
 
 ### `FREE`
 
 Frees extent `id`: nothing in the guest's filesystem refers to it any more. It need not be sealed.
-Freeing an extent the store doesn't hold succeeds: after a crash, the guest frees again what it may
+Freeing an extent the cell doesn't hold succeeds: after a crash, the guest frees again what it may
 have freed before. With `FREE_MANY` (`F_FREE_MANY`), the data names more extents, each freed as
 `id` is, in order: the first that fails fails the request, those before it freed, and the guest
 frees them all again. A guest frees the extents a flush lets go of in one request, rather than one
@@ -308,10 +308,10 @@ multiples of `map_alignment`, and the range lies within the window.
   completes.
 - Loads see the extent's contents. What of the mapping lies past the extent reads as zeros, as
   blocks within it never written do.
-- The mapping is read-only to the extent: a store to one of its pages makes the page private
+- The mapping is read-only to the extent: a write to one of its pages makes the page private
   (Shared memory), and the extent never changes.
 - With `MAP_ZEROS` (bit 3), the range maps zeros, `id` and `offset` ignored: holes, and pages past
-  a file's end, which a store then makes private pages of zeros, with nothing to copy. A
+  a file's end, which a write then makes private pages of zeros, with nothing to copy. A
   follower's window takes no `MAP_ZEROS` (`EINVAL`).
 - A `MAP` replaces whatever the window held there, freeing its private pages.
 
@@ -331,7 +331,7 @@ than the hypervisor one first access at a time, which nested virtualization make
 `UNMAP` makes `len` bytes of the window at `window_offset` inaccessible, freeing its private
 pages.
 
-`PRIVATE` makes `len` bytes of the window at `window_offset` private now, as stores would, all or
+`PRIVATE` makes `len` bytes of the window at `window_offset` private now, as writes would, all or
 none, and prefaults them, as `MAP_PREFAULT` does: a guest about to
 write many pages that aren't private yet, as a `write(2)` of them, makes them so in one round trip,
 rather than a fault of the host's each. Pages already private stay as they are. It fails with
@@ -352,7 +352,7 @@ in any window.
   for no level past that: doc-2's requirement 2, under which fsync keeps its ordering but a crash
   may lose a suffix.
 - **With `COMMIT_UPLOADED`** (bit 0), it completes once everything before it is uploaded, its
-  segments acknowledged by the bucket; local, if the store has no bucket. Unmount and `sync` use
+  segments acknowledged by the bucket; local, if the cell has no bucket. Unmount and `sync` use
   it.
 - cladefs: the extent daemon's wire has a third level, which no guest's device asks for:
   `COMMIT_LOCAL` (`WRITE_LOCAL` for a write's commit), which completes once everything before it is
@@ -378,7 +378,7 @@ filesystem's root is empty: formatting sets it.
 
 ```c
 struct virtio_extent_info {
-	le64 capacity;     /* bytes the store will hold for this branch */
+	le64 capacity;     /* bytes the cell will hold for this branch */
 	le64 used;         /* bytes of extents it holds for it */
 	le64 available;    /* bytes it can still take */
 	le64 next_sequence; /* one more than the highest sequence number the branch has written */
@@ -394,15 +394,15 @@ branch of its own (Snapshots).
 
 For `statfs`, and for the guest's own count of what it may write.
 
-`next_sequence` counts every extent the branch wrote, freed or not, and recovers with the store
+`next_sequence` counts every extent the branch wrote, freed or not, and recovers with the cell
 after a crash. A crash may leave extents written whose references the guest's journal lost:
 orphans. After replay, the guest mints from the largest of its own next sequence number,
 `next_sequence` and `sequence_floor`, and frees the extents between its own and `next_sequence`
 that nothing refers to.
 
-`sequence_floor` is 0 unless the store keeps its branch in object storage, where it is its
+`sequence_floor` is 0 unless the cell keeps its branch in object storage, where it is its
 writer's range's start (doc-7, The head): IDs below it another writer may have minted. No extent
-the store holds need reach it, so the guest looks for orphans below `next_sequence` only: between
+the cell holds need reach it, so the guest looks for orphans below `next_sequence` only: between
 its own count and the floor there may be 2^40 numbers.
 
 ### Errors
@@ -410,12 +410,12 @@ its own count and the floor there may be 2^40 numbers.
 | Status | When |
 |---|---|
 | `0` | Success. |
-| `EPERM` (1) | A write to a sealed extent, or to another branch's; a `MAP` of an open extent; a `WRITE`, `FREE` or `COMMIT` of a public base's store (TASK-43). |
+| `EPERM` (1) | A write to a sealed extent, or to another branch's; a `MAP` of an open extent; a `WRITE`, `FREE` or `COMMIT` of a public base's cell (TASK-43). |
 | `ENOENT` (2) | A `READ` or `MAP` of an extent that does not exist, or was freed. |
-| `EIO` (5) | The store failed to read or write. |
+| `EIO` (5) | The cell failed to read or write. |
 | `EINVAL` (22) | An unknown type or flag, a misaligned or out-of-range offset, length or window offset, or a feature's flag the device does not offer. With `F_READ_ONLY`, a `PRIVATE`, or a `MAP_ZEROS`. |
 | `ENOMEM` (12) | A `PRIVATE` past `private_max`. |
-| `ENOSPC` (28) | The store cannot hold more for this branch. |
+| `ENOSPC` (28) | The cell cannot hold more for this branch. |
 | `EROFS` (30) | The store stopped taking writes for this branch: another host took its head (milestone 4), or the host is shutting it down. Reads still work. With `F_READ_ONLY`, every `WRITE`, `FREE`, `COMMIT` and `RESIZED`. |
 | `ESTALE` (116) | `F_READ_ONLY`: the follower was cut off (Followers). |
 
@@ -427,15 +427,15 @@ journal replay reads on to the first extent its commit doesn't hold.
 
 ## Followers
 
-*Added 2026-10-18 (TASK-42.3, doc-8).* A VM on the writer's host follows a store another VM
+*Added 2026-10-18 (TASK-42.3, doc-8).* A VM on the writer's host follows a cell another VM
 writes, read-only, with a device offering `F_READ_ONLY`: its guest mounts the filesystem as of a
 commit of the writer's, and applies the writer's commits after it as they come, while the writer
 goes on and never waits for it. The host serves it the same extents, from the same memory.
 
-- **Its view.** The device reads the store as of a commit, named by its **commit number**: what that commit holds,
+- **Its view.** The device reads the cell as of a commit, named by its **commit number**: what that commit holds,
   its sealed extents and root, and nothing the writer wrote after it. The writer's frees after it
   are kept while the view may read them. `ROOT` is the view's commit's root. A device starts as of
-  the writer's latest commit, or the store's last, if no VM writes it.
+  the writer's latest commit, or the cell's last, if no VM writes it.
 - **Commits.** Each commit of the writer's after the view's sets `committed` to its number and
   raises a configuration change (the latest of a run of commits, at least once).
 - **`ADVANCE`** moves the view to the writer's latest commit, and returns its number:
@@ -459,16 +459,16 @@ goes on and never waits for it. The host serves it the same extents, from the sa
 - **Cut off.** A follower too far behind (a lag in time, or in bytes of frees it keeps), or whose
   writer went with writes uncommitted, is cut off: its `READ`s, `MAP`s, `ADVANCE`s and `PIN`s
   fail with `ESTALE` until its guest remounts, with the device reset.
-- **Reset.** A follower's device holds its store open from `DRIVER_OK` to a reset. Its guest
-  resets the device as it unmounts, which lets go of the store for a next writer, and sets
-  `DRIVER_OK` again as it mounts: the device opens the store anew, as of its writer's latest
+- **Reset.** A follower's device holds its cell open from `DRIVER_OK` to a reset. Its guest
+  resets the device as it unmounts, which lets go of the cell for a next writer, and sets
+  `DRIVER_OK` again as it mounts: the device opens the cell anew, as of its writer's latest
   commit, and `branch` says what it opened. A device that can't open it yet asks for a reset
   (`NEEDS_RESET`), and its guest's next mount tries again.
 
-The host serves a follower's store to its writer as it would without followers: a writer that
+The host serves a follower's cell to its writer as it would without followers: a writer that
 went with nothing open (its last commit all it wrote) leaves its followers following, and the
-next writer takes the store over; one that went with writes uncommitted cuts them off, and no VM
-opens the store again until they are gone.
+next writer takes the cell over; one that went with writes uncommitted cuts them off, and no VM
+opens the cell again until they are gone.
 
 ## Ordering and durability
 
@@ -478,10 +478,10 @@ barriers of `WRITE_BARRIER`s and `WRITE_COMMIT`s, divide the requests into **int
 - A request completed before a barrier was submitted belongs to an interval before it.
 - A request submitted after a barrier completed belongs to an interval after it.
 - A request in flight while a barrier is may fall on either side.
-- Stores to the window belong to no interval: they are in private pages, which no crash keeps,
+- Writes to the window belong to no interval: they are in private pages, which no crash keeps,
   until the guest `WRITE`s them.
 
-After a crash of the guest, the VMM or the host, the store holds:
+After a crash of the guest, the VMM or the host, the cell holds:
 
 - everything from the intervals before some barrier B, including the last root set before it;
 - any subset of the writes and frees of B's interval, each block written whole or not at all;
@@ -494,7 +494,7 @@ is the host's lag, bounded by its configuration (doc-2, requirement 11).
 ## When the host's daemon goes
 
 A host's extent daemon (cladefs's `cladefsd`) serves every VM's device on the host; the VMM
-holds nothing of a store itself. If the daemon goes, by a crash, a kill or running out of memory,
+holds nothing of a cell itself. If the daemon goes, by a crash, a kill or running out of memory,
 each VM sees it as follows (TASK-50.2):
 
 - **At once:** the device's connection to the daemon closes. Every request waiting fails, as does
@@ -503,13 +503,13 @@ each VM sees it as follows (TASK-50.2):
   status of its own (cladefs's Firecracker: 158, `CladefsdLost`), rather than let the guest go on
   with a disk whose every request fails. Its host's VM manager sees the VMM exit, and why.
 - **What the guest committed** is what the daemon made local: everything before some barrier
-  (see Ordering and durability), as after any crash. A store whose daemon went is opened again by
+  (see Ordering and durability), as after any crash. A cell whose daemon went is opened again by
   the next daemon, or another process, as of its last local commit; its branch in the bucket is the
   writer's as of its last upload.
 - **Nothing reconnects.** A device does not connect to a daemon started again: its window's
   mappings, its private pages, the extents it had open and its requests in flight are not
   recovered. The VM is
-  started again, from its store or a snapshot, by its manager.
+  started again, from its cell or a snapshot, by its manager.
 - **Grants** (per-tenant sockets) are not kept across the daemon's restarts: its manager grants
   them again, as the control API's documentation says.
 
@@ -519,16 +519,16 @@ Each VM's filesystem is a branch, with its own ID and root.
 
 - **Forking** a branch makes a child with a new ID, a copy of the parent's root, and every extent
   the parent had at the fork. It takes O(1): the host records the parent and the fork point, in
-  its bucket (crates/extent_bucket/src/branch.rs); a store directory on the host holds one branch.
+  its bucket (crates/extent_bucket/src/branch.rs); a cell directory on the host holds one branch.
 - **After a fork,** each branch mints extents under its own ID. A branch that frees an inherited
   extent drops only its own claim, and the host deletes the extent once every branch that has it has
   freed it.
 - **Reads** of inherited extents, and mappings of them, are as of the fork. Extents never change, so
   this needs no copying.
-- **Attached forks.** The host's control API may attach a fork of another store to a branch
+- **Attached forks.** The host's control API may attach a fork of another cell to a branch
   (`AttachBase`, doc-10). `READ`, and `MAP`, of an extent of a branch in that fork's ancestry,
-  and not in the attached-to branch's, read through to the fork: as of it, whatever its store did
-  since. `FREE` of one does nothing, as of any extent the store doesn't hold. An extent no attached fork holds fails with
+  and not in the attached-to branch's, read through to the fork: as of it, whatever its cell did
+  since. `FREE` of one does nothing, as of any extent the cell doesn't hold. An extent no attached fork holds fails with
   `ENOENT`. What a branch has attached stays attached to its forks. The guest cannot ask for this,
   and everything an attached fork holds is readable to it.
 
@@ -537,7 +537,7 @@ The guest sees none of this except a different `branch` in its configuration aft
 ## Snapshots
 
 A VMM snapshots a VM with the device, and restores the snapshot, as many times as it likes, each
-restored VM with a store of its own (cladefs's TASK-39.1): a zygote's children, suspend-to-RAM, a
+restored VM with a cell of its own (cladefs's TASK-39.1): a zygote's children, suspend-to-RAM, a
 VM moved to another host. Extent IDs carry their branch, and the restored guest has the branch it
 had in its memory, so the snapshot is taken when nothing is open:
 
@@ -552,11 +552,11 @@ had in its memory, so the snapshot is taken when nothing is open:
   writeback found no memory. cladefs's Firecracker takes the point before it records the window's
   mappings, so a refused snapshot leaves nothing behind.
 - **The snapshot** holds the device's state, its window's place in guest memory and what each
-  mapping of the window maps (an extent's bytes, or zeros), and a point of the store: the host
-  forks the store, as of its last commit, which with nothing open is all the guest wrote.
-- **A restore** opens a store of its own, forked from the snapshot's point (or the store the VM
+  mapping of the window maps (an extent's bytes, or zeros), and a point of the cell: the host
+  forks the cell, as of its last commit, which with nothing open is all the guest wrote.
+- **A restore** opens a cell of its own, forked from the snapshot's point (or the cell the VM
   had, if nothing else changed it), and maps the window as the snapshot had it, at the same guest
-  physical address. Its configuration's `branch` is the new store's.
+  physical address. Its configuration's `branch` is the new cell's.
 - **Thawing,** the guest sends `FREEZE` without the flag, and takes its `branch` from `INFO`, which
   it mints extents of from then on: its journal continues in new extents of it before anything
   else commits.
@@ -575,9 +575,9 @@ This section describes how the host stores extents. It is not part of the protoc
   the only thing that deletes, compacts objects that are mostly freed extents, copying the live
   small extents into new objects. Large extents are deleted whole and never copied. The host
   collects nothing locally (TASK-165.8).
-- **On the host's disk,** a store keeps its open segment, its write-ahead log and its own extents
+- **On the host's disk,** a cell keeps its open segment, its write-ahead log and its own extents
   (doc-14), and uploads them to the bucket, in the layout doc-7 describes; a segment acknowledged
-  there leaves the store for the host's part cache.
+  there leaves the cell for the host's part cache.
 - **Caches.** The extent cache holds sealed extents' pages in memory, which VMs map through their
   DAX windows; the part cache holds parts of the bucket's objects on the host's disk, which misses
   in memory read from before the bucket. Every VM, fork and point on the host that reads the same
@@ -586,7 +586,7 @@ This section describes how the host stores extents. It is not part of the protoc
 ## What Fxfs becomes
 
 One on-disk format: extents only (TASK-26.3). The same Fxfs runs on the host, where cladefs builds
-images and imports container images into stores (crates/cladefs/src/image.rs, import.rs), each a
+images and imports container images into cells (crates/cladefs/src/image.rs, import.rs), each a
 local extent store, and in the guest.
 
 | Fxfs | Becomes |

@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 //! Fxfs devices on an extent store (crates/local_cell, backlog doc-4): the writer's, on the
-//! store's cell, and a follower's, on a view of it ([`local_cell::View`]), read-only, as of the
-//! view's commit. Extents' I/O, commits and frees go to the store directly, as its locks are
+//! cell, and a follower's, on a view of it ([`local_cell::View`]), read-only, as of the
+//! view's commit. Extents' I/O, commits and frees go to the cell directly, as its locks are
 //! Shuttle's in the simulation (cladefs's own image device moves them off Fxfs's threads instead).
 
 use anyhow::{Error, bail};
@@ -34,17 +34,17 @@ impl Drop for LetGo {
     }
 }
 
-/// The writer's device: the store's cell. A flush commits the store, durably.
+/// The writer's device: the cell. A flush commits the cell, durably.
 pub struct CellDevice<D: Dir> {
-    store: Arc<LocalCell<D>>,
+    cell: Arc<LocalCell<D>>,
     description: Description,
     allocator: BufferAllocator,
 }
 
 impl<D: Dir> CellDevice<D> {
-    pub fn new(store: Arc<LocalCell<D>>) -> Self {
-        let description = store.description();
-        Self { allocator: allocator(&description), store, description }
+    pub fn new(cell: Arc<LocalCell<D>>) -> Self {
+        let description = cell.description();
+        Self { allocator: allocator(&description), cell, description }
     }
 }
 
@@ -70,7 +70,7 @@ impl<D: Dir + 'static> Device for CellDevice<D> {
         _read_opts: ReadOptions,
     ) -> Result<(), Error> {
         let mut data = vec![0; buffer.len()];
-        self.store.read(extent, offset, &mut data)?;
+        self.cell.read(extent, offset, &mut data)?;
         buffer.copy_from_slice(&data);
         Ok(())
     }
@@ -82,7 +82,7 @@ impl<D: Dir + 'static> Device for CellDevice<D> {
         buffer: BufferRef<'_>,
         write_opts: WriteOptions<'_>,
     ) -> Result<(), Error> {
-        self.store.write(extent, offset, &buffer.to_vec()).await?;
+        self.cell.write(extent, offset, &buffer.to_vec()).await?;
         if write_opts.flags.contains(WriteFlags::POST_BARRIER) {
             match write_opts.root {
                 Some(root) => self.commit_root(root).await?,
@@ -97,19 +97,19 @@ impl<D: Dir + 'static> Device for CellDevice<D> {
     }
 
     async fn next_sequence(&self) -> Result<u64, Error> {
-        Ok(self.store.info()?.next_sequence)
+        Ok(self.cell.info()?.next_sequence)
     }
 
     async fn free(&self, extent: ExtentId) -> Result<(), Error> {
-        self.store.free(extent)
+        self.cell.free(extent)
     }
 
     async fn root(&self) -> Result<Vec<u8>, Error> {
-        self.store.root()
+        self.cell.root()
     }
 
     async fn commit_root(&self, root: &[u8]) -> Result<(), Error> {
-        self.store.commit(Some(root)).await
+        self.cell.commit(Some(root)).await
     }
 
     async fn close(&self) -> Result<(), Error> {
@@ -117,7 +117,7 @@ impl<D: Dir + 'static> Device for CellDevice<D> {
     }
 
     async fn flush(&self) -> Result<(), Error> {
-        self.store.commit(None).await
+        self.cell.commit(None).await
     }
 
     fn is_read_only(&self) -> bool {
@@ -125,29 +125,29 @@ impl<D: Dir + 'static> Device for CellDevice<D> {
     }
 }
 
-/// A follower's device: a view of the store's cell, as of its commit, read-only. Extents its
+/// A follower's device: a view of the cell, as of its commit, read-only. Extents its
 /// commit doesn't hold read as `NoExtent`, so Fxfs's journal replay ends at the view's commit.
 /// Advancing moves the view to the latest commit, holding what the commits since the one it was
 /// as of held until the follower lets go of them: what applying them, and its readers, read.
 /// Pins are the view's.
 pub struct ViewDevice<D: Dir> {
-    store: Arc<LocalCell<D>>,
+    cell: Arc<LocalCell<D>>,
     view: Arc<Mutex<View>>,
     description: Description,
     allocator: BufferAllocator,
-    /// The simulation's mutation of a follower's bug: reads the store as it is, past the view.
+    /// The simulation's mutation of a follower's bug: reads the cell as it is, past the view.
     past_its_view: bool,
     /// Whether reads fail, as the tests of a failing batch have them.
     failing: Arc<AtomicBool>,
 }
 
 impl<D: Dir> ViewDevice<D> {
-    pub fn new(store: Arc<LocalCell<D>>, view: View) -> Self {
-        let description = store.description();
+    pub fn new(cell: Arc<LocalCell<D>>, view: View) -> Self {
+        let description = cell.description();
         let allocator = allocator(&description);
         Self {
             allocator,
-            store,
+            cell,
             view: Arc::new(Mutex::new(view)),
             description,
             past_its_view: false,
@@ -157,8 +157,8 @@ impl<D: Dir> ViewDevice<D> {
 
     /// A follower's device with a bug, the simulation's to catch: it reads extents of commits
     /// after its view's, as of now.
-    pub fn reading_past_its_view(store: Arc<LocalCell<D>>, view: View) -> Self {
-        Self { past_its_view: true, ..Self::new(store, view) }
+    pub fn reading_past_its_view(cell: Arc<LocalCell<D>>, view: View) -> Self {
+        Self { past_its_view: true, ..Self::new(cell, view) }
     }
 
     /// Its view, which its advances move.
@@ -198,9 +198,9 @@ impl<D: Dir + 'static> Device for ViewDevice<D> {
         }
         let mut data = vec![0; buffer.len()];
         if self.past_its_view {
-            self.store.read_kept(extent, offset, &mut data)?;
+            self.cell.read_kept(extent, offset, &mut data)?;
         } else {
-            self.store.read_view(&self.view.lock(), extent, offset, &mut data)?;
+            self.cell.read_view(&self.view.lock(), extent, offset, &mut data)?;
         }
         buffer.copy_from_slice(&data);
         Ok(())
@@ -221,7 +221,7 @@ impl<D: Dir + 'static> Device for ViewDevice<D> {
     }
 
     async fn next_sequence(&self) -> Result<u64, Error> {
-        Ok(self.store.info()?.next_sequence)
+        Ok(self.cell.info()?.next_sequence)
     }
 
     async fn free(&self, extent: ExtentId) -> Result<(), Error> {

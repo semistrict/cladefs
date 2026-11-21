@@ -4,9 +4,9 @@
 
 //! cladefs: what the host does with a script that failed (TASK-149.2): boots a VM of the test for
 //! each try of a shrink, the runner's `start-vm`, in a directory of its own, told the seed and the
-//! operations to drop, and says the smallest script that failed the same way, which CLADEFS_SEED and
-//! CLADEFS_RANDOM_OPS_DROP replay. CLADEFS_SHRINK_TRIES bounds the VMs, as a hang takes the test's
-//! timeout each, and 0 turns it off.
+//! operations to drop, and says the smallest script that failed the same way, which CLADEFS_SEED
+//! and CLADEFS_RANDOM_OPS_DROP replay. CLADEFS_SHRINK_TRIES bounds the VMs, as a hang takes the
+//! test's timeout each, and 0 turns it off.
 
 use crate::TestSetup;
 use crate::script::{self, DROP_VAR, Failure, Mix, SEED_VAR, TRIES, kind, shrink_failure};
@@ -153,7 +153,7 @@ impl Replays<'_> {
 
 /// Whether each file of `files`, a name and its model's, in the image at `path` is as its model,
 /// the image's fsck passing, or else how not: what the host's Fxfs reads of what a script's guest
-/// left in the store.
+/// left in the cell.
 pub fn stored_as_modelled(path: &Path, files: &[(String, String)]) -> Option<Failure> {
     use cladefs::{Filesystem, Storage};
     use futures::executor::block_on;

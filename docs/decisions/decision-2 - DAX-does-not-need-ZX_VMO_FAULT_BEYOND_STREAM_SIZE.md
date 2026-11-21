@@ -12,7 +12,7 @@ Linux's FUSE client (`fs/fuse/dax.c`) maps files in 2 MiB ranges, which extend p
 
 - it reports holes past `i_size` without asking the server;
 - a guest mmap past the last page gets `SIGBUS` from the guest kernel;
-- a write that extends the file becomes `FUSE_WRITE`, not a store through the window.
+- a write that extends the file becomes `FUSE_WRITE`, not a write through the window.
 
 ## Decision
 
@@ -21,12 +21,12 @@ DAX does not need `ZX_VMO_FAULT_BEYOND_STREAM_SIZE`. The window maps files' `UNB
 `crates/fxdax/src/vfs/tests.rs` `dax_past_the_end_of_the_file` tests this:
 
 - the guest reads zeros past the end;
-- a store past the end in the last page never reaches the file, because Fxfs writes back only what is before the end and zeroes the rest of the last block;
+- a write past the end in the last page never reaches the file, because Fxfs writes back only what is before the end and zeroes the rest of the last block;
 - the size is unchanged after fsync and remount.
 
 `crates/fxdax/src/dax.rs` documents this behavior.
 
 ## Consequences
 
-- Pages past EOF can be reached only when the guest's `i_size` is stale. The guest then sees zeros, and its stores there are dropped, as with a shared mmap of a file truncated elsewhere.
+- Pages past EOF can be reached only when the guest's `i_size` is stale. The guest then sees zeros, and its writes there are dropped, as with a shared mmap of a file truncated elsewhere.
 - The kernel port keeps omitting the flag and its stream test `FaultBeyondStreamSizeResizeDownRace`.

@@ -3,9 +3,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# An A/B of cell-bench's cases that time a store on a host's disk (`durable`, `burst`), two
-# worktrees' builds of it, on this Linux host, a shared one: what a change to the store's
-# write path costs (TASK-539.4, the stores' files counted as they write them).
+# An A/B of cell-bench's cases that time a cell on a host's disk (`durable`, `burst`), two
+# worktrees' builds of it, on this Linux host, a shared one: what a change to the cell's
+# write path costs (TASK-539.4, the cells' files counted as they write them).
 #
 #   scripts/cell-bench-ab.sh A_WORKTREE B_WORKTREE RESULTS [ROUNDS]
 #
@@ -13,7 +13,7 @@
 # 4 unless the caller says), each into a target of its own, RESULTS/target-a and RESULTS/target-b:
 # two worktrees sharing one link each other's crates (TASK-369). Then one measurement, `fxjob
 # --bench`, runs ROUNDS rounds (6), each side's cases once a round, the sides' order reversed every
-# other round (A B, B A, ...), so that what drifts on the host moves both alike. Their stores are
+# other round (A B, B A, ...), so that what drifts on the host moves both alike. Their cells are
 # on ext4 over a RAM-backed loop device, made in the measurement (sudo) and gone with it, which
 # supports O_DIRECT and leaves the host's disks out: the scratch disk, ext4 on a ZFS zvol, drifts
 # up to four times within one job (TASK-433.8). Each case's output goes to RESULTS/SIDE/CASE-rN.txt,
@@ -50,7 +50,7 @@ if [[ ${CELL_BENCH_AB_INNER:-} != 1 ]]; then
         "$here/cell-bench-ab.sh" "$a" "$b" "$results" "$rounds"
 fi
 
-# Inside the measurement: the stores' disk, ext4 over a loop device on tmpfs.
+# Inside the measurement: the cells' disk, ext4 over a loop device on tmpfs.
 image=/dev/shm/cell-bench-ab-$$.img
 mount=$results/disk
 mkdir -p "$mount"

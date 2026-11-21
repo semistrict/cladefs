@@ -25,7 +25,7 @@ extent_files = { workspace = true, features = ["testing"] }
 extent_keys.workspace = true
 local_cell.workspace = true
 rand.workspace = true
-# Its tests' stores encrypted under the tests' KMS, their environment naming none (TASK-411.28).
+# Its tests' cells encrypted under the tests' KMS, their environment naming none (TASK-411.28).
 cladefs = { path = "../cladefs", features = ["testing", "tests-kms"] }
 tempfile.workspace = true
 bucket_cell.workspace = true

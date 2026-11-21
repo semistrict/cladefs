@@ -11,8 +11,8 @@ Status: agreed design, 2026-10-16; the protocol (layout, fencing, forks, collect
 simulation (TASK-28.1, then `crates/extent_remote`, now `crates/extent_bucket`), 2026-10-17. It turns doc-2's milestone 3 (m-5) into a
 plan, from a survey of open-source systems that keep data in object storage (below). Tasks: TASK-28
 and its subtasks. *Rewritten 2026-11-07 (TASK-165.10)* for the host as it is since TASK-165 (doc-14):
-a branch lives in the bucket alone; a host keeps, on local disk, its stores' write-ahead logs, of
-what the bucket doesn't have yet, and its part cache, of copies of what it does; opening a store is
+a branch lives in the bucket alone; a host keeps, on local disk, its cells' write-ahead logs, of
+what the bucket doesn't have yet, and its part cache, of copies of what it does; opening a cell is
 one recovery, from the bucket and the log. No local lineage, local checkpoint, index or marker is
 left, and what this document said of them is gone from it; doc-14 says what went and why.
 *Revised 2026-11-15 (TASK-407, format 11):* every key of a branch's objects is written once, and
@@ -37,20 +37,20 @@ checkpoints and segments' footers, and lineage is in the bucket alone.
   and `object_store` behind it (S3, GCS, Azure Blob Storage; RustFS in `scripts/test-rustfs.sh`),
   or a directory of the host's (`file:///DIR`, `extent_bucket::local`). Its simulation and a TLA+
   spec check it (Testing).
-- **Every store has a bucket**, which its description names (TASK-165.6): on a host of cladefs's
+- **Every cell has a bucket**, which its description names (TASK-165.6): on a host of cladefs's
   system, the host's (`CLADEFSD_REMOTE`); an image of the cladefs CLI's, or a test's, a file
-  bucket of its own beside its directory (`<image>.bucket`), which its forks share. A store's
+  bucket of its own beside its directory (`<image>.bucket`), which its forks share. A cell's
   directory holds one branch.
-- **On the host** (doc-14, `crates/extent_store`): the guest's writes go to the store's open
+- **On the host** (doc-14, `crates/extent_store`): the guest's writes go to the cell's open
   segment, raw, and each commit's record to the segment's log, synced by the flush that makes the
   commit local; a segment closes when full, at the upload interval (1 s), when a commit waits for
   its upload, at a fork, or as the uploader stops, and is framed on a thread of its own, its footer
   stamped by the writer's chain; in place, if compressing saves under an eighth, its data written
   once.
   One filled between commits waits for the next, which seals in it what is one run there, a commit
-  spanning segments (Segments, TASK-92.41). Closed segments are the store's **write-ahead log**
+  spanning segments (Segments, TASK-92.41). Closed segments are the cell's **write-ahead log**
   (WAL): each the very object it will be in the bucket, synced before its PUT. The **uploader**
-  (`extent_store::upload`) PUTs them, and the extents of their own they name, up to 16 of a store's
+  (`extent_store::upload`) PUTs them, and the extents of their own they name, up to 16 of a cell's
   at once (`IN_FLIGHT`, 512 MiB of the host's upload budget over 32 MiB segments) and 64 requests
   for the host, acknowledges them in order, by swapping the branch's head to name them (The head,
   TASK-407), and moves each acknowledged
@@ -58,10 +58,10 @@ checkpoints and segments' footers, and lineage is in the bucket alone.
   in commits (4,096) and in bytes of WAL (1 GiB). What waits is on the host's disk; of it, the
   host holds in memory only what it uploads at once, its **upload memory** (512 MiB,
   `CLADEFSD_UPLOAD_MEMORY`), however far behind the bucket is (Uploads, Memory).
-- **Opening a store**, here or anywhere, the first time or after a crash, is one recovery (doc-14,
-  Opening a store): its writer takes the branch's head with the placement's token and recovers the
+- **Opening a cell**, here or anywhere, the first time or after a crash, is one recovery (doc-14,
+  Opening a cell): its writer takes the branch's head with the placement's token and recovers the
   branch from what the head names; a segment left open is closed again from its log; the
-  WAL is put after the branch's end by its commits (Recovery on the same host). An empty store of
+  WAL is put after the branch's end by its commits (Recovery on the same host). An empty cell of
   a branch (`cladefsctl take`) takes it so, holding its extents without their data, which is
   fetched as it is read.
 - **Forks, points and deletion** are the bucket's alone (TASK-165.7): a fork is a commit of the
@@ -80,7 +80,7 @@ checkpoints and segments' footers, and lineage is in the bucket alone.
   of 1 MiB, each compressed with zstd (level 1) on its own, or raw where that is no smaller, at
   4 KiB-aligned offsets, with a table of where each is stored. A segment is written raw while open
   (`open-segments/`), and framed when it closes; an extent of its own, raw until sealed
-  (`open-extents/`). Guests never map store files: DAX windows map cladefsd's memory, which reads
+  (`open-extents/`). Guests never map a cell directory's files: DAX windows map cladefsd's memory, which reads
   fill, so all data on disk and in the bucket is compressed, and memory holds it uncompressed.
   Reads decompress the parts they touch, a host fetches each part with one GET of its stored
   bytes, and its cache keeps them as stored.
@@ -106,7 +106,7 @@ Settled with the user on 2026-10-16:
 1. **One format, locally and in the bucket.** The local extent store (TASK-26.10) keeps segments in the
    format they are uploaded in. A closed local segment is byte for byte the object uploaded, so an
    upload is a PUT of the file. *Revised 2026-11-06 (TASK-165.8, 165.9):* the closed segments are
-   the WAL, and once acknowledged a segment's file leaves the store for the host's part cache,
+   the WAL, and once acknowledged a segment's file leaves the cell for the host's part cache,
    whose files are sparse copies of objects (Reading); a segment restamped by a rebase is restamped
    in memory, and its upload restamps the bytes (`extent_frame::restamp`).
 2. **The client is the `object_store` crate** (Apache-2.0/MIT), for S3 and GCS, and Azure Blob
@@ -122,19 +122,19 @@ Settled with the user on 2026-10-16:
    *Added 2026-10-18 (TASK-39.7):* a head carries the **fencing token** of the placement that took
    it, its boot ID, which a later placement's exceeds; a writer takes the head only with a token
    as high, so a host cut off takes no branch back from the placement after it (`ESTALE`). A
-   store's copy on a host carries its placement's token (`cladefsctl place`, `take … TOKEN`). Before
-   a clean stop, the system waits for a store's uploads (`cladefsctl sync`, the extent daemon's control API's `SyncStore`).
+   cell's copy on a host carries its placement's token (`cladefsctl place`, `take … TOKEN`). Before
+   a clean stop, the system waits for a cell's uploads (`cladefsctl sync`, the extent daemon's control API's `SyncCell`).
 5. **A fork is made once the parent's fork point is uploaded.** The child's `branches/` record is
    created only after the parent's uploads reach the fork point. *Revised 2026-11-05 (TASK-165.7):*
    it was local at once, a record in the parent's local lineage; there is no local fork now, and the
-   child's store is made once its record exists (Forks).
+   child's cell is made once its record exists (Forks).
 6. **Forks are of a branch's head only.** No snapshots or forks of past points, for now.
    *Refined 2026-11-02 (TASK-158):* a fork at a point in time is a point: a record naming a place in
    its parent (Points).
 7. **Compression, no encryption** in this milestone. *Revised 2026-10-17 (TASK-29):* the first
    ruling, no compression, held because compressed bytes cannot land straight in DAX pages. They
-   need not: the DAX window maps cladefsd's memory, which the pager fills by reading the store, and
-   never maps store files. So each 1 MiB part of an object is compressed with zstd on its own
+   need not: the DAX window maps cladefsd's memory, which the pager fills by reading the cell, and
+   never maps a cell directory's files. So each 1 MiB part of an object is compressed with zstd on its own
    (Segments), and a read decompresses only the parts it touches. *Level 1, measured 2026-10-19
    (TASK-29.4,* docs/measurements/gce-fs-bench-zstd-{0,1,3} and gce-fs-bench-pgbench-zstd-{0,1},
    c3-standard-8, Fxfs in the guest over DAX, branches in GCS): against parts stored raw, level 1
@@ -151,7 +151,7 @@ Settled with the user on 2026-10-16:
    (`extent_bucket::local`): `object_store`'s `LocalFileSystem`, which refuses conditional updates,
    with them added under a `flock` of the bucket's; every bucket runs one conformance suite
    (`bucket::conformance`).
-10. **Branches come first.** The store learned O(1) forks (doc-2's milestone 2 part) before uploads,
+10. **Branches come first.** The cell learned O(1) forks (doc-2's milestone 2 part) before uploads,
    because the bucket's layout needs lineage from the start. *Since TASK-165.7* lineage is the
    bucket's alone: a fork is O(1) in the bucket, a record and the parent's commit, and the child's
    opening recovers its state, O(extents) of the parent at the fork (doc-14, Decisions).
@@ -207,7 +207,7 @@ neither, nor does any pass, which lists a cell's prefix.
 
 A cell is a tenant's unit of placement: one host at a time holds it, and writes every vdisk of
 it, each a branch of its own with a log, a head and uploads of its own (one log per vdisk, the
-user's choice of 2026-11-11, over one log per cell, which would have had the store multiplex
+user's choice of 2026-11-11, over one log per cell, which would have had the cell multiplex
 vdisks). Taking a cell is one compare-and-swap of its object (`extent_bucket::cell::take`): the
 epoch after its last taking's, refused to a placement of a lower token than the one holding it
 (`Stale`), refused once deleted. A vdisk's writer takes its branch's head with the cell's epoch as
@@ -219,11 +219,11 @@ as one holder, its placement's token, so that a second taking by that holder goe
 rather than fencing the first: the extent daemon serving a cell's vdisks to VMs and a FUSE mount
 showing others share it.
 
-A writer's opening of a store takes its cell (not a point's, which no writer takes and any
+A writer's opening takes its cell (not a point's, which no writer takes and any
 number of hosts open), making it if it has no object yet (a new branch, or a fork's child), and
 has it hold its vdisk, named as its description says (`vdisk NAME`, `kind KIND`) unless the cell
-names its branch already: a vdisk's name is its branch's from its first, whatever directory a
-store of it is taken into. All in one compare-and-swap of the cell's object (`cell::hold`), a read
+names its branch already: a vdisk's name is its branch's from its first, whatever directory
+its cell directory is taken into. All in one compare-and-swap of the cell's object (`cell::hold`), a read
 alone when nothing changes. Only the holder changes a cell's vdisks, conditional on the epoch and
 holder it took it at (`Fenced` otherwise). Deleting a branch takes its cell first, deletes the
 branch with the cell's epoch, and takes its vdisk out of the cell. *(TASK-455: but with its cell,
@@ -231,26 +231,25 @@ dead, removed whole: Dead cells removed whole.)* A cell's object stays, as
 branches' records do: its epoch fences its vdisks' heads, so made anew at epoch 1 it would leave
 a branch whose head a higher epoch took unopenable.
 
-A store made alone, a VM's disk or an image, is the one vdisk of a new cell; a fork of one is the
+A cell made alone, a VM's disk or an image, is the one vdisk of a new cell; a fork of one is the
 one vdisk of a new cell of its tenant's. Forking a cell of several vdisks whole, at one cut, is
 the next step (TASK-364.1).
 
 The extent daemon's tenants are the bucket's: a tenant's grant (the control API's `Grant`) names
-its ID, and the stores in its directory are vdisks of its own cells. Its VM processes make stores
-of new cells of its own, and its VM manager the same (`CreateStore` and `ImportImage` of a new cell
-there of another tenant are refused, `EPERM`; `ForkStore` into its directory makes a cell of its
-own, whatever the parent's); they open no store of another tenant's cell (`EACCES`), refused by its
+its ID, and the cell directories in its directory are those of its own cells. Its VM processes make
+new cells of its own, and its VM manager the same (`CreateCell` and `ImportImage` of a new cell
+there of another tenant are refused, `EPERM`; `ForkCell` into its directory makes a cell of its
+own, whatever the parent's); they open no cell of another tenant's (`EACCES`), refused by its
 description before its opening would take its branch from the other tenant's writer. A point of
-another tenant's the VM manager gives it (TASK-154), they fork, each fork a store of a
-new cell of their own. The daemon's own socket's VM processes, its user's, reach any store, and
-make stores of the default tenant.
+another tenant's the VM manager gives it (TASK-154), they fork, each fork a new cell of their own. The daemon's own socket's VM processes, its user's, reach any cell, and
+make cells of the default tenant.
 
 ### Object IDs
 
 Every new branch's ID is an object ID of its bucket's (`extent_bucket::objectid`, TASK-364), which
-no other branch of the bucket has, nor will: a store made, a fork, a point, a point's fork, a
+no other branch of the bucket has, nor will: a cell made, a fork, a point, a point's fork, a
 vdisk a FUSE mount makes. Nothing names a new branch's ID itself: a VM process's `FORK` and the
-control API's `ForkStore` name none, and are told the one given; `CreateStore` of a branch the
+control API's `ForkCell` name none, and are told the one given; `CreateCell` of a branch the
 bucket has not is refused (`ENOENT`). Before cells, a branch's record, keyed by its ID alone, was
 what refused a second branch of one ID; under cells, records are keyed by their cells too, and two
 branches of one ID in two cells would share a host's cache entries, the one's VM reading the
@@ -344,7 +343,7 @@ from the first plan, of per-extent CRCs per 64 KiB in the footer: CRCs of the ob
 with nothing (compaction recomputes them for what it copies, from data it checked), need no entry
 per extent in checkpoints, and match what a host fetches.*
 
-**On the host** *(rewritten 2026-11-07; doc-14).* A store's open segment holds pieces of open
+**On the host** *(rewritten 2026-11-07; doc-14).* A cell's open segment holds pieces of open
 extents as they were written, raw, and its log the commits made in it, each the `Contents` its
 footer will hold. A commit seals the extents written before it, each copied into one run in the
 open segment if its pieces are not one already (the pieces left are dead bytes, gone with the
@@ -377,7 +376,7 @@ segments, not footers naming runs in other objects):*
   between, or across two segments) are copied into the open segment, and past its room into the
   next, which the commit goes on with in turn. Before, a segment filled holding no commit was set
   aside and the commit copied every extent in it out, into a file of its own each past the open
-  segment's room (store-bench's burst: 640 own files, each created, framed, synced and uploaded),
+  segment's room (cell-bench's burst: 640 own files, each created, framed, synced and uploaded),
   and one holding commits was closed, the extents written since copied out of it alike. Footers
   name runs in their own segments alone. Each segment's log holds its part of the commit, a record
   of its runs, checked or held as any record's runs are (`wal::LogRecord`); recovery drops a
@@ -390,7 +389,7 @@ segments, not footers naming runs in other objects):*
   its upload.
 - **Framed segments made durable together, off their framings** *(TASK-310)*. A framing reads,
   frames and writes its segment under a name of its own (`segments/<b>/framing-<n>`), syncing
-  nothing, then hands it to a thread of the store's that makes the segments framed meanwhile
+  nothing, then hands it to a thread of the cell's that makes the segments framed meanwhile
   durable at once: the directories of raw files and logs first, if a segment opened since they were
   synced; their framed files synced together; each renamed its segment's; the directory of framed
   files synced once. The segment's framing ends only then, so the uploader, a closing between
@@ -410,7 +409,7 @@ segments, not footers naming runs in other objects):*
   with (`State::begun`) and seal them, where they are, as the segment ending the commit is applied,
   before its own; a head whose end comes before the segment ending the commit, its writer taken
   over, leaves them unsealed: the commit, never acknowledged, never was. **Writers
-  acknowledge only segments that end their commits** (`Writer::acknowledge`), so that what a store
+  acknowledge only segments that end their commits** (`Writer::acknowledge`), so that what a cell
   lets go of, once acknowledged, the bucket has whole, and no acknowledged state, nor any
   checkpoint, holds a commit begun. A WAL is put after a branch's end by its commits
   (`Wal::rebase`): its segments going on with a commit the head left unended are no end of the
@@ -519,7 +518,7 @@ it (Bucket.tla, every model; `KeysWrittenOnce`, `HeadsCurrent`, `NoAckedLost`).
   collector deletes a failed head's slots, its marks only once a day old (`MARKS_KEPT`,
   `marks_kept`), past any creator still at work. specs/head-slots (HeadSlots.tla: `FencedWrites`,
   `SlotsNewest`, `OneHead`, `DeletedStays`, `FailedStays`) models it; specs/bucket keeps one head.
-- **Startup** probes that the store honours conditional creates and updates, and refuses to run if
+- **Startup** probes that the cell honours conditional creates and updates, and refuses to run if
   not.
 
 ## Uploads
@@ -531,12 +530,12 @@ Each branch's commits go through:
 3. **Closed:** the segment is full or old enough (the lag's time bound).
 4. **Uploaded:** segments and extents of their own upload in parallel, each a single create-only
    PUT (an extent is 64 MiB at most; no multipart upload), extents before the segments that name
-   them, up to 16 segments of a store at once within the host's upload budget (64 requests, its
+   them, up to 16 segments of a cell at once within the host's upload budget (64 requests, its
    upload memory: 512 MiB unless `CLADEFSD_UPLOAD_MEMORY` says otherwise; Memory, below).
 5. **Acknowledged:** once every segment before it is uploaded too, by the head's swap naming it
    (The head, TASK-407); a segment going on with a commit, with the segment ending it (Segments,
    TASK-92.41). Then `COMMIT_UPLOADED` waiters up to it complete, the WAL's
-   start moves past it, durably, and its files leave the store for the host's part cache.
+   start moves past it, durably, and its files leave the cell for the host's part cache.
 
 Invariants: what is uploaded never exceeds what is local; a branch's committed segments are
 a contiguous prefix; an object is uploaded before anything that names it.
@@ -546,8 +545,8 @@ a contiguous prefix; an object is uploaded before anything that names it.
 at most the upload interval (1 s) before its segment closes for the uploader; at either bound,
 commits stall (decision 3). A request object storage fails is retried, from 50 ms, doubling, to
 5 s apart (`extent_bucket::object_bucket`), for as long as it fails, an ambiguous one resolved by reading
-back (The head); the host reports each store's upload progress (`UploadStatus`: what is not yet
-acknowledged, and since when). *Added 2026-11-10 (TASK-314):* the store counts the requests that
+back (The head); the host reports each cell's upload progress (`UploadStatus`: what is not yet
+acknowledged, and since when). *Added 2026-11-10 (TASK-314):* the cell counts the requests that
 fail by kind and logs each kind's run of failures with the bucket's own error, as it starts, every
 30 s, and as it ends, so that a bucket failing for good (full, out of reach, refusing its
 credentials) says why its guests' commits wait; doc-12 says what the guest sees.
@@ -556,14 +555,14 @@ the uploader, and its commits waiting to be uploaded fail. (A writer displaced b
 took the branch again until TASK-407: no segment lands where another's goes now.)
 
 **Memory** *(added 2026-11-10, TASK-317).* A bucket that takes less than the guests write costs a
-host disk, not memory: what waits is the stores' write-ahead logs, synced to its disk (decision 3),
-within the lag bound, and the uploader takes at most `IN_FLIGHT` segments of a store's at a time,
+host disk, not memory: what waits is the cells' write-ahead logs, synced to its disk (decision 3),
+within the lag bound, and the uploader takes at most `IN_FLIGHT` segments of a cell's at a time,
 reading none until its upload goes. What a host's extent daemon holds in memory for it is bounded
 by its **upload memory**, `CLADEFSD_UPLOAD_MEMORY` (512 MiB by default, 64 MiB at least, an
-extent's most, which goes alone), every store's uploads together: each object read only once that
+extent's most, which goes alone), every cell's uploads together: each object read only once that
 budget has room for it (`extent_bucket::fetch::Budget`), held once while its PUT goes, however
 often it is retried (`Bucket::put` takes `bytes::Bytes`, which each try shares), and let go as it
-lands. Besides, the daemon holds, whatever the backlog, each store's framing of one segment, its
+lands. Besides, the daemon holds, whatever the backlog, each cell's framing of one segment, its
 data and its framed bytes (~2-4 segments' size, TASK-325), the host's fetches (64 MiB in flight,
 64 MiB of tails, 64 MiB of parts recent), its tenants' bytes in flight (doc-4) and its extent cache
 (`MEMORY_BYTES`, shared memory). The stats line's `uploads:` says what the uploads hold, the most
@@ -585,13 +584,13 @@ in 134 of glibc's per-thread arenas of 64 MiB, buffers freed; the host's OOM kil
 cache included, with no kill.
 
 *Added 2026-11-10 (TASK-330.2):* the daemon holds itself to that sum, its **anonymous memory's
-budget** (`cladefs::cladefsd::process`): its upload memory, a store's framing and sealing for each
-store written at once, the most so far (twice a segment and an extent, TASK-325's whole-segment
+budget** (`cladefs::cladefsd::process`): its upload memory, a cell's framing and sealing for each
+cell written at once, the most so far (twice a segment and an extent, TASK-325's whole-segment
 framing, and a commit's copy of an extent, 288 MiB), its fetches (192 MiB), its
-tenants' bytes in flight, as much as they held at most, the stores' maps of their extents (TASK-453: each
-decoded state the stores share once, at `extent_bucket::recovery::ENTRY_BYTES` an entry, and what
-each store holds of its own, at `extent_store::OWN_ENTRY_BYTES`, the most so far; and each run of
-changes, side by side, to a map shared with another, a state's made of another's or a store's
+tenants' bytes in flight, as much as they held at most, the cells' maps of their extents (TASK-453: each
+decoded state the cells share once, at `extent_bucket::recovery::ENTRY_BYTES` an entry, and what
+each cell holds of its own, at `extent_store::OWN_ENTRY_BYTES`, the most so far; and each run of
+changes, side by side, to a map shared with another, a state's made of another's or a cell's
 writer's of its bucket's layer, at `extent_bucket::recovery::RUN_BYTES`, the path of the persistent
 map's nodes it copies, a full copy at most: a free scattered over a shared map holds ~2 KB, not an
 entry's 512 or 1,024 bytes), and its own
@@ -604,14 +603,14 @@ copy no budget counts or what the allocator kept: both of TASK-317's bugs. The g
 run whose daemon passed it (`scripts/budgets.py`), and the daemon's soak against a degraded bucket
 holds it to it (`cladefsd::tests::soak`, TASK-330.3).
 
-**Recovery on the same host** *(rewritten 2026-11-07; doc-14, Opening a store)* is opening the
-store: its writer takes the branch's head; a segment left open is closed again from the
+**Recovery on the same host** *(rewritten 2026-11-07; doc-14, Opening a cell)* is opening the
+cell: its writer takes the branch's head; a segment left open is closed again from the
 whole records of its log, writes after the last local commit dropped; and the WAL is put after
 the branch's end by its commits (`Wal::rebase`). If the branch's last commit is one of the WAL's,
 the WAL's segments to it landed: acknowledged now, into the cache. If it is the WAL's start, or the
 last the WAL's segments landed to, the rest are restamped on the new chain after the head's end and
 upload as any closed segment: the guest keeps every commit made local here. Otherwise another
-writer's commits moved the branch on, and the store refuses to open (`Diverged`, `ESTALE`) until
+writer's commits moved the branch on, and the cell refuses to open (`Diverged`, `ESTALE`) until
 `cladefsctl take` drops its WAL, losing what its guest was never promised. Extents committed again
 are uploaded under the new writer's epoch, at its keys.
 
@@ -655,20 +654,20 @@ the host's part cache, fetching what it lacks.
   ID the fork's guest named and was deleted, naming what the collector reclaimed (TASK-174).
   Collecting them needs a bound on how long a writer can stall; they are small, and their number
   is bounded by the branches made.
-- **On the host** *(since TASK-165.7, 165.9)*, a fork is the bucket's alone: the parent's store
+- **On the host** *(since TASK-165.7, 165.9)*, a fork is the bucket's alone: the parent's cell
   commits the fork, which closes its segment (`Store::commit_fork`); the fork waits for the
   segment's acknowledgement and the child's record (`Uploader::forked`); only then is the child's
-  directory made, a store holding nothing of its own, whose opening recovers the child from the
+  directory made, a cell holding nothing of its own, whose opening recovers the child from the
   bucket, its extents read from the parent's objects there or the host's cache
   (`host_store::fork`). A child whose ID another branch has fails with `EEXIST`, making nothing. A
   fork failing once its commit was made is deleted in the bucket, as the fork's alone
   (`Uploader::unfork`, `branch::delete_fork`), so that its segment, landing late, makes nothing, and
-  its directory goes; its host crashing part way leaves a directory with no store, which deleting
+  its directory goes; its host crashing part way leaves a directory with no cell, which deleting
   finishes, and a fork that stands or never was, as the bucket has it. This replaced `copy_store`,
-  which forked by copying every file, and then local lineage, a record in the parent's store.
+  which forked by copying every file, and then local lineage, a record in the parent's cell.
 - **Keys** *(cladefs, TASK-411.4; doc-16, What TASK-411.4 made).* A fork of an encrypted branch into
   another cell, as every fork a host makes is, asks before anything is made for what its child
-  inherits (`Uploader::inheriting`): the keys its parent's store holds and a KEK for the child's
+  inherits (`Uploader::inheriting`): the keys its parent's cell holds and a KEK for the child's
   cell from the host's pool, no KMS call; refused (`EACCES`) it makes nothing. Once
   the child's record is made, its host makes the child's cell with that KEK, create-only, and
   gives the record the child's first DEK and the inherited ones rewrapped under the KEK, by a
@@ -731,8 +730,8 @@ that finds C. The danger is a pass that finds neither, or takes P for deleted wi
   it never listed: a fork after a state it read inherits what that state holds or a later object;
   a fork before it, that state names.
 
-**A host dying** at any step leaves C's record being made, or made, and a directory with no store,
-which deleting removes (Forks); or a store of C, which opening resumes (`branch::resume_point_fork`,
+**A host dying** at any step leaves C's record being made, or made, and a directory with no cell,
+which deleting removes (Forks); or a cell of C, which opening resumes (`branch::resume_point_fork`,
 TASK-455's review): C's record said resumed, with a condition, then its reference written, as the
 host would have, then steps 2 and 3. A fork of P to C forked again, finding C's record its own and
 being made, resumes it likewise. A record made stands as a fork's orphan, for
@@ -745,9 +744,9 @@ later placement holds the child. That its parent has a segment of that number pr
 not be the fork's. So the record says `claimed`, and a pass that can't recover a claim no writer has
 deletes it and goes on: nothing ever read it. Every other `Lost` stops the pass.
 
-**Any store makes one.** ForkStore's `point` makes a point of a store as a VM snapshot does, so that a
+**Any cell makes one.** ForkCell's `point` makes a point of a cell as a VM snapshot does, so that a
 base, from `ImportImage` or anything else, forks on any number of hosts at once: each takes a copy of
-the point (CreateStore of its branch) and forks that. The base keeps its writer, and what it writes
+the point (CreateCell of its branch) and forks that. The base keeps its writer, and what it writes
 after reaches no fork of the point. A point of a point is refused (`EINVAL`): it would name the same
 state, and its forks fork the point itself (TASK-158).
 
@@ -757,7 +756,7 @@ its moves stay for as long as it lives, as it has no writer to record them in a 
 **Shared points** *(cladefs, TASK-395.7, format 8).* A point forks only into cells of its own tenant's,
 unless its record says `shared`: a base image or a VM snapshot's point many tenants fork. Only a point's record
 says it (another's is corrupt), and only the trusted control API sets it, at the point's making
-(ForkStore's `shared`, after the point is made) or later (SharePoint, `cladefsctl share`), and clears
+(ForkCell's `shared`, after the point is made) or later (SharePoint, `cladefsctl share`), and clears
 it (`unshare`). The check is step 2's read, which every fork of a point makes, on any host, so that
 unsharing stops the forks whose reads come after, and those made stand. A fork refused leaves C's
 record being made, which its host deletes, as for a point deleted. *(TASK-411.4)* A point's fork keeps the keys it inherits
@@ -797,7 +796,7 @@ never safety:
   `PointsUnwritten`): its copy reads none (`head::Read::of_point`).
 - **What a host learned of a branch it is about to open** (`known::Learned`): its record as its own
   fork or take left it, its cell's object as its fork held it, and that it has no head, taken by
-  the branch's store's first opening here (`upload.rs`'s `first_reads`) in place of its first
+  the branch's cell's first opening here (`upload.rs`'s `first_reads`) in place of its first
   reads. Each is what a read at the moment of the write would have found, so using it is that
   read made earlier, which every step after must allow for. A step that writes does: the head's
   taking, and the cell's holding when it changes the cell, are conditional on the version they
@@ -809,7 +808,7 @@ never safety:
   fork left (`Taker::remembered`, `cell::still_held`; TASK-449's review). The holding finds the
   cell held by this placement already, as the fork left it, and writes nothing; but another host,
   placed later, may have taken the cell since (for another of its vdisks, not taking the fork's
-  head), and the head would then be taken with the fork's epoch, a superseded token: the store
+  head), and the head would then be taken with the fork's epoch, a superseded token: the cell
   writing the fork as its writer until the later placement's writer fenced it, what its guest
   wrote meanwhile lost, where the opening should have been refused (`ESTALE`), as it was when it
   read the cell first. Read once the head is taken, the cell found with the same epoch and holder
@@ -823,9 +822,9 @@ never safety:
   holding, read or conditional, or, from memory, by this read after.
   The other learned facts need no read after: the fork's having no head makes the head's taking
   a create, refused if a head is there. What is learned lives in the host's memory alone, a few
-  thousand at most, the oldest going first; the opening of the branch's store takes it as it
+  thousand at most, the oldest going first; the opening of the branch's cell takes it as it
   begins, whatever comes of it after, so nothing learned outlives the opening it was learned for;
-  and only a store whose log goes on from nothing the bucket acknowledged uses it.
+  and only a cell whose log goes on from nothing the bucket acknowledged uses it.
 - **No look at a point's fork's ID first**: the record's create finds any record there, and refuses it
   as the look did: another's, deleted or not, `IdTaken` (`EEXIST`); ours given up on, its point
   deleted (`ENOENT`); ours being made, resumed (TASK-455's order kept: resumed with a condition,
@@ -834,13 +833,13 @@ never safety:
   (`transition_leaving`, `Start::Found`), so its deletion, its giving up, or a resume since makes
   it read the record anew, as before.
 - **The child's cell held by its fork**, made, for the host's placement, the vdisk the child's
-  store will be, at once with the reference, after the record (a cell of no record keeps its
-  object, Dead cells removed whole): what the child's store would hold first as it opens, done
+  cell will be, at once with the reference, after the record (a cell of no record keeps its
+  object, Dead cells removed whole): what the child's cell would hold first as it opens, done
   earlier, as a holding before a crash and a reopening is. A fork that fails after leaves the
   cell's object in a cell already kept, a point's fork never made. Only on a host with no KMS, for a fork
-  inheriting no keys: otherwise the child's store makes its cell, encrypted or not, as it opens
+  inheriting no keys: otherwise the child makes its cell, encrypted or not, as it opens
   (TASK-485).
-- **One open of a point taken from the bucket**: `ExtentStore::take_with` opens the store its
+- **One open of a point taken from the bucket**: `ExtentStore::take_with` opens the cell its
   making opened, rather than closing and opening it again; the record its making read to see the
   bucket has the branch is learned for that opening.
 - **Reads at once**: an opening with nothing learned reads the record, the head and the cell's
@@ -854,7 +853,7 @@ connection such a call opened closed with it, and a fork asking more at once tha
 runtime had left idle in the pool connected anew each time, a TCP handshake, and a TLS one on a
 bucket elsewhere, before its request (`requests_on_runtimes_dropped_after_connect_anew`;
 cladefs's `restores_connect_to_the_bucket_no_more`: a connection a restore before). They run in the
-context of the bucket runtime now (`extent_store::upload::bucket_runtime`, which the stores'
+context of the bucket runtime now (`extent_store::upload::bucket_runtime`, which the cells'
 uploaders and fetches run on), so one runtime serves every connection to the host's buckets,
 whichever call opened it, and they stay in the pool (`calls_from_no_task_spawn_on_the_bucket_runtime`).
 A runtime of the calls' own beside it, as TASK-449 first had, served from its own two threads the
@@ -881,7 +880,7 @@ its own cell, the name of the branch's state as of a segment its head names. It 
 head and no cell of its own: **the branch's head names it** (`Head::versions`: its ID, the segment
 it is at, the cell's cut it is part of, whether it is shared), for as long as the version is kept.
 
-- **Its cut** is a commit of the branch, its store quiescent, that closes its segment, as a fork's
+- **Its cut** is a commit of the branch, its cell quiescent, that closes its segment, as a fork's
   does (Forks). The segment's footer names the version (`Contents::versions`), its ID random,
   unique to its making, as owners are. The snapshot returns once that commit is local, synced on the
   host's disk: the version is **local**, local-first. The acknowledgement whose swap names the segment
@@ -922,7 +921,7 @@ removed for versions: `NoForksCheckVersions`, `NoForksReferFirstVersions` and
 
 ## Reading
 
-- **The pager does not block on a fetch.** A page-in reads through the store, on the pager's
+- **The pager does not block on a fetch.** A page-in reads through the cell, on the pager's
   threads: an extent in the open segment or the WAL from its file, one the bucket holds
   (`extent_store::BucketData`) through the host's fetcher, asynchronously (`crate::cache`), so that
   a GET holds no thread while it waits.
@@ -935,14 +934,14 @@ removed for versions: `NoForksCheckVersions`, `NoForksReferFirstVersions` and
   (TASK-407.4: a key names one object for good, so a part failing its tail's CRC is no other
   object's; until then, it was read again, once, by its object's tail fetched anew).
 - **The part cache** (`bucket_cell::cache`, `CLADEFSD_PART_CACHE`), one per host, shared by its
-  stores: sparse copies of objects at their keys (`cladefs-parts/<key>`), their tails and the parts
+  cells: sparse copies of objects at their keys (`cladefs-parts/<key>`), their tails and the parts
   kept, as stored (compressed), at their real offsets, filled by fetches and by acknowledged WAL
   files moved in whole (`Cache::adopt`), and emptied by punching holes. It keeps no index file:
   opening it rebuilds what it keeps from its files' tails, each checked, so a host's restart
   refetches nothing it had (TASK-165.4). The parts read least recently go first (a clock of uses,
   `by_use`), an object's tail with its last part, to keep within its limit: its budget (cladefsd:
   `CLADEFSD_PART_CACHE_BYTES`, unbounded if unset, TASK-406.1) and what the disk governor leaves it
-  of its filesystem, the stores first (doc-22; until TASK-539.6, a floor of 4 GiB free,
+  of its filesystem, the cells first (doc-22; until TASK-539.6, a floor of 4 GiB free,
   `CACHE_FLOOR`). It holds copies of what the bucket has, never data the bucket lacks. Without a
   cache (`CLADEFSD_PART_CACHE` empty),
   every page-in of an extent in the bucket is a GET.
@@ -1377,7 +1376,7 @@ The rest of a pass, unchanged within the cell:
     head but so, or in a cell of no record (a stale taker's); a deleted branch's final one fencing its
     writers.
 
-**Time** (the grace period, by the store's clock) only spares readers that just looked an extent up
+**Time** (the grace period, by the cell's clock) only spares readers that just looked an extent up
 a round trip; correctness does not depend on it.
 
 **The model's bounds** (`scripts/check-tla.sh`; on a laptop, every model and mutation of the default
@@ -1433,7 +1432,7 @@ operator to see what the collector would do before trusting it with a bucket:
   moves both, and every marks object, until an operator collects for real or removes them. The
   collector never takes `<C>gc/` for a candidate, nor for a branch's.
   - **Readers warn.** Every reader of a bucket reads it through `object_bucket::ObjectBucket`
-    (cladefsd's stores, writers recovering, cladefsctl, the collector). A mark-only pass writes `gc/marking`
+    (cladefsd's cells, writers recovering, cladefsctl, the collector). A mark-only pass writes `gc/marking`
     first, which a reader reads every 60 s, a HEAD, alongside one of its reads; only while it is
     there does the reader hold the newest marks' keys of each cell it reads, read again every 60 s
     by a listing of the cell's `gc/marks/` (and a read once it changed) alongside one of its reads
@@ -1473,7 +1472,7 @@ goes by; every taking of the lease reads it and carries it to the next:
   written (a compacted object whose moves are too recent; moves of an object gone, or compacted in
   turn, too recent), each with when it may go;
 - **what the cell takes** (TASK-395.8): its objects and bytes by kind, as of its listing, and when
-  that began by the store's clock, less what the pass deleted and with the moves it compacted to,
+  that began by the cell's clock, less what the pass deleted and with the moves it compacted to,
   the lease counting itself as written.
 
 A pass takes the lease, a GET and a conditional PUT, and lists the cell. If its listing has the
@@ -1615,7 +1614,7 @@ retirement is marked first, as before. A base's cell then holds its live forks' 
 nothing of the forks gone, and its pass lists that much however many forks were made.
 
 **But a fork resumed is marked** (TASK-455's review). A fork of a point may be finished by another
-than its host: a store opening the fork (its host dead, or slow and its placement moved), or a
+than its host: a cell opening the fork (its host dead, or slow and its placement moved), or a
 fork of the point forked again finding the record being made its own. Its host may then still
 write the reference, late, after the fork was made, deleted and its cell removed, where an
 unmarked retirement would leave it standing for good, keeping the base's state at the fork point.
@@ -1624,7 +1623,7 @@ So whoever resumes a fork says so in its record first, with a condition, while i
 after it was made writes none, and a fork made says it was resumed whenever anyone but its host
 may write its reference after. Its retirement is marked (rule `resumes_marked`), the base's next
 pass deleting a late write by the mark. A resume writes the reference before it makes the fork
-(rule `resumes_refer`): before, a store's opening made it with none, and a host dying between
+(rule `resumes_refer`): before, a cell's opening made it with none, and a host dying between
 the record and the reference left a fork whose origin's state at the fork point no pass kept once
 the point was gone.
 
@@ -1662,7 +1661,7 @@ after. *Not removed:* dead cells of writable forks' children and points (their p
 record them again from states naming the forks, for as long as any such state may be read), of
 points' forks never made, of IDs no allocator gave; and the marks of their references.
 
-**LISTs counted by their pages** (TASK-455): `cladefs-gc`'s counts, and a store's, count a listing
+**LISTs counted by their pages** (TASK-455): `cladefs-gc`'s counts, and a cell's, count a listing
 of N objects as ceil(N / 1,000) requests, one at least, as S3 and GCS serve it.
 
 ## Testing
@@ -1670,7 +1669,7 @@ of N objects as ceil(N / 1,000) requests, one at least, as S3 and GCS serve it.
 The protocol was settled by a simulation before the code it checks (doc-2's risk: "the reclamation
 rules need a model and tests before code"): `crates/extent_remote` (now `extent_bucket`), its
 `sim` module (TASK-28.1),
-since TASK-88 extent_store's (`crates/extent_store/src/sim`), whose hosts' stores are
+since TASK-88 extent_store's (`crates/extent_store/src/sim`), whose hosts' cells are
 extent_store's and their uploaders `extent_store::upload`'s, on its own clock.
 
 - **The simulation** runs writers on hosts for their guests, forks, takeovers (a second writer taking

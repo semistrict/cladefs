@@ -117,7 +117,7 @@ item 10 is TASK-149.4, filed before.
    mutation (Specula's anti-overfitting rule). Where a spec makes atomic what the code does in two
    steps, split the action first (MongoDB's failure).
 2. **Memory-ordering audit confirmed by loom.** Per atomic: what it publishes, which load pairs
-   with which store, the happens-before argument. A finding counts only when a loom model fails.
+   with which write, the happens-before argument. A finding counts only when a loom model fails.
    Ordering mutants (Release/Acquire to Relaxed, a fence deleted) must turn a loom model red, or
    that's a missing test. dax.c's barriers would want LKMM litmus tests (herd7), licence pending
    (§4).

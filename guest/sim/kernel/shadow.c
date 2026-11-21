@@ -424,7 +424,7 @@ void sim_shadow_clone_end(struct sim_shadow_clone *clone, int err)
 }
 
 /* A user access's piece within one mapping: `file`'s `len` bytes at `pos`. */
-void sim_shadow_store_begin(struct sim_shadow_call *call, struct file *file, loff_t pos, size_t len)
+void sim_shadow_mapped_write_begin(struct sim_shadow_call *call, struct file *file, loff_t pos, size_t len)
 {
 	begin_change(call, shadow_of(file), pos, pos + len, false);
 	call->pos = pos;
@@ -432,10 +432,10 @@ void sim_shadow_store_begin(struct sim_shadow_call *call, struct file *file, lof
 }
 
 /*
- * The `done` bytes that landed of the store: known within the size, as a store past the end isn't
+ * The `done` bytes that landed of the write: known within the size, as a write past the end isn't
  * the file's; the rest as they were. `bytes` NULL: unknown, as a read's into a mapping.
  */
-void sim_shadow_store_end(struct sim_shadow_call *call, const void *bytes, size_t done)
+void sim_shadow_mapped_write_end(struct sim_shadow_call *call, const void *bytes, size_t done)
 {
 	loff_t size = size_now(call), within;
 

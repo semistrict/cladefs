@@ -42,7 +42,7 @@ use std::collections::BTreeMap;
 /// first, as a cell's object says it; the epoch of its last taking, and who took it, as a cell's
 /// head does ([`layout::Head`]); until when that pass holds the cell, and when the last pass to go
 /// through ended; and what the last pass over the cell that ran to its end recorded, carried from
-/// each taking to the next ([`Passed`]). Time is the store's clock as each pass read it
+/// each taking to the next ([`Passed`]). Time is the backend's clock as each pass read it
 /// ([`Bucket::now`]), in milliseconds: a pass's clock ahead takes a cell early, fencing the pass
 /// holding it, which then deletes nothing; never wrong, only late.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,15 +105,15 @@ const GC_LEASE: &str = "gc-lease";
 pub struct Passed {
     /// The digest of the listing of the cell it decided by, but the collector's own objects under
     /// it ([`Listed::digest`]): what a pass listing the same decides as it did. None if it decided
-    /// by more than the cell holds, which may change with no object of the cell's changing: a version
-    /// of another cell's record, read for a clone of it being made; an origin found lost; a
-    /// cell's recovery that found what it needs lost, and then nothing lost. Or if it deleted
-    /// only what a pass before deferred, without deciding anew what goes once that is gone.
+    /// by more than the cell holds, which may change with no object of the cell's changing: a
+    /// version of another cell's record, read for a clone of it being made; an origin found lost; a
+    /// cell's recovery that found what it needs lost, and then nothing lost. Or if it deleted only
+    /// what a pass before deferred, without deciding anew what goes once that is gone.
     pub listing: Option<[u8; 32]>,
     /// The options it decided by.
     pub decided: Decided,
     /// What it found no live cell needs, but that it was written too recently, each with when it
-    /// may go, by the store's clock: in the order of their keys.
+    /// may go, by the backend's clock: in the order of their keys.
     pub deferred: Vec<Deferred>,
     /// The cell's objects and bytes, as of its listing, less what it deleted, and with what it
     /// compacted to.
@@ -149,7 +149,7 @@ impl Decided {
 
 /// An object a pass found no live cell needs once a grace period went by since an object was
 /// written: one compacted, its moves too recent; moves of an object gone, or compacted in turn
-/// ([`crate::collector`]). Its key, and when it may go, by the store's clock.
+/// ([`crate::collector`]). Its key, and when it may go, by the backend's clock.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Deferred {
     pub key: String,
@@ -160,8 +160,8 @@ pub struct Deferred {
 /// TASK-395.8).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
-    /// When the listing it is of began, by the store's clock: milliseconds since the Unix epoch on
-    /// a real store.
+    /// When the listing it is of began, by the backend's clock: milliseconds since the Unix epoch
+    /// on a real backend.
     pub measured: u64,
     /// Objects, and their bytes as stored, by kind ([`layout::Kind::name`]): the cell's
     /// objects, what the collector compacted of them, its lease and marks, and the references of
@@ -217,9 +217,9 @@ pub(crate) struct Listed {
     pub objects: BTreeMap<String, Meta>,
     /// SHA-256 over every object listed but the collector's own (`<C>gc/`), in the order of their
     /// keys: each one's key, size, time written, and version (its ETag and its version, as the
-    /// store names them). Its lease, which every pass writes, and its marks, which no pass decides
-    /// by, change it not; nor the read evidence of its versions, which passes trim skipping it
-    /// ([`digest`]).
+    /// backend names them). Its lease, which every pass writes, and its marks, which no pass
+    /// decides by, change it not; nor the read evidence of its versions, which passes trim skipping
+    /// it ([`digest`]).
     pub digest: [u8; 32],
     /// Every object listed but the cell's collector lease, which recording counts as it writes it
     /// ([`record`]).

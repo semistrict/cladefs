@@ -677,10 +677,10 @@ fn times_out_of_range_are_refused() {
 const OUT_OF_RANGE: &str =
     "the time 18446744073709551615s since the Unix epoch is out of range: EINVAL (errno 22)";
 
-/// A store that cannot be made whole is deleted, leaving its path free for another: an image
+/// A cell that cannot be made whole is deleted, leaving its path free for another: an image
 /// with a time out of range left it half made, and every import to the path after it failed.
 #[test]
-fn a_store_that_cannot_be_made_whole_is_deleted() {
+fn a_cell_that_cannot_be_made_whole_is_deleted() {
     let dir = tempfile::tempdir().unwrap();
     let image = |name: &str, entry: Entry<'_>| {
         let path = dir.path().join(name);
@@ -689,25 +689,26 @@ fn a_store_that_cannot_be_made_whole_is_deleted() {
     };
     let out_of_range = image("out-of-range.tar", Entry::new("f", Kind::File(b"f")).mtime(u64::MAX));
     let whole = image("whole.tar", Entry::new("f", Kind::File(b"f")));
-    let store = dir.path().join("store");
+    let cell_dir = dir.path().join("store");
 
-    let made = block_on(cladefs::import::store(&store, STORAGE_SIZE, &out_of_range, None));
-    let error = made.expect_err("made a store of an image with a time out of range");
+    let made = block_on(cladefs::import::make_base(&cell_dir, STORAGE_SIZE, &out_of_range, None));
+    let error = made.expect_err("made a cell of an image with a time out of range");
     assert_eq!(format!("{error:#}"), format!("applying \"f\": {OUT_OF_RANGE}"));
     assert_eq!(error.errno(), Some(Errno::EINVAL));
-    assert!(!store.exists(), "the store is left half made");
-    block_on(cladefs::import::store(&store, STORAGE_SIZE, &whole, None)).expect("making failed");
+    assert!(!cell_dir.exists(), "the cell is left half made");
+    block_on(cladefs::import::make_base(&cell_dir, STORAGE_SIZE, &whole, None))
+        .expect("making failed");
     let line =
         format!("/f File 644 0:0 size=1 nlink=1 rdev=0 mtime={0:?} atime={0:?} [102]", time(MTIME));
-    assert_eq!(store_manifest(&store), [line]);
+    assert_eq!(cell_manifest(&cell_dir), [line]);
 }
 
-/// An image a thousand directories deep makes a store on a thread with the stack an extent
+/// An image a thousand directories deep makes a cell on a thread with the stack an extent
 /// daemon's blocking threads have, tokio's 2 MiB, though its whiteout removes a tree as deep:
 /// removal kept a poll frame on the thread's stack for each directory it was emptying, and
 /// overflowed it, aborting the process.
 #[test]
-fn deep_images_make_stores_on_a_daemons_thread() {
+fn deep_images_make_cells_on_a_daemons_thread() {
     const DEPTH: usize = 1000;
     const STACK: usize = 2 << 20;
     let deep = vec!["d"; DEPTH].join("/");
@@ -720,15 +721,15 @@ fn deep_images_make_stores_on_a_daemons_thread() {
     let dir = tempfile::tempdir().unwrap();
     let layout = dir.path().join("image");
     oci_layout(&layout, "deep:1", &[base, top]).unwrap();
-    let store = dir.path().join("store");
+    let cell_dir = dir.path().join("store");
     std::thread::scope(|scope| {
         let made = std::thread::Builder::new().stack_size(STACK).spawn_scoped(scope, || {
-            block_on(cladefs::import::store(&store, STORAGE_SIZE, &layout, Some("deep:1")))
+            block_on(cladefs::import::make_base(&cell_dir, STORAGE_SIZE, &layout, Some("deep:1")))
         });
-        made.unwrap().join().unwrap().expect("making the store failed");
+        made.unwrap().join().unwrap().expect("making the cell failed");
     });
     block_on(async {
-        let fs = Filesystem::mount(Storage::open(&store).await.unwrap()).await.unwrap();
+        let fs = Filesystem::mount(Storage::open(&cell_dir).await.unwrap()).await.unwrap();
         assert_eq!(names(&fs, "").await, ["kept"]);
         let (file, _) = at(&fs, &format!("kept/{deep}/file")).await.unwrap();
         assert_eq!(contents(&file).await, b"kept");
@@ -737,27 +738,27 @@ fn deep_images_make_stores_on_a_daemons_thread() {
     })
 }
 
-/// A store made of an image where no extent daemon is, as `cladefsctl import` makes one, forks once
+/// A cell made of an image where no extent daemon is, as `cladefsctl import` makes one, forks once
 /// opened there too, as fxfs-guest-import forks the base it imports for its guest: the fork is
-/// the bucket's alone (TASK-165.7), made by the store's uploader, which keeps its cell in the
+/// the bucket's alone (TASK-165.7), made by the cell's uploader, which keeps its cell in the
 /// bucket its description names, its own beside it, as an image's does. Opened so, it had none,
 /// and the fork failed (`ENOTSUP`, GCE r701). The fork holds the image's files, read from the
 /// bucket, and the base is as it was.
 #[tokio::test(flavor = "multi_thread")]
-async fn stores_made_of_images_fork_where_no_daemon_is() {
+async fn cells_made_of_images_fork_where_no_daemon_is() {
     let dir = tempfile::tempdir().unwrap();
     let layout = dir.path().join("image");
     let image = layer(&[Entry::new("etc/motd", Kind::File(b"forked\n"))]).unwrap();
     oci_layout(&layout, "fork:1", &[image]).unwrap();
     let base = dir.path().join("base");
-    block_on(cladefs::import::store(&base, STORAGE_SIZE, &layout, Some("fork:1"))).unwrap();
-    let manifest = store_manifest(&base);
+    block_on(cladefs::import::make_base(&base, STORAGE_SIZE, &layout, Some("fork:1"))).unwrap();
+    let manifest = cell_manifest(&base);
     let fork = dir.path().join("fork");
-    let base_store = cladefs::OpenCell::open(&base).await.unwrap();
-    base_store.fork(&fork, base_store.cell().tenant).await.unwrap();
-    drop(base_store);
-    assert_eq!(store_manifest(&fork), manifest);
-    assert_eq!(store_manifest(&base), manifest);
+    let base_cell = cladefs::OpenCell::open(&base).await.unwrap();
+    base_cell.fork(&fork, base_cell.cell().tenant).await.unwrap();
+    drop(base_cell);
+    assert_eq!(cell_manifest(&fork), manifest);
+    assert_eq!(cell_manifest(&base), manifest);
 }
 
 /// Runs cladefsctl with `args`, and returns whether it succeeded, and what it printed to stderr.
@@ -767,8 +768,8 @@ fn cladefsctl(args: &[&str]) -> (bool, String) {
     (output.status.success(), String::from_utf8_lossy(&output.stderr).into_owned())
 }
 
-/// The manifest of the filesystem in the store at `dir`.
-fn store_manifest(dir: &Path) -> Vec<String> {
+/// The manifest of the filesystem in the cell at `dir`.
+fn cell_manifest(dir: &Path) -> Vec<String> {
     block_on(async {
         let fs = Filesystem::mount(Storage::open(dir).await.unwrap()).await.unwrap();
         let manifest = manifest(&fs).await;
@@ -778,7 +779,7 @@ fn store_manifest(dir: &Path) -> Vec<String> {
 }
 
 #[test]
-fn cladefsctl_makes_stores_of_images() {
+fn cladefsctl_makes_cells_of_images() {
     let dir = tempfile::tempdir().unwrap();
     let layout = dir.path().join("image");
     let layers = sample_layers();
@@ -788,17 +789,17 @@ fn cladefsctl_makes_stores_of_images() {
     let (ok, stderr) =
         cladefsctl(&["import", &path("oci"), "67108864", &path("image"), "sample:1"]);
     assert!(ok, "{stderr}");
-    assert_eq!(store_manifest(Path::new(&path("oci"))), import_layout(&layout, None));
+    assert_eq!(cell_manifest(Path::new(&path("oci"))), import_layout(&layout, None));
 
     // A `docker export` tarball: one layer.
     std::fs::write(path("export.tar"), &layers[0]).unwrap();
     let (ok, stderr) = cladefsctl(&["import", &path("export"), "67108864", &path("export.tar")]);
     assert!(ok, "{stderr}");
-    let manifest = store_manifest(Path::new(&path("export")));
+    let manifest = cell_manifest(Path::new(&path("export")));
     assert_eq!(manifest.iter().filter(|line| line.starts_with("/gone File")).count(), 1);
     assert_eq!(manifest.len(), 10, "{manifest:#?}");
 
-    // An image that cannot be imported leaves no store behind.
+    // An image that cannot be imported leaves no cell behind.
     let (ok, stderr) = cladefsctl(&["import", &path("missing"), "67108864", &path("image"), "x:1"]);
     assert!(!ok);
     assert!(stderr.contains("no image is named \"x:1\""), "{stderr}");
@@ -807,5 +808,5 @@ fn cladefsctl_makes_stores_of_images() {
     let (ok, stderr) = cladefsctl(&["import", &path("oci"), "67108864", &path("image")]);
     assert!(!ok);
     assert!(stderr.contains("File exists"), "{stderr}");
-    assert_eq!(store_manifest(Path::new(&path("oci"))), import_layout(&layout, None));
+    assert_eq!(cell_manifest(Path::new(&path("oci"))), import_layout(&layout, None));
 }

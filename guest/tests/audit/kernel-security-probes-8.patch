@@ -743,7 +743,7 @@ index 62508a9cb..bc8ef3660 100644
 +        Ok(())
 +    }
 +
-     /// Makes the store at `path`, with the default volume, `volumes` others and `RO_VOLUME`, empty.
+     /// Makes the cell at `path`, with the default volume, `volumes` others and `RO_VOLUME`, empty.
      fn format(path: &Path, volumes: usize) -> anyhow::Result<()> {
          block_on(async {
 @@ -452,7 +476,7 @@ mod host {

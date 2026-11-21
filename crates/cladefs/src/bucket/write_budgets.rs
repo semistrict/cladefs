@@ -2,17 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! What a host's store writes to its disk for what a guest writes, by kind, against what its design
-//! says it writes (TASK-330.2): a guest's large file, written faster than it commits, its small
-//! files, and its large extents, each workload's bytes of each kind bounded by the rules the store writes by (doc-7, On
-//! the host; TASK-310), not by what it wrote when the test was written. A daemon that writes a
-//! guest's bytes twice, framing in a copy what it frames in place (TASK-310's sandbox host: 2.3
-//! times what its guests wrote), or writing back what it wrote back already, writes past them.
+//! What a host's open cell writes to its disk for what a guest writes, by kind, against what its
+//! design says it writes (TASK-330.2): a guest's large file, written faster than it commits, its
+//! small files, and its large extents, each workload's bytes of each kind bounded by the rules the
+//! open cell writes by (doc-7, On the host; TASK-310), not by what it wrote when the test was
+//! written. A daemon that writes a guest's bytes twice, framing in a copy what it frames in place
+//! (TASK-310's sandbox host: 2.3 times what its guests wrote), or writing back what it wrote back
+//! already, writes past them.
 //!
-//! The store is a host's, as the extent daemon opens it (`crate::host_cell`: its segments of
+//! The open cell is a host's, as the extent daemon opens it (`crate::host_cell`: its segments of
 //! 32 MiB, its extents of 64 MiB at most, large from 4 MiB), on the host's disk, its bucket in
 //! memory, uploading nothing until the test is done: what the process wrote to its disk, as its
-//! kernel counts it (`/proc/self/io`, Linux's), is the store's alone.
+//! kernel counts it (`/proc/self/io`, Linux's), is the open cell's alone.
 
 use super::tests::{idle, kept_in};
 use crate::test_data::noise;
@@ -24,11 +25,11 @@ use std::sync::Arc;
 /// The bytes of each write a guest's VM process sends: Fxfs's writeback's, of 256 KiB.
 const WRITE: usize = 256 << 10;
 
-/// The extents of a guest's large file: Fxfs's, of a MiB each, under the store's large ones
+/// The extents of a guest's large file: Fxfs's, of a MiB each, under the open cell's large ones
 /// (`Options::large_extent`), so that they go to its open segment first.
 const LARGE_FILES_EXTENT: usize = 1 << 20;
 
-/// What the store wrote between `before` and `after`, by kind.
+/// What the open cell wrote between `before` and `after`, by kind.
 fn delta(before: Written, after: Written) -> Written {
     Written {
         raw: after.raw - before.raw,
@@ -40,10 +41,11 @@ fn delta(before: Written, after: Written) -> Written {
     }
 }
 
-/// Writes `data` to `extent` of `store` as a guest's VM process does, [`WRITE`] bytes a request.
-async fn write(store: &OpenCell, extent: ExtentId, data: &[u8]) {
+/// Writes `data` to `extent` of `open_cell` as a guest's VM process does, [`WRITE`] bytes a
+/// request.
+async fn write(open_cell: &OpenCell, extent: ExtentId, data: &[u8]) {
     for (at, piece) in data.chunks(WRITE).enumerate() {
-        store.write(extent, (at * WRITE) as u64, &[VolatileSlice::from(piece)]).await.unwrap();
+        open_cell.write(extent, (at * WRITE) as u64, &[VolatileSlice::from(piece)]).await.unwrap();
     }
 }
 
@@ -56,7 +58,7 @@ fn io_written() -> u64 {
     line.trim().parse().unwrap()
 }
 
-/// The CPU time this process has spent, user and system: what the test says the store spent, a
+/// The CPU time this process has spent, user and system: what the test says the open cell spent, a
 /// figure, not a budget, as a test's build is no measurement's and no design bounds it.
 fn cpu() -> std::time::Duration {
     // SAFETY: getrusage writes the struct it is given, which is the caller's.
@@ -73,31 +75,32 @@ fn cpu() -> std::time::Duration {
 
 /// The most bytes a framing of `len` bytes of data writes beyond them: each part's entry in the
 /// table, its start aligned, and the trailer (`extent_frame`); its footer, the commits' contents,
-/// is the segment's log's, which the store writes too, at most.
+/// is the segment's log's, which the open cell writes too, at most.
 fn framing_overhead(len: u64) -> u64 {
     let parts = len.div_ceil(extent_frame::PART) + 1;
     parts * (extent_frame::ENTRY + extent_frame::ALIGN) + extent_frame::TRAILER
 }
 
-/// What a host's store writes for a guest's large file and its small files, by kind, is what its
-/// design says: each byte the guest writes once, raw; of a large file written faster than the
-/// store commits, every extent sealed where it was written, in the segments it filled, which its
-/// commit spans, each framed in place, its tail alone written (TASK-92.41, TASK-310); each small
-/// file, written in one run of the open segment, never copied, framed once, no larger than it was
-/// written; each large extent, in a raw file of its own, framed there in place, its tail alone
+/// What a host's open cell writes for a guest's large file and its small files, by kind, is what
+/// its design says: each byte the guest writes once, raw; of a large file written faster than the
+/// open cell commits, every extent sealed where it was written, in the segments it filled, which
+/// its commit spans, each framed in place, its tail alone written (TASK-92.41, TASK-310); each
+/// small file, written in one run of the open segment, never copied, framed once, no larger than it
+/// was written; each large extent, in a raw file of its own, framed there in place, its tail alone
 /// written, as none of its parts compresses (TASK-310). And
-/// (Linux) what its process had the kernel write to its disk is what the store says it wrote, each
-/// write a page more than its bytes at most: nothing written twice uncounted.
+/// (Linux) what its process had the kernel write to its disk is what the open cell says it wrote,
+/// each write a page more than its bytes at most: nothing written twice uncounted.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_hosts_store_writes_what_its_design_says() {
+async fn a_hosts_cell_writes_what_its_design_says() {
     // cladefs: at the shell's limit of open files, not the daemon's: a burst's extents spilled to
     // raw files of their own held two each till its commit, past 1,024 (TASK-332).
     let dir = tempfile::tempdir().unwrap();
     let bucket =
         Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), "cells"));
-    let store = kept_in(dir.path().join("store"), (4 << 30, None), &bucket, idle()).await.unwrap();
+    let open_cell =
+        kept_in(dir.path().join("store"), (4 << 30, None), &bucket, idle()).await.unwrap();
     let options = crate::host_cell::options();
-    let cell = store.cell();
+    let cell = open_cell.cell();
     let mut sequence = 0;
     let mut next = || {
         sequence += 1;
@@ -112,18 +115,18 @@ async fn a_hosts_store_writes_what_its_design_says() {
     const BURSTS: u64 = 2;
     const BURST: usize = 384 << 20;
     let extents_per_burst = BURST / LARGE_FILES_EXTENT;
-    // Its extents' data made first, so that what the process spends meanwhile is the store's: as
-    // many as a part, which is compressed alone, needs to find none like it.
+    // Its extents' data made first, so that what the process spends meanwhile is the open cell's:
+    // as many as a part, which is compressed alone, needs to find none like it.
     let data: Vec<Vec<u8>> = (0..16).map(|seed| noise(seed, LARGE_FILES_EXTENT)).collect();
     let (before, cpu_before) = (local_cell::written(), cpu());
     for _ in 0..BURSTS {
         for at in 0..extents_per_burst {
-            write(&store, next(), &data[at % data.len()]).await;
+            write(&open_cell, next(), &data[at % data.len()]).await;
         }
-        store.commit_local(None).await.unwrap();
+        open_cell.commit_local(None).await.unwrap();
     }
     // The last commit's copies framed too, as the open segment closes for its upload.
-    store.frame_open_segment().await.unwrap();
+    open_cell.frame_open_segment().await.unwrap();
     let (large, large_cpu) = (delta(before, local_cell::written()), cpu() - cpu_before);
 
     // The small files: 2,000 of 8 KiB, which compress, four commits of 500.
@@ -134,12 +137,12 @@ async fn a_hosts_store_writes_what_its_design_says() {
         for file in 0..SMALL_FILES / 4 {
             let seed = (commit * SMALL_FILES + file) as u8;
             let data: Vec<u8> = (0..SMALL_FILE).map(|i| seed ^ (i % 251) as u8).collect();
-            write(&store, next(), &data).await;
+            write(&open_cell, next(), &data).await;
         }
-        store.commit_local(None).await.unwrap();
+        open_cell.commit_local(None).await.unwrap();
     }
     // Their segment framed, as it closes for its upload.
-    store.frame_open_segment().await.unwrap();
+    open_cell.frame_open_segment().await.unwrap();
     let small = delta(before, local_cell::written());
 
     // The large extents: 4 of 8 MiB, which don't compress, each reaching past
@@ -152,12 +155,12 @@ async fn a_hosts_store_writes_what_its_design_says() {
     for seed in 0..LARGE_EXTENTS {
         let (extent, data) = (next(), noise(16 + seed as u64, large_extent));
         let (first, last) = data.split_at(large_extent - WRITE);
-        store.write(extent, first.len() as u64, &[VolatileSlice::from(last)]).await.unwrap();
-        write(&store, extent, first).await;
+        open_cell.write(extent, first.len() as u64, &[VolatileSlice::from(last)]).await.unwrap();
+        write(&open_cell, extent, first).await;
         tails += framing_overhead(large_extent as u64)
             + bucket_cell::layout::encode(&extent).len() as u64;
     }
-    store.commit_local(None).await.unwrap();
+    open_cell.commit_local(None).await.unwrap();
     let own = delta(before, local_cell::written());
 
     let guests = (BURSTS as usize * BURST) as u64;
@@ -197,8 +200,8 @@ async fn a_hosts_store_writes_what_its_design_says() {
         own.own
     );
 
-    // What the process wrote to its disk is what the store says it wrote: each write's bytes, and
-    // a page more at most, the last it dirtied in part.
+    // What the process wrote to its disk is what the open cell says it wrote: each write's bytes,
+    // and a page more at most, the last it dirtied in part.
     #[cfg(target_os = "linux")]
     {
         let (all, io) = (delta(start, local_cell::written()), io_written() - io_before);
@@ -206,12 +209,13 @@ async fn a_hosts_store_writes_what_its_design_says() {
         let bound = counted + all.writes * crate::pages::page_size();
         assert!(
             io <= bound,
-            "the kernel wrote {} MiB for the store, which says {} MiB in {} writes: {} MiB at most",
+            "the kernel wrote {} MiB for the open cell, which says {} MiB in {} writes: \
+             {} MiB at most",
             io >> 20,
             counted >> 20,
             all.writes,
             bound >> 20
         );
     }
-    drop(store);
+    drop(open_cell);
 }

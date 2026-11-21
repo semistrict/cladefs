@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: a store's write-ahead log of its cell (doc-14, TASK-165.9): what the bucket doesn't
+//! cladefs: a cell's write-ahead log (doc-14, TASK-165.9): what the bucket doesn't
 //! have yet of the cell, on local disk, and what recovering it from there takes.
 //!
 //! - **Its segments**, closed and not yet acknowledged in the bucket: each framed with its footer,
@@ -25,7 +25,7 @@
 //!   commits that stored extents on their own, which no record checks, syncs their data first,
 //!   as before. Its raw data and log go once it is
 //!   framed and the commits it names are durable, its framed file their record then.
-//! - **Its start**, `wal`: the cell's commit its first segment goes on from, which the store
+//! - **Its start**, `wal`: the cell's commit its first segment goes on from, which the cell
 //!   writes, durably, before the segments it acknowledged leave it ([`StartFile`]): a segment a
 //!   crash brings back, its removal not durable, whose last commit is the start's or before, is
 //!   acknowledged, and goes again.
@@ -43,13 +43,13 @@
 //! commits, those not durable, as flushes append records in their commits' order: the next segment
 //! holding commits then follows commits it lacks, which no later segment holds durable, and those
 //! after it go, durably, before it is closed again. cladefs: closed again, it is framed once the
-//! store's keys are known, not by recovery, which holds none yet ([`Recovered::close`],
-//! TASK-411.9). The store's commits are numbered one after
+//! cell's keys are known, not by recovery, which holds none yet ([`Recovered::close`],
+//! TASK-411.9). The cell's commits are numbered one after
 //! another, and the segments a crash left torn are all of the last opening's, which numbered them
 //! alike: one closed again is whole if the next segment holding commits holds the next commit first
 //! (TASK-165.9's crash rounds, cutting openings, and its Shuttle tests, a crash bringing back a
 //! segment's raw data without its log). The footers recovered are
-//! stamped as they were, or provisionally for those closed again: opening the store puts the log
+//! stamped as they were, or provisionally for those closed again: opening the cell puts the log
 //! after the cell's end by its commits (`bucket_cell::Wal::rebase`), and stamps them anew.
 
 use crate::dir::{Dir, File, not_found, read_file};
@@ -86,14 +86,14 @@ struct Slot {
 /// is not in, and syncs it, so that a writing a crash tears leaves the one before. Read, it is the
 /// whole slot of the higher serial number; none, before the first writing. Opened for each
 /// writing, which comes with an acknowledgement, rather than held open: a host serves hundreds
-/// of stores, forks most of them, which acknowledge little.
+/// of cells, forks most of them, which acknowledge little.
 pub(crate) struct StartFile {
     made: bool,
     serial: u64,
 }
 
 impl StartFile {
-    /// The start file of the store in `dir`, and the start it holds.
+    /// The start file of the cell in `dir`, and the start it holds.
     pub fn read<D: Dir>(dir: &D) -> Result<(Self, Option<u64>), Error> {
         let file = match dir.open(START, false) {
             Ok(file) => file,
@@ -246,9 +246,9 @@ impl LogRecord {
 
     /// The records of `bytes`, `segment`'s log, that are whole: those of any kind, after its
     /// header, salted as it says ([`LOG_MAGIC`]), as a log reused does, whose records from before
-    /// are torn then; none if its header isn't `segment`'s ([`log_salt`]). cladefs: each followed by
-    /// its MAC, which is checked if `encryption`, its encryption, is given: one not authentic fails it,
-    /// naming it; read holding no key, as recovery reads, it is not checked (TASK-411.5).
+    /// are torn then; none if its header isn't `segment`'s ([`log_salt`]). cladefs: each followed
+    /// by its MAC, which is checked if `encryption`, its encryption, is given: one not authentic
+    /// fails it, naming it; read holding no key, as recovery reads, it is not checked (TASK-411.5).
     fn decode(
         bytes: &[u8],
         segment: SegmentId,
@@ -291,22 +291,21 @@ impl LogRecord {
 
 /// cladefs: what a segment's log starts with: its header, a block, its salt after this, then its
 /// records, each salted with it, so that a log reused, a spare, holding records of another
-/// segment's after them, reads as holding its own alone (TASK-301): a log made ahead of its
-/// records is overwritten as it is appended to, a sync then syncing the records alone, not the
-/// log's size and blocks too, a third of the time on a cloud disk. The header is synced before any
-/// record is appended: a log whose new header a crash lost would read its old one's records.
-/// cladefs: after the salt, the segment the log is of, the cell's then the number: a spare is
-/// renamed a log, and was renamed a spare, neither rename durable until a flush syncs the
-/// directory of logs, so a crash may keep it under its last segment's name, holding the new
-/// one's header and records, which an opening took for the last one's commits (TASK-341, found by
-/// TASK-310's crash rounds, round 81); a log whose header names another segment holds none of
-/// its own.
-/// cladefs: after those fields, the DEK its segment's raw file is encrypted under and its log
-/// authenticated with, its cell's and its generation, and the salt of their subkeys
-/// (`raw::RawEncryption`), then the header's MAC; each record of it is followed by its MAC, of its offset
-/// in the log and its bytes (TASK-411.5). Its records hold of the runs of its commits what the raw
-/// file stores, encrypted. Every store's are so (TASK-411.28): a log headed in the clear,
-/// `FXLOG\0\0\x02` as before, is no segment's log.
+/// segment's after them, reads as holding its own alone (TASK-301): a log made ahead of its records
+/// is overwritten as it is appended to, a sync then syncing the records alone, not the log's size
+/// and blocks too, a third of the time on a cloud disk. The header is synced before any record is
+/// appended: a log whose new header a crash lost would read its old one's records. cladefs: after
+/// the salt, the segment the log is of, the cell's then the number: a spare is renamed a log, and
+/// was renamed a spare, neither rename durable until a flush syncs the directory of logs, so a
+/// crash may keep it under its last segment's name, holding the new one's header and records, which
+/// an opening took for the last one's commits (TASK-341, found by TASK-310's crash rounds, round
+/// 81); a log whose header names another segment holds none of its own. cladefs: after those
+/// fields, the DEK its segment's raw file is encrypted under and its log authenticated with, its
+/// cell's and its generation, and the salt of their subkeys (`raw::RawEncryption`), then the
+/// header's MAC; each record of it is followed by its MAC, of its offset in the log and its bytes
+/// (TASK-411.5). Its records hold of the runs of its commits what the raw file stores, encrypted.
+/// Every cell's are so (TASK-411.28): a log headed in the clear, `FXLOG\0\0\x02` as before, is no
+/// segment's log.
 pub(crate) const LOG_MAGIC: &[u8; 8] = b"FXLOG\0\0\x03";
 
 /// cladefs: where a segment's log's records start, after its header.
@@ -319,8 +318,8 @@ const LOG_FIELDS: usize = LOG_MAGIC.len() + 3 * 8;
 /// header reads.
 pub(crate) const LOG_HEADER: usize = LOG_FIELDS + 8 + 4 + SALT_LEN + MAC_LEN;
 
-/// cladefs: the header of `segment`'s log, its records salted with `salt`, MACed by `encryption`, which
-/// encrypts its raw file and log ([`LOG_MAGIC`]).
+/// cladefs: the header of `segment`'s log, its records salted with `salt`, MACed by `encryption`,
+/// which encrypts its raw file and log ([`LOG_MAGIC`]).
 pub(crate) fn log_header(salt: u64, segment: SegmentId, encryption: &RawEncryption) -> Vec<u8> {
     let mut header = vec![0; LOG_RECORDS as usize];
     let fields = [salt, segment.cell, segment.number].map(u64::to_le_bytes);
@@ -337,8 +336,8 @@ pub(crate) fn log_header(salt: u64, segment: SegmentId, encryption: &RawEncrypti
     header
 }
 
-/// cladefs: a segment's log's header, as its bytes say ([`LogHeader::of`]): the salt of its records,
-/// and the DEK and salt of its encryption, with the bytes its MAC is of, and the MAC.
+/// cladefs: a segment's log's header, as its bytes say ([`LogHeader::of`]): the salt of its
+/// records, and the DEK and salt of its encryption, with the bytes its MAC is of, and the MAC.
 pub(crate) struct LogHeader {
     pub salt: u64,
     encrypted: (KeyId, Salt, [u8; MAC_LEN]),
@@ -365,9 +364,9 @@ impl LogHeader {
         Some(Self { salt, encrypted: (key, key_salt, mac), signed: signed.to_vec() })
     }
 
-    /// The encryption of `segment`'s raw file and log, as this, its log's header, says, under the DEK
-    /// of `keys`' it names, the header's MAC checked: refused if `keys` hold no such DEK, or its
-    /// MAC is not the header's.
+    /// The encryption of `segment`'s raw file and log, as this, its log's header, says, under the
+    /// DEK of `keys`' it names, the header's MAC checked: refused if `keys` hold no such DEK, or
+    /// its MAC is not the header's.
     pub fn encryption(
         &self,
         segment: SegmentId,
@@ -377,7 +376,7 @@ impl LogHeader {
         let keys = keys.of(segment.cell);
         let dek = extent_frame::Keys::dek(&keys, *key).ok_or_else(|| {
             anyhow::anyhow!(
-                "{segment:?}'s raw file is encrypted under {key:?}, which the store holds not"
+                "{segment:?}'s raw file is encrypted under {key:?}, which the cell holds not"
             )
         })?;
         let encryption = RawEncryption::of(dek, *key, *salt);
@@ -557,11 +556,11 @@ impl ReplicaLog {
     }
 }
 
-/// A store's WAL as its directory holds it, recovered ([`recover`]): its start; its segments,
+/// A cell's WAL as its directory holds it, recovered ([`recover`]): its start; its segments,
 /// footers by their numbers, in order; and the number of the next segment, past every one the
 /// directory held. cladefs: of those, the ones closed again, not yet framed, by their numbers, with
 /// the records of their logs their footers fold, their raw files and logs still there: framed once
-/// the store's keys are known ([`Recovered::close`], TASK-411.9).
+/// the cell's keys are known ([`Recovered::close`], TASK-411.9).
 pub(crate) struct Recovered {
     pub start: Option<u64>,
     pub start_file: StartFile,
@@ -572,16 +571,17 @@ pub(crate) struct Recovered {
 
 impl Recovered {
     /// cladefs: frames the segments recovery closed again ([`Recovered::closing`]), in `dir`, of
-    /// `cell`, holding `keys`, the store's: encrypted under its cell's newest DEK; each from its raw data and its log's records read again, which must still be
-    /// those recovery kept, with the footer recovery folded them into, and synced; then the
-    /// directory of framed files synced, and their raw files and logs removed, as the commits they
-    /// hold are durable in the framed files then. Recovery frames nothing itself: it holds no key
-    /// yet, and a sealed cell's segment framed in the clear and resealed later left its data on
-    /// the host's disk in the clear meanwhile, and for good if the host died between (TASK-411.9).
-    /// A crash before leaves the raw files and logs, which the next recovery closes again alike.
-    /// cladefs: an encrypted store's raw data is decrypted first, under the DEK and salt its log's header
-    /// names, which the header's MAC and each record's must be authentic under, as recovery read
-    /// them holding no key (TASK-411.5).
+    /// `cell`, holding `keys`, the cell's: encrypted under its cell's newest DEK; each from its raw
+    /// data and its log's records read again, which must still be those recovery kept, with the
+    /// footer recovery folded them into, and synced; then the directory of framed files synced, and
+    /// their raw files and logs removed, as the commits they hold are durable in the framed files
+    /// then. Recovery frames nothing itself: it holds no key yet, and a sealed cell's segment
+    /// framed in the clear and resealed later left its data on the host's disk in the clear
+    /// meanwhile, and for good if the host died between (TASK-411.9). A crash before leaves the raw
+    /// files and logs, which the next recovery closes again alike. cladefs: an encrypted cell's raw
+    /// data is decrypted first, under the DEK and salt its log's header names, which the header's
+    /// MAC and each record's must be authentic under, as recovery read them holding no key
+    /// (TASK-411.5).
     pub fn close<D: Dir>(
         &mut self,
         dir: &D,
@@ -631,11 +631,11 @@ impl Recovered {
         Ok(())
     }
 
-    /// cladefs: of an ephemeral cell, whose segments closed again stay raw (doc-25, TASK-698.2): writes
-    /// into each raw file, in `dir`, of `cell`, holding `keys`, the runs its log's records hold, which
-    /// a flush that sealed little made durable in its log alone ([`LogRecord`]), and syncs it: its
-    /// raw file holds its commits whole from then on, as a framing's file does. The records must
-    /// still be those recovery kept.
+    /// cladefs: of an ephemeral cell, whose segments closed again stay raw (doc-25, TASK-698.2):
+    /// writes into each raw file, in `dir`, of `cell`, holding `keys`, the runs its log's records
+    /// hold, which a flush that sealed little made durable in its log alone ([`LogRecord`]), and
+    /// syncs it: its raw file holds its commits whole from then on, as a framing's file does. The
+    /// records must still be those recovery kept.
     pub fn restore_raw<D: Dir>(
         &self,
         dir: &D,
@@ -696,14 +696,14 @@ pub(crate) fn recover<D: Dir>(dir: &D, cell: CellId) -> Result<Recovered, Error>
     let (framed, raw, logs) = (listed(SEGMENTS)?, listed(OPEN_SEGMENTS)?, listed(LOGS)?);
     let numbers: BTreeSet<u64> = framed.iter().chain(&raw).chain(&logs).copied().collect();
     let left = |number| raw.contains(&number) || logs.contains(&number);
-    // cladefs: the logs that are their segments' own, their headers naming them: one renamed a spare
-    // and taken as another segment's log, which a crash brought back under its old name, holds none
-    // of its segment's records, and says nothing of whether its segment was made durable: a
-    // segment the start acknowledged, its files' removal undone, its log a spare taken since, read
-    // as one past the start whose raw file and log are both there, broke the run of segments framed
-    // whole, those after it closed again from their raw files and logs, which they hold no more,
-    // their commits lost (TASK-369, the Shuttle rounds, with the next segment's log prepared from a
-    // spare as soon as it opens).
+    // cladefs: the logs that are their segments' own, their headers naming them: one renamed a
+    // spare and taken as another segment's log, which a crash brought back under its old name,
+    // holds none of its segment's records, and says nothing of whether its segment was made
+    // durable: a segment the start acknowledged, its files' removal undone, its log a spare taken
+    // since, read as one past the start whose raw file and log are both there, broke the run of
+    // segments framed whole, those after it closed again from their raw files and logs, which they
+    // hold no more, their commits lost (TASK-369, the Shuttle rounds, with the next segment's log
+    // prepared from a spare as soon as it opens).
     let mut own = BTreeSet::new();
     for &number in &logs {
         if own_log(dir, SegmentId { cell: cell.id, number })? {
@@ -825,8 +825,8 @@ pub(crate) fn recover<D: Dir>(dir: &D, cell: CellId) -> Result<Recovered, Error>
     // Each segment, in order: whole, framed; or, its framed file not whole, closed again from its
     // log, which holds the records of the commits made in it that a flush made durable, at least;
     // or holding no durable commit, its files going. One closed again whose log lacks its last
-    // commits, the next segment holding commits not following its last, is the last: those after
-    // it go, durably, first (see the module's docs). cladefs: and one going on with a commit that no
+    // commits, the next segment holding commits not following its last, is the last: those after it
+    // go, durably, first (see the module's docs). cladefs: and one going on with a commit that no
     // segment after it ends is the last, closed again without it, from its raw data and log, which
     // stay until the commit is durable: the commit is not.
     let mut segments: Vec<(Footer, u64)> = Vec::new();
@@ -917,7 +917,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, cell: CellId) -> Result<Recovered, Error>
         if framed.contains(&number) {
             remove(dir, &segment_path(segment))?;
         }
-        // cladefs: framed once the store's keys are known, its raw file and log kept until then
+        // cladefs: framed once the cell's keys are known, its raw file and log kept until then
         // (`Recovered::close`, TASK-411.9).
         let previous = segments.last().map(|(footer, _)| footer);
         segments.push((closed_again(cell, previous, &records)?, number));
@@ -980,7 +980,7 @@ fn own_log<D: Dir>(dir: &D, segment: SegmentId) -> Result<bool, Error> {
     Ok(log_salt(&header, segment).is_some())
 }
 
-/// cladefs: the store's epoch of the first commit `records`, a segment's log's, hold: the first a
+/// cladefs: the cell's epoch of the first commit `records`, a segment's log's, hold: the first a
 /// record ends, or goes on with (TASK-92.41).
 fn first_epoch(records: &[Contents]) -> Option<u64> {
     let first = records.first()?;
@@ -1015,7 +1015,7 @@ impl Found {
         }
     }
 
-    /// The store's epoch of the first commit it holds, if any.
+    /// The cell's epoch of the first commit it holds, if any.
     fn first_commit(&self) -> Option<u64> {
         let first = match self {
             Found::Whole(footer) => footer.contents.commits.first(),
@@ -1038,13 +1038,13 @@ struct Logged {
     /// (TASK-334).
     refused: bool,
     /// cladefs: what its raw data is encrypted under and its log authenticated with, read holding
-    /// the store's keys; none read holding no key (TASK-411.5).
+    /// the cell's keys; none read holding no key (TASK-411.5).
     encryption: Option<Arc<RawEncryption>>,
 }
 
 /// What the log of `segment` and its raw file hold ([`Logged`]); none if it has no log. Read
 /// holding no key, as recovery reads, its records' MACs unchecked if it is encrypted, its data as
-/// stored; cladefs: or holding `keys`, the store's, which give its encryption, and which its header
+/// stored; cladefs: or holding `keys`, the cell's, which give its encryption, and which its header
 /// and records must be authentic under (TASK-411.5).
 fn log_records<D: Dir>(
     dir: &D,
@@ -1076,7 +1076,7 @@ fn log_records<D: Dir>(
 
 /// The footer of a segment closed again, left open, or framed part way, from the records of its
 /// log that are whole, which hold a commit at least: their contents folded, stamped provisionally
-/// as `cell`'s, after `last`, the footer before it, if any. cladefs: framed with it once the store's
+/// as `cell`'s, after `last`, the footer before it, if any. cladefs: framed with it once the cell's
 /// keys are known ([`Recovered::close`], TASK-411.9).
 fn closed_again(
     cell: CellId,
@@ -1173,8 +1173,8 @@ impl Queue {
         taken
     }
 
-    /// cladefs: the segments, from the first, whose commits are `durable` or before, ending where no
-    /// commit goes on past them, by their numbers, with their footers: what an ephemeral cell's
+    /// cladefs: the segments, from the first, whose commits are `durable` or before, ending where
+    /// no commit goes on past them, by their numbers, with their footers: what an ephemeral cell's
     /// checkpoint covers (doc-25, TASK-698.2).
     pub fn covering(&self, durable: u64) -> Vec<(u64, Footer)> {
         let durable =
@@ -1193,7 +1193,7 @@ impl Queue {
     }
 
     /// Segment `number`, the first, is acknowledged: it leaves the queue, which goes on from its
-    /// last commit. Returns the segments whose acknowledgements are whole now, which their store
+    /// last commit. Returns the segments whose acknowledgements are whole now, which their cell
     /// may let go of: it, and those held before it; none if it goes on with a commit, which it is
     /// held for, until the segment ending that commit is acknowledged (TASK-338). Let go of before,
     /// its files leaving for the host's cache, the start not yet past the commit, a crash left the
@@ -1242,8 +1242,8 @@ mod tests {
         }
     }
 
-    /// cladefs: an encryption of a segment's raw file and log, under the tests' DEK, as the store's of
-    /// [`CELL`] encrypts them (`bucket_cell::testing::encrypting`, TASK-411.28).
+    /// cladefs: an encryption of a segment's raw file and log, under the tests' DEK, as the cell's
+    /// of [`CELL`] encrypts them (`bucket_cell::testing::encrypting`, TASK-411.28).
     fn encryption() -> Arc<RawEncryption> {
         let (dek, key) = bucket_cell::testing::encrypting(CELL);
         Arc::new(RawEncryption::new(dek, key))
@@ -1290,8 +1290,8 @@ mod tests {
         log.append(&records).unwrap();
     }
 
-    /// cladefs: the WAL in `dir` recovered, and the segments it closed again framed, encrypted, as a
-    /// store opens it holding its keys (TASK-411.9).
+    /// cladefs: the WAL in `dir` recovered, and the segments it closed again framed, encrypted, as
+    /// a cell opens it holding its keys (TASK-411.9).
     fn recover_closing(dir: &MemDir) -> Result<Recovered, Error> {
         let mut recovered = recover(dir, CELL)?;
         recovered.close(dir, CELL, &bucket_cell::testing::ring([CELL]))?;
@@ -1375,7 +1375,7 @@ mod tests {
     }
 
     /// TASK-411.9: a recovery frames nothing: a segment it closes again keeps its raw data and log,
-    /// no framed file, until the store's keys frame it, encrypted under its cell's DEK, never in
+    /// no framed file, until the cell's keys frame it, encrypted under its cell's DEK, never in
     /// the clear, its data as it was. TASK-411.3: an encrypted segment's framed file, whole, its
     /// raw data and log still there, is whole to a recovery holding no key, as one's in the clear
     /// is: checked by its CRCs, never closed again from its raw data.
@@ -1615,11 +1615,11 @@ mod tests {
         assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![], vec![]));
     }
 
-    /// cladefs: a segment left open whose log's first commit isn't the next after the last kept goes,
-    /// and those after it: a flush appends its commits' records to their segments' logs at once,
-    /// and a crash may keep a later commit's record and lose an earlier one's in the log before,
-    /// whose segment then holds nothing durable, and goes (TASK-310's Shuttle crash rounds, round
-    /// 20).
+    /// cladefs: a segment left open whose log's first commit isn't the next after the last kept
+    /// goes, and those after it: a flush appends its commits' records to their segments' logs at
+    /// once, and a crash may keep a later commit's record and lose an earlier one's in the log
+    /// before, whose segment then holds nothing durable, and goes (TASK-310's Shuttle crash rounds,
+    /// round 20).
     #[test]
     fn logs_following_a_commit_lost_go() {
         let dir = MemDir::new();
@@ -1715,11 +1715,11 @@ mod tests {
         assert_eq!(recovered.segments, framed[1..]);
     }
 
-    /// cladefs: a log whose header is another segment's holds none of its segment's commits: a spare,
-    /// renamed from segment 3's log, then renamed segment 6's, neither rename durable, its header
-    /// and records then 6's, which a crash kept under 3's name. Read as 3's, its commits were kept
-    /// with segment 3's raw data, which holds none of their runs (TASK-341, TASK-310's crash
-    /// rounds, round 81).
+    /// cladefs: a log whose header is another segment's holds none of its segment's commits: a
+    /// spare, renamed from segment 3's log, then renamed segment 6's, neither rename durable, its
+    /// header and records then 6's, which a crash kept under 3's name. Read as 3's, its commits
+    /// were kept with segment 3's raw data, which holds none of their runs (TASK-341, TASK-310's
+    /// crash rounds, round 81).
     #[test]
     fn logs_of_other_segments_hold_none_of_their_names() {
         let dir = MemDir::new();
@@ -1801,7 +1801,7 @@ mod tests {
 
     /// A segment whose framed file isn't whole, its raw data and log gone, as a crash part way
     /// through removing it leaves, it holding nothing durable, goes, rather than refusing the
-    /// store: its raw data and log go otherwise only once it is framed whole (found by the crash
+    /// cell: its raw data and log go otherwise only once it is framed whole (found by the crash
     /// rounds cutting openings, TASK-165.9).
     #[test]
     fn segments_torn_without_raw_data_or_log_go() {

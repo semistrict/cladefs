@@ -9,11 +9,11 @@
 //! [`OPEN`] carries its physical memory, the VM process's tenant's arena of it, `args[1]`,
 //! the default tenant's if it is of none, and the default arena, read-only (TASK-43, TASK-79.17).
 //!
-//! cladefs: each message's fields, its flags and arguments, payload and descriptors, are encoded and
-//! decoded in [`super::codec`] alone (TASK-160.9), which refuses what a kind gives no meaning.
+//! cladefs: each message's fields, its flags and arguments, payload and descriptors, are encoded
+//! and decoded in [`super::codec`] alone (TASK-160.9), which refuses what a kind gives no meaning.
 //!
 //! cladefs: the wire has a version, [`VERSION`], and a VM process and a daemon of different ones
-//! refuse each other as the VM process opens its store (TASK-141.3), rather than serve with what
+//! refuse each other as the VM process opens its cell (TASK-141.3), rather than serve with what
 //! requests both happen to know: AGENTS.md's rule, no migrations, which has a format change
 //! outright and the old one refused. Every request is required of a daemon of the VM process's
 //! version, so none is optional: a refusal of one fails the connection.
@@ -196,7 +196,7 @@ impl Header {
 /// Version 4: a request may say the guest request it is a call for ([`REQUEST`], TASK-260).
 /// Version 5: a commit may complete once local, synced to the host's disk ([`COMMIT_LOCAL`],
 /// [`WRITE_LOCAL`], TASK-301). Version 6: an [`OPEN`] may make a SQLite cell
-/// ([`OPEN_SQLITE`], TASK-364), and stores are cells, in their prefixes. Version
+/// ([`OPEN_SQLITE`], TASK-364), and cells are kept in their prefixes. Version
 /// 7: a [`FORK`] names no cell: its reply says the one the daemon gave (TASK-364). Version 8:
 /// an [`OPEN`] may make a memory cell ([`OPEN_MEMORY`], TASK-456.2). Version 9: the
 /// flags doc-4 has too are at doc-4's bits, under its names ([`COMMIT_UPLOADED`], [`COMMIT_ROOT`],
@@ -220,13 +220,14 @@ pub(crate) const REQUEST_BYTES: usize = 8;
 
 // Requests, from a VM process. A reply ([`REPLY`]) answers each, but for [`ACK`].
 
-/// Opens the store at the path the payload holds, creating it with `args[0]` bytes of capacity if
+/// Opens the cell at the path the payload holds, creating it with `args[0]` bytes of capacity if
 /// [`OPEN_CREATE`] and it doesn't exist; or, with [`OPEN_FORK`], forking it from the version
-/// `args[2]` of the cell `args[1]` of tenant `args[3]` if it doesn't exist (TASK-39.1: a VM restored
-/// from a snapshot), or is a fork that failed, whose deletion it finishes first (TASK-79.84), of
-/// `args[0]` bytes: a fork into a cell of the connection's tenant, of another tenant's version only
-/// if it is shared (`EACCES` otherwise), `ENOENT` if the bucket has no such version. The reply's `args[0]` is its cell, and it carries the kernel's physical memory.
-/// cladefs: with [`OPEN_READ_ONLY`], a follower of the store (backlog doc-8), as of its latest
+/// `args[2]` of the cell `args[1]` of tenant `args[3]` if it doesn't exist (TASK-39.1: a VM
+/// restored from a snapshot), or is a fork that failed, whose deletion it finishes first
+/// (TASK-79.84), of `args[0]` bytes: a fork into a cell of the connection's tenant, of another
+/// tenant's version only if it is shared (`EACCES` otherwise), `ENOENT` if the bucket has no such
+/// version. The reply's `args[0]` is its cell, and it carries the kernel's physical memory.
+/// cladefs: with [`OPEN_READ_ONLY`], a follower of the cell (backlog doc-8), as of its latest
 /// commit, whose commit number is the reply's `args[2]`. The reply's `args[3]` is how many mappings
 /// the host lets a process make, 0 if it doesn't limit them, which a VM process in a jail without
 /// /proc can't read (TASK-172). cladefs: its `args[4]` is the VM process's wire [`VERSION`], and
@@ -253,30 +254,30 @@ pub(crate) const UNMAP: u32 = 6;
 pub(crate) const COMMIT: u32 = 7;
 /// Reads the root (`ROOT`): the reply's payload.
 pub(crate) const ROOT: u32 = 8;
-/// What the store holds (`INFO`): the reply's `args`, as [`ExtentInfo`](crate::ExtentInfo)'s
+/// What the cell holds (`INFO`): the reply's `args`, as [`ExtentInfo`](crate::ExtentInfo)'s
 /// fields in order.
 pub(crate) const INFO: u32 = 9;
-/// Creates the store's window, of `args[0]` bytes, which the VM process maps in its own memory as
+/// Creates the cell's window, of `args[0]` bytes, which the VM process maps in its own memory as
 /// the daemon's [stage operations](STAGE_MAP) say. cladefs: a writer's copies on write (backlog
 /// doc-13), of `args[1]` private pages at most, one at least, the VM process's memory, for which
-/// the daemon reserves nothing (TASK-501): a store to a page makes the page private. A follower's
-/// copies nothing, refusing every store, its `args[1]` 0 (`EINVAL` otherwise, as a writer's of
+/// the daemon reserves nothing (TASK-501): a write to a page makes the page private. A follower's
+/// copies nothing, refusing every write, its `args[1]` 0 (`EINVAL` otherwise, as a writer's of
 /// 0). `args[2]` is how many runs of pages the VM process keeps installed at most, each a mapping
 /// of its own, by the mappings the host lets it make ([`OPEN`]'s reply): 0 if it doesn't say, which
 /// the daemon's metrics show (TASK-111.5).
 pub(crate) const WINDOW: u32 = 10;
-/// Resolves the guest's fault at `args[0]` in the window: a store if [`FAULT_WRITE`], on that page
+/// Resolves the guest's fault at `args[0]` in the window: a write if [`FAULT_WRITE`], on that page
 /// alone if [`FAULT_PAGE`]. The stage operations it takes come before the reply.
 pub(crate) const FAULT: u32 = 11;
 /// Acknowledges stage operation `id`, which the VM process has made; and says, as
 /// [`STAGE_COUNTS`] does, what its stage operations have cost it so far.
 pub(crate) const ACK: u32 = 12;
-/// Forks the store, as of its last commit made uploaded, to a new cell, whose handle is a new
+/// Forks the cell, as of its last commit made uploaded, to a new cell, whose handle is a new
 /// directory at the path the payload holds, nothing there (`EEXIST`)
 /// ([`OpenCell::fork`](crate::OpenCell)): a fork the daemon serves, sharing its extents'
-/// pages with the store's. cladefs: a new cell of the store's tenant's, its ID the
+/// pages with the cell's. cladefs: a new cell of the cell's tenant's, its ID the
 /// bucket's to give (`bucket_cell::objectid`, TASK-364), which the reply's `args[0]` is. With
-/// [`FORK_QUIESCENT`], no payload, it makes a version of the store's cell instead, a VM
+/// [`FORK_QUIESCENT`], no payload, it makes a version of the cell instead, a VM
 /// snapshot's, which any number of hosts fork at once and none writes: `EBUSY` unless nothing is
 /// open ([`OpenCell::is_quiescent`](crate::OpenCell::is_quiescent)); the reply's `args[1]`
 /// is its ID. cladefs: with [`FORK_DROP`], no payload, it drops the version `args[0]`, one this
@@ -294,7 +295,7 @@ pub(crate) const MAPPINGS: u32 = 17;
 /// The bytes of a mapping in a [`MAPPINGS`] reply.
 pub(crate) const MAPPING_BYTES: u64 = 6 * 8;
 // 14, 15 and 18 to 20 were requests the host's tools made, of the daemon's stats, and to resize,
-// fork, delete and sync stores by path: the control API's now (TASK-43.5), not reused.
+// fork, delete and sync cells by path: the control API's now (TASK-43.5), not reused.
 /// cladefs: moves a follower's view to the writer's latest commit, whose number is the reply's
 /// `args[0]`, holding what the commits since the one it was as of held, until [`LET_GO`]
 /// ([`OpenCell::advance`](crate::OpenCell::advance)).
@@ -321,10 +322,10 @@ pub(crate) const FREE_MANY: u32 = 26;
 /// The most bytes a transfer area holds.
 pub(crate) const MAX_TRANSFER_AREA: u64 = 64 << 20;
 
-/// cladefs: the most bytes a VM process's DAX window has (`WINDOW`, `EINVAL` past them): a number it
-/// chooses, which sizes what the daemon keeps for it, a mapping a page, and the room it holds its
-/// replies in, whatever else it asks (TASK-150.3). 750 MiB of those at most, of 4 KiB pages; the
-/// suites' guests' 2 GiB windows, and their soak's, are far within it.
+/// cladefs: the most bytes a VM process's DAX window has (`WINDOW`, `EINVAL` past them): a number
+/// it chooses, which sizes what the daemon keeps for it, a mapping a page, and the room it holds
+/// its replies in, whatever else it asks (TASK-150.3). 750 MiB of those at most, of 4 KiB pages;
+/// the suites' guests' 2 GiB windows, and their soak's, are far within it.
 pub(crate) const MAX_WINDOW: u64 = 64 << 30;
 /// cladefs: the stage operations the VM process has made of the connection's, `args[0]`, the
 /// nanoseconds they took it, `args[1]`, and those of them that took access away from pages it had
@@ -336,7 +337,7 @@ pub(crate) const MAX_WINDOW: u64 = 64 << 30;
 pub(crate) const STAGE_COUNTS: u32 = 27;
 /// cladefs: the VM process's build, the commit it was built of ([`crate::BUILD_COMMIT`]), the
 /// payload, [`MAX_BUILD`] bytes at most, of letters, digits, `.`, `_` and `-`: which the daemon's
-/// metrics show by its store's cell (TASK-111.7). Said once, after [`OPEN`], as every VM process
+/// metrics show by its cell (TASK-111.7). Said once, after [`OPEN`], as every VM process
 /// does: refused, the VM process's connection fails (TASK-141.3).
 pub(crate) const BUILD: u32 = 28;
 // 29 was the guest's answer to an ask to seal, writable DAX's (TASK-153.15), not reused.
@@ -344,15 +345,14 @@ pub(crate) const BUILD: u32 = 28;
 pub(crate) const MAX_BUILD: usize = 64;
 /// cladefs: the most bytes a root holds ([`COMMIT_ROOT`], [`WRITE_ROOT`]), `EINVAL` past it: the
 /// extent device's (doc-4's `max_root`, Firecracker's `MAX_ROOT`), which a guest's root is within
-/// (TASK-149.17). A VM process's was as large as a payload, 64 MiB, which its store kept, and wrote
+/// (TASK-149.17). A VM process's was as large as a payload, 64 MiB, which its cell kept, and wrote
 /// with its commits, and which each `ROOT` copied into its reply, uncounted: 16 of them at once
 /// held 768 MiB.
 pub(crate) const MAX_ROOT: usize = storage_device::MAX_ROOT;
-/// cladefs: makes the `args[1]` bytes of the window at `args[0]` private now, as stores to each page
-/// would, mapped writable, for the guest ahead of its accesses: doc-4's `PRIVATE` (backlog
-/// doc-13). `ENOMEM`, none made private, past the window's private pages; `EINVAL` of a
-/// follower's window, which copies nothing. The stage operations it takes come before the
-/// reply.
+/// cladefs: makes the `args[1]` bytes of the window at `args[0]` private now, as writes to each
+/// page would, mapped writable, for the guest ahead of its accesses: doc-4's `PRIVATE` (backlog
+/// doc-13). `ENOMEM`, none made private, past the window's private pages; `EINVAL` of a follower's
+/// window, which copies nothing. The stage operations it takes come before the reply.
 pub(crate) const PRIVATE: u32 = 30;
 /// cladefs: the VM process's answer to the daemon's [`STATS_ASK`] `args[0]`: with [`STATS_GUEST`],
 /// its guest's stats, the payload, UTF-8 text of [`MAX_STATS`] bytes at most, as the guest's
@@ -374,12 +374,12 @@ pub(crate) const MAX_STATS: usize = 64 << 10;
 /// second stage apiece (TASK-92.14). A request of its own rather than a flag of `MAP`'s, as
 /// [`FREE_MANY`] is: a daemon older than it refuses it (`EINVAL`).
 pub(crate) const MAP_MANY: u32 = 32;
-/// cladefs: of the stage operations the VM process has made of the connection's, the runs of private
-/// pages it made, each at once, `args[0]`, the pages they made, `args[1]`, and the nanoseconds
-/// they took it, `args[2]`; and the [`PRIVATE`] requests it made, `args[3]`, and the nanoseconds
-/// it waited for their replies, `args[4]`, so far (`Stats::stage_private_runs`, TASK-164.10): said once
-/// [`STAGE_COUNTS_EVERY`] has passed since it last said, as it makes them, and as it closes the
-/// connection. Nothing replies.
+/// cladefs: of the stage operations the VM process has made of the connection's, the runs of
+/// private pages it made, each at once, `args[0]`, the pages they made, `args[1]`, and the
+/// nanoseconds they took it, `args[2]`; and the [`PRIVATE`] requests it made, `args[3]`, and the
+/// nanoseconds it waited for their replies, `args[4]`, so far (`Stats::stage_private_runs`,
+/// TASK-164.10): said once [`STAGE_COUNTS_EVERY`] has passed since it last said, as it makes them,
+/// and as it closes the connection. Nothing replies.
 pub(crate) const STAGE_PRIVATE_COUNTS: u32 = 33;
 /// cladefs: how long a VM process's stage operations go uncounted at most while it makes them
 /// ([`STAGE_COUNTS`]): within a sample of the daemon's stats file (`CLADEFSD_STATS`).
@@ -389,10 +389,10 @@ pub(crate) const STAGE_COUNTS_EVERY: std::time::Duration = std::time::Duration::
 pub(crate) const OPEN_CREATE: u32 = 1 << 0;
 pub(crate) const OPEN_FORK: u32 = 1 << 1;
 pub(crate) const OPEN_READ_ONLY: u32 = 1 << 2;
-/// cladefs: with [`OPEN_CREATE`], the store made is a SQLite cell, which the
+/// cladefs: with [`OPEN_CREATE`], the cell made is a SQLite cell, which the
 /// sqlite_cladefs VFS alone opens, not an Fxfs one (TASK-364).
 pub(crate) const OPEN_SQLITE: u32 = 1 << 3;
-/// cladefs: with [`OPEN_CREATE`], the store made is a memory cell, a VM's memory
+/// cladefs: with [`OPEN_CREATE`], the cell made is a memory cell, a VM's memory
 /// (TASK-456.2), not an Fxfs one.
 pub(crate) const OPEN_MEMORY: u32 = 1 << 4;
 /// cladefs: doc-4's `MAP_ZEROS`, at its bit. Bit 0 was writable DAX's; doc-4's bits 1 and 2,
@@ -452,11 +452,12 @@ pub(crate) const STAGE_MAPPED: u32 = 106;
 /// is mapped there. Acknowledged ([`STAGE_ACK`]): it takes the page mapped there away, and the
 /// daemon keeps the page it is copied from until it is made.
 pub(crate) const STAGE_PRIVATE: u32 = 108;
-/// The store's capacity is `args[0]` bytes now, which the guest takes (the control API's `ResizeCell`); or, with
-/// [`CAPACITY_ASK`], the guest is asked to shrink to `args[0]` bytes, and answers ([`RESIZED`]).
+/// The cell's capacity is `args[0]` bytes now, which the guest takes (the control API's
+/// `ResizeCell`); or, with [`CAPACITY_ASK`], the guest is asked to shrink to `args[0]` bytes, and
+/// answers ([`RESIZED`]).
 pub(crate) const CAPACITY: u32 = 104;
 pub(crate) const CAPACITY_ASK: u32 = 1 << 0;
-/// cladefs: the writer of a follower's store committed: its latest commit's number is `args[0]`,
+/// cladefs: the writer of a follower's cell committed: its latest commit's number is `args[0]`,
 /// which the follower may [`ADVANCE`] to. Sent once for each run of commits.
 pub(crate) const COMMITTED: u32 = 105;
 /// cladefs: asks the VM process for its stats and its guest's, as of now: ask `args[0]`, which its
@@ -470,9 +471,9 @@ pub(crate) const STAGE_ACK: u32 = 1 << 0;
 /// The most bytes of payload a message carries: a `READ` or `WRITE` of a whole extent, or less.
 pub(crate) const MAX_PAYLOAD: u64 = crate::OpenCell::MAX_EXTENT;
 
-/// cladefs: the most requests a VM process keeps sent and not answered, its replies not yet received
-/// (TASK-79.16): many times what its device's queues and its window's faults have at once. A VM
-/// process past it the daemon lets go.
+/// cladefs: the most requests a VM process keeps sent and not answered, its replies not yet
+/// received (TASK-79.16): many times what its device's queues and its window's faults have at once.
+/// A VM process past it the daemon lets go.
 pub(crate) const MAX_REQUESTS: usize = 4096;
 
 /// cladefs: the most bytes of data a VM process's requests not answered move through the stream
@@ -1052,10 +1053,10 @@ impl Receiver {
         Ok(run)
     }
 
-    /// cladefs: receives the messages already read or waiting whole in the socket, up to 63, as long
-    /// as `take` takes each, in order, none with a payload or descriptors: a read of the socket's,
-    /// at most, that waits for nothing. Bounded, so that what is made of them together, and
-    /// acknowledged once all is, waits for no more. What `take` makes of each, it returns.
+    /// cladefs: receives the messages already read or waiting whole in the socket, up to 63, as
+    /// long as `take` takes each, in order, none with a payload or descriptors: a read of the
+    /// socket's, at most, that waits for nothing. Bounded, so that what is made of them together,
+    /// and acknowledged once all is, waits for no more. What `take` makes of each, it returns.
     fn take_waiting<T>(
         &mut self,
         mut take: impl FnMut(&Header) -> Option<T>,
@@ -1144,8 +1145,8 @@ impl Receiver {
     }
 }
 
-/// cladefs: the receiving half of one of the daemon's connections, on a runtime, which receives every
-/// connection's messages on a few threads rather than a thread each (TASK-34): its socket
+/// cladefs: the receiving half of one of the daemon's connections, on a runtime, which receives
+/// every connection's messages on a few threads rather than a thread each (TASK-34): its socket
 /// non-blocking, read as it is ready.
 pub(crate) struct AsyncReceiver(Socket);
 

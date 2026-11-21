@@ -34,7 +34,7 @@ store that happens-before doesn't hide from it. A model's verdict counts, not an
 - **Classes**, after AtomVChecker: (1) an ordering too weak to publish the state related to it;
   (2) an `AtomicPtr` whose pointee isn't synchronised; (3) an ordering stronger than needed. The
   host crates have no `AtomicPtr`, and no `std::sync::atomic::fence` (`crate::halt`, which
-  halts a store after a panic, is no memory fence).
+  halts a cell after a panic, is no memory fence).
 
 The count, as of 2026-11-15: 326 non-`SeqCst` accesses in the production code of these crates,
 about 90 more in their tests.
@@ -105,7 +105,7 @@ These publish nothing. Each is an RMW or a load of a value that is read as a num
 - physmem: `pmm::{free_count, alloc_failed_no_mem}`; `physmap::create_shared_memory`'s `NEXT`.
 - local_cell: `segments`' timing statics; `written::WRITES`; `framed::{OPENED, UNPACKS}`;
   `framing::SEEN_AHEAD`; `timings`.
-- bucket_cell: `store::Counts` (requests, bytes, failures); `client::Progress::last`;
+- bucket_cell: `object_bucket::Counts` (requests, bytes, failures); `client::Progress::last`;
   `checkpoint`, `fetch` and `sweep` counters; `collector`'s; `bin/cladefs-gc-fill`'s.
 - virtio_extent: `requests::Served`.
 
@@ -113,7 +113,7 @@ These publish nothing. Each is an RMW or a load of a value that is read as a num
 
 The atomics in test modules (`#[cfg(test)]`), in Shuttle builds (whose atomics are `SeqCst`
 whatever they ask) and in `tests/` are switches a test sets before the threads it affects start,
-or counters a test reads after joining them. Examples: `cladefs::bucket`'s `Gated` store (`shut`,
+or counters a test reads after joining them. Examples: `cladefs::bucket`'s `Gated` bucket (`shut`,
 `full`, `held`, `went`, `writes`), `cladefsd::tests`, `cell_table`'s and `cell_requests`' Shuttle
 tests, `follower`'s test listener, and `bucket_cell::{cell, collector, fetch}` tests. The join
 or channel that ends the test orders the read after the writes.

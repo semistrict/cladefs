@@ -2,17 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: how long this process's stores' flushes and framings took, phase by phase: where the
+//! cladefs: how long this process's cells' flushes and framings took, phase by phase: where the
 //! time commits wait to be made durable goes ([`crate::Lags`], TASK-165.9).
 
 use crate::durability::FileSyncs;
 use std::sync::Mutex;
 use std::time::Instant;
 
-/// The phases of a flush ([`crate::LocalCell::flush`]): waiting for the flush before it; syncing its
-/// commits' data files; syncing the directories whose entries they changed; appending their
-/// records to the segments' logs; removing the files they let go of; and removing the raw files
-/// and logs of the segments framed whose commits are durable.
+/// The phases of a flush ([`crate::LocalCell::flush`]): waiting for the flush before it; syncing
+/// its commits' data files; syncing the directories whose entries they changed; appending their
+/// records to the segments' logs; removing the files they let go of; and removing the raw files and
+/// logs of the segments framed whose commits are durable.
 pub const FLUSH_PHASES: [&str; 6] = ["wait", "data", "dirs", "logs", "gone", "raw"];
 
 /// The phases of a framing ([`crate::LocalCell::framing`]): syncing the extents stored on their own
@@ -202,7 +202,7 @@ impl<const N: usize> Timed<N> {
     }
 }
 
-/// How long this process's stores' flushes and framings took; cladefs: and making their segments
+/// How long this process's cells' flushes and framings took; cladefs: and making their segments
 /// framed durable, so many at a time, `durable_segments` of them in all (TASK-310); and, of the
 /// files flushes synced, how long the longest sync of an extent's own file, and of a segment's raw
 /// file, took.
@@ -216,7 +216,7 @@ pub struct Timings {
     pub raw_sync_max_us: u64,
 }
 
-/// [`Timings`] of this process's stores.
+/// [`Timings`] of this process's cells.
 static TIMINGS: Mutex<Timings> = Mutex::new(Timings {
     flushes: Timed::NONE,
     framings: Timed::NONE,
@@ -234,12 +234,12 @@ pub(crate) struct Flush {
     pub synced: FileSyncs,
 }
 
-/// cladefs: how long this process's stores' flushes and framings took ([`Timings`]).
+/// cladefs: how long this process's cells' flushes and framings took ([`Timings`]).
 pub fn timings() -> Timings {
     *TIMINGS.lock().unwrap()
 }
 
-/// A flush of a store of this process's, `flush`, of cell `cell`, ended: one past cladefsd's
+/// A flush of a cell of this process's, `flush`, of cell `cell`, ended: one past cladefsd's
 /// turn said as it happens, what it synced with it, which a daemon killed leaves in its log.
 pub(crate) fn flushed(cell: u64, flush: &Flush) {
     let Flush { phases, commits, synced } = flush;
@@ -273,7 +273,7 @@ fn named<const N: usize>(names: &[&str; N], phases: Phases<N>) -> String {
     format!("{} ms; runnable {:.1} ms", named.join(", "), ms(phases.runnable_us))
 }
 
-/// A framing of a store of this process's, of `segment`, took `phases`: one past cladefsd's turn
+/// A framing of a cell of this process's, of `segment`, took `phases`: one past cladefsd's turn
 /// said as it happens, as a slow flush is ([`flushed`]); cladefs: with `how` it framed it, in place
 /// or not, and what of it it read (TASK-400).
 pub(crate) fn framed(

@@ -2,17 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: Fuchsia's Fxfs, and the extent stores a guest's own Fxfs keeps its filesystem in.
+//! cladefs: Fuchsia's Fxfs, and the cells a guest's own Fxfs keeps its filesystem in.
 //!
 //! cladefs has two uses of Fxfs:
 //!
-//! - **Extent stores** ([`OpenCell`]), which a guest running Fxfs in its own kernel keeps its
-//!   filesystem in, through a VMM's extent-store device (backlog doc-4). On Linux, cladefs's daemon,
-//!   `cladefsd`, one a host (`cladefsd`), serves the stores of a host's VMs, and maps their
+//! - **Open cells** ([`OpenCell`]), which a guest running Fxfs in its own kernel keeps its
+//!   filesystem in, through a VMM's extent-store device (backlog doc-4). On Linux, cladefs's
+//!   daemon, `cladefsd`, one a host (`cladefsd`), serves the cells of a host's VMs, and maps their
 //!   extents into the VMs' DAX windows from one cache of their pages, which the VMs share; a VMM's
 //!   device is a `CellClient`, a connection to it.
 //! - **A filesystem on the host** ([`Filesystem`]), which formats, fills and checks images, such
-//!   as the stores a guest's Fxfs mounts. It is the guest's filesystem too: Fxfs's POSIX layer
+//!   as the volumes a guest's Fxfs mounts. It is the guest's filesystem too: Fxfs's POSIX layer
 //!   (crates/fxfs-posix), which the guest kernel's VFS calls, and the host's filesystem calls as a
 //!   VFS would.
 //!
@@ -47,7 +47,7 @@
 //! - Errors are [`Errno`]s, Linux's values on every host.
 //!
 //! On Linux, [`fuse`] mounts a filesystem with FUSE, for any process to use; `cladefs-mount` mounts
-//! a store so, and cladefsd tenants' cells (`cladefsd::mount`, TASK-475.2).
+//! a cell so, and cladefsd tenants' cells (`cladefsd::mount`, TASK-475.2).
 //!
 //! # Async
 //!
@@ -93,21 +93,21 @@
 //!
 //! # Storage
 //!
-//! An image lives on [`Storage`]: an image, which is a directory holding an extent store, a file
+//! An image lives on [`Storage`]: an image, which is a cell directory, a file
 //! per extent, or memory. Closing an image, or a filesystem mounted from storage, gives its
 //! storage back, which [`Storage::check`] checks.
 //!
 //! An image's I/O bypasses the host's page cache where the host filesystem allows, and runs on
 //! threads of its own. Freeing an extent removes its file.
 //!
-//! An image keeps its cell in a bucket, as every extent store does: a file bucket of its own,
+//! An image keeps its cell in a bucket, as every cell directory does: a file bucket of its own,
 //! in its directory, which its description names (or, on a host of cladefs's system, the host's).
 //! Its commits are uploaded behind them, and closing it waits for them to be; what it frees, the
 //! process collects there after its commits.
 //!
 //! An image can be forked: [`Storage::fork_to`] forks closed storage, and
 //! [`Image::fork_storage_to`] a mounted image's, after writing back its volumes' dirty data.
-//! Forking forks the image's extent store, which shares the image's data rather than copies it,
+//! Forking forks the image's cell directory, which shares the image's data rather than copies it,
 //! whatever it holds, and its cell in its bucket, which the fork shares.
 
 #![deny(missing_docs)]

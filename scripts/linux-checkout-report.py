@@ -36,7 +36,7 @@ HUNDREDS = ["import-median", "import-max", "mount-median", "mount-max", "status-
             "status-warm", "status-synced", "first-overwrite", "first-create", "unmount-all"]
 REBOOTED = ["default-mount", "mount", "status-cold", "status-warm", "mount-others-median",
             "mount-others-max", "unmount-all"]
-# What the host's disk holds that the checkout puts there: stores, buckets and the daemon's part
+# What the host's disk holds that the checkout puts there: cells, buckets and the daemon's part
 # cache, not logs nor the root filesystem.
 DISK = re.compile(r"^(bucket|cladefsd-cache|generation|publisher|publisher\.bucket|sandbox-\d+|"
                   r"hundreds|ext4\.img)$")
@@ -164,7 +164,7 @@ def memory(case, lines):
 
 
 def disk(case, measured):
-    """What each store, bucket and the part cache take of the host's disk after each VM, in
+    """What each cell, bucket and the part cache take of the host's disk after each VM, in
     MiB."""
     host = measured.get("host", {})
     roles, entries = [], []

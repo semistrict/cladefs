@@ -78,7 +78,7 @@ for data in "$results"/logs/*/*/perf.data; do
     rm -f "$data"
 done
 # The guests' root filesystems, copies of the Alpine image (and their images,
-# under Firecracker), and the filesystems' images and stores, which a failed
+# under Firecracker), and the filesystems' images and cells, which a failed
 # case leaves, are not results.
 find "$results/logs" -type d \( -name rootfs -o -name extents -o -name '*.img' \) -prune \
     -exec rm -rf {} +

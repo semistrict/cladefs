@@ -68,7 +68,7 @@ u64 sim_allocs_failed(void);
 
 /*
  * The fake device under the window, which copies on write (doc-13): seals what is open, frees
- * extents. A store to a page mapped read-only makes it private, a MAP or UNMAP over it frees it; it
+ * extents. A write to a page mapped read-only makes it private, a MAP or UNMAP over it frees it; it
  * holds at most a quarter of the window's pages private, unless told otherwise before the mount.
  */
 void sim_device_init(u64 window_len);
@@ -181,7 +181,7 @@ extern unsigned long sim_mm_faults;
 /* Whether a WARN logs and goes on, rather than fails the run. */
 extern bool sim_warns_continue;
 /* A user access, a page at a time: 0, or -EFAULT for a SIGBUS or a SIGSEGV. */
-int sim_user_store(unsigned long addr, const void *buf, size_t len);
+int sim_user_write(unsigned long addr, const void *buf, size_t len);
 int sim_user_load(unsigned long addr, void *buf, size_t len);
 /* How many bytes it copied, without faulting if `pagefault_disabled`, as copy_{to,from}_user. */
 size_t sim_copy_user(unsigned long addr, void *buf, size_t len, bool write);

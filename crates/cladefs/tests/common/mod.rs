@@ -10,7 +10,7 @@
 #[cfg(target_os = "linux")]
 pub mod daemon;
 
-/// Makes this process a host of the multi-node system, as an extent daemon's must be: its stores'
+/// Makes this process a host of the multi-node system, as an extent daemon's must be: its cells'
 /// cells in a bucket in its memory, as of placement 1, unless the test named others.
 pub fn host() {
     // The daemon's log, and the VM processes', on standard error, which a test that fails shows.
@@ -40,7 +40,7 @@ pub fn pattern(seed: u64) -> Vec<u8> {
         .collect()
 }
 
-/// `pages` pages of anonymous memory, which a store's window takes.
+/// `pages` pages of anonymous memory, which a cell's window takes.
 pub fn memory(pages: usize) -> std::ptr::NonNull<u8> {
     let len = pages * cladefs::pages::page_size() as usize;
     // SAFETY: A new anonymous mapping, which nothing else uses.
@@ -94,18 +94,19 @@ pub fn read_window(at: *const u8, len: usize) -> Vec<u8> {
     bytes
 }
 
-/// Writes `bytes` as an extent of `store`, commits, and reads it through a window, which caches
+/// Writes `bytes` as an extent of `client`, commits, and reads it through a window, which caches
 /// its pages in the daemon's memory.
-pub fn cache(store: &CellClient, bytes: &[u8]) {
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    store.write(extent, 0, &[VolatileSlice::from(bytes)]).unwrap();
-    store.commit(None).unwrap();
+pub fn cache(client: &CellClient, bytes: &[u8]) {
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    client.write(extent, 0, &[VolatileSlice::from(bytes)]).unwrap();
+    client.commit(None).unwrap();
     let window = memory(bytes.len() / cladefs::pages::page_size() as usize);
     // SAFETY: The memory is this function's, which it leaks: the window maps it while the
     // process lives.
-    unsafe { store.create_dax_window_in_host_memory(window, bytes.len() as u64, None, 1) }.unwrap();
-    store.map(extent, 0, bytes.len() as u64, 0).unwrap();
-    // SAFETY: The window's memory, whose faults the store serves.
+    unsafe { client.create_dax_window_in_host_memory(window, bytes.len() as u64, None, 1) }
+        .unwrap();
+    client.map(extent, 0, bytes.len() as u64, 0).unwrap();
+    // SAFETY: The window's memory, whose faults its cell serves.
     let mapped = unsafe { std::slice::from_raw_parts(window.as_ptr(), bytes.len()) };
     assert!(mapped == bytes, "the window maps other bytes");
 }

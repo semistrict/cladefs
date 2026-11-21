@@ -6,7 +6,7 @@
 # The sandbox team's performance gate, and copy-on-write DAX's, on the test host (TASK-131.5,
 # TASK-164.5), each run of scripts/test-host.sh a measurement there, alone and on CPUs of its own
 # (CLADEFS_TEST_HOST_BENCH=1). One VM a case (RESULTS/single): pgbench, five runs of a VM, on the
-# guest's Fxfs without a DAX window, and with one, whose stores copy on write, each VM making its
+# guest's Fxfs without a DAX window, and with one, whose writes copy on write, each VM making its
 # database; the same two on a database a base holds, which the VM forks; on ext4 with DAX on
 # virtio-pmem, a static DAX device; on ext4 on virtio-blk, its flushes dropped, the sandbox team's
 # runtime, and each a host fsync (TASK-91.8); and bigmap, a file four times the guest's memory, in a

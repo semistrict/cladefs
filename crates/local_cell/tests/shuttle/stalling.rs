@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! A store's directory whose file system stalls a call, as on a slow disk, for as long as a
+//! A cell directory whose file system stalls a call, as on a slow disk, for as long as a
 //! scenario says: so that Shuttle, whose waits that can't end are deadlocks it reports, shows what
 //! goes on meanwhile.
 

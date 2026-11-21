@@ -164,7 +164,7 @@ class Kept(unittest.TestCase):
 
 
 class Tidy(unittest.TestCase):
-    def test_the_rounds_size_is_kept_and_their_stores_removed(self):
+    def test_the_rounds_size_is_kept_and_their_cells_removed(self):
         """TASK-489: what the rounds wrote, before what is not results goes, tells the nightly
         what room a measurement needs (scripts/nightly.py's room)."""
         directory = Path(tempfile.mkdtemp())

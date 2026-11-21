@@ -16,8 +16,8 @@
 //! A file set may map its files into a window of memory ([`FileSet::open_mapped`], extent_files'
 //! `window`): reads copy from it, and SQLite's memory-mapped I/O reads pages there in place. On
 //! Linux, `daemon`
-//! opens a file set on a store the host's extent daemon serves, whose window holds the daemon's
-//! cache's pages themselves, one copy for every store and VM on the host (TASK-300).
+//! opens a file set on a cell the host's extent daemon serves, whose window holds the daemon's
+//! cache's pages themselves, one copy for every cell and VM on the host (TASK-300).
 
 // Every unsafe block says why it is sound, other threads included (TASK-444.4).
 #![deny(clippy::undocumented_unsafe_blocks)]

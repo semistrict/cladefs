@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! Checkpoints: a cell's state as of a segment (doc-7, Checkpoints): a table of where its extents
-//! are (`extent_frame::table`), as local stores' checkpoints are, whose footer holds the rest of
+//! are (`extent_frame::table`), as local cells' checkpoints are, whose footer holds the rest of
 //! the state. A writer recovering the cell reads it whole; a host after one extent looks it up by
 //! its table ([`Table`]), through its fetcher, which reads the checkpoint's tail, with the footer,
 //! and the part holding one block ([`Fetcher::lookup`](crate::fetch::Fetcher::lookup)).
@@ -16,8 +16,8 @@ use storage_device::ExtentId;
 
 pub use extent_frame::table::TABLE_BLOCK;
 
-/// The checkpoint of `state`. cladefs: authenticated, not encrypted, under the DEK `encrypting` gives:
-/// metadata, which the collector reads holding no key (doc-16, TASK-411.3).
+/// The checkpoint of `state`. cladefs: authenticated, not encrypted, under the DEK `encrypting`
+/// gives: metadata, which the collector reads holding no key (doc-16, TASK-411.3).
 pub fn encode(state: &State, encrypting: layout::EncryptionKey<'_>) -> Vec<u8> {
     let rest = State { extents: Default::default(), ..state.clone() };
     let entries = (state.extents.iter())

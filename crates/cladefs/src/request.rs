@@ -5,11 +5,11 @@
 //! cladefs: the guest request a piece of work is for, end to end (TASK-260), which logs and traces
 //! name: [`current`].
 //!
-//! A guest's virtio extent driver numbers every request it makes of its device (doc-4's `unique`,
-//! a per-device counter from 1), which costs it nothing more: that number is the request's ID. The
+//! A guest's virtio extent driver numbers every request it makes of its device (doc-4's `unique`, a
+//! per-device counter from 1), which costs it nothing more: that number is the request's ID. The
 //! VMM serves each request with it current ([`guest_request`]); the extent daemon's client says it
-//! in each call it makes for the request (`cladefsd::wire::REQUEST`); and the daemon serves each such
-//! call with it current again, with the store its connection serves, since every VM's device
+//! in each call it makes for the request (`cladefsd::wire::REQUEST`); and the daemon serves each
+//! such call with it current again, with the cell its connection serves, since every VM's device
 //! numbers its own requests. So the daemon's log records about a request (`cladefsd::logging`), the
 //! object store's requests made for it among them, name it, as anything that traces it can.
 //!
@@ -30,9 +30,9 @@ pub struct RequestId {
     /// The guest's own number of it, its virtio extent device's `unique` (doc-4): unique among
     /// that device's requests, not among a host's.
     pub guest: NonZeroU64,
-    /// In the extent daemon, the store whose VM process made the call, which tells one VM's device
-    /// from another's: none in the VMM, which serves one device, nor before its store is open.
-    pub store: Option<Arc<str>>,
+    /// In the extent daemon, the cell whose VM process made the call, which tells one VM's device
+    /// from another's: none in the VMM, which serves one device, nor before its cell is open.
+    pub open_cell: Option<Arc<str>>,
 }
 
 thread_local! {
@@ -64,7 +64,7 @@ pub(crate) fn current_guest() -> Option<NonZeroU64> {
 /// `future`, polled with the guest request numbered `guest` current, unless it is 0, no number:
 /// the VMM serves each of the guest's requests so.
 pub fn guest_request<F: Future>(guest: u64, future: F) -> InRequest<F> {
-    within(NonZeroU64::new(guest).map(|guest| RequestId { guest, store: None }), future)
+    within(NonZeroU64::new(guest).map(|guest| RequestId { guest, open_cell: None }), future)
 }
 
 /// `future`, polled with `request`, or none, current: what carries the request current to a
@@ -111,7 +111,7 @@ mod tests {
     use super::*;
 
     fn guest(number: u64) -> Option<RequestId> {
-        Some(RequestId { guest: NonZeroU64::new(number).unwrap(), store: None })
+        Some(RequestId { guest: NonZeroU64::new(number).unwrap(), open_cell: None })
     }
 
     /// A future polled in a guest request has it current at each poll, and none between; guest
@@ -146,7 +146,7 @@ mod tests {
     fn a_request_is_current_where_it_is_carried() {
         let request = Some(RequestId {
             guest: NonZeroU64::new(9).unwrap(),
-            store: Some("/stores/vm1".into()),
+            open_cell: Some("/cells/vm1".into()),
         });
         assert_eq!(within_now(guest(1), || within_now(request.clone(), current)), request);
         assert_eq!(

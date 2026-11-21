@@ -15,7 +15,7 @@ over 2 are in bold. Runs before cladefs left libkrun (TASK-40) measured the defa
 virtio-blk and libkrun's virtio-fs device too, which the others compared with: the report still
 reads them.
 
-When the extent daemon kept stores in a bucket (CLADEFSD_BUCKET), a section after the table
+When the extent daemon kept cells in a bucket (CLADEFSD_BUCKET), a section after the table
 counts its requests by kind, with their estimated cost, and the bytes it uploaded and downloaded,
 from the stats it kept in logs/cladefsd-stats.txt (bucket_cell::object_bucket::Stats::line). Another
 says what the VM processes' requests took the daemon, by kind, and its commits, by phase.
@@ -61,8 +61,8 @@ UPLOADS = ["segments", "extents", "checkpoints", "moves", "other"]
 def daemon_stats(directory, kind):
     """The extent daemon's stats of `kind`, by name, if it kept them: its stats file
     (CLADEFSD_STATS, which scripts/test-e2e.sh sets), a line of `NAME=COUNT` after `KIND:`
-    for each kind: object-store (what it did with object storage, if it kept stores there),
-    followers (what the stores' followers were), daemon (what serving the stores cost it) and
+    for each kind: object-store (what it did with object storage, if it kept cells there),
+    followers (what the cells' followers were), daemon (what serving the cells cost it) and
     requests (the VM processes' requests it served, by kind)."""
     logs = Path(directory) / "logs"
     # A run of a tree from before TASK-503 names it for the daemon's old name, extent[d].
@@ -78,7 +78,7 @@ def daemon_stats(directory, kind):
 
 
 def object_store_stats(directory):
-    """What the extent daemon did with object storage, by name, if it kept stores there."""
+    """What the extent daemon did with object storage, by name, if it kept cells there."""
     return daemon_stats(directory, "object-store")
 
 
@@ -93,7 +93,7 @@ def object_storage(stats):
     """The section of the report on object storage, of `stats`, as lines."""
     lines = [
         "Object storage: the extent daemon's requests to its bucket, for the cases that kept their",
-        "stores there, at GCS Standard single-region prices (class A $0.005 per 1,000, class B",
+        "cells there, at GCS Standard single-region prices (class A $0.005 per 1,000, class B",
         "$0.0004 per 1,000, deletes free).",
         "",
         "| Request | Count | Class | Cost |",
@@ -171,7 +171,7 @@ def served(requests, daemon):
         phases += [
             f"{phase} {each(name):,.1f} µs"
             for phase, name in [
-                ("committing the store", "commit-store-ns"),
+                ("committing the extent store", "commit-store-ns"),
                 ("sealing the windows' mappings", "commit-seal-ns"),
                 ("waiting for object storage", "commit-wait-ns"),
             ]

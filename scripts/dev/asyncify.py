@@ -325,7 +325,7 @@ def apply(asyncs, awaits):
                                    count=1)
                 changed += 1
                 # A test made async runs on a runtime of its own: tokio's, multi-threaded, as
-                # `upload::blocking` and the timers a store's waits take need one.
+                # `upload::blocking` and the timers a cell's waits take need one.
                 for above in range(at - 1, -1, -1):
                     attribute = lines[above].strip()
                     if attribute == "#[test]":

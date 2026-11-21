@@ -40,7 +40,7 @@ struct task_struct {
 	bool killed;
 	/* How often the fault it is in had the kernel drop entries: -1 out of faults. */
 	int fault_drops;
-	/* The page the fault it is in maps, its file's and its index there, and if a store's. */
+	/* The page the fault it is in maps, its file's and its index there, and if a write's. */
 	struct address_space *fault_mapping;
 	pgoff_t fault_pgoff;
 	bool fault_write;

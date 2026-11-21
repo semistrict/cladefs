@@ -6,7 +6,7 @@
 //! doc-10, Moving to a newer generation). A publisher VM keeps a clone of an upstream repo in a
 //! volume and publishes it twice, at upstream's first commit (A) and its second (B); upstream then
 //! makes a third (C), and its own volume is published too, as the remote. A consumer VM, on a
-//! store of its own, runs the automounter on `/repos`, whose asks the host answers as the sandbox
+//! cell of its own, runs the automounter on `/repos`, whose asks the host answers as the sandbox
 //! manager would: `repo` is the first generation, the consumer's checkout; `repo-g1` the second,
 //! the newest generation of `/repos/upstream`, as `git-remote-fxfs` asks; `upstream` the remote.
 //! In the consumer, its checkout at A, with a commit of its own, a change staged, one not and a
@@ -22,7 +22,7 @@
 //!   path) is an ordinary one: a clone through it has all of upstream, and no alternates;
 //!
 //! then the consumer is snapshotted, its volumes frozen, and restored, and the checkout reads
-//! through its alternates still; and rebooted, which reopens its store, and the alternates' path
+//! through its alternates still; and rebooted, which reopens its cell, and the alternates' path
 //! automounts again. The host checks what the sandbox manager was asked.
 
 use macros::{guest, host};

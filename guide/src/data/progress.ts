@@ -13,7 +13,7 @@ export type Mark = "know" | "fuzzy" | "unknown";
 
 /** Where in the guide something happened: the view, and what the reader was looking at. */
 export interface Place {
-  /** The view's name and step, as the reader sees it: "Page Pilot, step 2: A store in fork A". */
+  /** The view's name and step, as the reader sees it: "Page Pilot, step 2: A write in fork A". */
   view: string;
   /** The hash of the view, to find it again. */
   hash: string;

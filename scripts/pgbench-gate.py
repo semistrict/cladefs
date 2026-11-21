@@ -12,7 +12,7 @@ repeat-K/CASE/log.txt), each directory's repeats after the last's:
 - pgbench's (test_fxfs_guest_pgbench.rs): their runs' tps in order, RUNS a VM as the guest's output
   beside the log says (stdout.txt's `OK runs RUNS`), as many VMs as one daemon served
   (CLADEFS_PGBENCH_VMS). On the guest's Fxfs without a DAX window (fxfs-guest-pgbench: no-dax), or
-  with one, its stores copying on write (-dax: dax), each VM making its database; on a database a
+  with one, its writes copying on write (-dax: dax), each VM making its database; on a database a
   base holds, each VM running on a fork of it (fxfs-guest-pgbench-forked, -dax-forked:
   no-dax-forked, dax-forked), its files read in, which DAX maps; so, each VM kept running until the
   last's runs are done, the host's memory measured as each is added (fxfs-guest-pgbench-density,
@@ -32,7 +32,7 @@ It writes them, and the gates, as JSON, and fails unless every gate passes. Each
 least its threshold, or at most for those marked so. Copy-on-write DAX's were set from the first
 run measured, GCE r632 (docs/measurements/dax-cow-gate.md): from its numbers, but for `dax` and
 `forked-dax`: `dax` holds doc-13's expectation, `forked-dax` the user's decision (2026-11-06) that
-copy-on-write DAX's one host round trip a page's first store, measured 0.836 and 0.854 (r650), is
+copy-on-write DAX's one host round trip a page's first write, measured 0.836 and 0.854 (r650), is
 acceptable, with room for noise.
 
 - decay: each guest Fxfs pgbench case's last run of its first VM against its first run (the
@@ -41,7 +41,7 @@ acceptable, with room for noise.
   in the run is files created in the mount, which take the page cache's path (doc-13), at least
   DAX;
 - forked-dax: DAX against no DAX on a base's database, as `dax`: a round trip to the host for
-  each page's first store, nothing after (doc-13 expected 0.9 to 1; 0.84-0.85 measured and
+  each page's first write, nothing after (doc-13 expected 0.9 to 1; 0.84-0.85 measured and
   accepted, TASK-164.10), at least FORKED_DAX;
 - static-dax: DAX against ext4 with DAX on pmem, as `dax`: the gap to a static DAX device, at least
   STATIC_DAX, by default 0, reported and not gated;

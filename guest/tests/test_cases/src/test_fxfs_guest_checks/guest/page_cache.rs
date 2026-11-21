@@ -98,7 +98,7 @@ pub(super) fn test_scattered_writeback() {
 
 /// cladefs: of a large folio, writeback writes the pages written alone (TASK-91.12): a database's
 /// pages, 8 KiB each, written into a file read into large folios, which writeback wrote whole,
-/// a megabyte each. Then a store through a mapping into the same folios, which dirties them
+/// a megabyte each. Then a write through a mapping into the same folios, which dirties them
 /// whole. Read again from the device, the file holds what each wrote.
 pub(super) fn test_partial_writeback() {
     use std::os::unix::fs::FileExt;
@@ -145,12 +145,12 @@ pub(super) fn test_partial_writeback() {
 }
 
 /// cladefs: a page cache writeback that finds no memory keeps what it was to write (TASK-212): of a
-/// file's 16 pages written, its fsync with each of its first 64 allocations that may fail failing in
-/// turn (the debug kernel's fault injection, /proc/thread-self/fail-nth), the fsync failing ENOMEM
-/// or not at all; then the file's clean pages dropped (POSIX_FADV_DONTNEED, drop_caches), which a
-/// writeback that left them clean lost, the store holding the round before, as TASK-207 found of
-/// DAX; then synced and evicted, which reads what was written. Said, and passed, on a kernel
-/// without fault injection: the debug kernel's suites run it (soak-sanitized).
+/// file's 16 pages written, its fsync with each of its first 64 allocations that may fail failing
+/// in turn (the debug kernel's fault injection, /proc/thread-self/fail-nth), the fsync failing
+/// ENOMEM or not at all; then the file's clean pages dropped (POSIX_FADV_DONTNEED, drop_caches),
+/// which a writeback that left them clean lost, the cell holding the round before, as TASK-207
+/// found of DAX; then synced and evicted, which reads what was written. Said, and passed, on a
+/// kernel without fault injection: the debug kernel's suites run it (soak-sanitized).
 pub(super) fn test_writeback_out_of_memory() {
     use std::os::unix::fs::FileExt;
     const PAGES: usize = 16;

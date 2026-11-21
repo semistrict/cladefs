@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: how long a store's hot paths take a call, each looking up an extent's life: a page-in's
-//! `locate`, a view's `locate_view`, a write's opening and finish, and a free; the store holding
+//! cladefs: how long a cell's hot paths take a call, each looking up an extent's life: a page-in's
+//! `locate`, a view's `locate_view`, a write's opening and finish, and a free; the cell holding
 //! tens of thousands of extents, keeping as many freed, and having spent their numbers
 //! (TASK-160.18). A measurement, not a check: ignored, run in release,
 //! `cargo nextest run --release -p local_cell --test hot_path --run-ignored only --no-capture`.
@@ -14,7 +14,7 @@ use storage_device::ExtentId;
 
 const BLOCK: usize = 4096;
 const CELL: bucket_cell::layout::CellId = bucket_cell::layout::test_cell(7);
-/// The extents the store holds, and as many it keeps, freed.
+/// The extents the cell holds, and as many it keeps, freed.
 const EXTENTS: u64 = 20_000;
 /// The rounds of each call timed, over every extent.
 const ROUNDS: u32 = 5;
@@ -36,39 +36,39 @@ async fn hot_paths() {
     let temp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let description = Description { block_size: BLOCK as u32, capacity: 4 << 30, cell: CELL };
     let dir = HostDir::new(temp.path()).unwrap();
-    let store = LocalCell::create(dir, description, Options::default()).unwrap();
+    let cell = LocalCell::create(dir, description, Options::default()).unwrap();
     let data = vec![7u8; BLOCK];
     // Held: 1..=EXTENTS; kept, freed: EXTENTS+1..=2*EXTENTS, their numbers spent.
     for sequence in 1..=2 * EXTENTS {
-        store.write(extent(sequence), 0, &data).await.unwrap();
+        cell.write(extent(sequence), 0, &data).await.unwrap();
         if sequence % 1000 == 0 {
-            store.commit(None).await.unwrap();
+            cell.commit(None).await.unwrap();
         }
     }
     for sequence in EXTENTS + 1..=2 * EXTENTS {
-        store.free(extent(sequence)).unwrap();
+        cell.free(extent(sequence)).unwrap();
     }
-    store.commit(None).await.unwrap();
-    let view = store.view();
+    cell.commit(None).await.unwrap();
+    let view = cell.view();
     let held = || (1..=EXTENTS).map(extent);
     let mut results = Vec::new();
     for _ in 0..ROUNDS {
         let locate = timed(EXTENTS, async || {
             for extent in held() {
-                store.locate(extent, 0, BLOCK as u64).unwrap();
+                cell.locate(extent, 0, BLOCK as u64).unwrap();
             }
         })
         .await;
         let viewed = timed(EXTENTS, async || {
             for extent in held() {
-                store.locate_view(&view, extent, 0, BLOCK as u64).unwrap();
+                cell.locate_view(&view, extent, 0, BLOCK as u64).unwrap();
             }
         })
         .await;
         // Refused: sealed, or spent, as a write to a sealed extent is.
         let refused = timed(2 * EXTENTS, async || {
             for sequence in 1..=2 * EXTENTS {
-                assert!(store.begin_write(extent(sequence), 0, BLOCK as u64).await.is_err());
+                assert!(cell.begin_write(extent(sequence), 0, BLOCK as u64).await.is_err());
             }
         })
         .await;
@@ -78,13 +78,13 @@ async fn hot_paths() {
     let first = 2 * EXTENTS + 1;
     let written = timed(EXTENTS, async || {
         for sequence in first..first + EXTENTS {
-            store.write(extent(sequence), 0, &data).await.unwrap();
+            cell.write(extent(sequence), 0, &data).await.unwrap();
         }
     })
     .await;
     let freed = timed(EXTENTS, async || {
         for sequence in first..first + EXTENTS {
-            store.free(extent(sequence)).unwrap();
+            cell.free(extent(sequence)).unwrap();
         }
     })
     .await;

@@ -2,35 +2,36 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! A VM's memory as a cell of its own (TASK-456.2): a store the host's extent daemon makes as
+//! A VM's memory as a cell of its own (TASK-456.2): one the host's extent daemon makes as
 //! a memory cell (`OPEN_MEMORY`), kept as an `extent_files` file set of one file, [`IMAGE`], the
 //! image of the guest's memory, a page a block. A snapshot writes the pages its guest wrote and
 //! makes the zero ones holes, which store nothing, and commits them at once ([`MemoryCell`]); a
 //! restored VM's next snapshot goes into a fork of its parent's memory ([`MemoryCell::fork`]),
 //! which reads the parent's pages and stores only its own.
 //!
-//! Its device is the daemon's store ([`DaemonDevice`]): its reads of sealed extents are the
-//! daemon's cache's, which every store and VM it serves shares.
+//! Its device is the daemon's extent store ([`DaemonDevice`]): its reads of sealed extents are the
+//! daemon's cache's, which every cell and VM it serves shares.
 //!
 //! **Restored** (TASK-456.3), a VM's memory is the cell's window ([`MemoryCell::window`]): the
 //! daemon's pages of its extents, shared with every VM restored from the same snapshot on the host,
-//! mapped read-only, a page the guest stores to made a private copy of its own, as a DAX window
+//! mapped read-only, a page the guest writes to made a private copy of its own, as a DAX window
 //! copies on write (backlog doc-13). The window maps nothing at first: a fault on a page of a tree
 //! node not mapped yet maps that node's runs first ([`Unmapped`]), on a thread of the cell's own,
 //! as reading the tree blocks, every fault on the node waiting for that one mapping; so a restore
 //! reads the cell's root alone, and what of its tree the guest's touches reach. The node's pages
 //! are installed with it, ahead of the guest's touches: KVM resolves a load of a page installed on
 //! the vCPU, with no fault here, where a page not installed it hands to x86's asynchronous page
-//! fault worker, whose fault is a write, a load's too, which the window can only take for a store,
-//! a private copy (docs/research/kvm-async-pf-and-shared-guest-memory.md). So every write to the
-//! window is a store, and a node's first page alone may be made private for a load. Its private
-//! pages are the guest's memory, reserved nowhere in the daemon: the VM process's cgroup limits
-//! them.
+//! fault worker, whose fault is a write, a load's too, which the window can only take for a guest
+//! write, a private copy (docs/research/kvm-async-pf-and-shared-guest-memory.md). So every write to
+//! the window is a guest write, and a node's first page alone may be made private for a load. Its
+//! private pages are the guest's memory, reserved nowhere in the daemon: the VM process's cgroup
+//! limits them.
 //!
 //! A window maps the cell's runs as they are, a page a block, 4 KiB, and mmap maps nothing smaller
 //! than a host's page, nor at an offset of an extent that isn't a whole one: so a host whose pages
 //! are larger (an arm64 kernel of 16 KiB pages) restores no window, refused as it is made
-//! ([`crate::pages::window_fits_host`]), rather than at the guest's first fault (TASK-722's run, board 5230).
+//! ([`crate::pages::window_fits_host`]), rather than at the guest's first fault (TASK-722's run,
+//! board 5230).
 
 use crate::error::{Errno, Error};
 use crate::{
@@ -49,7 +50,7 @@ use storage_device::DeviceHolder;
 /// The file of a memory cell that is the guest's memory.
 pub const IMAGE: &str = "memory";
 
-/// The store capacity a memory of `size` bytes takes at most: its pages, the tree naming them (a
+/// The cell capacity a memory of `size` bytes takes at most: its pages, the tree naming them (a
 /// node of 170 refs a page) and their owners (8 bytes a page), and room for a commit's worth of
 /// pages written again besides its compactions.
 pub fn capacity(size: u64) -> u64 {
@@ -58,36 +59,36 @@ pub fn capacity(size: u64) -> u64 {
 
 /// A VM's memory, a cell of its own. See the module docs.
 pub struct MemoryCell {
-    store: Arc<CellClient>,
+    client: Arc<CellClient>,
     files: Arc<FileSet>,
     size: u64,
 }
 
 impl MemoryCell {
-    /// The memory cell at `store`, which the daemon listening at `socket` serves, made, a
+    /// The memory cell at `cell_dir`, which the daemon listening at `socket` serves, made, a
     /// memory of `size` bytes of zeros, if it doesn't exist: `EINVAL` for one of another size.
-    pub fn open(socket: &Path, store: &Path, size: u64) -> Result<Self, Error> {
+    pub fn open(socket: &Path, cell_dir: &Path, size: u64) -> Result<Self, Error> {
         let daemon = DaemonConnection::connect(socket)?;
-        Self::over(daemon.open_memory(store, capacity(size))?, size)
+        Self::over(daemon.open_memory(cell_dir, capacity(size))?, size)
     }
 
-    /// The memory cell at `store`, forked from the version `from` of a memory cell if it doesn't
+    /// The memory cell at `cell_dir`, forked from the version `from` of a memory cell if it doesn't
     /// exist: a VM's memory restored from a snapshot, on any host, as its disks are
     /// (docs/integrator-guide.md). `EINVAL` for a memory of another size.
     pub fn open_forked(
         socket: &Path,
-        store: &Path,
+        cell_dir: &Path,
         from: CellVersion,
         size: u64,
     ) -> Result<Self, Error> {
         let daemon = DaemonConnection::connect(socket)?;
-        Self::over(daemon.open_forked(store, from, capacity(size))?, size)
+        Self::over(daemon.open_forked(cell_dir, from, capacity(size))?, size)
     }
 
     /// The memory cell `opened` is, of a memory of `size` bytes, made one of zeros if new.
     fn over(opened: CellClient, size: u64) -> Result<Self, Error> {
-        let store = Arc::new(opened);
-        let device = DeviceHolder::new(DaemonDevice::new(store.clone()).map_err(Error::new)?);
+        let client = Arc::new(opened);
+        let device = DeviceHolder::new(DaemonDevice::new(client.clone()).map_err(Error::new)?);
         let files = FileSet::open(device, Options::default()).map_err(Error::new)?;
         files.open_file(IMAGE, true).map_err(Error::new)?;
         match files.size(IMAGE).map_err(Error::new)? {
@@ -101,7 +102,7 @@ impl MemoryCell {
                     .context(format!("a memory of {held} bytes, not {size}")));
             }
         }
-        Ok(Self { store, files, size })
+        Ok(Self { client, files, size })
     }
 
     /// The bytes of the guest's memory.
@@ -114,9 +115,9 @@ impl MemoryCell {
         self.files.device().block_size() as u64
     }
 
-    /// The store's cell.
+    /// Its cell.
     pub fn cell(&self) -> u64 {
-        self.store.cell()
+        self.client.cell()
     }
 
     /// Writes `pages` at `offset`, whole pages, to be committed by [`MemoryCell::commit`].
@@ -183,19 +184,19 @@ impl MemoryCell {
     /// Makes a version of the cell as of its last commit: a VM snapshot's memory, which any number
     /// of hosts restore at once ([`MemoryCell::open_forked`]), and none writes.
     pub fn make_version(&self) -> Result<CellVersion, Error> {
-        self.store.make_version().map_err(Error::new)
+        self.client.make_version().map_err(Error::new)
     }
 
-    /// Forks the cell, as of its last commit, to a new store at `path`, a memory cell of a
+    /// Forks the cell, as of its last commit, to a new cell at `path`, a memory cell of a
     /// new cell, which reads its pages until it writes its own: its cell.
     pub fn fork(&self, path: &Path) -> Result<u64, Error> {
-        self.store.fork(path).map_err(Error::new)
+        self.client.fork(path).map_err(Error::new)
     }
 
     /// The runs of its window's private pages, by offset in the memory, in order: those the
     /// guest stored to, its own, which its next snapshot writes.
     pub fn private_runs(&self) -> Result<Vec<std::ops::Range<u64>>, Error> {
-        self.store.private_runs().map_err(Error::new)
+        self.client.private_runs().map_err(Error::new)
     }
 
     /// How many private pages its window holds.
@@ -249,7 +250,7 @@ impl MemoryCell {
         let mapper = Mapper {
             nodes: shared.clone(),
             files: Arc::downgrade(&self.files),
-            store: Arc::downgrade(&self.store),
+            client: Arc::downgrade(&self.client),
         };
         std::thread::Builder::new()
             .name("cladefs-memory-nodes".into())
@@ -257,7 +258,7 @@ impl MemoryCell {
             .map_err(Error::new)?;
         let unmapped = Arc::new(Reach { nodes: shared, asks: Mutex::new(asks) });
         // SAFETY: As the caller promises.
-        unsafe { self.store.create_memory_window_in_host_memory(base, size, prefault, unmapped) }
+        unsafe { self.client.create_memory_window_in_host_memory(base, size, prefault, unmapped) }
     }
 
     /// Fails with `EINVAL` unless `len` bytes at `offset` are whole pages within the memory.
@@ -352,7 +353,7 @@ impl Unmapped for Reach {
 struct Mapper {
     nodes: Arc<Nodes>,
     files: Weak<FileSet>,
-    store: Weak<CellClient>,
+    client: Weak<CellClient>,
 }
 
 impl Mapper {
@@ -380,8 +381,8 @@ impl Mapper {
     /// installed takes a load of the guest's no fault here (see the module docs).
     fn map(&self, node: u64) -> Result<(), Error> {
         let gone = || Error::new(Errno::EIO).context("the memory cell went");
-        let (files, store) =
-            (self.files.upgrade().ok_or_else(gone)?, self.store.upgrade().ok_or_else(gone)?);
+        let (files, client) =
+            (self.files.upgrade().ok_or_else(gone)?, self.client.upgrade().ok_or_else(gone)?);
         let start = node * self.nodes.node_bytes;
         let len = self.nodes.node_bytes.min(self.nodes.size - start);
         let mut read = vec![0; len as usize];
@@ -403,8 +404,8 @@ impl Mapper {
                 })
             })
             .collect();
-        store.map_many(&mappings).map_err(Error::new)?;
-        store.prefault(start, len);
+        client.map_many(&mappings).map_err(Error::new)?;
+        client.prefault(start, len);
         Ok(())
     }
 }

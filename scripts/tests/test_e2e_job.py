@@ -3,7 +3,7 @@
 # found in the LICENSE file.
 
 """Tests of scripts/test-e2e-job.sh, which runs scripts/test-e2e.sh with what it writes, the
-cases' stores among it, in the job's temporary directory, on ext4, and copies the results back
+cases' cells among it, in the job's temporary directory, on ext4, and copies the results back
 (TASK-397): here in a tree of its own, test-e2e-job.sh as it is, and in place of test-e2e.sh one
 that says where it ran and leaves what a case leaves, of findmnt one that says the filesystem
 given, and of scripts/contamination.py, under which the cases run (TASK-375), one that says how it
@@ -19,7 +19,7 @@ from pathlib import Path
 from fake_ssh import FXJOB
 from script import SCRIPTS
 
-# test-e2e.sh, which says in its results what it was given, leaves a case's log, its store, its
+# test-e2e.sh, which says in its results what it was given, leaves a case's log, its cell, its
 # guest's root filesystem and image and the daemon's part cache, and ends with $FAKE_STATUS.
 CASES = """#!/bin/bash
 cd "$CLADEFS_E2E_RESULTS"
@@ -115,7 +115,7 @@ class Job(unittest.TestCase):
         self.assertEqual((bucket, arguments), ("no bucket named", ["bench-fs-fxfs-guest-dax"]))
         self.assertEqual((self.tree / "asked").read_text(), f"-no FSTYPE -T {self.tree / 'tmp'}\n")
 
-    def test_the_run_is_a_round_recorded_of_the_disk_its_stores_are_on(self):
+    def test_the_run_is_a_round_recorded_of_the_disk_its_cells_are_on(self):
         # The directory the run wrote in, in the job's temporary one, is the round's disk, and no
         # other: not the results', which is the test host's ZFS home under bench-rounds.sh, unchecked.
         status, errors = self.job("bench-fs-fxfs-guest-dax")
@@ -132,7 +132,7 @@ class Job(unittest.TestCase):
                          ["run", "/round/1", self.given()[0], "--",
                           str(self.tree / "scripts" / "test-e2e.sh"), "case"])
 
-    def test_the_stores_caches_and_root_filesystems_are_no_results(self):
+    def test_the_cells_caches_and_root_filesystems_are_no_results(self):
         status, errors = self.job("--tag", "bench")
         self.assertEqual((status, errors), (0, self.moved()))
         self.assertEqual(files(self.tree / "results"), ["case/log.txt", "given.txt"])
@@ -156,7 +156,7 @@ class Job(unittest.TestCase):
                 status, errors = self.job("case", fstype=fstype)
                 self.assertEqual(
                     (status, errors),
-                    (2, f"{self.tree / 'tmp'} is on {fstype}: the run's stores go on ext4, as a "
+                    (2, f"{self.tree / 'tmp'} is on {fstype}: the run's cells go on ext4, as a "
                         "host's (TMPDIR, fxjob's on its scratch disk)\n"))
                 self.assertEqual(self.left(), ["asked", "bin", "scripts", "tmp"])
 
@@ -171,7 +171,7 @@ class Job(unittest.TestCase):
         status, errors = self.job("case", tmpdir=False)
         self.assertEqual(
             (status, errors),
-            (2, "TMPDIR is unset: the run's stores go in the job's temporary directory, fxjob's "
+            (2, "TMPDIR is unset: the run's cells go in the job's temporary directory, fxjob's "
                 "(run this under fxjob)\n"))
         self.assertEqual(self.left(), ["bin", "scripts", "tmp"])
 
@@ -282,12 +282,12 @@ class Rounds(unittest.TestCase):
         self.assertIn('"CLADEFS_E2E_PREBUILT=$artifacts" "CLADEFS_BENCH_RESULTS=$out" \\\n'
                       '            "$repo/scripts/test-e2e-job.sh" "$out/e2e" "$case" '
                       '> "$out/run.log" 2>&1 || ran=$?', text)
-        # Neither a bucket nor test-e2e.sh's results, the stores with them, in the results'
+        # Neither a bucket nor test-e2e.sh's results, the cells with them, in the results'
         # directory, on whatever filesystem that is (TASK-397).
         self.assertNotIn("CLADEFSD_BUCKET=", text)
         self.assertNotIn("CLADEFS_E2E_RESULTS=", text)
         self.assertNotIn("/scripts/test-e2e.sh\" \"$case\"", text)
-        # Nor the round's record here, of the results' disk: the job's, of its stores' (TASK-375).
+        # Nor the round's record here, of the results' disk: the job's, of its cells' (TASK-375).
         self.assertNotIn("contamination.py", text.split("set -euo pipefail")[1])
 
 

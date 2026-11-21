@@ -13,7 +13,7 @@ use crate::model::{NAMES, Op, Writer};
 use fuchsia_async as fasync;
 use fuchsia_sync::Mutex;
 use fxfs::filesystem::{FxFilesystemBuilder, OpenFxFilesystem};
-use local_cell::{Description, LocalCell, MemDir, Options as StoreOptions, View};
+use local_cell::{Description, LocalCell, MemDir, Options as CellOptions, View};
 use shuttle::scheduler::RandomScheduler;
 use shuttle::{Config, Runner};
 use std::future::Future;
@@ -31,12 +31,12 @@ struct Following {
 
 async fn following() -> Following {
     let description = Description { block_size: 4096, capacity: 64 << 20, cell: CELL };
-    let store = LocalCell::create(MemDir::new(), description, StoreOptions::default()).unwrap();
-    let store = Arc::new(store);
-    let writer = Writer::new(store.clone()).await;
+    let cell = LocalCell::create(MemDir::new(), description, CellOptions::default()).unwrap();
+    let cell = Arc::new(cell);
+    let writer = Writer::new(cell.clone()).await;
     writer.apply(Op::Create(NAMES[0])).await;
     writer.apply(Op::Sync).await;
-    let device = ViewDevice::new(store.clone(), store.view());
+    let device = ViewDevice::new(cell.clone(), cell.view());
     let (view, failing) = (device.view(), device.failing());
     let fs = FxFilesystemBuilder::new().read_only(true).open(DeviceHolder::new(device)).await;
     Following { writer, fs: fs.expect("mounting the follower failed"), view, failing }

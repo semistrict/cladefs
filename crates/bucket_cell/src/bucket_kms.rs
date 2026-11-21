@@ -29,9 +29,9 @@
 //!   again once [`FRESH_FOR`] old, so that a tenant shredded on another host is refused here within
 //!   that time even if this host is not told; dropped at once by `Kms::forget`, which a host told
 //!   the tenant's keys are revoked or destroyed calls (`keys::CachingKms::revoked`).
-//! - **Which KMS a host uses** ([`from_env`]): `CLADEFS_KMS`'s if it names one; else, given a master
-//!   key, this one, over the host's bucket; else none, which every process opening stores refuses
-//!   to start with, naming both (TASK-411.28: every store is encrypted). The cells of other
+//! - **Which KMS a host uses** ([`from_env`]): `CLADEFS_KMS`'s if it names one; else, given a
+//!   master key, this one, over the host's bucket; else none, which every process opening cells
+//!   refuses to start with, naming both (TASK-411.28: every cell is encrypted). The cells of other
 //!   buckets, of other cloud regions, are each under their own bucket's KMS ([`ByBucket`],
 //!   TASK-633.6): the one the registry of buckets names for it, or its own variables do, or the
 //!   bucket KMS over that bucket, its tenants' KEKs kept there.
@@ -336,22 +336,22 @@ impl<B: Bucket> HostKms<B> {
     }
 }
 
-/// Why a host has no KMS ([`from_env`]): neither variable gives one. Every store is encrypted
-/// (TASK-411.28), so a process that opens stores refuses to start so, saying this.
+/// Why a host has no KMS ([`from_env`]): neither variable gives one. Every cell is encrypted
+/// (TASK-411.28), so a process that opens cells refuses to start so, saying this.
 pub fn no_kms() -> String {
     format!(
         "no KMS: {KMS_VAR} names none, and neither {MASTER_KEY_VAR} nor {MASTER_KEY_FILE_VAR} \
-         gives a master key; every store is encrypted (doc-16): set {KMS_VAR} to a KMS's URL, or \
+         gives a master key; every cell is encrypted (doc-16): set {KMS_VAR} to a KMS's URL, or \
          {MASTER_KEY_VAR} to a master key (openssl rand -hex 32) to keep tenants' KEKs in the \
          bucket"
     )
 }
 
-/// The KMS a host's environment chooses, the one place every process that opens stores asks
-/// (cladefsd, cladefsctl, the cladefs CLI's mounts through `cladefs::bucket::kms`; `cladefs-gc`): the KMS
-/// [`KMS_VAR`] names, if it names one; else, given master keys (`CLADEFS_MASTER_KEY` or
+/// The KMS a host's environment chooses, the one place every process that opens cells asks
+/// (cladefsd, cladefsctl, the cladefs CLI's mounts through `cladefs::bucket::kms`; `cladefs-gc`):
+/// the KMS [`KMS_VAR`] names, if it names one; else, given master keys (`CLADEFS_MASTER_KEY` or
 /// `CLADEFS_MASTER_KEY_FILE`), the bucket KMS over `bucket()`, the host's bucket; else refused
-/// ([`no_kms`]), as every store is encrypted (TASK-411.28). A KMS named, or master keys given, that
+/// ([`no_kms`]), as every cell is encrypted (TASK-411.28). A KMS named, or master keys given, that
 /// can't be had is refused, saying why, never what a key holds.
 pub fn from_env<B: Bucket>(
     bucket: impl FnOnce() -> Result<Arc<B>, String>,
@@ -875,8 +875,8 @@ mod tests {
 
     /// AC #3 (TASK-411.27), as TASK-411.28 left it: a KEK object deleted outright, not shredded,
     /// loses what its KEK wrapped: keys under it are refused, as destroyed until a wrap makes the
-    /// tenant a new KEK, then as another KEK's. Its new cells are encrypted under the new one: no cell
-    /// is ever in the clear, so no marker refuses the tenant (TASK-411.19's went).
+    /// tenant a new KEK, then as another KEK's. Its new cells are encrypted under the new one: no
+    /// cell is ever in the clear, so no marker refuses the tenant (TASK-411.19's went).
     #[test]
     fn kek_objects_deleted_outright_lose_what_they_wrapped() {
         let master = Secret::random();
@@ -1027,8 +1027,8 @@ mod tests {
     /// bucket's under the bucket KMS over that bucket, by its own master key, a third's under the
     /// KMS its entry names, none of its KEKs in it. A tenant destroyed in the second is refused
     /// there alone; a master key the registry records that the host has not refuses that bucket's
-    /// cells, as no revocation; a key one bucket's KMS wrapped is refused by another's as
-    /// another bucket's, not as destroyed. Shredding the tenant destroys its KEK in both buckets under a
+    /// cells, as no revocation; a key one bucket's KMS wrapped is refused by another's as another
+    /// bucket's, not as destroyed. Shredding the tenant destroys its KEK in both buckets under a
     /// bucket KMS, naming the third's KMS, which keeps its own.
     #[test]
     fn buckets_cells_are_under_their_own_buckets_kms() {
@@ -1185,7 +1185,7 @@ mod tests {
         assert_eq!(
             kind(&chosen(Some(&bucket))),
             "no KMS: CLADEFS_KMS names none, and neither CLADEFS_MASTER_KEY nor CLADEFS_MASTER_KEY_FILE \
-             gives a master key; every store is encrypted (doc-16): set CLADEFS_KMS to a KMS's URL, or \
+             gives a master key; every cell is encrypted (doc-16): set CLADEFS_KMS to a KMS's URL, or \
              CLADEFS_MASTER_KEY to a master key (openssl rand -hex 32) to keep tenants' KEKs in the \
              bucket"
         );

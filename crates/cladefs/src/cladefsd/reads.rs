@@ -4,24 +4,24 @@
 
 //! cladefs: traces of what VMs read of their cells (TASK-702.1), the evidence a prediction of a
 //! version's reads is to be chosen from. With `CLADEFSD_READ_TRACES` naming a directory, each VM
-//! process's connection records, from its store's opening and for [`WINDOW`], every `READ` its guest
+//! process's connection records, from its cell's opening and for [`WINDOW`], every `READ` its guest
 //! makes, every `MAP` of an extent into its DAX window, and every fault of the window the daemon
-//! resolves: when, since the opening, what of which extent, and how long the guest waited for it.
-//! A `MAP` is the guest's mapping of a file's range it touches; a fault, a VM's first touch of a page
+//! resolves: when, since the opening, what of which extent, and how long the guest waited for it. A
+//! `MAP` is the guest's mapping of a file's range it touches; a fault, a VM's first touch of a page
 //! mapped that is not in memory. A warm host installs a `MAP`'s pages in memory already, and its VM
 //! faults on none of them, so the `MAP`s say what a VM read on a warm host, and the faults which of
 //! the pages it touched on a cold one; a page-in would say neither what a warm host's VM read nor
 //! which reads were read-ahead's.
 //!
 //! A trace is written once, as its connection goes (`server::finish_connection`, off the runtime
-//! through the daemon's seam), to `<cell>-<opened>.reads` in the directory,
-//! the cell in base 32 (`base32_id`) and the opening in milliseconds since the Unix epoch: the first
-//! line [`HEADER`], the second `cell CELL opened MS`, then a line a read,
-//! `AT_US KIND EXTENT_CELL EXTENT_SEQUENCE EXTENT_LEN OFFSET LEN WAITED_US`: times in decimal
-//! microseconds, the extent's ID in base 32, its length (0 where the store can't say, as for an
-//! attached base's) and the range read in hexadecimal, and the kind `read` (a `READ`), `map` (a
-//! `MAP`), `fault` (a load's fault) or `store` (a store's fault, which makes the page private). `scripts/read_prediction.py`
-//! reads them.
+//! through the daemon's seam), to `<cell>-<opened>.reads` in the directory, the cell in base 32
+//! (`base32_id`) and the opening in milliseconds since the Unix epoch: the first line [`HEADER`],
+//! the second `cell CELL opened MS`, then a line a read, `AT_US KIND EXTENT_CELL EXTENT_SEQUENCE
+//! EXTENT_LEN OFFSET LEN WAITED_US`: times in decimal microseconds, the extent's ID in base 32, its
+//! length (0 where the cell can't say, as for an attached base's) and the range read in
+//! hexadecimal, and the kind `read` (a `READ`), `map` (a `MAP`), `fault` (a read's fault) or
+//! `store` (a write's fault, which makes the page private). `scripts/read_prediction.py` reads
+//! them.
 
 use crate::ExtentId;
 use base32_id::Short;
@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
-/// How long after its store's opening a VM's reads are recorded.
+/// How long after its cell's opening a VM's reads are recorded.
 pub(super) const WINDOW: Duration = Duration::from_secs(120);
 
 /// The most reads a trace holds.
@@ -63,10 +63,10 @@ pub(super) fn configure() -> Result<(), String> {
 pub(super) enum Kind {
     /// A `READ`.
     Read,
-    /// A load's fault on its window.
+    /// A read's fault on its window.
     Fault,
-    /// A store's fault on its window, which made the page private.
-    Store,
+    /// A write's fault on its window, which made the page private, `store` in a trace.
+    Write,
     /// A `MAP` of an extent's bytes into its window: the guest's mapping of a file's range it
     /// touches, whose pages a warm host installs without a fault.
     Map,
@@ -77,7 +77,7 @@ impl Kind {
         match self {
             Kind::Read => "read",
             Kind::Fault => "fault",
-            Kind::Store => "store",
+            Kind::Write => "store",
             Kind::Map => "map",
         }
     }
@@ -86,11 +86,11 @@ impl Kind {
 /// A read a trace records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Read {
-    /// When it was made, since the store's opening.
+    /// When it was made, since the cell's opening.
     pub at: Duration,
     pub kind: Kind,
     pub extent: ExtentId,
-    /// The extent's length, 0 if the store can't say.
+    /// The extent's length, 0 if the cell can't say.
     pub extent_len: u64,
     pub offset: u64,
     pub len: u64,
@@ -98,7 +98,7 @@ pub(super) struct Read {
     pub waited: Duration,
 }
 
-/// A VM's reads of its cell, from its store's opening, written once as its connection goes.
+/// A VM's reads of its cell, from its cell's opening, written once as its connection goes.
 pub(super) struct Trace {
     file: PathBuf,
     cell: u64,
@@ -108,13 +108,13 @@ pub(super) struct Trace {
 }
 
 impl Trace {
-    /// A trace of the reads of a VM whose store of `cell` opened now, if the daemon writes traces.
+    /// A trace of the reads of a VM whose cell of `cell` opened now, if the daemon writes traces.
     pub(super) fn opened(cell: u64) -> Option<Self> {
         let dir = DIR.get().get()?.as_ref()?;
         Some(Self::in_dir(dir, cell))
     }
 
-    /// A trace of the reads of a VM whose store of `cell` opened now, written in `dir`.
+    /// A trace of the reads of a VM whose cell of `cell` opened now, written in `dir`.
     fn in_dir(dir: &Path, cell: u64) -> Self {
         let opened_ms = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -123,7 +123,7 @@ impl Trace {
         Self { file, cell, opened_ms, opened: Instant::now(), reads: Mutex::default() }
     }
 
-    /// When the store opened.
+    /// When the cell opened.
     #[cfg(test)]
     fn opened_at(&self) -> Instant {
         self.opened
@@ -181,7 +181,8 @@ mod tests {
     use super::*;
 
     /// A trace's text: its header, its cell and opening, and a line a read, in the order recorded,
-    /// IDs in base 32, ranges in hexadecimal, times in microseconds; reads past the window left out.
+    /// IDs in base 32, ranges in hexadecimal, times in microseconds; reads past the window left
+    /// out.
     #[test]
     fn traces_say_each_read() {
         let dir = tempfile::tempdir().unwrap();
@@ -200,7 +201,7 @@ mod tests {
             0x1000,
         );
         trace.record(Kind::Read, opened + Duration::from_millis(9), extent, 0x30_0000, 0, 0x200);
-        trace.record(Kind::Store, opened + WINDOW + Duration::from_secs(1), extent, 1, 0, 1);
+        trace.record(Kind::Write, opened + WINDOW + Duration::from_secs(1), extent, 1, 0, 1);
         let text = trace.text();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], HEADER);

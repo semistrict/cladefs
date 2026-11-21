@@ -2,19 +2,19 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs's own: what a fork into a new cell costs, encrypted, as every cell is (TASK-411.4, backlog
-//! doc-16): N forks (200) of a store of 64 extents of 64 KiB, each into a new cell of its tenant's,
-//! as every fork a host makes is, timed each, on a memory bucket of the process's, so that what is
-//! timed is the host's own work, the protocol's and the keys'; and the bucket's requests each fork
-//! makes, which a real bucket's round trips multiply. Then the first opening of ten of the forks.
-//! Say:
+//! cladefs's own: what a fork into a new cell costs, encrypted, as every cell is (TASK-411.4,
+//! backlog doc-16): N forks (200) of a cell of 64 extents of 64 KiB, each into a new cell of its
+//! tenant's, as every fork a host makes is, timed each, on a memory bucket of the process's, so
+//! that what is timed is the host's own work, the protocol's and the keys'; and the bucket's
+//! requests each fork makes, which a real bucket's round trips multiply. Then the first opening of
+//! ten of the forks. Say:
 //!
 //! ```sh
 //! cargo run --release -p cladefs-examples --example fork-bench -- [N]
 //! ```
 //!
 //! Under a KMS of its own (a `local:///` one, `CLADEFS_KMS`, keeping tenant 5's KEK), it forks a
-//! store of tenant 5, encrypted, whose forks keep the DEKs they inherit rewrapped under their own
+//! cell of tenant 5, encrypted, whose forks keep the DEKs they inherit rewrapped under their own
 //! cells' KEKs, taken from the host's pool. (Forks in the clear, before TASK-411.28: an old pin's,
 //! `--no-kms` there.) Each request
 //! of the bucket's waits `CLADEFS_BUCKET_LATENCY_MS` more, if set, as a bucket elsewhere's round
@@ -43,38 +43,38 @@ fn main() {
     }
     let tenants: &[(u64, &str)] = &[(5, "encrypted")];
     println!(
-        "{forks} forks into new cells of a store of {EXTENTS} extents of {} KiB",
+        "{forks} forks into new cells of a parent of {EXTENTS} extents of {} KiB",
         EXTENT >> 10
     );
-    // The bench's runtime, made once the environment is set: its stores' uploaders run on it.
+    // The bench's runtime, made once the environment is set: its cells' uploaders run on it.
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     for &(tenant, name) in tenants {
         runtime.block_on(bench(&dir.path().join(format!("tenant-{tenant}")), tenant, name, forks));
     }
 }
 
-/// Forks a store of `tenant`'s `forks` times into new cells, under `dir`, and prints what it took.
+/// Forks a cell of `tenant`'s `forks` times into new cells, under `dir`, and prints what it took.
 async fn bench(dir: &std::path::Path, tenant: u64, name: &str, forks: usize) {
     std::fs::create_dir(dir).unwrap();
     let capacity = 2 * EXTENTS * EXTENT as u64;
-    let store = OpenCell::create_in(dir.join("parent"), capacity, tenant).await;
-    let store = store.unwrap();
+    let parent = OpenCell::create_in(dir.join("parent"), capacity, tenant).await;
+    let parent = parent.unwrap();
     let data = vec![0x5a; EXTENT];
     for sequence in 1..=EXTENTS {
-        let extent = ExtentId { cell: store.cell().id, sequence };
-        store.write(extent, 0, &[VolatileSlice::from(&data[..])]).await.unwrap();
+        let extent = ExtentId { cell: parent.cell().id, sequence };
+        parent.write(extent, 0, &[VolatileSlice::from(&data[..])]).await.unwrap();
     }
-    store.commit(Some(b"root")).await.unwrap();
-    // The pool of the tenant's new cell KEKs, filled as its store opened, off the forks' path.
+    parent.commit(Some(b"root")).await.unwrap();
+    // The pool of the tenant's new cell KEKs, filled as its cell opened, off the forks' path.
     cladefs::bucket::kms().unwrap().filled(tenant).await;
     let mut took = Vec::with_capacity(forks);
-    let before = store.bucket().stats();
+    let before = parent.bucket().stats();
     for n in 0..forks {
         let started = Instant::now();
-        store.fork(dir.join(format!("fork-{n}")), tenant).await.unwrap();
+        parent.fork(dir.join(format!("fork-{n}")), tenant).await.unwrap();
         took.push(started.elapsed());
     }
-    let after = store.bucket().stats();
+    let after = parent.bucket().stats();
     let requests: u64 = after.requests.iter().zip(&before.requests).map(|(a, b)| a - b).sum();
     let mut opened = Vec::with_capacity(OPENED);
     for n in 0..OPENED.min(forks) {

@@ -48,7 +48,7 @@
 # which others' runs fill, no longer loses the status of a job whose tests passed (board 2320,
 # board 2740). fetch writes a gzipped tar of the results to its standard output: but for what
 # aren't results (unresults): the guests' root filesystems (rootfs, their images, and jails), some
-# of whose files (setuid binaries) no one may read; parts caches; and stores, buckets and images,
+# of whose files (setuid binaries) no one may read; parts caches; and cells, buckets and images,
 # by the names the cases give them, which a job killed mid-case leaves, gigabytes of them, its
 # script's own pruning never run (board 1868). cancel ends the job, and clean removes the run's
 # directory, its worktrees with it, once no job runs there; two cleans of one run at once, as a

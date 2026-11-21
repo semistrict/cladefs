@@ -5,7 +5,7 @@
 (* found in the LICENSE file.                                              *)
 (*                                                                         *)
 (* Live read-only followers of a mounted Fxfs (backlog doc-8, TASK-42.8):  *)
-(* the protocol between a writer VM, the store cladefsd serves it from, a   *)
+(* the protocol between a writer VM, the cell cladefsd serves it from, a    *)
 (* follower VM's Fxfs and the readers in that VM, at the level of the      *)
 (* protocol: what each step reads and writes, and in what order.           *)
 (*                                                                         *)
@@ -13,14 +13,14 @@
 (* filesystem (a token renamed between two directories, so that a half-   *)
 (* applied rename shows as the token in neither; files written, a new     *)
 (* extent each time and the old one freed; files deleted). Each commit    *)
-(* seals what it wrote (doc-4), so the store as of a commit is immutable; *)
+(* seals what it wrote (doc-4), so the cell as of a commit is immutable;  *)
 (* its frees are kept while a follower's view may still read them.        *)
 (*                                                                         *)
 (* The follower fetches batches of commits, advancing its device to the   *)
 (* latest; then, holding its fill barrier exclusively (TASK-42.10), drops  *)
 (* the DAX mappings of each file they change and applies them, mutation   *)
 (* by mutation; lets the barrier go; and lets go of the commit it was as  *)
-(* of, which lets the store release what the batch freed.                 *)
+(* of, which lets the cell release what the batch freed.                  *)
 (* It pins the extents of files deleted while a reader has them open (its *)
 (* graveyard).                                                            *)
 (*                                                                         *)
@@ -66,7 +66,7 @@ Tree0 == [k \in Keys |-> IF k = "d1" THEN 1
 Extents == 1..(Cardinality(Files) + MaxCommits)
 
 VARIABLES
-    \* The writer and the store.
+    \* The writer and the cell.
     hist,       \* hist[c + 1]: the writer's tree as of commit c (hist[1], the mount's)
     txs,        \* txs[c]: commit c's mutations, <<key, value>>, in order
     nextExt,    \* the next extent the writer mints
@@ -77,7 +77,7 @@ VARIABLES
     \* The follower.
     ftree,      \* its tree
     applied,    \* the last commit it has applied
-    view,       \* the commit it last let go up to: the store keeps frees after it
+    view,       \* the commit it last let go up to: the cell keeps frees after it
     fphase,     \* "idle", "fetched", "waiting", "dropping", "applying", "lettingGo"
     pending,    \* the batch's mutations not yet applied
     target,     \* the commit the batch ends at
@@ -154,7 +154,7 @@ WriterNext ==
        \/ \E f \in Files : Write(f) \/ Delete(f)
 
 -----------------------------------------------------------------------------
-(* The store (cladefsd). *)
+(* The cell (cladefsd).  *)
 
 \* A kept free goes once the follower's view is past it, unless the graveyard pins it.
 ReleaseOf(kf) ==
@@ -478,7 +478,7 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
-\* The follower, the store and readers once started go on; the writer, and readers starting
+\* The follower, the cell and readers once started go on; the writer, and readers starting
 \* operations, needn't.
 Fairness ==
     /\ WF_vars(FollowerNext)
@@ -487,7 +487,7 @@ Fairness ==
 
 LiveSpec == Spec /\ Fairness
 
-\* A follower that hangs (its VM paused, its kernel stuck): only the store goes on.
+\* A follower that hangs (its VM paused, its kernel stuck): only the cell goes on.
 StalledSpec == Spec /\ WF_vars(StoreNext)
 
 \* Readers are interchangeable (for safety only: TLC's symmetry is unsound for liveness).
@@ -512,7 +512,7 @@ TypeOK ==
 \* What the actions' checks found, by kind.
 \* A read sees whole transactions: a pair read saw a committed prefix, never going back.
 NoTornReads == "pair read saw no committed prefix" \notin errors
-\* No read(2) copies from an extent the store released.
+\* No read(2) copies from an extent the cell released.
 NoReleasedReads == "read(2) of a released extent" \notin errors
 \* A file deleted while a reader has it open reads to its end.
 OpenFilesReadable == "open file deleted, unreadable" \notin errors
@@ -521,7 +521,7 @@ NoGoingBack == "reader went back" \notin errors
 \* And no other kind.
 NoErrors == errors = {}
 
-\* No DAX mapping, while the follower is not cut off, maps an extent the store released.
+\* No DAX mapping, while the follower is not cut off, maps an extent the cell released.
 MappingsLive == ~cutOff => \A m \in mappings : m.e \notin released
 
 \* What the graveyard keeps stays.
@@ -553,7 +553,7 @@ FreesGo ==
 ReadersFinish == \A r \in Readers : (pc[r] # "idle") ~> (pc[r] = "idle" \/ cutOff)
 
 \* A follower holding more than Limit frees is cut off, rather than holding them on: even one
-\* that hangs (StalledSpec), so that no follower can make the writer's store grow unbounded.
+\* that hangs (StalledSpec), so that no follower can make the writer's cell grow unbounded.
 LagCutOff == (Cardinality(kept) > Limit) ~> (cutOff \/ Cardinality(kept) <= Limit)
 
 =============================================================================

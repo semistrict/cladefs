@@ -3,9 +3,10 @@
 // found in the LICENSE file.
 
 //! TASK-443.5, TASK-443.14: what a sandbox's life asks of its bucket, by phase: a restore (a fork
-//! of a version and the fork's first open) on a host that never saw the version and on one that has it
-//! open, a small write and its commit, a clean close, a reopen, a snapshot (a version) of the written
-//! fork, and its deletion, on a base of as many extents as asked for. A measurement, not a check.
+//! of a version and the fork's first open) on a host that never saw the version and on one that has
+//! it open, a small write and its commit, a clean close, a reopen, a snapshot (a version) of the
+//! written fork, and its deletion, on a base of as many extents as asked for. A measurement, not a
+//! check.
 //!
 //! The bucket is one in memory behind [`Recording`], which notes every request that reaches the
 //! object store, the ones `ObjectBucket::stats` leaves out too (the collector's marks), with its
@@ -16,8 +17,8 @@
 //! keys it read more than once.
 //!
 //! Its requests, bytes and round trips are the code's, whatever the build. Its times beside the
-//! bucket's (`wall-ms` less `bucket-ms`: decoding and encoding checkpoints, opening stores) are a
-//! debug build's: cladefs's tests don't build in release (TASK-320).
+//! bucket's (`wall-ms` less `bucket-ms`: decoding and encoding checkpoints, opening open cells) are
+//! a debug build's: cladefs's tests don't build in release (TASK-320).
 
 use super::tests::{idle, kept_in, pattern, reopened, url_of};
 use crate::host_cell::{self, DEFAULT_TENANT};
@@ -40,8 +41,8 @@ use std::time::{Duration, Instant};
 
 const BLOCK: usize = OpenCell::BLOCK_SIZE as usize;
 
-/// How many stores are closed and opened again, a restore after each, to see which of them reads
-/// the base's checkpoint anew: twice what the bucket keeps decoded, and two.
+/// How many open cells are closed and opened again, a restore after each, to see which of them
+/// reads the base's checkpoint anew: twice what the bucket keeps decoded, and two.
 const RESUMES: u32 = 34;
 
 /// How many extents the base's commits hold each: a segment each.
@@ -57,7 +58,7 @@ struct Event {
     key: String,
     up: u64,
     down: u64,
-    /// When it began and was answered, since the store was made.
+    /// When it began and was answered, since the open cell was made.
     began: Duration,
     ended: Duration,
 }
@@ -400,17 +401,17 @@ impl Run {
     }
 }
 
-/// Writes a block to a new extent of `store`'s and commits it, durable.
-async fn write_and_commit(store: &OpenCell) {
-    let info = store.info().unwrap();
+/// Writes a block to a new extent of `open_cell`'s and commits it, durable.
+async fn write_and_commit(open_cell: &OpenCell) {
+    let info = open_cell.info().unwrap();
     let sequence = info.next_sequence.max(info.sequence_floor);
-    let extent = ExtentId { cell: store.cell().id, sequence };
+    let extent = ExtentId { cell: open_cell.cell().id, sequence };
     let data = pattern(sequence as u8, BLOCK);
-    store.write(extent, 0, &[VolatileSlice::from(&data[..])]).await.unwrap();
-    store.commit(None).await.unwrap();
+    open_cell.write(extent, 0, &[VolatileSlice::from(&data[..])]).await.unwrap();
+    open_cell.commit(None).await.unwrap();
 }
 
-/// The store at `path`, opened, uploading only as a commit waits.
+/// The cell directory at `path`, opened, uploading only as a commit waits.
 async fn open(path: &Path) -> OpenCell {
     reopened(path, idle()).await.unwrap()
 }
@@ -439,7 +440,7 @@ impl Made {
     }
 
     /// A copy of the version, made at `name` on the host measured, kept in `bucket`, and opened:
-    /// as the daemon's `CreateCell` with a version, then the store's opening, make it.
+    /// as the daemon's `CreateCell` with a version, then the open cell's opening, make it.
     async fn copied(&self, bucket: &Arc<ObjectBucket>, name: &str) -> OpenCell {
         let ((cell, version), capacity) = (self.version, self.capacity);
         let url = super::tests::url_of(bucket);
@@ -449,7 +450,7 @@ impl Made {
         OpenCell::take_with(self.at(name), (capacity, cell, None), opening()).await.unwrap()
     }
 
-    /// The path of the store `name` on the host measured.
+    /// The path of the open cell `name` on the host measured.
     fn at(&self, name: &str) -> std::path::PathBuf {
         self.dir.path().join("host").join(name)
     }
@@ -486,10 +487,10 @@ async fn based(
     (base.cell(), version)
 }
 
-/// Has `bucket` be the measured host's, as the daemon's stores are made in it, and does what a
+/// Has `bucket` be the measured host's, as the daemon's open cells are made in it, and does what a
 /// host does once, not for each restore: its conditional writes probed, a block of object IDs
-/// taken. Made so without the environment, which the base's stores' threads, and the S3 server's,
-/// may read meanwhile (TASK-444.16).
+/// taken. Made so without the environment, which the base's open cells' threads, and the S3
+/// server's, may read meanwhile (TASK-444.16).
 async fn host(bucket: &Arc<ObjectBucket>) {
     crate::host_cell::use_host_bucket(url_of(bucket));
     bucket.probed(rand::random()).await.unwrap();
@@ -501,7 +502,7 @@ fn memory() -> Arc<dyn ObjectStore> {
     Arc::new(object_store::memory::InMemory::new())
 }
 
-/// How the host measured opens stores: uploading only as a commit waits.
+/// How the host measured opens open cells: uploading only as a commit waits.
 fn opening() -> Opening {
     Opening { keeping: idle(), ..Opening::here().unwrap() }
 }
@@ -588,8 +589,8 @@ async fn lifecycle(extents: u64, latency: Duration) {
     ];
     run.total("life with a resume and a snapshot", &resumed);
 
-    // The states the bucket keeps decoded: after how many resumes of other stores a restore reads
-    // the base's checkpoint again. Not late: its requests and bytes alone.
+    // The states the bucket keeps decoded: after how many resumes of other open cells a restore
+    // reads the base's checkpoint again. Not late: its requests and bytes alone.
     run.late(false);
     let restore = async |run: &Run, name: &str| {
         let (_, asked, events) = run
@@ -641,16 +642,16 @@ async fn bucket_lifecycle_by_phase() {
 
 /// TASK-449: a restore, a fork of a version and its child's first open, asks the bucket what the
 /// protocol needs, at once where it can: a fork, its child's record created, then its reference and
-/// its cell held at once, the head naming the version read, the record made from the version its create left
-/// (4 round trips, one after another); the child's open, its head taken from none, then its record
-/// and its cell read again at once (2), all else known from the fork (`bucket_cell::known`; the
-/// cell read once the head is taken, as its holding from what the fork left writes nothing:
-/// `restores_refused_to_placements_superseded_since_their_forks`). 8 requests in 6 round trips,
-/// where they were 14 in 13. On a host that never saw the version, its store taken first, opened
-/// once, its record read as the take finds it, at once with the collector's marking looked at, then
-/// the base's head and the checkpoint the version names (3): 12 in 9, where they were 25 in 21.
-/// Requests are counted as they reach the object store, round trips as the longest chain of them
-/// each begun once the one before it was answered.
+/// its cell held at once, the head naming the version read, the record made from the version its
+/// create left (4 round trips, one after another); the child's open, its head taken from none, then
+/// its record and its cell read again at once (2), all else known from the fork
+/// (`bucket_cell::known`; the cell read once the head is taken, as its holding from what the fork
+/// left writes nothing: `restores_refused_to_placements_superseded_since_their_forks`). 8 requests
+/// in 6 round trips, where they were 14 in 13. On a host that never saw the version, its open cell
+/// taken first, opened once, its record read as the take finds it, at once with the collector's
+/// marking looked at, then the base's head and the checkpoint the version names (3): 12 in 9, where
+/// they were 25 in 21. Requests are counted as they reach the object store, round trips as the
+/// longest chain of them each begun once the one before it was answered.
 ///
 /// cladefs: those counts were a clear restore's. Every restore is encrypted since TASK-411.28; with
 /// one object a cell, its head (TASK-515), the fork makes its child's head with its keys, a KEK of
@@ -732,8 +733,8 @@ async fn restores_refused_to_placements_superseded_since_their_forks() {
     drop(taken);
 }
 
-/// TASK-449's review: how fast a store's uploads go after `CLADEFS_UPLOAD_RESTORES` restores (8),
-/// against the S3 server in memory, over HTTP: the connections the restores' calls from no
+/// TASK-449's review: how fast an open cell's uploads go after `CLADEFS_UPLOAD_RESTORES` restores
+/// (8), against the S3 server in memory, over HTTP: the connections the restores' calls from no
 /// runtime's task opened stay in the bucket's pool, which the uploads take first; their sockets
 /// are served by the runtime they opened on. `CLADEFS_UPLOAD_MIB` MiB (256) written, in extents of
 /// 1 MiB, then committed, three times. Lines `UPLOADS`.

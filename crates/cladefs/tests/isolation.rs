@@ -3,13 +3,13 @@
 // found in the LICENSE file.
 
 //! TASK-39.2: a VM process reaches the memory of its extent daemon alone, which caches the
-//! extents of the stores the daemon serves: another daemon's cached pages are not in what a VM
+//! extents of the cells the daemon serves: another daemon's cached pages are not in what a VM
 //! process of this one can map. (One daemon serves every tenant, each in an arena of its memory of
 //! its own: tests/tenants.rs, TASK-43.)
 //!
-//! Two daemons, each its own process with its own kernel, serve a store each. Each store's extent,
+//! Two daemons, each its own process with its own kernel, serve a cell each. Each cell's extent,
 //! written, committed and read through a window, is in its daemon's physical memory, which the
-//! VM process of that store holds, and not in the other's.
+//! VM process of that cell holds, and not in the other's.
 
 #![cfg(target_os = "linux")]
 

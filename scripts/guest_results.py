@@ -64,7 +64,7 @@ def repeats_of(results, case):
 def daemon_bytes(path):
     """What the extent daemon whose stats file is `path` downloaded from its bucket against what it
     read, as its last counts say (`object-store:`'s `down`, `daemon:`'s `fetched-bytes`, page-ins of
-    the bucket's data through its part cache, and `page-in-bytes`, of its store's): None if it
+    the bucket's data through its part cache, and `page-in-bytes`, of its cell's): None if it
     says none (TASK-165.12)."""
     last = {}
     for line in path.read_text(errors="replace").splitlines():
@@ -162,7 +162,7 @@ def said(daemon):
     """What `daemon` downloaded against what it read ([`daemon_bytes`]), as a line says it."""
     return (f"{daemon['daemon']}: downloaded {size(daemon['downloaded'])} for "
             f"{size(daemon['bucket_read'])} read of its bucket's, "
-            f"{size(daemon['store_read'])} of its store's")
+            f"{size(daemon['store_read'])} of its cell's")
 
 
 def report(summary):

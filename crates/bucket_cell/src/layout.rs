@@ -4,8 +4,8 @@
 
 //! Where cells keep what, in a bucket, and what the objects hold (doc-7, Layout).
 //!
-//! Numbers in keys are fixed-width base 32 ([`Padded`]), so keys list in numeric order. Objects are read from a
-//! bucket, by ranged reads, as [`crate::object`] reads them.
+//! Numbers in keys are fixed-width base 32 ([`Padded`]), so keys list in numeric order. Objects are
+//! read from a bucket, by ranged reads, as [`crate::object`] reads them.
 
 use base32_id::Padded;
 use serde::de::DeserializeOwned;
@@ -26,17 +26,17 @@ pub struct Child {
 }
 
 /// cladefs: the format of a cell's objects, which its record says first
-/// ([`Record::format`](crate::record::Record::format)): a reader refuses a cell of any other,
-/// newer or older, naming it, and reads none of it (doc-11, rule 1; TASK-141.2). 2: a footer holds
-/// its segment's [`Contents`], with the capacity its commits set, and a checkpoint the cell's
-/// capacity (TASK-165.3); nothing reads 1's, as nothing keeps any (AGENTS.md). 3: a commit may span
+/// ([`Record::format`](crate::record::Record::format)): a reader refuses a cell of any other, newer
+/// or older, naming it, and reads none of it (doc-11, rule 1; TASK-141.2). 2: a footer holds its
+/// segment's [`Contents`], with the capacity its commits set, and a checkpoint the cell's capacity
+/// (TASK-165.3); nothing reads 1's, as nothing keeps any (AGENTS.md). 3: a commit may span
 /// segments, a footer naming the runs in its data of the commit it goes on with
-/// (`Contents::continued`, TASK-92.41); nothing reads 2's. 4: a checkpoint names the cell's
-/// fences, which the collector keeps ([`State::fences`](crate::recovery::State::fences), TASK-371);
-/// nothing reads 3's. 5: a cell's objects are under its tenant's cell's prefix, and footers,
-/// forks and origins name cells with their cells ([`CellId`], TASK-364); nothing reads 4's. 6: a
-/// checkpoint's fences count the cell's strays (TASK-383); nothing reads 5's, whose fences lack
-/// them. 7: a checkpoint names the cell's strays apart from its fences, each void or late
+/// (`Contents::continued`, TASK-92.41); nothing reads 2's. 4: a checkpoint names the cell's fences,
+/// which the collector keeps ([`State::fences`](crate::recovery::State::fences), TASK-371); nothing
+/// reads 3's. 5: a cell's objects are under its tenant's cell's prefix, and footers, forks and
+/// origins name cells with their cells ([`CellId`], TASK-364); nothing reads 4's. 6: a checkpoint's
+/// fences count the cell's strays (TASK-383); nothing reads 5's, whose fences lack them. 7: a
+/// checkpoint names the cell's strays apart from its fences, each void or late
 /// ([`Stray`](crate::recovery::Stray), TASK-388); nothing reads 6's. 8: a version's record says
 /// whether other tenants may fork it ([`Record::shared`](crate::record::Record::shared),
 /// TASK-395.7); nothing reads 7's. 9: everything a cell's collection reads is under the cell's
@@ -47,36 +47,35 @@ pub struct Child {
 /// a KMS, and a record its cell's DEKs, wrapped by its cell's ([`crate::keys`], doc-16,
 /// TASK-411.3); objects are framed in extent_frame's FORMAT 2, encrypted under their cell's DEK
 /// (none in the clear since TASK-411.28, which changed no format), own extents' footers naming
-/// their extents, and moves' the object they are the moves of; nothing reads 9's. 11: a key is written once (TASK-407): segments' and checkpoints'
-/// keys name their writers' epochs, a cell's head ([`head`], [`Head`]) names the segments it
-/// holds and its newest checkpoint, replacing its lease, and footers name no segment they follow;
-/// nothing reads 10's. 12: a fork of a version, made, says so
-/// ([`Made::Clone`](crate::record::Made::Clone)), so that the collector removes a dead cell of
-/// given roots and clones whole (TASK-455); nothing reads 11's. 13: a fork of a version says whether
-/// another than its host resumed it ([`Head::resumed`]), whose
-/// clone's reference is retired marked (TASK-455's review); nothing reads 12's. 14: a cell's head
-/// names its versions, and a footer those made at its end ([`Head::versions`], [`NewVersion`];
-/// doc-18, TASK-476); a fork being made says whether it is of a version or a version; nothing reads
-/// 13's. 15: every number in a key is in base 32 ([`Padded`], TASK-504), as a [`CellId`] is
-/// displayed in its records; nothing reads 14's, whose keys were in hexadecimal. 16: a cell has one
-/// kind (doc-20, TASK-508.1): its object names its one cell and kind, not a map of cells,
-/// and a version names no cut of several cells; nothing reads 15's. 17: forks are of versions
-/// alone: a record names no version, nor a version it is being forked from (TASK-508.2); nothing reads
-/// 16's. 18: no writable forks: a record is its kind, not flags, and a footer names no forks
-/// (TASK-508.3); nothing reads 17's. 19: a cell's head is its one swapped object, holding what its
-/// record and its cell's object held (TASK-515); nothing reads 18's. 20: a bucket has a number, in
-/// its identity object ([`IDENTITY`]), which the high bits of every cell ID it gives carry
-/// ([`crate::identity`], doc-23, TASK-633.9); nothing reads 19's. 21: a cell's head says whether
-/// it is replicated, and names its active configuration ([`Head::replication`], doc-21,
-/// TASK-537.3.1); nothing reads 20's. 22: a version forked into another bucket is mirrored there
-/// (doc-23, Mirrors; TASK-633.8): its pin, a reference of the mirror's own ([`pin`]), and its
-/// marker ([`mirror`]), under the parent's prefix in that bucket; nothing reads 21's. 23: a cell's
-/// head is in its bucket's count of objects, its slots, each written in turn ([`head`],
-/// [`Head::swaps`], TASK-691), as GCS takes about one write a second of an object, and a bucket's
-/// identity holds its settings ([`crate::identity::Settings`]); nothing reads 22's, whose head was
-/// one object. 24: a version's read evidence, what forks of it read of it as they opened, each
-/// tenant's under the version's cell's prefix ([`evidence`], [`crate::evidence`], TASK-702.2);
-/// nothing reads 23's.
+/// their extents, and moves' the object they are the moves of; nothing reads 9's. 11: a key is
+/// written once (TASK-407): segments' and checkpoints' keys name their writers' epochs, a cell's
+/// head ([`head`], [`Head`]) names the segments it holds and its newest checkpoint, replacing its
+/// lease, and footers name no segment they follow; nothing reads 10's. 12: a fork of a version,
+/// made, says so ([`Made::Clone`](crate::record::Made::Clone)), so that the collector removes a
+/// dead cell of given roots and clones whole (TASK-455); nothing reads 11's. 13: a fork of a
+/// version says whether another than its host resumed it ([`Head::resumed`]), whose clone's
+/// reference is retired marked (TASK-455's review); nothing reads 12's. 14: a cell's head names its
+/// versions, and a footer those made at its end ([`Head::versions`], [`NewVersion`]; doc-18,
+/// TASK-476); a fork being made says whether it is of a version or a version; nothing reads 13's.
+/// 15: every number in a key is in base 32 ([`Padded`], TASK-504), as a [`CellId`] is displayed in
+/// its records; nothing reads 14's, whose keys were in hexadecimal. 16: a cell has one kind
+/// (doc-20, TASK-508.1): its object names its one cell and kind, not a map of cells, and a version
+/// names no cut of several cells; nothing reads 15's. 17: forks are of versions alone: a record
+/// names no version, nor a version it is being forked from (TASK-508.2); nothing reads 16's. 18: no
+/// writable forks: a record is its kind, not flags, and a footer names no forks (TASK-508.3);
+/// nothing reads 17's. 19: a cell's head is its one swapped object, holding what its record and its
+/// cell's object held (TASK-515); nothing reads 18's. 20: a bucket has a number, in its identity
+/// object ([`IDENTITY`]), which the high bits of every cell ID it gives carry ([`crate::identity`],
+/// doc-23, TASK-633.9); nothing reads 19's. 21: a cell's head says whether it is replicated, and
+/// names its active configuration ([`Head::replication`], doc-21, TASK-537.3.1); nothing reads
+/// 20's. 22: a version forked into another bucket is mirrored there (doc-23, Mirrors; TASK-633.8):
+/// its pin, a reference of the mirror's own ([`pin`]), and its marker ([`mirror`]), under the
+/// parent's prefix in that bucket; nothing reads 21's. 23: a cell's head is in its bucket's count
+/// of objects, its slots, each written in turn ([`head`], [`Head::swaps`], TASK-691), as GCS takes
+/// about one write a second of an object, and a bucket's identity holds its settings
+/// ([`crate::identity::Settings`]); nothing reads 22's, whose head was one object. 24: a version's
+/// read evidence, what forks of it read of it as they opened, each tenant's under the version's
+/// cell's prefix ([`evidence`], [`crate::evidence`], TASK-702.2); nothing reads 23's.
 pub const FORMAT: u32 = 24;
 
 /// cladefs: the most slots a cell's head is kept in ([`crate::identity::Settings::head_slots`],
@@ -1010,8 +1009,8 @@ impl Head {
         self
     }
 
-    /// cladefs: the head with the versions cut at the ends of the segments `cuts` names, each by its
-    /// number, named too, in order (doc-18, TASK-476): each after the versions named, and its
+    /// cladefs: the head with the versions cut at the ends of the segments `cuts` names, each by
+    /// its number, named too, in order (doc-18, TASK-476): each after the versions named, and its
     /// window, if it asks for one, keeping it and the newest before it alone.
     pub fn naming<'a>(mut self, cuts: impl IntoIterator<Item = (u64, &'a NewVersion)>) -> Self {
         for (at, cut) in cuts {
@@ -1057,7 +1056,7 @@ impl Head {
 pub struct Marks {
     /// The epoch of the collector's lease the pass took.
     pub epoch: u64,
-    /// Its grace period, in milliseconds by the store's clock ([`crate::collector::Options`]):
+    /// Its grace period, in milliseconds by the backend's clock ([`crate::collector::Options`]):
     /// what it found doomed, a pass of no shorter one finds doomed too.
     pub grace: u64,
     /// The objects marked, in the order of their keys.
@@ -1083,8 +1082,8 @@ impl Reference {
 }
 
 /// cladefs: a mirror's marker's bytes ([`mirror`], TASK-633.8): the format of the bucket's objects,
-/// and the epoch of the writer whose checkpoint at the version it copied, as the parent's head named
-/// it, so that the version's state is found by key in the mirror's bucket, its head being in
+/// and the epoch of the writer whose checkpoint at the version it copied, as the parent's head
+/// named it, so that the version's state is found by key in the mirror's bucket, its head being in
 /// another ([`checkpoint`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mirror {
@@ -1118,7 +1117,7 @@ pub struct Marked {
     pub size: u64,
     pub e_tag: Option<String>,
     pub version: Option<String>,
-    /// When it was written, by the store's clock.
+    /// When it was written, by the backend's clock.
     pub modified: u64,
 }
 
@@ -1167,8 +1166,8 @@ pub use extent_frame::{Frame, PART, TRAILER, crc};
 pub type EncryptionKey<'a> = (&'a extent_frame::Secret, extent_frame::KeyId);
 
 /// The bytes of an object of `data` and `footer`, framed (`extent_frame`): the data's parts,
-/// compressed, the footer, the table of where the parts are, then the [`TRAILER`]. cladefs: encrypted
-/// as `encrypting` says (TASK-411.3).
+/// compressed, the footer, the table of where the parts are, then the [`TRAILER`]. cladefs:
+/// encrypted as `encrypting` says (TASK-411.3).
 pub fn with_footer<T: Serialize>(
     data: &[u8],
     footer: &T,
@@ -1184,7 +1183,8 @@ pub fn own_extent(extent: ExtentId, data: &[u8], encrypting: EncryptionKey<'_>) 
 }
 
 /// The data of a whole object [`with_footer`] made, checked against its CRCs, by a reader holding
-/// `keys` (TASK-411.3): none of an object encrypted under a key not of them ([`crate::Error::NoKey`]).
+/// `keys` (TASK-411.3): none of an object encrypted under a key not of them
+/// ([`crate::Error::NoKey`]).
 pub fn data_under(bytes: &[u8], keys: &dyn extent_frame::Keys) -> Result<Vec<u8>, crate::Error> {
     Ok(extent_frame::data(bytes, keys)?)
 }

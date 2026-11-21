@@ -5,7 +5,7 @@
 # Killer: scenarios cow_rebind_skips_dirty
 #
 # TASK-164.4, doc-13: a rebind takes dirty pages too, which no extent holds yet: the MAP of what
-# Fxfs has discards their stores. cow_rebind_skips_dirty.
+# Fxfs has discards their writes. cow_rebind_skips_dirty.
 
 --- a/guest/linux/fs/cladefs/pages.c
 +++ b/guest/linux/fs/cladefs/pages.c

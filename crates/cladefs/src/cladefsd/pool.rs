@@ -4,10 +4,10 @@
 
 //! The threads that serve VM processes' requests, which every connection shares (TASK-34): as
 //! many as requests run at once, up to a bound the host's processors set, not a set of threads per
-//! connection. A thread idle for a while goes. Requests block: on the store's disk, a page-in, a
+//! connection. A thread idle for a while goes. Requests block: on the cell's disk, a page-in, a
 //! guest's acknowledgement, an upload a durable commit waits for. None waits for a request queued
 //! behind it, so a full pool delays requests, and deadlocks none. cladefs: and pools of their own
-//! for the work every store's flushes do behind it (`server::flush_behind`, TASK-92.49), as many
+//! for the work every cell's flushes do behind it (`server::flush_behind`, TASK-92.49), as many
 //! threads as do it at once, up to a bound, not one each.
 
 use std::collections::VecDeque;
@@ -92,8 +92,8 @@ impl Pool {
         true
     }
 
-    /// cladefs: runs `work` on a thread of the pool, as [`Pool::run`] runs a job, and returns what it
-    /// returns, once it has, holding no thread while it waits: none if it panicked or could not
+    /// cladefs: runs `work` on a thread of the pool, as [`Pool::run`] runs a job, and returns what
+    /// it returns, once it has, holding no thread while it waits: none if it panicked or could not
     /// start. The tests' way to see what a job did (board 744, 2406).
     #[cfg(test)]
     pub(super) async fn call<T: Send + 'static>(

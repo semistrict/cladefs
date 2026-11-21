@@ -64,7 +64,7 @@ if part clippy; then
     cargo clippy --manifest-path "$root/Cargo.toml" -p physmem -p cladefs -p virtio_extent \
         --features loom --tests -- -A clippy::all -D warnings
 fi
-# The simulation of bucket_cell's protocol over local_cell's stores (TASK-88): its profiles'
+# The simulation of bucket_cell's protocol over local_cell's extent stores (TASK-88): its profiles'
 # soaks, and its rules' seed searches, each until a seed with the rule off finds what the rule
 # prevents, up to 20,000. Its own part, built with the profile sim, optimized with a debug build's
 # checks: unoptimized, in the suite's build, four searches took 20 to 27 minutes each, which ran
@@ -182,8 +182,8 @@ fi
 # (TASK-79.102), its vCPUs' exits' (TASK-187) and the PCI transport's shared memory BAR's and device
 # IDs' (TASK-267), on Linux alone, which the VMM builds for, with no KVM. With its cladefs feature, as
 # cladefs builds it (scripts/firecracker-cargo.sh), and those its feature gates: the extent
-# device's, its vCPUs' exits', its features pages' and its signal handlers'. Each extent test serves its store from a daemon in its process, a host's:
-# its stores' cells in a bucket in memory, as of placement 1, which without
+# device's, its vCPUs' exits', its features pages' and its signal handlers'. Each extent test serves its cell from a daemon in its process, a host's:
+# its cells in a bucket in memory, as of placement 1, which without
 # CLADEFSD_BUCKET and CLADEFSD_TOKEN fails EIO opening it (TASK-220). userfaultfd-sys's
 # bindgen needs libclang to build it.
 if part firecracker; then

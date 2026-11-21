@@ -2,13 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: what tests of the protocol need (the `testing` feature, TASK-88): a bucket whose requests
-//! take effect when the test says ([`SimBucket`]): in any order, failing before or after taking
-//! effect, or after whoever made them has gone; a writer's creates of segments, if it says, only
-//! once an object at their keys was deleted; and the collector's moves, which a test follows as a
-//! reader does ([`MovesMaps`]). local_cell's simulation of doc-7's protocol runs on it, as this
-//! crate's own tests do. cladefs: and a DEK objects framed outside a writer are encrypted under, and a
-//! ring holding it ([`encrypting`], [`ring`]): nothing is framed in the clear (TASK-411.28).
+//! cladefs: what tests of the protocol need (the `testing` feature, TASK-88): a bucket whose
+//! requests take effect when the test says ([`SimBucket`]): in any order, failing before or after
+//! taking effect, or after whoever made them has gone; a writer's creates of segments, if it says,
+//! only once an object at their keys was deleted; and the collector's moves, which a test follows
+//! as a reader does ([`MovesMaps`]). local_cell's simulation of doc-7's protocol runs on it, as
+//! this crate's own tests do. cladefs: and a DEK objects framed outside a writer are encrypted
+//! under, and a ring holding it ([`encrypting`], [`ring`]): nothing is framed in the clear
+//! (TASK-411.28).
 
 use crate::bucket::{Bucket, ByteRange, Error, Listing, Meta, Object, Page, PutMode, Version};
 use crate::layout::{self, CellId, Kind};
@@ -89,10 +90,10 @@ pub enum Fault {
 ///
 /// cladefs: it may hold the buckets of several cloud regions (TASK-633.10), one queue of requests
 /// for them all, so that a seed orders them all: a request goes to the bucket its key's cell's ID
-/// numbers ([`layout::routed_to`]), as a routed bucket's do, and a key of no cell, or of a cell tests
-/// name, to the bucket of the host asking ([`SimBucket::at`]); bucket 0 the one bucket of a
-/// simulation of one, which routes nothing, its requests and journal as before regions. A region's bucket may be
-/// down ([`SimBucket::down`]).
+/// numbers ([`layout::routed_to`]), as a routed bucket's do, and a key of no cell, or of a cell
+/// tests name, to the bucket of the host asking ([`SimBucket::at`]); bucket 0 the one bucket of a
+/// simulation of one, which routes nothing, its requests and journal as before regions. A region's
+/// bucket may be down ([`SimBucket::down`]).
 #[derive(Default)]
 pub struct SimBucket {
     inner: Arc<Mutex<Inner>>,
@@ -103,7 +104,7 @@ pub struct SimBucket {
     /// cladefs: the bucket of the host asking through it: where keys of no cell go.
     home: u16,
     /// cladefs: whether every request goes to `home`, whatever cell its key is of: the bucket's own
-    /// store ([`SimBucket::own`], TASK-633.8).
+    /// twin ([`SimBucket::own`], TASK-633.8).
     pinned: bool,
 }
 
@@ -117,7 +118,7 @@ impl SimBucket {
         Arc::new(Self { inner: self.inner.clone(), known: self.known.clone(), home, pinned: false })
     }
 
-    /// cladefs: its host's bucket's own store, every request there whatever cell its key is of, as
+    /// cladefs: its host's bucket's own twin, every request there whatever cell its key is of, as
     /// `ObjectBucket::own` is (TASK-633.8).
     pub fn own(&self) -> Arc<Self> {
         let (inner, known) = (self.inner.clone(), self.known.clone());
@@ -332,8 +333,8 @@ impl SimBucket {
         self.inner.lock().unwrap().objects.keys().cloned().collect()
     }
 
-    /// cladefs: the size of every object, by where it is kept ([`SimBucket::stored`]): a copy in one
-    /// region's bucket and its original in another's apart.
+    /// cladefs: the size of every object, by where it is kept ([`SimBucket::stored`]): a copy in
+    /// one region's bucket and its original in another's apart.
     pub fn sizes(&self) -> BTreeMap<String, u64> {
         let inner = self.inner.lock().unwrap();
         (inner.objects.iter()).map(|(at, stored)| (at.clone(), stored.bytes.len() as u64)).collect()
@@ -399,9 +400,9 @@ impl Op {
     }
 
     /// As [`Op::describe_key`], a put's with its bytes' length and its mode, as the journal keeps
-    /// it. cladefs: not a hash of its bytes, as before every object was encrypted (TASK-411.28): each
-    /// is encrypted under keys and salts drawn at random, a run's bytes not another's, their lengths
-    /// the same.
+    /// it. cladefs: not a hash of its bytes, as before every object was encrypted (TASK-411.28):
+    /// each is encrypted under keys and salts drawn at random, a run's bytes not another's, their
+    /// lengths the same.
     fn describe(&self) -> String {
         match self {
             Op::Put(key, bytes, mode) => format!("put {key} {}B {mode:?}", bytes.len()),
@@ -451,7 +452,7 @@ impl Inner {
             Op::GetRange(key, range) => {
                 let bytes = &self.objects.get(&at(&key)).ok_or(Error::NotFound)?.bytes;
                 let len = bytes.len() as u64;
-                // Refused as `object_store` refuses it, as though the store were out of reach: of
+                // Refused as `object_store` refuses it, as though the backend were out of reach: of
                 // no bytes, or beginning past the object's end.
                 let empty = matches!(&range, ByteRange::Bounded(range) if range.is_empty());
                 if empty || !range.begins_within(len) {
@@ -604,7 +605,7 @@ impl Bucket for SimBucket {
     }
 }
 
-/// cladefs: the mirrors in its host's bucket, in its own store (TASK-633.8), as
+/// cladefs: the mirrors in its host's bucket, in its own bucket (TASK-633.8), as
 /// `ObjectBucket`'s.
 impl crate::mirror::Here for SimBucket {
     fn marked(&self, parent: CellId, at: u64) -> futures::future::BoxFuture<'_, bool> {
@@ -661,7 +662,7 @@ impl Direct {
     /// cladefs: a listing of a prefix of no cell's lists every region's bucket, as one: the
     /// simulation's view of them all (TASK-633.10), each object where its key routes it, as a
     /// routed bucket's requests reach it: not the copies a region's bucket keeps of other
-    /// buckets' cells (TASK-633.8), which a view of its own store lists ([`SimBucket::own`]).
+    /// buckets' cells (TASK-633.8), which a view of its own bucket lists ([`SimBucket::own`]).
     fn apply(&self, op: Op) -> Result<Reply, Error> {
         let region = self.0.region_of(op.key());
         let mut inner = self.0.inner.lock().unwrap();
@@ -850,8 +851,8 @@ pub async fn live(bucket: &impl Bucket) -> Result<BTreeMap<CellId, layout::Head>
 /// its own, until two in a row delete and compact nothing: their reports, summed. Two, as a pass
 /// over a dead cell retires the references that kept what its parents' cells reclaim at their next,
 /// and a pass retiring them again deletes nothing (TASK-395.4). It fails as a sweep fails, and
-/// panics after [`SWEEPS`]: passes that never settle are a bug. cladefs: compacting under the tests'
-/// KMS (`keys::testing`), which every test writer encrypts under (TASK-411.28).
+/// panics after [`SWEEPS`]: passes that never settle are a bug. cladefs: compacting under the
+/// tests' KMS (`keys::testing`), which every test writer encrypts under (TASK-411.28).
 pub async fn collect_until_quiet(
     bucket: &impl Bucket,
     options: &crate::collector::Options,
@@ -1090,13 +1091,13 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
             Kind::Hold { .. } => true,
             Kind::Reference { .. } => !retirable.contains(key) && !unnamed.contains(key),
             // Moves naming nothing live stay while what they are of stays, as a pass deletes them
-            // only once it is gone (specs/bucket's doomedKey): of one a fork's ways from seals keep,
-            // for as long as it does (TASK-697).
+            // only once it is gone (specs/bucket's doomedKey): of one a fork's ways from seals
+            // keep, for as long as it does (TASK-697).
             Kind::Moves { .. } => {
                 layout::moved_from(key).is_some_and(|from| needed.contains(&from))
             }
-            // cladefs: a failed head's marks, a day, and a head its maker left unmade, an hour, till
-            // the collector fails it (TASK-691).
+            // cladefs: a failed head's marks, a day, and a head its maker left unmade, an hour,
+            // till the collector fails it (TASK-691).
             Kind::Head { cell, .. } => {
                 let found = crate::head::read(bucket, cell).await.slots();
                 match (crate::bucket::get(bucket, key).await, found.found()) {
@@ -1138,7 +1139,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
     left
 }
 
-/// cladefs: what bucket `number`, whose own store is `own`, keeps of other buckets' cells that it
+/// cladefs: what bucket `number`, whose own bucket is `own`, keeps of other buckets' cells that it
 /// should not, its collectors done ([`uncollected`]'s, of the copies of mirrors, TASK-633.8), and
 /// what it keeps short: `bucket` routed, as its host's requests go, its listing of no cell's
 /// prefix every bucket's own cells' objects, as [`Direct`]'s.
@@ -1256,7 +1257,7 @@ async fn dead(bucket: &impl Bucket, cell: CellId) -> bool {
     })
 }
 
-/// cladefs: whether the copy in bucket `number`, whose own store is `own`, holding `here`, of
+/// cladefs: whether the copy in bucket `number`, whose own bucket is `own`, holding `here`, of
 /// `cell`'s version at `at` is whole, as its marker says ([`uncollected_copies`]): what it lacks if
 /// not, or the hold missing.
 async fn copied_whole(
@@ -1359,7 +1360,7 @@ pub async fn fork_version_given(
     Ok(())
 }
 
-/// cladefs: the ring a reader of `cell`'s store holds, as a host opening it reads it: its head,
+/// cladefs: the ring a reader of `cell` holds, as a host opening it reads it: its head,
 /// its KEK unwrapped by the tests' KMS (`keys::testing`), which every test writer encrypts under
 /// (TASK-411.28).
 pub async fn ring_of(
@@ -1372,7 +1373,7 @@ pub async fn ring_of(
 }
 
 /// cladefs: [`crate::fetch::read`] holding the ring of the cell whose object `location` names
-/// ([`ring_of`]): what a test reads an extent's data by, as a host serving its store would.
+/// ([`ring_of`]): what a test reads an extent's data by, as a host serving its cell would.
 pub async fn read<B: Bucket>(
     bucket: &Arc<B>,
     extent: storage_device::ExtentId,
@@ -1424,7 +1425,7 @@ mod tests {
             ]
         );
 
-        // TASK-633.8: a host's own store takes a key of another bucket's cell in its bucket.
+        // TASK-633.8: a host's own bucket takes a key of another bucket's cell in its bucket.
         let own = first.own();
         let pin = layout::pin(theirs, 3);
         assert_eq!(put(&own, &pin), [format!("@1 put {pin}")]);
@@ -1481,7 +1482,7 @@ mod tests {
     }
 
     /// TASK-79.40: the simulation refuses the ranged reads `object_store` refuses, as it does, as
-    /// though the store were out of reach: of no bytes, or starting past the object's end, as its
+    /// though the backend were out of reach: of no bytes, or starting past the object's end, as its
     /// objects in memory and S3's and GCS's HTTP answers alike; and, as those answers, a suffix of
     /// no bytes, or of an object of none. A range ending past the object's end reads short.
     #[test]
@@ -1529,8 +1530,8 @@ mod tests {
         assert_eq!(block_on(created), Ok(version));
     }
 
-    /// A create that lands and then fails, retried, finds its own object and succeeds; one that finds
-    /// another's does not.
+    /// A create that lands and then fails, retried, finds its own object and succeeds; one that
+    /// finds another's does not.
     #[test]
     fn ambiguous_creates_are_resolved_by_reading_back() {
         use crate::bucket::{Created, create};

@@ -38,7 +38,7 @@
 # The guests' extent stores are served by cladefs's extent daemon, which this
 # starts, as CLADEFSD tells the tests; its control API is beside it, at
 # cladefsd.control, in a directory of their own under /tmp. CLADEFSD_MEMORY
-# caps its memory, in bytes. cladefs: every store of the run is encrypted, under a local KMS of the
+# caps its memory, in bytes. cladefs: every cell of the run is encrypted, under a local KMS of the
 # run's (CLADEFS_KMS), and checked so, holding no key, case by case and at the end (TASK-411.15,
 # below). LIBCLANG_PATH names libclang's directory where
 # llvm-config cannot, and DAX needs access to /dev/userfaultfd (docs/operating-a-host.md).
@@ -361,19 +361,19 @@ sockets=$(mktemp -d /tmp/cladefs-e2e-sockets.XXXXXX)
 chmod 755 "$sockets"
 socket="$sockets/cladefsd.sock"
 control="$sockets/cladefsd.control"
-# cladefs: the run's stores encrypted, as production's tenants' are (TASK-411.15, doc-16): the guest
+# cladefs: the run's cells encrypted, as production's tenants' are (TASK-411.15, doc-16): the guest
 # tests run encrypted only, plaintext covered by the host's suites. A local KMS, beside the
 # sockets, gone with them, not in the results, which runs keep, holding a KEK for every tenant the
 # cases use, the default tenant (0) among them (the runner's `kms`); CLADEFS_KMS names it to every
 # process of the run, the daemon, the cases' own daemons, cladefsctl, cladefs-gc and FUSE mounts, unless
 # it names one already, whose tenants' KEKs are the caller's to make. CLADEFS_E2E_ENCRYPTED has the
-# runner check each case's stores, once it passed, holding no key (test_cases::encrypted): its cells'
+# runner check each case's cells, once it passed, holding no key (test_cases::encrypted): its cells'
 # KEKs, its records' DEKs, its objects' and files' encryptions, and no known plaintext anywhere; and the
-# run's own bucket and part cache at its end. Every store is encrypted since TASK-411.28: its daemon,
+# run's own bucket and part cache at its end. Every cell is encrypted since TASK-411.28: its daemon,
 # cladefsctl, cladefs-gc, FUSE mounts and runner refuse to start without a KMS. A daemon and harness
 # both built before encryption (an A/B's old side, CLADEFS_E2E_PREBUILT, CLADEFS_E2E_ROOT, of an old
 # pin) run in the clear, unchecked, saying so; one of them old and the other not is refused, as
-# neither reads the other's stores: what each run was is in encryption.txt.
+# neither reads the other's cells: what each run was is in encryption.txt.
 kms_dir="$sockets/kms"
 old_daemon='' old_runner=''
 grep -qa CLADEFS_KMS "$cladefsd_bin" || old_daemon=1
@@ -382,7 +382,7 @@ if [[ -n $old_daemon && -n $old_runner ]]; then
     echo "clear: $cladefsd_bin and $runner predate encryption (no CLADEFS_KMS, no \`runner kms\`)" \
         > "$results/encryption.txt"
 elif [[ -n $old_daemon$old_runner ]]; then
-    echo "$cladefsd_bin and $runner: one predates encryption, the other encrypts every store" \
+    echo "$cladefsd_bin and $runner: one predates encryption, the other encrypts every cell" \
         "(TASK-411.28): run a daemon and a harness of one pin" >&2
     exit 1
 else
@@ -394,17 +394,17 @@ else
     echo "encrypted: $CLADEFS_KMS" > "$results/encryption.txt"
 fi
 echo "encryption: $(cat "$results/encryption.txt")" >&2
-# A host keeps stores in a bucket, CLADEFSD_BUCKET's or a file bucket in memory, on tmpfs,
+# A host keeps cells in a bucket, CLADEFSD_BUCKET's or a file bucket in memory, on tmpfs,
 # as of placement 1 unless one is named; what it did with it scripts/bench-report.py reports. Not
-# one in the daemon's memory: the cases open the stores it made in processes of their own (cladefs's
-# Storage), which keep a store's cell in the bucket its description names (TASK-165.6). Its
+# one in the daemon's memory: the cases open the cells it made in processes of their own (cladefs's
+# Storage), which keep a cell in the bucket its description names (TASK-165.6). Its
 # memory is CLADEFSD_MEMORY bytes, if set; otherwise, as production's, a page cache of what
 # of the host's memory, and the run's cgroup's, is free (TASK-358).
-# cladefs: what its stores read from the bucket it keeps in a part cache of its own on disk, as
+# cladefs: what its cells read from the bucket it keeps in a part cache of its own on disk, as
 # production's daemon does (CLADEFSD_PART_CACHE, doc-7), unless CLADEFSD_PART_CACHE says
 # otherwise, empty for none; not this process's, which the cases' own daemons would share
-# (TASK-164.12). In the results' directory, where the cases make their stores: a store goes into
-# the cache by renames, which a store on another filesystem than the cache's refuses (TASK-359).
+# (TASK-164.12). In the results' directory, where the cases make their cells: a cell goes into
+# the cache by renames, which a cell on another filesystem than the cache's refuses (TASK-359).
 # What the run's daemon's stats file and log are called, NAME-stats.txt and NAME.log: as the
 # tree's own helpers read them (scripts/guest_results.py), cladefsd, or the daemon's name before
 # TASK-503 in a tree from before it (CLADEFS_E2E_ROOT, an A/B's base).
@@ -496,7 +496,7 @@ for test in "${tests[@]}"; do
     fi
 done
 # cladefs: the run's own bucket, whole, and its part cache, encrypted and holding no known plaintext,
-# as each case's stores were (TASK-411.15).
+# as each case's cells were (TASK-411.15).
 if [[ -n ${CLADEFS_E2E_ENCRYPTED:-} ]] &&
     ! "$runner" encrypted --bucket "${CLADEFSD_BUCKET:-file://$bucket_dir}" \
         ${cache_dir:+"$cache_dir"} 2> "$results/encrypted.txt"; then
@@ -523,12 +523,12 @@ for (comm, call), count in sorted(seen.items()):
 ' > "$results/seccomp-log.txt"
     echo "seccomp: $(wc -l < "$results/seccomp-log.txt") thread and call pairs refused" >&2
 fi
-# cladefs: the guest stores the DAX windows refused: the guest and the window disagreeing, which fails
+# cladefs: the guest writes the DAX windows refused: the guest and the window disagreeing, which fails
 # the run (TASK-44.12). Not a kernel worker's, the VM processes' logs saying whose (TASK-150.16).
 mapfile -t firecracker_logs < <(find "$results" -name firecracker.log)
 if ! "$root/scripts/dax-refusals.py" "$results/$daemon_file.log" "${firecracker_logs[@]}" \
     > "$results/unexplained-refusals.txt"; then
-    echo "the DAX window refused a guest's stores: see $results/unexplained-refusals.txt" >&2
+    echo "the DAX window refused a guest's writes: see $results/unexplained-refusals.txt" >&2
     status=1
 fi
 # cladefs: the bucket's requests that kept failing, as the daemon logged them (TASK-314): each is

@@ -11,7 +11,7 @@ updated_date: '2026-11-17 01:09'
 on write now: the window maps sealed extents and zeros, read-only, and a page the guest writes is a
 private copy in host memory, which writeback sends as `WRITE`s to new extents, then a commit, as
 without DAX. So a seal never touches the window: no write-protect at the commit (`commit_seal_ns`
-went), no restage, no evacuation, no store waiting for a seal, and a DAX fsync costs what a no-DAX
+went), no restage, no evacuation, no write waiting for a seal, and a DAX fsync costs what a no-DAX
 one does. Section 1 holds, every fsync still sealing for the reasons it gives, but for its first
 bullet's "a commit writes its open extents' data" (`WRITE`s did, before it) and its third
 bullet: no open extent is ever mapped (doc-13's invariant 1), so a seal leaves nothing to protect. Section 2 is a
@@ -29,7 +29,7 @@ or `WRITE_COMMIT`), and doc-4 has a barrier seal every extent written before it.
 extents sealed by the next barrier were settled in doc-4's design review (2026-10-13); appendable
 extents were rejected. What depends on it:
 
-- **Durability is of whole extents.** A commit writes its open extents' data to the store, and the
+- **Durability is of whole extents.** A commit writes its open extents' data to the cell, and the
   host packs sealed extents, in commit order, into segments it uploads and indexes by extent ID
   (doc-4, The host's storage; doc-7). An extent still open after a local commit would have bytes
   in one segment and later bytes in another, and the index, the collector and the bucket would have
@@ -47,7 +47,7 @@ extents were rejected. What depends on it:
 Fxfs never rewrites a committed block in place, so a *committed-but-open* staging extent is
 conceivable: commit its written prefix, keep the rest writable, seal on fork, snapshot, reclaim or
 when it is full. It would save the restage (a new staging extent and its MAP) and the evacuation
-after each fsync. It costs a store format whose extents grow across commits, prefix-level
+after each fsync. It costs an extent store format whose extents grow across commits, prefix-level
 protection of window pages, and seal-on-share in forks, snapshots and followers. Not worth it
 while the cheaper items below remain; revisit if they don't close the gap.
 
@@ -63,7 +63,7 @@ What a DAX commit itself costs, against no DAX:
 | Per commit | DAX | No DAX |
 |---|---|---|
 | The guest's `COMMIT` round trip (`device_commits_ns`) | ~430 us | ~263 us |
-| cladefsd's commit | 126 us: writing open extents 44, store commit 15, sealing the windows' mappings 58, waiting for uploads 9 | ~25 us |
+| cladefsd's commit | 126 us: writing open extents 44, commit to the cell 15, sealing the windows' mappings 58, waiting for uploads 9 | ~25 us |
 | The rest: transport, and the VM process's window changes before the reply | ~304 us | ~238 us |
 
 So on the commit path DAX adds ~100 us in cladefsd, of which writing the data the guest stored
@@ -78,7 +78,7 @@ Off it, the background work costs the transactions directly:
   file's sealed pages (`fxfs_dax_evacuate_file`): ~650 us each, 32 s of holds a 60 s run
   (`dax_evacuate_hold_ns`), a MAP round trip (~400 us) inside it. Reads, writes and faults of that
   file wait meanwhile: PostgreSQL's WAL is evacuated after nearly every commit.
-- **Stores wait for seals**: 10k a run, ~480 us each (`stores_held_by_seals_ns`, 4.9 s).
+- **Writes wait for seals**: 10k a run, ~480 us each (`stores_held_by_seals_ns`, 4.9 s).
 
 So the levers, cheapest first:
 

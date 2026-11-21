@@ -14,7 +14,7 @@
 //!   with no read of the origin's head, whichever host or however long after.
 //! - **What a host learned of a cell it is about to open** ([`Learned`]): its head as its own
 //!   fork or take left it, its slots (TASK-691), and whether it has no head. The
-//!   cell's store, opened next, takes it ([`Known::take`]) in place of its first reads. Each is
+//!   cell, opened next, takes it ([`Known::take`]) in place of its first reads. Each is
 //!   what a read at the moment of the write would have found: so using it is that read, made
 //!   earlier, which every step after allows for: the head's taking, and the cell's holding when it
 //!   writes, are conditional on the version found, going on from what is there if another's write
@@ -31,7 +31,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
 /// What a host learned of a cell before it opens it ([`Known`]): its head, as this host's last
-/// write of it left it, its slots' versions: what the store's taking starts from.
+/// write of it left it, its slots' versions: what the cell's taking starts from.
 #[derive(Clone, Debug)]
 pub struct Learned {
     pub head: Slots,
@@ -45,8 +45,8 @@ pub struct Known {
 }
 
 impl Known {
-    /// How many segments' epochs it keeps: an origin each, of the versions (bases, VM snapshots') the
-    /// host forks.
+    /// How many segments' epochs it keeps: an origin each, of the versions (bases, VM snapshots')
+    /// the host forks.
     const EPOCHS: usize = 1 << 16;
 
     /// How many cells' learnings it keeps, the oldest going first: those of forks not opened

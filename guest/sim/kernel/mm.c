@@ -115,7 +115,7 @@ vm_fault_t finish_fault(struct vm_fault *vmf)
 }
 
 /*
- * A copy isn't one step: it reads its source before it writes its destination, and a store between
+ * A copy isn't one step: it reads its source before it writes its destination, and a write between
  * the two is lost where they overlap, as TASK-122's was: the page copied onto itself.
  */
 unsigned long copy_mc_to_kernel(void *to, const void *from, unsigned long len)
@@ -282,7 +282,7 @@ static void hold(struct vm_area_struct *vma, unsigned long addr)
  * own page unmapped, from every mapping, as a read fault replaces its entry (dax_insert_entry,
  * which patch 0010 stops for a page the entry names), which holds what it unmaps still. A fault's
  * other unmappings are as anything else's: of other ranges, as one evicts a range to make room in
- * the window (cladefs_dax_release), and a store's of its own, as it drops the slice it can't store to
+ * the window (cladefs_dax_release), and a write's of its own, as it drops the slice it can't write to
  * (cladefs_dax_fault_drop_slice), an UNMAP of the range.
  */
 static bool faults_on(struct address_space *mapping, pgoff_t start, pgoff_t nr)
@@ -422,7 +422,7 @@ int pfn_mkclean_range(unsigned long pfn, unsigned long nr_pages, pgoff_t pgoff,
 }
 
 /*
- * A user's PTE maps a window page writably, of `pages` from `page`: what a store could hit, with
+ * A user's PTE maps a window page writably, of `pages` from `page`: what a write could hit, with
  * no fault, however the host maps the page. The address, or 0.
  */
 unsigned long sim_mm_writable_mapping(u64 page, u64 pages)
@@ -639,12 +639,12 @@ void sim_unpin_page(struct page *page)
 
 /* Its pieces, a mapping's each, the file model's calls (kernel/shadow.c). */
 void sim_user_access_begin(struct sim_user_access *access, unsigned long addr, size_t len,
-			   bool store)
+			   bool write)
 {
 	size_t at = 0;
 
 	access->count = 0;
-	access->store = store;
+	access->write = write;
 	while (at < len && access->count < SIM_ACCESS_PIECES) {
 		struct vm_area_struct *vma = find_vma(current->mm, addr + at);
 		size_t part;
@@ -654,8 +654,8 @@ void sim_user_access_begin(struct sim_user_access *access, unsigned long addr, s
 			break;
 		part = min_t(size_t, len - at, vma->vm_end - (addr + at));
 		pos = ((loff_t)vma->vm_pgoff << PAGE_SHIFT) + (addr + at - vma->vm_start);
-		if (store)
-			sim_shadow_store_begin(&access->pieces[access->count].call, vma->vm_file, pos,
+		if (write)
+			sim_shadow_mapped_write_begin(&access->pieces[access->count].call, vma->vm_file, pos,
 					       part);
 		else
 			sim_shadow_read_begin(&access->pieces[access->count].call, vma->vm_file, pos,
@@ -675,14 +675,14 @@ void sim_user_access_end(struct sim_user_access *access, const void *bytes, size
 		size_t at = access->pieces[i].at;
 		size_t got = done > at ? min(done - at, access->pieces[i].len) : 0;
 
-		if (access->store)
-			sim_shadow_store_end(&access->pieces[i].call, bytes ? bytes + at : NULL, got);
+		if (access->write)
+			sim_shadow_mapped_write_end(&access->pieces[i].call, bytes ? bytes + at : NULL, got);
 		else
 			sim_shadow_read_end(&access->pieces[i].call, "a load", bytes + at, got);
 	}
 }
 
-int sim_user_store(unsigned long addr, const void *buf, size_t len)
+int sim_user_write(unsigned long addr, const void *buf, size_t len)
 {
 	struct sim_user_access access;
 	size_t done;

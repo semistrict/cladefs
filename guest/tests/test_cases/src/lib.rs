@@ -2,10 +2,10 @@
 // Copyright 2026 The cladefs Authors: changed for cladefs's guest tests.
 // SPDX-License-Identifier: Apache-2.0
 
-//! cladefs's guest tests: VMs booted with cladefs's Firecracker and guest kernel, each a test case run
-//! by the runner (`runner test --test-case NAME`), its host half here under the `host` feature and
-//! its guest half, in the guest agent, under `guest`. Moved from libkrun's tests (TASK-40), whose
-//! framework this is.
+//! cladefs's guest tests: VMs booted with cladefs's Firecracker and guest kernel, each a test case
+//! run by the runner (`runner test --test-case NAME`), its host half here under the `host` feature
+//! and its guest half, in the guest agent, under `guest`. Moved from libkrun's tests (TASK-40),
+//! whose framework this is.
 
 /// A POSIX ACL xattr's value: its version, then each entry's tag, permissions and id.
 pub fn posix_acl(entries: &[(u16, u16, u32)]) -> Vec<u8> {
@@ -18,7 +18,7 @@ pub fn posix_acl(entries: &[(u16, u16, u32)]) -> Vec<u8> {
     value
 }
 
-// cladefs: the known plaintext cases write, and the check that a run's stores keep none of it in the
+// cladefs: the known plaintext cases write, and the check that a run's cells keep none of it in the
 // clear (TASK-411.15).
 pub mod canary;
 #[cfg(feature = "host")]
@@ -106,8 +106,8 @@ use test_fxfs_guest_script::TestFxfsGuestScript;
 mod test_fxfs_guest_fsx;
 #[cfg(any(feature = "host", target_os = "linux"))]
 use test_fxfs_guest_fsx::TestFxfsGuestFsx;
-// cladefs: hours of mixed load through every crash doc-12 names (TASK-67), its plans and verdicts in
-// `soak`.
+// cladefs: hours of mixed load through every crash doc-12 names (TASK-67), its plans and verdicts
+// in `soak`.
 pub mod soak;
 #[cfg(any(feature = "host", target_os = "linux"))]
 mod test_fxfs_guest_soak;
@@ -129,8 +129,8 @@ mod script_vm;
 #[cfg(feature = "guest")]
 mod kernel_log;
 
-// cladefs: what the guest halves of the guest's Fxfs's tests share: evicting, DAX, a mount's counts,
-// and copying on write's files read in from sealed extents (doc-13).
+// cladefs: what the guest halves of the guest's Fxfs's tests share: evicting, DAX, a mount's
+// counts, and copying on write's files read in from sealed extents (doc-13).
 #[cfg(feature = "guest")]
 mod guest_fxfs;
 

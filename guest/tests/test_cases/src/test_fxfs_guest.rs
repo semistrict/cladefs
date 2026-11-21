@@ -5,17 +5,17 @@
 // Test Fxfs in the guest's kernel (cladefs's TASK-26.1 and TASK-26.6).
 //
 // The host boots the kernel cladefs's scripts/build-guest-kernel.sh builds, which
-// CLADEFS_GUEST_KERNEL names, with an extent-store device on a new store. The
-// guest mounts the store's filesystem with the kernel's Fxfs, writes, links,
+// CLADEFS_GUEST_KERNEL names, with an extent-store device on a new cell. The
+// guest mounts the cell's filesystem with the kernel's Fxfs, writes, links,
 // renames and removes, unmounts and mounts again. After the VM exits, the host
-// mounts the store with its own Fxfs and finds what the guest wrote.
+// mounts the cell with its own Fxfs and finds what the guest wrote.
 //
-// fxfs-guest: the host makes an cladefs filesystem on the store first, with a
+// fxfs-guest: the host makes an cladefs filesystem on the cell first, with a
 // file, and a directory holding a larger file, which the guest lists and reads.
-// fxfs-guest-format: the store holds nothing, and the guest's Fxfs formats it.
-// fxfs-guest-crash: the guest formats the store, fsyncs file after file,
+// fxfs-guest-format: the cell holds nothing, and the guest's Fxfs formats it.
+// fxfs-guest-crash: the guest formats the cell, fsyncs file after file,
 // reporting each once its fsync returns, while another thread does too, and
-// resets the VM in the middle, without syncing. The host checks the store's
+// resets the VM in the middle, without syncing. The host checks the cell's
 // filesystem (fsck), and finds every file the guest reported, whole.
 // fxfs-guest-dax and fxfs-guest-crash-dax: the same with a DAX window, which
 // the guest's Fxfs maps files' data from (on hosts whose pages are 4 KiB,
@@ -79,20 +79,20 @@ impl TestFxfsGuest {
 
     /// cladefs: fxfs-guest-crash-dax-killed: the crash test with DAX, its VM process killed
     /// (SIGKILL) where its guest would reset it, as a host's crash would end it, the extent
-    /// daemon serving the store on, its requests in flight cut off (TASK-119.6).
+    /// daemon serving the cell on, its requests in flight cut off (TASK-119.6).
     pub fn crash_killed() -> Self {
         Self { killed: true, ..Self::crash().with_dax() }
     }
 
-    /// cladefs: fxfs-guest-crash-dax-daemon-killed: the crash test with DAX, on a daemon of its own,
-    /// killed where its guest would reset its VM: of what fsyncs were told, a prefix stays.
+    /// cladefs: fxfs-guest-crash-dax-daemon-killed: the crash test with DAX, on a daemon of its
+    /// own, killed where its guest would reset its VM: of what fsyncs were told, a prefix stays.
     pub fn crash_daemon_killed() -> Self {
         Self { daemon_killed: true, ..Self::crash_killed() }
     }
 
     /// cladefs: fxfs-guest-crash-stray-dax: the crash test with DAX, its guest touching the window
-    /// where nothing is mapped where it would reset its VM: a load or a store, within a page or
-    /// across two, which CLADEFS_CRASH_MS says. That VM stops, and nothing else does: its store
+    /// where nothing is mapped where it would reset its VM: a load or a write, within a page or
+    /// across two, which CLADEFS_CRASH_MS says. That VM stops, and nothing else does: its cell
     /// holds what fsyncs were told, and the daemon serves on (TASK-77).
     pub fn crash_stray() -> Self {
         Self { stray: true, ..Self::crash_killed() }
@@ -101,7 +101,7 @@ impl TestFxfsGuest {
     /// cladefs: fxfs-guest-faults-dax: two writers create, write and fsync files, as the crash
     /// test's do, while the guest's kernel fails their allocations at random, slabs' and pages'
     /// (failslab, fail_page_alloc, its debug build's: CLADEFS_GUEST_KERNEL_BUILD=debug), their
-    /// calls failing as they may; the filesystem complains of nothing, and the store holds every
+    /// calls failing as they may; the filesystem complains of nothing, and the cell holds every
     /// file whose fsync returned (TASK-44.10).
     pub fn faults() -> Self {
         Self { mode: Mode::Faults, dax: true, killed: false, daemon_killed: false, stray: false }
@@ -113,8 +113,8 @@ impl TestFxfsGuest {
     }
 }
 
-/// cladefs: the window of a test that strays out of what it was given, and how much of its start the
-/// test's writers reach: its first half is files' ranges, and regions fill the second from its
+/// cladefs: the window of a test that strays out of what it was given, and how much of its start
+/// the test's writers reach: its first half is files' ranges, and regions fill the second from its
 /// start, of which they use tens of mebibytes in their seconds (GCE r350 mapped 270 MiB in).
 #[cfg_attr(feature = "guest", allow(dead_code))]
 const STRAY_WINDOW: u64 = 1 << 29;
@@ -143,17 +143,17 @@ fn durable_into(writer: u8, index: usize, bytes: &mut [u8]) {
 }
 
 /// The bytes of the unnamed file (O_TMPFILE) the crash test's guest leaves open as its VM stops,
-/// which its store's next mount frees (TASK-26.19.1): large enough that what is left of it once
-/// freed, half, stands out from the store's metadata (some 13 MB once the writers ran).
+/// which its cell's next mount frees (TASK-26.19.1): large enough that what is left of it once
+/// freed, half, stands out from the cell's metadata (some 13 MB once the writers ran).
 const UNNAMED: usize = 48 << 20;
 
-/// cladefs: the crash test's file, a page of `mapped_synced()`, synced, which its guest then stores
-/// a byte to through a mapping, at MAPPED_STORE, as the VM stops (TASK-79.11).
+/// cladefs: the crash test's file, a page of `mapped_synced()`, synced, which its guest then writes
+/// a byte to through a mapping, at MAPPED_WRITE, as the VM stops (TASK-79.11).
 const MAPPED_SYNCED: &str = "mapped-synced";
-const MAPPED_STORE: usize = 100;
+const MAPPED_WRITE: usize = 100;
 
 /// cladefs: the crash test's files whose pages are written again and again, each write then synced
-/// (TASK-119.6): through write(2) and fsync, or stores through a mapping and msync.
+/// (TASK-119.6): through write(2) and fsync, or writes through a mapping and msync.
 const REWRITTEN: [&str; 2] = ["rewritten", "rewritten-mapped"];
 const REWRITTEN_PAGES: usize = 16;
 
@@ -181,8 +181,8 @@ fn resized_byte(at: usize) -> u8 {
     (at % 251) as u8 + 1
 }
 
-/// cladefs: the crash test's directory with a default ACL, durable, and what it created inherits it:
-/// a file and a directory of these names.
+/// cladefs: the crash test's directory with a default ACL, durable, and what it created inherits
+/// it: a file and a directory of these names.
 const INHERITS: &str = "inherits";
 const INHERITS_FILE: &str = "file";
 const INHERITS_DIR: &str = "dir";
@@ -242,7 +242,8 @@ fn pattern(len: usize, seed: u8) -> Vec<u8> {
 
 /// What the guest writes, which the host reads back: more than one of the kernel's
 /// chunks of writes, and not a whole number of blocks, then an append. cladefs: the guest tests'
-/// known plaintext (`crate::canary`), which no file of an encrypted run's stores holds (TASK-411.15).
+/// known plaintext (`crate::canary`), which no file of an encrypted run's cells holds
+/// (TASK-411.15).
 fn written() -> Vec<u8> {
     let mut data = crate::canary::stream((3 << 20) + 777);
     data.extend_from_slice(b"appended\n");
@@ -259,7 +260,7 @@ mod host {
     use cladefs::{Filesystem, Owner, Storage};
     use futures::executor::block_on;
 
-    /// The store's capacity: room for the crash test's unnamed file too.
+    /// The cell's capacity: room for the crash test's unnamed file too.
     const CAPACITY: u64 = 128 << 20;
 
     /// cladefs: doc-12's crash bound: what a daemon crash may lose, the commits ordered, and
@@ -292,8 +293,8 @@ mod host {
             })
     }
 
-    /// cladefs: the files whose fsync returned within [`CRASH_LOSS_BOUND_MS`] before the guest asked
-    /// to be killed, as `output` says: those a daemon killed may lose, short or empty.
+    /// cladefs: the files whose fsync returned within [`CRASH_LOSS_BOUND_MS`] before the guest
+    /// asked to be killed, as `output` says: those a daemon killed may lose, short or empty.
     fn synced_at_the_kill(output: &str) -> std::collections::BTreeSet<(u8, usize)> {
         let killing = output.lines().find_map(|line| line.strip_prefix(KILLING));
         let killing = killing.and_then(|at| at.strip_suffix("ms"));
@@ -304,11 +305,11 @@ mod host {
         synced(output).filter(|(_, at)| at.is_some_and(recent)).map(|(file, _)| file).collect()
     }
 
-    /// cladefs: of the files each writer's fsync returned for, in its order, those that stayed, with
-    /// what was written, followed by those lost: a commit stays only with those before it (doc-12:
-    /// up to 50 ms of them go with a daemon). One lost may be there, short or empty, its creation
-    /// durable, its data not, if its fsync returned just before the kill (`recent`, TASK-165.9).
-    /// Returns how many went.
+    /// cladefs: of the files each writer's fsync returned for, in its order, those that stayed,
+    /// with what was written, followed by those lost: a commit stays only with those before it
+    /// (doc-12: up to 50 ms of them go with a daemon). One lost may be there, short or empty, its
+    /// creation durable, its data not, if its fsync returned just before the kill (`recent`,
+    /// TASK-165.9). Returns how many went.
     fn assert_kept_prefix(
         fs: &Filesystem,
         synced: &[(u8, usize)],
@@ -359,12 +360,13 @@ mod host {
         assert_eq!(synced_files(output), vec![(1, 2), (4, 5)]);
     }
 
-    /// cladefs: the files whose fsync returned within [`CRASH_LOSS_BOUND_MS`] before the guest asked
-    /// to be killed, as it says, are those a daemon killed may leave short; none if it says not
-    /// when, or a line cut short says not when (TASK-165.9).
+    /// cladefs: the files whose fsync returned within [`CRASH_LOSS_BOUND_MS`] before the guest
+    /// asked to be killed, as it says, are those a daemon killed may leave short; none if it says
+    /// not when, or a line cut short says not when (TASK-165.9).
     #[test]
     fn files_synced_just_before_the_kill_are_recent() {
-        // Two files synced before the bound began, one just within it, one whose line was cut short.
+        // Two files synced before the bound began, one just within it, one whose line was cut
+        // short.
         let kill = 2 * CRASH_LOSS_BOUND_MS + 300;
         let bound = kill - CRASH_LOSS_BOUND_MS;
         let (old, older, recent) = (bound - 50, bound - 300, bound + 1);
@@ -439,9 +441,9 @@ mod host {
                 None
             };
             if self.mode == Mode::Crash {
-                // cladefs: when the VM stops, from when its writers begin: CLADEFS_CRASH_MS, to replay
-                // a run, or else a time of the run's own, before the writers fill the store, and
-                // with DAX after its store through a mapping (TASK-119.6).
+                // cladefs: when the VM stops, from when its writers begin: CLADEFS_CRASH_MS, to
+                // replay a run, or else a time of the run's own, before the writers fill the cell,
+                // and with DAX after its write through a mapping (TASK-119.6).
                 let first = if self.dax { 1100 } else { 300 };
                 let crash_ms =
                     std::env::var("CLADEFS_CRASH_MS").ok().and_then(|ms| ms.parse().ok());
@@ -467,7 +469,7 @@ mod host {
             // cladefs: as the guest wrote it, a stop's kernel lines in its midst gone (GCE r248).
             let output = crate::vm::without_kernel_lines(&String::from_utf8(stdout).unwrap());
             let path = test_setup.tmp_dir.join("extents");
-            // cladefs: the writers' calls failed, some of them, as their allocations did; the store
+            // cladefs: the writers' calls failed, some of them, as their allocations did; the cell
             // holds every file whose fsync returned, whole (TASK-44.10).
             if self.mode == Mode::Faults {
                 // Calls may all succeed, allocations failing where the code falls back: that the
@@ -509,9 +511,9 @@ mod host {
                 if self.daemon_killed {
                     crate::common::say_daemon_stats(&test_setup, "cladefsd");
                 }
-                // The store as the crash left it, for a failure to be looked into: checking it
+                // The cell as the crash left it, for a failure to be looked into: checking it
                 // recovers it, and mounting it replays its journal.
-                crate::common::copy_store(&path, &test_setup.tmp_dir.join("extents-at-crash"))
+                crate::common::copy_cell_dir(&path, &test_setup.tmp_dir.join("extents-at-crash"))
                     .unwrap();
                 let storage = block_on(Storage::open(&path).unwrap().check()).unwrap();
                 let fs = block_on(Filesystem::mount(storage)).unwrap();
@@ -639,18 +641,18 @@ mod host {
                 if self.dax {
                     assert!(
                         output.lines().any(|line| line == "stored mapped"),
-                        "the guest didn't store to {MAPPED_SYNCED}: {output:?}"
+                        "the guest didn't write to {MAPPED_SYNCED}: {output:?}"
                     );
                     let (file, _) = block_on(fs.root().lookup(MAPPED_SYNCED.as_bytes())).unwrap();
                     let mut contents = vec![0; 4096];
                     let read = block_on(file.read(0, &mut contents)).unwrap();
                     let expected = mapped_synced();
                     assert_eq!(read, expected.len(), "{MAPPED_SYNCED} ends early");
-                    contents[MAPPED_STORE] = expected[MAPPED_STORE];
+                    contents[MAPPED_WRITE] = expected[MAPPED_WRITE];
                     assert!(contents == expected, "{MAPPED_SYNCED} holds other data");
                 }
                 // The unnamed file open as the VM stopped, which nothing names: freed once the
-                // store is mounted again, its blocks with it, as the graveyard frees them.
+                // cell is mounted again, its blocks with it, as the graveyard frees them.
                 let names: Vec<Vec<u8>> = (block_on(fs.root().entries()).unwrap().into_iter())
                     .map(|entry| entry.name)
                     .collect();
@@ -677,7 +679,7 @@ mod host {
             if output != "OK\n" {
                 return TestOutcome::Fail(format!("expected exactly \"OK\\n\", got {output:?}"));
             }
-            // What the guest wrote is in the store, for the host's Fxfs as for the guest's.
+            // What the guest wrote is in the cell, for the host's Fxfs as for the guest's.
             let fs = block_on(Filesystem::mount(Storage::open(&path).unwrap())).unwrap();
             let lookup = |parent: &cladefs::Node, name: &str| {
                 block_on(parent.lookup(name.as_bytes())).unwrap()
@@ -1163,7 +1165,7 @@ mod guest {
         WRITERS_BEGAN.get().expect("the writers began").elapsed().as_millis()
     }
 
-    /// Whether the crash test's writers wait, as its guest stores through a mapping (TASK-79.11).
+    /// Whether the crash test's writers wait, as its guest writes through a mapping (TASK-79.11).
     static PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
     fn fsync_files(writer: u8) -> ! {
@@ -1210,7 +1212,7 @@ mod guest {
     }
 
     /// [`report`]s `line` for the host to hold before the caller goes on: of a write, whose bytes
-    /// the store may hold as the VM stops, as it begins.
+    /// the cell may hold as the VM stops, as it begins.
     fn report_out(line: &str) {
         while_loud(|_| crate::guest_init::say_out(line));
     }
@@ -1249,9 +1251,9 @@ mod guest {
     }
 
     /// cladefs: makes REWRITTEN[`file`], each page's generation 0 synced, then writes its pages
-    /// again and again, each a generation more, through write(2) and fsync, or (`file` 1) stores
+    /// again and again, each a generation more, through write(2) and fsync, or (`file` 1) writes
     /// through a mapping and msync of the page, reporting each write as it begins, and as its sync
-    /// returns, until the VM stops (TASK-119.6). The pages of a crash's store hold what one of
+    /// returns, until the VM stops (TASK-119.6). The pages of a crash's cell hold what one of
     /// their writes since the last synced wrote.
     fn rewrite(file: usize) -> ! {
         let path = format!("{MNT}/{}", REWRITTEN[file]);
@@ -1324,8 +1326,8 @@ mod guest {
     }
 
     /// Stops the VM mid-workload: with two writers fsyncing, and without syncing (reboot(2)
-    /// doesn't); or, if `killed`, has its host kill its process there ([`KILL_ME`]); or, if `stray`, touches the window where
-    /// nothing is mapped ([`TestFxfsGuest::crash_stray`]).
+    /// doesn't); or, if `killed`, has its host kill its process there ([`KILL_ME`]); or, if
+    /// `stray`, touches the window where nothing is mapped ([`TestFxfsGuest::crash_stray`]).
     fn crash(dax: bool, killed: bool, stray: bool) -> ! {
         assert_eq!(names(MNT), Vec::<String>::new());
         // Files map their data from the window, if there is one: small ones too.
@@ -1338,7 +1340,7 @@ mod guest {
         assert_eq!(is_dax(&small), dax, "a small file's DAX attribute");
         fs::remove_file(&probe).unwrap();
         fs::remove_file(&small).unwrap();
-        // An unnamed file, made durable, open as the VM stops: which the store's next mount frees.
+        // An unnamed file, made durable, open as the VM stops: which the cell's next mount frees.
         let dir = CString::new(MNT).unwrap();
         let fd = unsafe { libc::open(dir.as_ptr(), libc::O_TMPFILE | libc::O_RDWR, 0o600) };
         assert!(fd >= 0, "O_TMPFILE: {}", std::io::Error::last_os_error());
@@ -1354,7 +1356,7 @@ mod guest {
             file.sync_all().unwrap();
             fs::File::open(MNT).unwrap().sync_all().unwrap();
             // cladefs: created here, it is a page-cache inode until read in again (doc-13,
-            // TASK-164.3): read in again, DAX, its store is the window's.
+            // TASK-164.3): read in again, DAX, its memory is the window's.
             drop(file);
             read_in_sealed(&mapped);
         }
@@ -1367,13 +1369,13 @@ mod guest {
         std::thread::spawn(|| rewrite(0));
         std::thread::spawn(|| rewrite(1));
         std::thread::spawn(resize);
-        // cladefs: with DAX, a store through a mapping as the VM stops, before the writers fill the
-        // store, which they do in 2 seconds (TASK-79.11). The VM stops at a time the host picks,
+        // cladefs: with DAX, a write through a mapping as the VM stops, before the writers fill the
+        // cell, which they do in 2 seconds (TASK-79.11). The VM stops at a time the host picks,
         // CLADEFS_CRASH_MS, from when the writers begin (TASK-119.6).
         let crash_ms: u64 = std::env::var("CLADEFS_CRASH_MS").unwrap().parse().unwrap();
         if dax {
             std::thread::sleep(std::time::Duration::from_secs(1));
-            store_mapped(&mapped);
+            write_mapped(&mapped);
             PAUSED.store(false, std::sync::atomic::Ordering::Release);
             std::thread::sleep(std::time::Duration::from_millis(crash_ms.saturating_sub(1000)));
         } else {
@@ -1384,15 +1386,15 @@ mod guest {
             None => {
                 // The writers quiet first, under stdout's lock (`report`): a write the host
                 // doesn't hear of, said after KILL_ME, on which it kills the VM, would reach the
-                // store, which the checks would find written by no write said (GCE r261).
+                // cell, which the checks would find written by no write said (GCE r261).
                 let mut stdout = std::io::stdout().lock();
                 quiet().store(true, std::sync::atomic::Ordering::Release);
                 let access = stray.then(|| stray_access(crash_ms));
                 match &access {
                     Some(access) => writeln!(stdout, "{STRAY}{access}").unwrap(),
                     None => {
-                        // cladefs: when, for the files synced just before, which a daemon killed may
-                        // lose ([`synced_at`], TASK-165.9).
+                        // cladefs: when, for the files synced just before, which a daemon killed
+                        // may lose ([`synced_at`], TASK-165.9).
                         writeln!(stdout, "{KILLING}{}ms", since_writers_began()).unwrap();
                         writeln!(stdout, "{KILL_ME}").unwrap();
                     }
@@ -1400,7 +1402,8 @@ mod guest {
                 stdout.flush().unwrap();
                 drop(stdout);
                 if let Some(access) = access {
-                    // As long as the console's drained, the line reaches the host before the VM stops.
+                    // As long as the console's drained, the line reaches the host before the VM
+                    // stops.
                     std::thread::sleep(std::time::Duration::from_millis(100));
                     fs::write("/sys/module/cladefs/parameters/dax_stray", access).unwrap();
                     println!("the stray access returned");
@@ -1412,8 +1415,8 @@ mod guest {
         }
     }
 
-    /// cladefs: a load or store (cladefs.dax_stray) of the window where nothing is mapped, past what the
-    /// writers reach, within a page or across two, as `crash_ms` picks.
+    /// cladefs: a load or write (cladefs.dax_stray) of the window where nothing is mapped, past
+    /// what the writers reach, within a page or across two, as `crash_ms` picks.
     fn stray_access(crash_ms: u64) -> String {
         let op = if crash_ms & 1 == 0 { "load" } else { "store" };
         // But for the last page, which a word across two would pass the end of.
@@ -1491,13 +1494,13 @@ mod guest {
         }
     }
 
-    /// cladefs: stores a byte to the page at `path`, synced, through a mapping, as the VM is about
-    /// to stop, with the writers waiting (TASK-79.11): the store makes the page private, one page
-    /// more (doc-13), and a thread of its own stores the byte again and writes the page back, again
-    /// and again, so that the VM stops with a writeback of it under way, or just done. The store
+    /// cladefs: writes a byte to the page at `path`, synced, through a mapping, as the VM is about
+    /// to stop, with the writers waiting (TASK-79.11): the write makes the page private, one page
+    /// more (doc-13), and a thread of its own writes the byte again and writes the page back, again
+    /// and again, so that the VM stops with a writeback of it under way, or just done. The cell
     /// holds what was synced, but for the byte, either way: a writeback that wrote the extent's
     /// page, not the window's, or committed before its bytes, leaves other data.
-    fn store_mapped(path: &str) {
+    fn write_mapped(path: &str) {
         PAUSED.store(true, std::sync::atomic::Ordering::Release);
         // A writer's fsync in progress, done.
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -1513,18 +1516,18 @@ mod guest {
             )
         };
         assert_ne!(map, libc::MAP_FAILED, "mmap: {}", std::io::Error::last_os_error());
-        // A load first maps the file's range, which the writers' files may have taken: the store
+        // A load first maps the file's range, which the writers' files may have taken: the write
         // then finds the page mapped, read-only, as a fault holding it does.
-        let loaded = unsafe { map.cast::<u8>().add(MAPPED_STORE).read_volatile() };
-        assert_eq!(loaded, mapped_synced()[MAPPED_STORE], "the mapping maps other data");
+        let loaded = unsafe { map.cast::<u8>().add(MAPPED_WRITE).read_volatile() };
+        assert_eq!(loaded, mapped_synced()[MAPPED_WRITE], "the mapping maps other data");
         let before = private_pages();
-        unsafe { map.cast::<u8>().add(MAPPED_STORE).write_volatile(0xee) };
-        assert_eq!(private_pages(), before + 1, "the store's private pages");
+        unsafe { map.cast::<u8>().add(MAPPED_WRITE).write_volatile(0xee) };
+        assert_eq!(private_pages(), before + 1, "the write's private pages");
         let page = map as usize;
         std::thread::spawn(move || {
             let page = page as *mut u8;
             loop {
-                unsafe { page.add(MAPPED_STORE).write_volatile(0xee) };
+                unsafe { page.add(MAPPED_WRITE).write_volatile(0xee) };
                 let synced = unsafe { libc::msync(page.cast(), 4096, libc::MS_SYNC) };
                 assert_eq!(synced, 0, "msync: {}", std::io::Error::last_os_error());
             }
@@ -1782,7 +1785,7 @@ mod guest {
                 small_files_share();
             }
 
-            // The store mounted again, elsewhere, is the same filesystem.
+            // The cell mounted again, elsewhere, is the same filesystem.
             const MNT2: &str = "/mnt/fxfs2";
             fs::create_dir_all(MNT2).unwrap();
             mount_at("extents", MNT2).unwrap();

@@ -5,7 +5,7 @@
 # Killer: scenarios cow_writeback_counts_again
 #
 # TASK-149.15, doc-13: writeback sizes its batch by the dirty ranges it counts with the file's
-# semaphore held shared, and swaps out no more than that many once it holds it for writing: a store
+# semaphore held shared, and swaps out no more than that many once it holds it for writing: a write
 # beside the count dirties another range, first in the file, which the swap takes, passing by the
 # last, dirty before an fsync began, which returns 0 without it. Found by the file model's
 # durability check (TASK-149.18), failures seed 62; cow_writeback_counts_again: Fxfs's extents lack

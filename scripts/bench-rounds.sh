@@ -28,7 +28,7 @@
 #
 # A run's numbers are cladefs's on a host's disks, not this host's results' filesystem's (the test
 # host's home, ZFS, whose syncs a durable sync then measured: bench-fs-fxfs-guest-dax's sync-loop
-# 10.8/s there at 25 ms of bucket latency, 30.1/s as below, TASK-397). Each run's stores and its
+# 10.8/s there at 25 ms of bucket latency, 30.1/s as below, TASK-397). Each run's cells and its
 # extent daemon's part cache are on ext4, as a host's local disk: in the job's temporary directory,
 # fxjob's, on the host's scratch disk, which goes with the job (scripts/test-e2e-job.sh, which
 # refuses another filesystem). Its bucket is test-e2e.sh's own, a file bucket in memory, on tmpfs,
@@ -37,14 +37,14 @@
 # more of it (CLADEFS_ROUNDS_MEM), or a bucket named on a disk.
 #
 # Each run's results go to RESULTS/CASE/round-K: test-e2e.sh's logs (e2e, copied there as the run
-# ends, without the stores and the guests' root filesystems), and the fs bench's report as JSON
+# ends, without the cells and the guests' root filesystems), and the fs bench's report as JSON
 # (CLADEFS_BENCH_RESULTS), which scripts/bench-ab.py compares, a side's directories its cases'
 # round directories; and what others wrote to the run's disk meanwhile (contamination.json there,
-# scripts/contamination.py, TASK-375), the job's scratch disk, the stores', which only the job
+# scripts/contamination.py, TASK-375), the job's scratch disk, the cells', which only the job
 # can name: test-e2e-job.sh runs the cases under it, a run others wrote beside left out of the
 # comparison's timings. The environment's CLADEFS_* and CLADEFSD_* variables pass to every run (sudo drops them
 # otherwise): CLADEFS_GUEST_KERNEL, CLADEFS_BENCH_ITERATIONS, CLADEFS_BENCH_GROUPS, CLADEFS_PGBENCH_RUNS
-# and such. It fails if a run did; a run refused before it started (2: no ext4 for its stores,
+# and such. It fails if a run did; a run refused before it started (2: no ext4 for its cells,
 # artifacts it can't boot) ends the rounds there, as every other would be. CLADEFS_TEST_HOST_PROC
 # and CLADEFS_TEST_HOST_SYS name the host's /proc and /sys, for the tests.
 set -euo pipefail

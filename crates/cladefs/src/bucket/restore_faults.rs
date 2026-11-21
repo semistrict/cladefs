@@ -3,13 +3,13 @@
 // found in the LICENSE file.
 
 //! Restores of one version on several hosts with something going wrong at each of their steps
-//! (TASK-158), as [`super::fork_faults`] has it for a fork: a step of a fork of a store at a version
-//! failing, on each host; its host dying there; or, there, other hosts restoring the version and a
-//! pass of the collector running, or the version being dropped; or a write of it going wrong.
-//! Then, whatever came of it, what [`Hosts::settle`] checks: no fork told it was made lost
-//! anything, though only the version keeps what it holds, its cell having freed all of it since;
-//! no restore wrote a segment of the cell's; every other host restores it still; and nothing is
-//! left once everything is deleted.
+//! (TASK-158), as [`super::fork_faults`] has it for a fork: a step of a fork of an open cell at a
+//! version failing, on each host; its host dying there; or, there, other hosts restoring the
+//! version and a pass of the collector running, or the version being dropped; or a write of it
+//! going wrong. Then, whatever came of it, what [`Hosts::settle`] checks: no fork told it was made
+//! lost anything, though only the version keeps what it holds, its cell having freed all of it
+//! since; no restore wrote a segment of the cell's; every other host restores it still; and nothing
+//! is left once everything is deleted.
 
 use super::fork_faults::{self, Leftover, MISHAPS, commit, host, options};
 use super::tests::{Gated, Mishap, kept_in, naming, reopened, restart};
@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// How many hosts hold a store at the version, none of them its cell's writer.
+/// How many hosts hold an open cell at the version, none of them its cell's writer.
 const HOSTS: usize = 3;
 
 /// What goes wrong in a restore on one of the hosts.
@@ -55,14 +55,14 @@ struct Hosts {
     disks: Vec<PathBuf>,
     /// Each host's copy of the version, open, but for one that died.
     copies: Vec<Option<Arc<OpenCell>>>,
-    /// The store whose cell's version it is, and the version.
+    /// The open cell whose cell's version it is, and the version.
     source: Option<Arc<OpenCell>>,
     version: u64,
     /// The segments of its cell's in the bucket as the hosts were made, which no restore adds to.
     segments: Vec<String>,
     /// What the version holds, and its root.
     held: Vec<(ExtentId, Vec<u8>)>,
-    /// The forks made, by their cells, with their stores' paths.
+    /// The forks made, by their cells, with their open cells' paths.
     children: Arc<Mutex<Vec<(crate::CellId, PathBuf)>>>,
     /// Whether a host died.
     dead: Arc<AtomicBool>,
@@ -207,7 +207,7 @@ impl Hosts {
         assert_eq!(written, Vec::<String>::new(), "{case}: the cell was written");
     }
 
-    /// Asserts the fork `child` holds what the version held, in the bucket, and, its store at
+    /// Asserts the fork `child` holds what the version held, in the bucket, and, its open cell at
     /// `path`, opened, reads it and goes on.
     async fn check_fork(&self, child: crate::CellId, path: &Path, case: &str) {
         let mut read = in_bucket(&self.bucket, child).unwrap_or_else(|err| panic!("{case}: {err}"));
@@ -216,12 +216,12 @@ impl Hosts {
         held.sort();
         assert!(read == held, "{case}: fork {child} holds other extents");
         naming(path, &self.bucket);
-        let store = reopened(path, options()).await.unwrap();
-        assert_eq!(store.root(), Ok(b"root".to_vec()), "{case}");
-        let own = commit(&store, 5, &[fork_faults::BLOCK], b"child").await;
-        assert_eq!(store.wait_uploaded().await, Ok(()), "{case}");
+        let open_cell = reopened(path, options()).await.unwrap();
+        assert_eq!(open_cell.root(), Ok(b"root".to_vec()), "{case}");
+        let own = commit(&open_cell, 5, &[fork_faults::BLOCK], b"child").await;
+        assert_eq!(open_cell.wait_uploaded().await, Ok(()), "{case}");
         assert!(
-            fork_faults::read(&store, own[0].0, fork_faults::BLOCK).await == own[0].1,
+            fork_faults::read(&open_cell, own[0].0, fork_faults::BLOCK).await == own[0].1,
             "{case}"
         );
     }
@@ -239,7 +239,7 @@ impl Hosts {
         forked
     }
 
-    /// Arms `fault`, for a restore on `host` of the child whose store will be at `name`.
+    /// Arms `fault`, for a restore on `host` of the child whose open cell will be at `name`.
     fn arm(&self, host: usize, fault: Fault) -> Option<FailGuard> {
         let once = Arc::new(AtomicBool::new(false));
         // What the faults do off the host's thread, on threads of their own, awaited on the
@@ -357,7 +357,7 @@ impl Hosts {
                 Err(err) => {
                     assert!(
                         self.deleted.load(Ordering::SeqCst),
-                        "{case}: the store at the version: {err}"
+                        "{case}: the cell directory at the version: {err}"
                     );
                 }
             }
@@ -392,7 +392,7 @@ impl Hosts {
         self.gated[host].land_late();
         Self::collect(&self.bucket, case);
         self.check_unwritten(case);
-        // What a restore whose host died left standing in the bucket, no store holding it, an
+        // What a restore whose host died left standing in the bucket, no open cell holding it, an
         // operator finds among the live cells, and deletes (TASK-165.7).
         let mut named = vec![self.source.as_ref().unwrap().cell()];
         named.extend(self.children.lock().unwrap().iter().map(|(child, _)| *child));
@@ -471,10 +471,9 @@ impl Hosts {
                     let failed = *read.found() == bucket_cell::head::Found::Failed;
                     !failed && !read.head(cell).unwrap().is_some_and(|head| head.deleted())
                 }
-                // cladefs: a block of object IDs taken stays for good (TASK-364), as does the bucket's
-                // identity (TASK-633.9), a reference's
-                // mark, retired or taken back (TASK-395.13), and a tenant's KEK object
-                // (TASK-411.27).
+                // cladefs: a block of object IDs taken stays for good (TASK-364), as does the
+                // bucket's identity (TASK-633.9), a reference's mark, retired or taken back
+                // (TASK-395.13), and a tenant's KEK object (TASK-411.27).
                 Kind::CollectorLease { .. }
                 | Kind::Marks { .. }
                 | Kind::ObjectIds { .. }
@@ -619,7 +618,7 @@ async fn each_write_of_a_restore_going_wrong() {
     .await;
 }
 
-/// TASK-411.4: the host's KMS holding the default tenant's KEK, which every store, copy and
+/// TASK-411.4: the host's KMS holding the default tenant's KEK, which every open cell, copy and
 /// restore here is of: their cells encrypted, each restore's child keeping the keys it inherits
 /// rewrapped under its own cell's KEK. Returns what keeps the KMS's directory.
 fn encrypted() -> tempfile::TempDir {

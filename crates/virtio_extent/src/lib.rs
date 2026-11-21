@@ -17,7 +17,7 @@
 //! - [`protocol`]: the requests, flags, features and configuration space, and the version a
 //!   driver and a snapshot are checked against.
 //! - [`Config`]: a device's configuration, as a VMM's user gives it.
-//! - [`Device`] (Linux): a device's store, configuration space, notices, DAX window and
+//! - [`Device`] (Linux): a device's cell, configuration space, notices, DAX window and
 //!   snapshots, which a VMM's adapter holds beside its transport's state.
 //! - [`Buffers`], [`handle`] and, on Linux, [`Requests`]: serving a request whose buffers the
 //!   adapter took off a queue, over any [`Backend`]; on Linux, [`Workers`], a thread each queue,

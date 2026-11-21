@@ -23,7 +23,7 @@ shuttle = [
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-# cladefs: stores kept in no bucket, encrypted under the tests' DEK (TASK-411.28).
+# cladefs: cells kept in no bucket, encrypted under the tests' DEK (TASK-411.28).
 local_cell = { workspace = true, features = ["unkept"] }
 follower.workspace = true
 follower_history.workspace = true

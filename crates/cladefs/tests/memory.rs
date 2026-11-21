@@ -29,28 +29,28 @@ fn contents(sequence: u64) -> Vec<u8> {
     (0..EXTENT / (64 << 10)).flat_map(|part| pattern(sequence << 8 | part)).collect()
 }
 
-/// Writes [`EXTENTS`] extents to `store`, commits, and reads each through a window mapping them
+/// Writes [`EXTENTS`] extents to `client`, commits, and reads each through a window mapping them
 /// all, read-only, twice over: [`EXTENTS`] MiB of pages cached in the daemon's memory, as it
 /// holds them. Returns the window.
-fn read_through(store: &CellClient) -> std::ptr::NonNull<u8> {
-    let extent = |sequence| ExtentId { cell: store.cell(), sequence };
+fn read_through(client: &CellClient) -> std::ptr::NonNull<u8> {
+    let extent = |sequence| ExtentId { cell: client.cell(), sequence };
     for sequence in 1..=EXTENTS {
-        store.write(extent(sequence), 0, &[VolatileSlice::from(&contents(sequence)[..])]).unwrap();
+        client.write(extent(sequence), 0, &[VolatileSlice::from(&contents(sequence)[..])]).unwrap();
     }
-    store.commit(None).unwrap();
+    client.commit(None).unwrap();
     let size = EXTENTS * EXTENT;
     let window = memory((size / cladefs::pages::page_size()) as usize);
     // SAFETY: The memory is this test's, which it leaks: the window maps it while the process
     // lives.
-    unsafe { store.create_dax_window_in_host_memory(window, size, None, 1) }.unwrap();
+    unsafe { client.create_dax_window_in_host_memory(window, size, None, 1) }.unwrap();
     for sequence in 1..=EXTENTS {
-        store.map(extent(sequence), 0, EXTENT, (sequence - 1) * EXTENT).unwrap();
+        client.map(extent(sequence), 0, EXTENT, (sequence - 1) * EXTENT).unwrap();
     }
     for round in 0..2 {
         for sequence in 1..=EXTENTS {
             let at = ((sequence - 1) * EXTENT) as usize;
             // Evictions change the window's memory as it is read.
-            // SAFETY: The window's memory, whose faults the store serves.
+            // SAFETY: The window's memory, whose faults its cell serves.
             let mapped = read_window(unsafe { window.as_ptr().add(at) }, EXTENT as usize);
             let expected = contents(sequence);
             if mapped != expected {

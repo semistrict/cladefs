@@ -56,15 +56,15 @@ service Peer {
 
   // Live migration of an ephemeral cell to this host (backlog doc-25, TASK-698.4;
   // specs/ephemeral): the source prepares it here, which writes this host's reference to the
-  // cell's origin before taking anything (targetRefersFirst); sends its store's files, kept
+  // cell's origin before taking anything (targetRefersFirst); sends its cell's files, kept
   // segments first, as rounds while its guest runs, the rest once it gave the cell up; then asks
   // this host to take it over, naming every file it sent. FAILED_PRECONDITION on a host keeping no
   // ephemeral cells (CLADEFSD_EPHEMERAL).
   rpc MigratePrepare(MigratePrepareRequest) returns (MigratePrepareResponse);
-  // A piece of a file of the store being migrated, or its holes.
+  // A piece of a file of the cell being migrated, or its holes.
   rpc MigrateFile(MigrateFileRequest) returns (MigrateFileResponse);
   // Takes the migrated cell over, if this host holds every file named whole (openAtNamed): its
-  // store put at its path, durably, and the migration remembered as accepted for good
+  // cell put at its path, durably, and the migration remembered as accepted for good
   // (remembersAccepted), so that this answers yes to it again, however often asked. Otherwise no,
   // what it took dropped and its reference retired, so that it never takes that migration after
   // (refuseFinal). No to a migration it never prepared, or of another incarnation of this host's.
@@ -89,7 +89,7 @@ message MigratePrepareRequest {
   uint64 at = 6;
   // The URL of the bucket its parent is kept in.
   string bucket = 7;
-  // Where its store goes on this host.
+  // Where it goes on this host.
   string to = 8;
 }
 
@@ -107,11 +107,11 @@ message Range {
   uint64 len = 2;
 }
 
-// A piece of a file of the store being migrated.
+// A piece of a file of the cell being migrated.
 message MigrateFileRequest {
   // The migration.
   uint64 migration = 1;
-  // The file's path in the store; a directory's, made if it is not there, ends with `/`.
+  // The file's path in the cell; a directory's, made if it is not there, ends with `/`.
   string path = 2;
   // Where `bytes` go in it.
   uint64 offset = 3;
@@ -126,9 +126,9 @@ message MigrateFileRequest {
 // A piece written.
 message MigrateFileResponse {}
 
-// A file of the store a hand-over names.
+// A file of the cell a hand-over names.
 message FileDigest {
-  // Its path in the store.
+  // Its path in the cell.
   string path = 1;
   // Its length.
   uint64 len = 2;
@@ -142,7 +142,7 @@ message MigrateHandOverRequest {
   uint64 migration = 1;
   // The incarnation of this host's its preparation answered.
   uint64 incarnation = 2;
-  // Every file of the store.
+  // Every file of the cell.
   repeated FileDigest files = 3;
 }
 

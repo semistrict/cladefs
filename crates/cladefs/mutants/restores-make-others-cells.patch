@@ -12,6 +12,6 @@
                  let forked = (crate::CellId { tenant, id: cell }, version);
 -                cells::fork_version(forked, capacity, (path, self.tenant.granted())).await?;
 +                cells::fork_version(forked, capacity, (path, None)).await?;
-                 Arc::new(open_store(path, None, Some(arena)).await?)
+                 Arc::new(open_cell_at(path, None, Some(arena)).await?)
              }
              (None, codec::Opening::Create(capacity, kind)) => {

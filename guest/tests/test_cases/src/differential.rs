@@ -6,13 +6,13 @@
 //! TASK-149.12): a reference the kernel has long had (ext4), and the filesystem under test (Fxfs).
 //! Each step is done on the reference first, and both are held to the model (`script_run`): the
 //! reference failing it is the model's mistake, or the kernel's, its own kind of failure
-//! ([`kind::REFERENCE_DIFFERS`]), not taken for the subject's; the subject failing it, the reference
-//! passing, is the subject's.
+//! ([`kind::REFERENCE_DIFFERS`]), not taken for the subject's; the subject failing it, the
+//! reference passing, is the subject's.
 //!
 //! What the model doesn't say, the reference does: which of the files' modification and change
 //! times a step changed, which the two must agree on, as POSIX and Linux's VFS say they change but
 //! no model here does. Those that differ are counted ([`Differences`]), the run going on, and are
-//! failures unless [`ALLOWED`] lists them, with why. A store through a shared mapping says nothing
+//! failures unless [`ALLOWED`] lists them, with why. A write through a shared mapping says nothing
 //! of times ([`Step::says_its_times`]).
 //!
 //! A subject that may refuse (fault injection) leaves a file as far as an operation got, which the
@@ -275,13 +275,13 @@ mod tests {
         assert_eq!(differences.1, 2);
     }
 
-    /// A store through a shared mapping says nothing of times: whether it faults is the cache's.
+    /// A write through a shared mapping says nothing of times: whether it faults is the cache's.
     #[test]
-    fn a_shared_stores_times_are_not_compared() {
+    fn a_shared_writes_times_are_not_compared() {
         let mut differences = Differences::default();
-        let store = Step::Store { file: 0, at: 0, data: vec![1], child: false };
-        differences.note(1, 1, &effect(store.clone(), vec![BOTH]), &effect(store, vec![NEITHER]));
-        let private = Step::MapStore { file: 0, at: 0, data: vec![1], private: true };
+        let write = Step::MappedWrite { file: 0, at: 0, data: vec![1], child: false };
+        differences.note(1, 1, &effect(write.clone(), vec![BOTH]), &effect(write, vec![NEITHER]));
+        let private = Step::MapWrite { file: 0, at: 0, data: vec![1], private: true };
         differences.note(
             1,
             2,
@@ -293,7 +293,7 @@ mod tests {
             differences
                 .0
                 .keys()
-                .all(|difference| difference.op == "store through a private mapping")
+                .all(|difference| difference.op == "write through a private mapping")
         );
     }
 
@@ -365,8 +365,8 @@ mod tests {
         drop((host.reference, host.subject, host._dir));
     }
 
-    /// cladefs: and the hostile mix's (TASK-149.16), its far steps each held to its own filesystem's
-    /// largest file.
+    /// cladefs: and the hostile mix's (TASK-149.16), its far steps each held to its own
+    /// filesystem's largest file.
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
     fn a_hostile_script_on_one_filesystem_twice_agrees() {
@@ -402,8 +402,8 @@ mod tests {
     }
 
     /// A subject with no room left refuses, as it may, and the reference's file is made what the
-    /// subject's was left, the two going on alike to the script's end. Root's, as script_run's tests
-    /// on filesystems of their own are.
+    /// subject's was left, the two going on alike to the script's end. Root's, as script_run's
+    /// tests on filesystems of their own are.
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
     fn refusals_are_adopted_by_the_reference() {

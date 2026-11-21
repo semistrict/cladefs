@@ -9,7 +9,7 @@
 # drifts on the shared host over the hours moves both sides alike (TASK-310). Each run is a
 # measurement of its own under `fxjob --bench` (cores 4-7 its own, CLADEFS_AB_MEM of memory, 20G by
 # default), its results in OUT/<case>/<side>-<round>; scripts/ab-guest-summary.py compares them.
-# What a run leaves of its stores, bucket, part cache and VMs' root filesystems goes once it ends
+# What a run leaves of its cells, bucket, part cache and VMs' root filesystems goes once it ends
 # (a shared-disk run leaves some 25 GB), but with CLADEFS_AB_KEEP_DATA=1: its logs and stats stay.
 #
 #   scripts/ab-guest-cases.sh OUT A_NAME=A_ARTIFACTS B_NAME=B_ARTIFACTS ROUNDS CASE...
@@ -26,7 +26,7 @@
 #
 # CLADEFS_AB_RAM_DISK, a size (truncate's, as 12G), runs each run in a directory of ext4 on a loop
 # device over a file in /dev/shm, made inside its `fxjob --bench` job (its memory the job's) and gone
-# as it ends, its TMPDIR in it too: its stores', part cache's and VMs' disks, which the host's
+# as it ends, its TMPDIR in it too: its cells', part cache's and VMs' disks, which the host's
 # scratch disk otherwise
 # holds, whose speed drifts up to 4x within a job (ubu1's, ext4 on a ZFS zvol), so that a side's
 # syncs taking longer is its own doing (TASK-707). What the run leaves is copied to its results but
@@ -82,7 +82,7 @@ run() {
             mkfs.ext4 -q -F "$image"
             sudo mount -o loop "$image" "$disk"
             sudo chown "$(id -u):$(id -g)" "$disk"
-            # The run'"'"'s temporary files there too: a daemon keeps a store at a version for forks
+            # The run'"'"'s temporary files there too: a daemon keeps a cell at a version for forks
             # in its TMPDIR, refused off its part cache'"'"'s filesystem (TASK-726).
             mkdir "$disk/tmp"
             status=0

@@ -21,7 +21,7 @@ const HOPS: Record<string, string> = {
   driver: "virtqueues: READ WRITE FREE COMMIT MAP UNMAP PRIVATE",
   vmm: "Unix socket; the daemon's memfds, mapped",
   daemon: "pages: cache, windows, private copies",
-  memory: "misses read from the store; writes go to it",
+  memory: "misses read from the cell; writes go to it",
   disk: "framed segments uploaded; extents fetched",
 };
 

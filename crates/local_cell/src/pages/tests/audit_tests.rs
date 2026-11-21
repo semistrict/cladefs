@@ -75,9 +75,9 @@ fn a_write_back_error_reaches_a_writer_held_at_the_shared_bound() {
     assert_eq!(bytes, data);
 }
 
-/// TASK-539.12: a write-back that failed, as a full disk fails it, then succeeds, fails nothing: the
-/// sync after it writes back its pages, dirty still, and the file holds them. Before, the sync
-/// reported the earlier failure once, which failed a store's flush, and the store, for good.
+/// TASK-539.12: a write-back that failed, as a full disk fails it, then succeeds, fails nothing:
+/// the sync after it writes back its pages, dirty still, and the file holds them. Before, the sync
+/// reported the earlier failure once, which failed a cell's flush, and the cell, for good.
 #[test]
 fn a_write_back_that_failed_then_succeeds_fails_no_sync() {
     let disk = MemDisk::new();

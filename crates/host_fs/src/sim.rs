@@ -7,7 +7,7 @@
 //! A disk is a tree of inodes from its root, `/`: files, holding bytes, and directories, holding
 //! entries, each a name and an inode. What is durable is a file's bytes as of its last sync, a
 //! directory's entries of files as of its last sync, and directories once made, as
-//! `local_cell::MemDir` has them, the model the stores' own crash tests are written to; what
+//! `local_cell::MemDir` has them, the model the cells' own crash tests are written to; what
 //! changed since, files' writes, and directories' entries made, removed or renamed, each in order,
 //! are kept beside. A crash ([`Disk::crashed`]) keeps what was
 //! durable and any of what changed since, as the seed says, each change kept or not in order, each
@@ -227,7 +227,7 @@ impl Fs {
             return Err(errno(libc::EEXIST));
         }
         let made = self.make(Inode::Dir(DirData::default()));
-        // Durable at once, as the stores' own simulations have directories (`local_cell::MemDir`),
+        // Durable at once, as the cells' own simulations have directories (`local_cell::MemDir`),
         // and as a journaling file system's next sync of anything makes it.
         let parent = self.dir(parent)?;
         parent.entries.insert(name.clone(), made);

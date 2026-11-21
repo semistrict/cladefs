@@ -9,7 +9,7 @@
 //!
 //! cladefs: a record about a guest request, the work on its thread being for one
 //! (`crate::request::current`), names it: `request_id`, the guest's number of it, and `store`, the
-//! store whose VM process asked, which tells one VM's requests from another's (TASK-260).
+//! cell whose VM process asked, which tells one VM's requests from another's (TASK-260).
 //!
 //! Two variables set it, read as the log is set up:
 //!
@@ -191,8 +191,8 @@ impl fmt::Display for Text<'_> {
         record.key_values().visit(&mut KeyValues(f)).map_err(|_| fmt::Error)?;
         if let Some(request) = &self.request {
             write!(f, " request_id={}", request.guest)?;
-            if let Some(store) = &request.store {
-                write!(f, " store={store}")?;
+            if let Some(open_cell) = &request.open_cell {
+                write!(f, " store={open_cell}")?;
             }
         }
         Ok(())
@@ -231,9 +231,9 @@ fn json(
     string(&mut out, &record.args().to_string());
     if let Some(request) = request {
         write!(out, ",\"request_id\":{}", request.guest).expect("a String takes what is written");
-        if let Some(store) = &request.store {
+        if let Some(open_cell) = &request.open_cell {
             out.push_str(",\"store\":");
-            string(&mut out, store);
+            string(&mut out, open_cell);
         }
     }
     // A String takes every key-value, which none fails.
@@ -291,8 +291,11 @@ mod tests {
         SystemTime::UNIX_EPOCH + Duration::from_micros(1_794_141_296_789_012)
     }
 
-    fn request(guest: u64, store: Option<&str>) -> Option<RequestId> {
-        Some(RequestId { guest: NonZeroU64::new(guest).unwrap(), store: store.map(Into::into) })
+    fn request(guest: u64, open_cell: Option<&str>) -> Option<RequestId> {
+        Some(RequestId {
+            guest: NonZeroU64::new(guest).unwrap(),
+            open_cell: open_cell.map(Into::into),
+        })
     }
 
     #[test]
@@ -329,7 +332,7 @@ mod tests {
         );
     }
 
-    /// A record about a guest request names it, and its store, after its key-values.
+    /// A record about a guest request names it, and its cell, after its key-values.
     #[test]
     fn a_text_record_names_its_request() {
         let pairs: [(&str, log::kv::Value<'_>); 1] = [("kind", log::kv::Value::from("get"))];

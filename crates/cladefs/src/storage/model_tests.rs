@@ -5,7 +5,7 @@
 //! cladefs: random sequences of what a filesystem's user asks of an image and of its forks, all
 //! kept in the image's own bucket, among passes of the bucket's collector, checked against a model
 //! of their files (TASK-291.4). fxfs-posix's model holds Fxfs to a model on a device of memory,
-//! under which no bucket is: this one holds the images' extents, in their stores and their
+//! under which no bucket is: this one holds the images' extents, in their cells and their
 //! bucket, to what their files were written, as the collector compacts and deletes under them.
 //!
 //! Files are made, written over and past their ends, truncated, removed and synced; images are

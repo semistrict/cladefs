@@ -13,7 +13,7 @@ adapter) and libmachine.
   driver's features (`check_acked`) and of a snapshot's version (`check_version`).
 - **Configuration** (`Config`): a device's, as a VMM's user gives it, serializable, with its
   validation and the features it makes.
-- **The device** (`Device`, Linux): opens its store in cladefs's extent daemon, builds and reads
+- **The device** (`Device`, Linux): opens its cell in cladefs's extent daemon, builds and reads
   its configuration space, hears the daemon's notices (capacity, a follower's commits, asks for
   the guest's stats) and has the VMM raise a configuration change interrupt for them, makes and
   creates the DAX window, and takes snapshots of the store and restores from them.
@@ -76,7 +76,7 @@ Its vCPUs:
   (`cladefs::AccessFailures`), and stop the VM when the failures persist, telling what it can of
   them (`dax_window_at`, `cladefs::describe_windows`; `dax_window_at` assumes one VM per process,
   as Firecracker's are). Firecracker exits with status 159.
-- Stop the VM when a store's private pages pass `private_max` (the guest's store is refused),
+- Stop the VM when a cell's private pages pass `private_max` (the guest's write is refused),
   and when the extent daemon goes (`OnLost`, which `Device::new` takes; Firecracker exits with
   status 158).
 
@@ -91,5 +91,5 @@ Snapshots:
 ## Tests
 
 `cargo nextest run -p virtio_extent`: the protocol, configuration, notices and request handling
-over a fake store in fake guest memory, everywhere; on Linux, `tests/daemon.rs` serves requests
+over a fake cell in fake guest memory, everywhere; on Linux, `tests/daemon.rs` serves requests
 from a daemon of the test's, and makes, activates, snapshots and restores devices over one.

@@ -14,11 +14,12 @@
 //! - `scan`: a sum over every row.
 //!
 //! Configurations: `extents`, this crate's VFS on an image (`cladefs::Storage`), every commit
-//! durable, the image's I/O bypassing the page cache; on Linux, `daemon`, the VFS on a store an
+//! durable, the image's I/O bypassing the page cache; on Linux, `daemon`, the VFS on a cell an
 //! extent daemon on a thread of this process serves, its reads copied from the daemon's window
-//! (TASK-300), and `daemon-mmap`, SQLite's memory-mapped reads reading pages there in place; and SQLite's own unix VFS on a file:
-//! `delete-full` (rollback journal, `synchronous=FULL`: every commit durable), `wal-full` (WAL,
-//! every commit durable) and `wal-normal` (WAL, durable at checkpoints only: no commit is).
+//! (TASK-300), and `daemon-mmap`, SQLite's memory-mapped reads reading pages there in place; and
+//! SQLite's own unix VFS on a file: `delete-full` (rollback journal, `synchronous=FULL`: every
+//! commit durable), `wal-full` (WAL, every commit durable) and `wal-normal` (WAL, durable at
+//! checkpoints only: no commit is).
 //!
 //! Usage: sqlite-bench [SCALE], SCALE multiplying the counts (default 1). It prints a table
 //! in markdown, a row per configuration and workload.
@@ -185,7 +186,7 @@ fn on_file_set(config: &str, file_set: std::sync::Arc<FileSet>, pragmas: &str, s
     file_set.close().unwrap();
 }
 
-/// An extent daemon serving stores under `root` on a thread of this process, as a host's would
+/// An extent daemon serving cells under `root` on a thread of this process, as a host's would
 /// from its own, keeping their cells in a file bucket there: its socket.
 #[cfg(target_os = "linux")]
 fn daemon(root: &Path) -> PathBuf {
@@ -195,7 +196,7 @@ fn daemon(root: &Path) -> PathBuf {
     socket
 }
 
-/// The bytes the bucket under `root` the stores keep their cells in takes, if it is there yet.
+/// The bytes the bucket under `root` the cells keep their objects in takes, if it is there yet.
 fn bucket_bytes(root: &Path) -> u64 {
     let bucket = root.join("daemon.bucket");
     if bucket.exists() { disk_bytes(&bucket) } else { 0 }
@@ -237,10 +238,10 @@ fn main() {
         let socket = daemon(&root);
         for (config, pragmas) in [("daemon", ""), ("daemon-mmap", "PRAGMA mmap_size = 1073741824")]
         {
-            let (store, before) = (root.join(config), bucket_bytes(&root));
+            let (cell_dir, before) = (root.join(config), bucket_bytes(&root));
             let file_set = sqlite_cladefs::daemon::open(
                 &socket,
-                &store,
+                &cell_dir,
                 64 << 30,
                 1 << 30,
                 Options::default(),
@@ -248,7 +249,7 @@ fn main() {
             .unwrap();
             on_file_set(config, file_set.clone(), pragmas, scale);
             println!("| {config} | pages read in place | {} | | | | |", file_set.fetched());
-            sizes.push((config, disk_bytes(&store) + bucket_bytes(&root) - before));
+            sizes.push((config, disk_bytes(&cell_dir) + bucket_bytes(&root) - before));
         }
     }
     for (config, pragmas) in [

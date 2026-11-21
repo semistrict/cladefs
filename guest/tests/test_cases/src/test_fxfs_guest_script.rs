@@ -4,10 +4,11 @@
 
 //! cladefs: a script of operations on several files in a guest of its own, shrunk if it fails
 //! (TASK-149.2): what fxfs-guest-checks' random_ops does to a file, across three, with clones
-//! between them and stores by forked children, each file checked against a model by the guest, and
-//! by the host's Fxfs as it reads them from the store. A failure says the seed, and the host boots
-//! a VM for each try of a shrink (`script_vm`), of whatever failed: the guest's model, the image's
-//! fsck, the host's comparison, a kernel's complaint, its death or its running out of time.
+//! between them and writes through mappings by forked children, each file checked against a model
+//! by the guest, and by the host's Fxfs as it reads them from the cell. A failure says the seed,
+//! and the host boots a VM for each try of a shrink (`script_vm`), of whatever failed: the guest's
+//! model, the image's fsck, the host's comparison, a kernel's complaint, its death or its running
+//! out of time.
 //!
 //! fxfs-guest-script-full and -full-dax: on a small volume, filled to `LEFT` before the script
 //! starts, where anything may be refused for lack of room (`script_run`), and a run that's never
@@ -16,11 +17,11 @@
 //! fxfs-guest-script-killed and -killed-dax: the VM killed at an operation the seed picks
 //! (`script::kill_index`): the guest does those before it, says [`KILL_ME`] and waits, and the host
 //! kills its VM process, writeback, rebinds and the journal still going in the guest's kernel; then
-//! the host's Fxfs replays the store, which fsck checks, and each file must hold what it may after a
-//! kill (`script::Survivals`): a size it had since its last fsync, and each page as one of its states
-//! since then had it. fxfs-guest-script-killed-full and -killed-full-dax: on the small volume, nearly
-//! full, where what an operation refused left of a file the guest reads back: it says each such as
-//! it goes (`script::Partial`), and the host replays the model by them.
+//! the host's Fxfs replays the cell, which fsck checks, and each file must hold what it may after a
+//! kill (`script::Survivals`): a size it had since its last fsync, and each page as one of its
+//! states since then had it. fxfs-guest-script-killed-full and -killed-full-dax: on the small
+//! volume, nearly full, where what an operation refused left of a file the guest reads back: it
+//! says each such as it goes (`script::Partial`), and the host replays the model by them.
 
 use macros::{guest, host};
 
@@ -35,8 +36,8 @@ pub struct TestFxfsGuestScript {
     pub killed: bool,
 }
 
-/// cladefs: what a killed run's guest says once it has done the operations before the kill, at which
-/// the host kills its VM process.
+/// cladefs: what a killed run's guest says once it has done the operations before the kill, at
+/// which the host kills its VM process.
 #[cfg_attr(feature = "host", allow(dead_code))]
 const KILL_ME: &str = "kill me";
 
@@ -77,8 +78,8 @@ mod host {
         })
     }
 
-    /// cladefs: how the killed run in `dir`, which said `stdout`, failed, if it did: as a run does, if
-    /// it said so before the kill; or a file the store holds isn't what it may be after a kill
+    /// cladefs: how the killed run in `dir`, which said `stdout`, failed, if it did: as a run does,
+    /// if it said so before the kill; or a file the cell holds isn't what it may be after a kill
     /// before the script's operation the seed picks, of what the run's drops kept (TASK-149.2).
     fn killed_verdict(dir: &Path, stdout: &[u8]) -> Option<Failure> {
         let output = String::from_utf8_lossy(stdout);
@@ -152,13 +153,13 @@ mod host {
         })
     }
 
-    /// cladefs: a killed run's files checked as the host's Fxfs reads them from the store (TASK-149.2):
-    /// what the operations before the kill left passes; a page no state of the file held fails,
-    /// and so does a run that never said it was to be killed.
+    /// cladefs: a killed run's files checked as the host's Fxfs reads them from the cell
+    /// (TASK-149.2): what the operations before the kill left passes; a page no state of the file
+    /// held fails, and so does a run that never said it was to be killed.
     #[test]
-    fn a_killed_runs_files_are_checked_as_the_store_holds_them() {
+    fn a_killed_runs_files_are_checked_as_the_cell_holds_them() {
         use cladefs::Owner;
-        // Every store is encrypted (TASK-411.28): this test's, its environment naming no KMS, under
+        // Every cell is encrypted (TASK-411.28): this test's, its environment naming no KMS, under
         // the tests' own, as a guest run's are under the run's (scripts/test-e2e.sh).
         cladefs::bucket::testing::encrypted();
         let killed = |files: &[Vec<u8>], seed: u64, output: &[u8]| {
@@ -242,7 +243,8 @@ mod host {
             let seed = seed();
             eprintln!("{}: seed {seed} (CLADEFS_SEED={seed} replays it)", test_setup.test_case);
             std::fs::write(test_setup.tmp_dir.join("seed"), seed.to_string())?;
-            // cladefs: what a replay drops, for the verdict of a killed run, which replays the model.
+            // cladefs: what a replay drops, for the verdict of a killed run, which replays the
+            // model.
             let drops = std::env::var(DROP_VAR).unwrap_or_default();
             std::fs::write(test_setup.tmp_dir.join("drops"), drops)?;
             if self.killed {

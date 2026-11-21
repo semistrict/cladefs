@@ -3,17 +3,17 @@
 // found in the LICENSE file.
 
 //! cladefs: guests writing all the while against a degraded bucket (TASK-330.3): the case's daemon,
-//! its own, keeps its stores' cells in an S3 server's bucket (RustFS, scripts/test-e2e-rustfs.sh
-//! starts it), through a proxy that degrades it as the case says ([`crate::faulty_s3`]):
-//! answering, then slow (300 ms a request), then full (its writes failing, 507), then out of
-//! service (every request failing, 503), then answering again, 300 ms a request, each a fraction
-//! of CLADEFS_BUCKET_SOAK_SECS (1,800, the qualification's; 1,200 at least, so that the bucket is out
+//! its own, keeps its cells' cells in an S3 server's bucket (RustFS, scripts/test-e2e-rustfs.sh
+//! starts it), through a proxy that degrades it as the case says ([`crate::faulty_s3`]): answering,
+//! then slow (300 ms a request), then full (its writes failing, 507), then out of service (every
+//! request failing, 503), then answering again, 300 ms a request, each a fraction of
+//! CLADEFS_BUCKET_SOAK_SECS (1,800, the qualification's; 1,200 at least, so that the bucket is out
 //! of service longer than its S3 client retries a request, about a minute). Through a proxy, not
 //! the daemon's own faults (`CLADEFS_BUCKET_FAULTS`), so that LangSmith's pin's daemon from before
 //! them meets the same bucket, a qualification's A/B comparing them (TASK-330.4).
-//! CLADEFS_BUCKET_SOAK_VMS VMs (4), each on a store of its own, write files of 16 MiB that don't
+//! CLADEFS_BUCKET_SOAK_VMS VMs (4), each on a cell of its own, write files of 16 MiB that don't
 //! compress and fsync each, deleting each once 16 newer are written, at the rate that writes past
-//! every store's lag bound while the bucket fails, until the run's end; then sync, every commit
+//! every cell's lag bound while the bucket fails, until the run's end; then sync, every commit
 //! uploaded, and exit. As `cladefs::cladefsd::tests::soak` does with VM processes of its own in CI,
 //! in seconds a phase, this does with guests' kernels and their Fxfs, the daemon a process of its
 //! own. It fails, saying each check that failed, unless:
@@ -26,8 +26,9 @@
 //!   at the end, succeed, the longest waiting through the bucket's failure;
 //! - every commit made before the bucket answers again is uploaded within doc-12's bound of it
 //!   answering: its next retry's 5 s, the upload interval's second, and the time the guests took
-//!   to write what waited (the control API's `SyncCell` of each store, from then);
-//! - no VM is let go (TASK-249): each runs to its end, exiting 0, and the daemon's log lets none go.
+//!   to write what waited (the control API's `SyncCell` of each cell, from then);
+//! - no VM is let go (TASK-249): each runs to its end, exiting 0, and the daemon's log lets none
+//!   go.
 //!
 //! scripts/budgets.py checks the daemon's stats file beside its log too, as every run's daemons'.
 
@@ -36,7 +37,7 @@ use macros::{guest, host};
 pub struct TestFxfsGuestBucketSoak;
 
 const MIB: u64 = 1 << 20;
-/// Each store's capacity: the files the guest keeps, and what waits for the bucket, with room.
+/// Each cell's capacity: the files the guest keeps, and what waits for the bucket, with room.
 #[cfg_attr(feature = "guest", allow(dead_code))]
 const CAPACITY: u64 = 4096 * MIB;
 /// A file's bytes.
@@ -62,11 +63,11 @@ mod host {
 
     /// The daemon's memory, its extent cache's: the guests' files' worth and more.
     const DAEMON_MEMORY: u64 = 2 << 30;
-    /// Its upload memory: as much as its stores upload at once, so that its uploads holding each
+    /// Its upload memory: as much as its cells upload at once, so that its uploads holding each
     /// object twice, TASK-317's bug, hold more than every other part of its budget may, as
     /// `cladefs::cladefsd::tests::soak`'s.
     const UPLOAD_MEMORY: u64 = 1536 << 20;
-    /// What the guests write while the bucket fails: past every store's lag bound, 1 GiB, so that
+    /// What the guests write while the bucket fails: past every cell's lag bound, 1 GiB, so that
     /// their commits stall there, and past the host's upload memory.
     const WRITTEN_WHILE_FAILING: u64 = 6 << 30;
     const VM_MEMORY_MIB: u32 = 1024;
@@ -112,19 +113,19 @@ mod host {
         line.iter().filter(|(name, _)| name.starts_with("failed-")).map(|(_, count)| count).sum()
     }
 
-    /// Boots VM `vm` on store `store`, served by the daemon at `socket`, writing at `rate` bytes a
-    /// second for `secs` seconds.
+    /// Boots VM `vm` on the cell at `cell_dir`, served by the daemon at `socket`, writing at `rate`
+    /// bytes a second for `secs` seconds.
     fn boot(
         test_setup: &TestSetup,
         root: &Path,
         socket: &Path,
-        store: &Path,
+        cell_dir: &Path,
         (vm, rate, secs): (u64, u64, u64),
     ) -> anyhow::Result<Firecracker> {
         let name = format!("vm-{vm}");
         let mut machine = Vm::new(2, VM_MEMORY_MIB)?;
         machine.guest_kernel()?;
-        machine.cell_served("extents", store, CAPACITY, 0, socket);
+        machine.cell_served("extents", cell_dir, CAPACITY, 0, socket);
         for (var, value) in [
             ("CLADEFS_BUCKET_SOAK_SEED", vm),
             ("CLADEFS_BUCKET_SOAK_RATE", rate),
@@ -198,14 +199,14 @@ mod host {
             let failing: f64 = PHASES.iter().filter(|phase| phase.3).map(|phase| phase.1).sum();
             let rate = (WRITTEN_WHILE_FAILING as f64 / (vms as f64 * failing * secs as f64)) as u64;
             eprintln!("bucket-soak: {secs} s, {vms} VMs writing {} MiB/s each", rate >> 20);
-            let stores: Vec<_> = (0..vms).map(|vm| dir.join(format!("store-{vm}"))).collect();
+            let cell_dirs: Vec<_> = (0..vms).map(|vm| dir.join(format!("store-{vm}"))).collect();
             // Each VM's, and when it booted: its guest writes for the run's seconds from its own
             // start, after its boot, and may end once they're up, before the phases do (TASK-386).
             let mut running = Vec::new();
-            for (vm, store) in stores.iter().enumerate() {
+            for (vm, cell_dir) in cell_dirs.iter().enumerate() {
                 let booted = Instant::now();
                 let vm = vm as u64;
-                running.push((boot(test_setup, &root, &socket, store, (vm, rate, secs))?, booted));
+                running.push((boot(test_setup, &root, &socket, cell_dir, (vm, rate, secs))?, booted));
             }
             let began = Instant::now();
             let mut ended = 0.0;
@@ -216,13 +217,13 @@ mod host {
                 bucket.set(Fault::parse(words).map_err(anyhow::Error::msg)?);
                 eprintln!("bucket-soak: at {:?}, the bucket {name}: {words}", began.elapsed());
                 if name == "answering again" {
-                    // Every store's commits made so far uploaded, each sync says, within the bound.
+                    // Every cell's commits made so far uploaded, each sync says, within the bound.
                     let since = Instant::now();
-                    for store in &stores {
-                        let (socket, store) = (socket.clone(), store.clone());
+                    for cell_dir in &cell_dirs {
+                        let (socket, cell_dir) = (socket.clone(), cell_dir.clone());
                         syncs.push(std::thread::spawn(move || {
-                            let synced = crate::common::control(&socket)?.sync_cell(&store);
-                            synced.with_context(|| format!("syncing {}", store.display()))?;
+                            let synced = crate::common::control(&socket)?.sync_cell(&cell_dir);
+                            synced.with_context(|| format!("syncing {}", cell_dir.display()))?;
                             anyhow::Ok(since.elapsed())
                         }));
                     }
@@ -269,10 +270,10 @@ mod host {
             let mut latest = Duration::ZERO;
             for (vm, synced) in syncs.into_iter().enumerate() {
                 let took = synced.join().unwrap()?;
-                eprintln!("bucket-soak: store {vm} uploaded {took:?} after the bucket answered");
+                eprintln!("bucket-soak: cell {vm} uploaded {took:?} after the bucket answered");
                 if took > bound {
                     failed.push(format!(
-                        "uploads: store {vm} uploaded {took:?} after, past {bound:?}"
+                        "uploads: cell {vm} uploaded {took:?} after, past {bound:?}"
                     ));
                 }
                 latest = latest.max(took);

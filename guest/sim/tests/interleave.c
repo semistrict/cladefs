@@ -10,18 +10,18 @@
  * -t logs each scheduling point, -T has dax.c's trace of the page that fails logged, -w logs the
  * window page's MAPs, -a the address's PTE, and -W what Fxfs does to the file's page; -v each
  * operation. -I leaves dax.c's fault injection off, and -N the operations that take a file's own
- * mapping for their memory. Stores copy on write (doc-13).
+ * mapping for their memory. Writes copy on write (doc-13).
  *
- * Every store is stamped, as ztest's blocks carry their tags: whose it is, where it belongs, its
+ * Every write is stamped, as ztest's blocks carry their tags: whose it is, where it belongs, its
  * generation and the seal it was made in. Tasks share files without sharing bytes: each owns a slot
  * of every page of the shared files, and a private file, cells of stamps. What a task reads of its
- * own must be its last store. What it reads of another's can't be exact, as the owner may be
- * storing, but it is bounded, as ztest's txg bounds a block's: not older than the last store that
+ * own must be its last write. What it reads of another's can't be exact, as the owner may be
+ * writing, but it is bounded, as ztest's txg bounds a block's: not older than the last write that
  * ended before the read began, nor anything any read saw before it began, nor newer than the last
- * store begun as it ended, and never zeros once written, unless a store was under way. So a stale
+ * write begun as it ended, and never zeros once written, unless a write was under way. So a stale
  * read, a zero read, a read of another file's or another place's data, or from the future, is named
  * as such as it is read, on any task's read of any slot. After an fsync, Fxfs's extents must hold
- * every slot's last store of the synced file, a store being in a private page until its file's
+ * every slot's last write of the synced file, a write being in a private page until its file's
  * writeback; and once all end, the same of all of it. Each of dax.c's WARNs fails the run.
  */
 
@@ -48,7 +48,7 @@
 
 #define STAMP_MAGIC 0xfdaf5eedU
 
-/* What a store leaves in a slot. */
+/* What a write leaves in a slot. */
 struct stamp {
 	u32 magic;
 	u32 ino;
@@ -65,9 +65,9 @@ _Static_assert(sizeof(struct stamp) == SLOT, "a stamp is a slot");
 
 /* A slot of a page of a file every worker has a slot of each page of. */
 struct slot {
-	/* The last store to end. */
+	/* The last write to end. */
 	struct stamp done;
-	/* The generation of the last to begin, the newest a read saw, and if a store is under way. */
+	/* The generation of the last to begin, the newest a read saw, and if a write is under way. */
 	u64 begun, seen;
 	bool flying;
 };
@@ -114,7 +114,7 @@ static int writers_left;
 static unsigned long operations = 200;
 /* Whether the operations that take a file's own mapping for their memory are left out (-N). */
 static bool no_self;
-/* Whether Fxfs's transactions fail: writes and stores then may too. And whether a MAP does. */
+/* Whether Fxfs's transactions fail: writes and writes then may too. And whether a MAP does. */
 static bool failing, failing_maps;
 /*
  * How many pages of a file slots are taken from, in a run that has them all on a few, or 0 for
@@ -198,7 +198,7 @@ static const char *stamp_wrong(const struct stamp *got, u64 ino, loff_t at, int 
 	if (all_zeros(got, SLOT))
 		return low && !overlapped ? "a zero read" : NULL;
 	if (!stamp_valid(got))
-		return "bytes no store made";
+		return "bytes no write made";
 	if (got->ino != ino)
 		return "another file's data";
 	if (got->cell * SLOT != at)
@@ -237,7 +237,7 @@ static __noreturn void wrong_read(const char *what, const char *why, struct file
 static void check_bytes(const char *what, struct file *file, const char *got, const char *expected,
 			size_t len, loff_t at)
 {
-	const char *why = "other data than the last store's";
+	const char *why = "other data than the last write's";
 	size_t i, cell;
 
 	for (i = 0; i < len; i++) {
@@ -302,7 +302,7 @@ static loff_t slot_at(int worker, unsigned long page)
 }
 
 /*
- * A store that failed: its slot may hold what it held, or zeros, as writable DAX's moved blocks
+ * A write that failed: its slot may hold what it held, or zeros, as writable DAX's moved blocks
  * held. So the owner reads what it holds now.
  */
 static void slot_resync(struct worker *worker, struct slots *file, unsigned long page)
@@ -318,11 +318,11 @@ static void slot_resync(struct worker *worker, struct slots *file, unsigned long
 		slot->seen = 0;
 		return;
 	}
-	check_bytes("a slot after a failed store", file->file, (char *)&got,
+	check_bytes("a slot after a failed write", file->file, (char *)&got,
 		    (char *)&slot->done, SLOT, at);
 }
 
-static void slot_store(struct worker *worker, struct slots *file, unsigned long page, bool mapped)
+static void slot_mapped_write(struct worker *worker, struct slots *file, unsigned long page, bool mapped)
 {
 	struct slot *slot = &file->slots[worker->id][page];
 	loff_t at = slot_at(worker->id, page);
@@ -331,9 +331,9 @@ static void slot_store(struct worker *worker, struct slots *file, unsigned long 
 
 	stamp_make(&stamp, file_inode(file->file)->i_ino, at, worker->id, ++slot->begun);
 	slot->flying = true;
-	done = mapped ? sim_user_store(file->addrs[worker->id] + at, &stamp, SLOT) ?: SLOT :
+	done = mapped ? sim_user_write(file->addrs[worker->id] + at, &stamp, SLOT) ?: SLOT :
 	       sim_write(file->file, at, &stamp, SLOT);
-	check(done == SLOT || failed_as_asked(done), "a store at page %lu of worker %d: %zd", page,
+	check(done == SLOT || failed_as_asked(done), "a write at page %lu of worker %d: %zd", page,
 	      worker->id, done);
 	if (done == SLOT)
 		slot->done = stamp;
@@ -374,10 +374,10 @@ static void slot_op(struct worker *worker, struct slots *file)
 	unsigned long page = between(0, pages - 1);
 	u64 how = between(0, 3);
 
-	operation(worker, "%s page %lu of ino %lu\n", how < 2 ? "store" : "read", page,
+	operation(worker, "%s page %lu of ino %lu\n", how < 2 ? "write" : "read", page,
 		  file_inode(file->file)->i_ino);
 	if (how < 2)
-		slot_store(worker, file, page, how);
+		slot_mapped_write(worker, file, page, how);
 	else
 		slot_read(worker, file, page, between(0, WORKERS - 1), how == 3);
 }
@@ -415,7 +415,7 @@ static void private_resync(struct worker *worker)
 		if (!memcmp(whole + at, worker->private + at, SLOT))
 			continue;
 		if (!private_cell(worker, (struct stamp *)(whole + at)))
-			wrong_read("a file after a failed write", "bytes no store made",
+			wrong_read("a file after a failed write", "bytes no write made",
 				   worker->file, whole + at, worker->private + at, at);
 	}
 	/*
@@ -562,7 +562,7 @@ static void private_truncate(struct worker *worker)
 	check(!err || failed_as_asked(err), "a truncate: %d", err);
 	/*
 	 * A growth that failed leaves the file as long as it was: the inode saying a size Fxfs
-	 * hasn't, read in again the file is Fxfs's size, the stores past it lost (cladefs_data_resize).
+	 * hasn't, read in again the file is Fxfs's size, the writes past it lost (cladefs_data_resize).
 	 */
 	check(!err || size <= worker->size || i_size_read(file_inode(worker->file)) == worker->size,
 	      "a growth to %lld that failed (%d) left the file %lld bytes long, not %lld", size, err,
@@ -695,7 +695,7 @@ out:
 }
 
 /*
- * What a cycle stores in its file. In one extent a chunk is a slice of its region, which a page
+ * What a cycle writes in its file. In one extent a chunk is a slice of its region, which a page
  * moving drops, so that a PMD's fault says shared. In two, each whole, it is a range of its own,
  * its pages in a row, as a PMD's fault finds them; and a page that moves leaves the row (TASK-123),
  * whose PMD entry the faults after replace (patch 0008).
@@ -720,7 +720,7 @@ static bool huge_write(struct worker *worker, const char *data, bool pieces)
 }
 
 /*
- * A chunk mapped by a PMD, whose page a store then makes private, which splits the PMD: its other
+ * A chunk mapped by a PMD, whose page a write then makes private, which splits the PMD: its other
  * pages must fault back in, each read what it held (TASK-123). Truncated first, so that no entries
  * of its pages keep a PMD's fault out; and mapped anew, as a PTE table left under the PMD would.
  */
@@ -732,7 +732,7 @@ static void huge_cycle(struct worker *worker)
 	bool pieces = between(0, 1);
 	int err, i, round;
 
-	operation(worker, "a PMD's cycle, %s, storing to page %lu\n",
+	operation(worker, "a PMD's cycle, %s, writing to page %lu\n",
 		  pieces ? "in pieces" : "whole", stored);
 	sim_munmap(worker->huge_addr);
 	worker->huge_addr = sim_mmap(worker->huge_file, 0, HUGE_LEN);
@@ -748,8 +748,8 @@ static void huge_cycle(struct worker *worker)
 	check_bytes("a load of a PMD", worker->huge_file, buf, mine, SLOT, 0);
 	huge_mapped += sim_mm_is_huge(worker->huge_addr);
 	new_cells(worker, worker->huge_file, buf, stored * PAGE_SIZE, SLOT);
-	err = sim_user_store(worker->huge_addr + stored * PAGE_SIZE, buf, SLOT);
-	check(!err || failed_as_asked(err), "a store into a PMD: %d", err);
+	err = sim_user_write(worker->huge_addr + stored * PAGE_SIZE, buf, SLOT);
+	check(!err || failed_as_asked(err), "a write into a PMD: %d", err);
 	if (err)
 		return;
 	memcpy(mine + stored * PAGE_SIZE, buf, SLOT);
@@ -832,7 +832,7 @@ static void worker_task(void *arg)
 	writers_left--;
 }
 
-/* A slot's last store, whose file hold it must through Fxfs's extents, if none came since. */
+/* A slot's last write, whose file hold it must through Fxfs's extents, if none came since. */
 struct fsync_check {
 	struct slots *file;
 	struct slot *slot;
@@ -860,7 +860,7 @@ static void fsync_watch(struct fsync_check *watched, struct slots *file)
 	watched->begun = watched->slot->begun;
 }
 
-/* What the seal made durable, unless a store came since or was under way. */
+/* What the seal made durable, unless a write came since or was under way. */
 static void fsync_check(const struct fsync_check *watched)
 {
 	struct stamp held;
@@ -877,7 +877,7 @@ static void fsync_check(const struct fsync_check *watched)
 }
 
 /*
- * Seals as a journal does, whenever it likes: in some runs seldom. A store is in a private page
+ * Seals as a journal does, whenever it likes: in some runs seldom. A write is in a private page
  * until its file's writeback, and the fsync makes its own file's slots durable, no other's, which
  * are those watched then.
  */
@@ -900,7 +900,7 @@ static void syncer_task(void *arg)
 	}
 }
 
-/* Each worker's every slot of a file must be its last store, in Fxfs's extents. */
+/* Each worker's every slot of a file must be its last write, in Fxfs's extents. */
 static void check_slots(const struct slots *file)
 {
 	struct cladefs *fs = mount->info->fs;

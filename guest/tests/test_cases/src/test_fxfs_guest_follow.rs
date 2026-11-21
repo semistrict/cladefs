@@ -2,15 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Live read-only followers (cladefs's backlog doc-8, TASK-42.6): a VM follows a store another VM
-//! writes, both running. The writer writes files and syncs; the follower mounts its store,
+//! Live read-only followers (cladefs's backlog doc-8, TASK-42.6): a VM follows a cell another VM
+//! writes, both running. The writer writes files and syncs; the follower mounts its cell,
 //! read-only, and finds them, and keeps one open and another mapped. The writer then writes a new
 //! file, renames one, deletes the one the follower keeps open, and overwrites the one it maps, and
 //! syncs; the follower sees all of it, without remounting: the new file, the rename, the deletion
 //! (the open file still reading as it was, as POSIX has it), and the overwrite, through read(2) and
 //! through its mapping. Each guest tells the host over vsock where it is, and the host tells the
 //! other. Last, the writer mounts its own filesystem read-only (-o ro), which reads, refuses
-//! writes, and commits nothing: the store's latest commit, which the host asks the extent daemon
+//! writes, and commits nothing: the cell's latest commit, which the host asks the extent daemon
 //! for, stays as the writer's unmount left it.
 //!
 //! With DAX, one file's inode fails to get its window's file, as without the memory for it, and
@@ -55,14 +55,14 @@ mod host {
 
     const CAPACITY: u64 = 256 << 20;
 
-    /// A VM of the guest's `role` on the store at `store`, the writer's or, if `read_only`, a
+    /// A VM of the guest's `role` on the cell at `cell_dir`, the writer's or, if `read_only`, a
     /// follower's, run in Firecracker; its vsock's socket `uds`.
     fn run(
         test: &TestFxfsGuestFollow,
         test_setup: &TestSetup,
         root: &Path,
         role: &str,
-        store: &Path,
+        cell_dir: &Path,
         read_only: bool,
         uds: &Path,
     ) -> anyhow::Result<Firecracker> {
@@ -73,9 +73,9 @@ mod host {
         let window =
             if test.dax { crate::common::dax_window(crate::common::Window::Large)? } else { 0 };
         if read_only {
-            vm.cell_following("extents", store, window)?;
+            vm.cell_following("extents", cell_dir, window)?;
         } else {
-            vm.cell("extents", store, CAPACITY, window)?;
+            vm.cell("extents", cell_dir, CAPACITY, window)?;
         }
         vm.env(&CString::new(format!("CLADEFS_FOLLOW={role}"))?);
         vm.vsock(uds);
@@ -119,7 +119,7 @@ mod host {
         fn run(&self, test_setup: &TestSetup) -> anyhow::Result<()> {
             let dir = &test_setup.tmp_dir;
             let root = setup_rootfs(test_setup)?;
-            let store = dir.join("store");
+            let cell_dir = dir.join("store");
             // Short, as Unix sockets' paths must be.
             let uds = |role: &str| -> PathBuf {
                 std::env::temp_dir()
@@ -128,11 +128,11 @@ mod host {
             let listen = |role: &str| UnixListener::bind(format!("{}_{PORT}", uds(role).display()));
             let (writers, followers) = (listen("writer")?, listen("follower")?);
 
-            let mut writer = run(self, test_setup, &root, "writer", &store, false, &uds("writer"))?;
+            let mut writer = run(self, test_setup, &root, "writer", &cell_dir, false, &uds("writer"))?;
             let mut w = Guest::accept(&mut writer, &writers)?;
             w.expect("ready")?;
             let mut follower =
-                run(self, test_setup, &root, "follower", &store, true, &uds("follower"))?;
+                run(self, test_setup, &root, "follower", &cell_dir, true, &uds("follower"))?;
             let mut f = Guest::accept(&mut follower, &followers)?;
             f.expect("following")?;
             w.tell("change")?;
@@ -143,10 +143,10 @@ mod host {
             w.expect("unmounted")?;
             let cladefsd = std::env::var_os("CLADEFSD").context("CLADEFSD unset")?;
             let control = crate::common::control(Path::new(&cladefsd))?;
-            let before = control.committed(&store)?;
+            let before = control.committed(&cell_dir)?;
             w.tell("mount read-only")?;
             w.expect("unmounted read-only")?;
-            let after = control.committed(&store)?;
+            let after = control.committed(&cell_dir)?;
             anyhow::ensure!(after == before, "a read-only mount committed: {before} to {after}");
             w.tell("checked")?;
             wait(writer)?;

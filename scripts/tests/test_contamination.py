@@ -99,16 +99,16 @@ class Disks(unittest.TestCase):
         self.tree.disk("sda", "8:0")
         self.tree.partition("sda", "sda1", "8:1")
         self.tree.mount("/", "8:1", "ext4", "/dev/sda1")
-        self.tree.loop("loop3", "7:3", "/var/images/store.img")
-        self.tree.mount("/mnt/store", "7:3", "ext4", "/dev/loop3")
-        self.assertEqual(layout_of(self.tree, "/mnt/store/r1"), ({"sda": "8:0"}, {}, {}, [], []))
+        self.tree.loop("loop3", "7:3", "/var/images/cell.img")
+        self.tree.mount("/mnt/cell", "7:3", "ext4", "/dev/loop3")
+        self.assertEqual(layout_of(self.tree, "/mnt/cell/r1"), ({"sda": "8:0"}, {}, {}, [], []))
 
     def test_a_loop_device_on_tmpfs_has_no_device(self):
         self.tree.mount("/dev/shm", "0:26", "tmpfs", "tmpfs")
-        self.tree.loop("loop0", "7:0", "/dev/shm/store.img (deleted)")
-        self.tree.mount("/mnt/store", "7:0", "ext4", "/dev/loop0")
-        self.assertEqual(layout_of(self.tree, "/mnt/store"), (
-            {}, {}, {}, ["/dev/shm/store.img: tmpfs, no device: nothing to record"], []))
+        self.tree.loop("loop0", "7:0", "/dev/shm/cell.img (deleted)")
+        self.tree.mount("/mnt/cell", "7:0", "ext4", "/dev/loop0")
+        self.assertEqual(layout_of(self.tree, "/mnt/cell"), (
+            {}, {}, {}, ["/dev/shm/cell.img: tmpfs, no device: nothing to record"], []))
 
     def test_a_mapped_devices_disks_are_those_under_it(self):
         self.tree.disk("nvme0n1", "259:0")
@@ -575,7 +575,7 @@ class Drivers(unittest.TestCase):
         bench = (SCRIPTS / "lib" / "bench-linux-host.sh").read_text()
         self.assertIn('CLADEFS_BENCH_RESULTS="$results" "$repo/scripts/contamination.py" run '
                       '"$results" -- \\\n    "$repo/scripts/bench.sh" "$iterations"', bench)
-        # bench-rounds.sh's through the job, which alone can name the disk its stores are on, its
+        # bench-rounds.sh's through the job, which alone can name the disk its cells are on, its
         # scratch directory: the record of that disk, in the round's directory.
         rounds = (SCRIPTS / "bench-rounds.sh").read_text()
         self.assertIn('"CLADEFS_E2E_PREBUILT=$artifacts" "CLADEFS_BENCH_RESULTS=$out" \\\n'

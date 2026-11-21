@@ -2,18 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: what tests share of looking at the host's disk beside stores (the `testing` feature,
+//! cladefs: what tests share of looking at the host's disk beside cells (the `testing` feature,
 //! TASK-463): the files under a directory that hold what a test wrote in the clear, as tests of
-//! encrypted stores look for (TASK-411.5), here and in sqlite_cladefs'.
+//! encrypted cells look for (TASK-411.5), here and in sqlite_cladefs'.
 
 use std::collections::BTreeSet;
 use std::io;
 use std::path::Path;
 
 /// The paths of the files under `dir`, at every depth, that hold any of `pieces`, all of one
-/// length. What keeps files there must be still meanwhile: its stores closed, or their work
-/// behind their callers waited for (`Store::wait_idle`, and their uploaders' `wait_uploaded`). A
-/// file listed, then gone before it is read, fails, as a store working on would.
+/// length. What keeps files there must be still meanwhile: its cells closed, or their work
+/// behind their callers waited for (`Cell::wait_idle`, and their uploaders' `wait_uploaded`). A
+/// file listed, then gone before it is read, fails, as a cell working on would.
 pub fn files_holding(dir: &Path, pieces: &[&[u8]]) -> Vec<String> {
     let mut held = BTreeSet::new();
     pass(dir, pieces, &mut held, Gone::Fails, &mut |_| {});
@@ -21,7 +21,7 @@ pub fn files_holding(dir: &Path, pieces: &[&[u8]]) -> Vec<String> {
 }
 
 /// [`files_holding`], beside what works on in `dir` that the test cannot wait for, as a daemon's
-/// stores do, behind its API: a file or directory listed, then gone before it is read, ends the
+/// cells do, behind its API: a file or directory listed, then gone before it is read, ends the
 /// pass short, and another walks `dir` again, until one reads everything it lists. Each pass's
 /// finds are kept, so a file renamed between passes is found under either name: none is lost
 /// for going, which a pass that skipped it and returned would lose.
@@ -112,7 +112,7 @@ mod tests {
         assert_eq!(files_holding_beside(dir.path(), &PIECES), expected);
     }
 
-    /// A file renamed between its listing and its reading, as a store's framing renames its
+    /// A file renamed between its listing and its reading, as a cell's framing renames its
     /// segment's framed file its own (TASK-463), fails a walk of what is to be still.
     #[test]
     #[should_panic(expected = "framing-1: No such file or directory")]

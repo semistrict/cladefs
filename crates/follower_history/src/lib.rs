@@ -6,7 +6,7 @@
 //! the writer's operations made, and which commits may hold them.
 //!
 //! The writer's operations are in order: after the `i`th, the files are the `i`th model, the 0th
-//! being none. Each one's transaction is in a commit after the store's latest as it began
+//! being none. Each one's transaction is in a commit after the cell's latest as it began
 //! (`after`), and, once a sync after it returns, at or before that sync's latest (`by`). A follower
 //! as of commit `e` shows the files after the operations in commits up to `e`, a prefix of them:
 //! the `j`th model for a `j` from the last operation surely in `e` to the last that may be. A
@@ -141,7 +141,7 @@ impl<N: Ord + Clone + Debug, C: Clone + PartialEq + Debug> History<N, C> {
         }
     }
 
-    /// Records an operation, which began with the store at `after`, and changed the files named
+    /// Records an operation, which began with the cell at `after`, and changed the files named
     /// in `changes`: each to the file given, or to none, unlinked.
     pub fn operation(
         &mut self,
@@ -150,7 +150,7 @@ impl<N: Ord + Clone + Debug, C: Clone + PartialEq + Debug> History<N, C> {
     ) {
         assert!(
             self.bounds.last().is_none_or(|last| last.after <= after),
-            "an operation began with the store at {after}, before its last"
+            "an operation began with the cell at {after}, before its last"
         );
         self.bounds.push(Bounds { after, by: None });
         let index = self.bounds.len();
@@ -182,7 +182,7 @@ impl<N: Ord + Clone + Debug, C: Clone + PartialEq + Debug> History<N, C> {
         }
     }
 
-    /// Records an operation, which began with the store at `after`, and left the files `model`.
+    /// Records an operation, which began with the cell at `after`, and left the files `model`.
     pub fn operation_leaving(&mut self, after: u64, model: &BTreeMap<N, File<C>>) {
         let gone = self
             .names
@@ -199,7 +199,7 @@ impl<N: Ord + Clone + Debug, C: Clone + PartialEq + Debug> History<N, C> {
         self.operation(after, changes);
     }
 
-    /// Records a sync, which returned with the store at commit `commit`: the operations before it
+    /// Records a sync, which returned with the cell at commit `commit`: the operations before it
     /// are in commits by then.
     pub fn synced(&mut self, commit: u64) {
         for bounds in self.bounds.iter_mut().rev().take_while(|bounds| bounds.by.is_none()) {

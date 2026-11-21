@@ -4,19 +4,19 @@
 
 //! cladefs: sandboxes as LangSmith's CI runs them (TASK-330.1), the shape of host their suites
 //! found TASK-310 and TASK-311 on and ours didn't: two sandbox hosts, each with an extent daemon
-//! of its own; one disk under both, an ext4 one, holding their stores, their part caches and the
+//! of its own; one disk under both, an ext4 one, holding their cells, their part caches and the
 //! bucket, an S3 server's (RustFS, Apache-2.0), whose objects are on that disk too; and many VMs
 //! at once, more vCPUs between them than the host has CPUs, building Docker images and exporting
 //! them, running pgbench, and working a git repository, each running a sandbox's user's commands
 //! all the while.
 //!
 //! scripts/sandboxes.sh runs it: it starts the S3 server with its data on the disk the case's
-//! directory is on, names its bucket (CLADEFSD_BUCKET, an `s3://` URL, and the server's
-//! address and credentials, AWS_*) and its data's directory (CLADEFS_SANDBOX_BUCKET_DIR), which this
-//! checks is on the case's disk. CLADEFS_SANDBOX_MODE says how much: `short` (the default), eight
-//! VMs at once, minutes, for every push to main (.github/workflows/sandboxes.yml); or `long`,
-//! LangSmith's controlled load's sixteen, eight at a time, each doing more, by hand on the test
-//! host before each candidate handed to LangSmith (scripts/qualify.sh, TASK-330.5).
+//! directory is on, names its bucket (CLADEFSD_BUCKET, an `s3://` URL, and the server's address and
+//! credentials, AWS_*) and its data's directory (CLADEFS_SANDBOX_BUCKET_DIR), which this checks is
+//! on the case's disk. CLADEFS_SANDBOX_MODE says how much: `short` (the default), eight VMs at
+//! once, minutes, for every push to main (.github/workflows/sandboxes.yml); or `long`, LangSmith's
+//! controlled load's sixteen, eight at a time, each doing more, by hand on the test host before
+//! each candidate handed to LangSmith (scripts/qualify.sh, TASK-330.5).
 //!
 //! Each host imports the sandboxes' image once, as a base: an Alpine root with PostgreSQL and git,
 //! Docker's static binaries and its buildx plugin, and a BusyBox image to build from; each VM
@@ -26,10 +26,10 @@
 //! - **builder**: 8 vCPUs, as LangSmith's builders, its root through a DAX window: Docker builds an
 //!   image with BuildKit, stages in parallel, loads it, saves it, exports it as a tar of its files,
 //!   as fxfs-guest-docker-build-dax does (TASK-311), its builds and their size as the mode says;
-//! - **pgbench**: PostgreSQL makes its database on a store of the VM's own, loads it, runs pgbench
+//! - **pgbench**: PostgreSQL makes its database on a cell of the VM's own, loads it, runs pgbench
 //!   with fsync, checks it whole, recovers it from a crash and checks it again, as
 //!   fxfs-guest-pgbench does; every other one through a DAX window;
-//! - **git**: a repository on a store of the VM's own, made commit by commit, packed, cloned and
+//! - **git**: a repository on a cell of the VM's own, made commit by commit, packed, cloned and
 //!   checked;
 //! - **writer**: LangSmith's own load, which showed TASK-310: a large file that doesn't compress,
 //!   fsynced, and small files, synced, read back and deleted, as fxfs-guest-shared-disk does;
@@ -46,7 +46,7 @@
 //!   LangSmith with write-behind's double writes);
 //! - a sandbox's command takes longer than its budget, [`COMMAND_BUDGET_MS`] (LangSmith's
 //!   sandboxes took 1.9 s for `/bin/echo` then);
-//! - the hosts' stores write more than [`WRITES_BUDGET`] times what their guests wrote, every guest
+//! - the hosts' cells write more than [`WRITES_BUDGET`] times what their guests wrote, every guest
 //!   byte written half again (LangSmith's pin wrote 2.3 times, TASK-310);
 //! - the VMs at once have no more vCPUs than the host has CPUs, or the bucket's data isn't on the
 //!   case's disk: the run isn't the topology it says it is.
@@ -91,7 +91,7 @@ impl Role {
 #[cfg_attr(feature = "guest", allow(dead_code))]
 const FRAMING_BUDGET_MS: f64 = 1000.0;
 
-/// The most the hosts' stores may write, between them, for each byte their guests wrote: half of
+/// The most the hosts' cells may write, between them, for each byte their guests wrote: half of
 /// it again. The design writes a guest's byte once, raw; again only what a commit copies, or a
 /// segment's data that compressing saves an eighth of, framed in a copy (TASK-310, TASK-92.41):
 /// main wrote 1.14-1.27 times on these runs, pgbench's commits' copies the most of it. LangSmith's
@@ -145,7 +145,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
     /// The base's capacity, and so each root's: a builder's layers, caches and archives, with
     /// room, as fxfs-guest-docker-build-dax's root has.
     const ROOT_CAPACITY: u64 = 16 * GIB;
-    /// A VM's own store's, for its database, repository or files.
+    /// A VM's own cell's, for its database, repository or files.
     const DATA_CAPACITY: u64 = 8 * GIB;
 
     /// How much a run does: CLADEFS_SANDBOX_MODE's.
@@ -160,11 +160,11 @@ RUN apk add --no-cache postgresql postgresql-contrib git
         shape: fn(Role) -> (u8, u32),
         /// Each daemon's memory: its extent cache's bound, and its windows' private pages'.
         daemon_memory: u64,
-        /// A builder's root's DAX window, and the window of a VM's own store, when it has one:
+        /// A builder's root's DAX window, and the window of a VM's own cell, when it has one:
         /// what a sandbox maps, not the host's memory, of which eight windows at once were
         /// refused (ENOMEM, fxfs-guest-shared-disk-dax). Each window's private pages, half its
         /// pages, are pinned in its daemon's memory as it is made, out of what the daemon can
-        /// evict: a host's builder's and its own stores' with windows at once, half of these.
+        /// evict: a host's builder's and its own cells' with windows at once, half of these.
         windows: (u64, u64),
         timeout_secs: u64,
     }
@@ -203,7 +203,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
     }
 
     /// The long mode's VMs: 5.5 GiB for eight at once, beside two daemons of 2 GiB, RustFS and the
-    /// stores' page cache, within the 16 GiB a measurement has on the test host (fxjob --bench,
+    /// cells' page cache, within the 16 GiB a measurement has on the test host (fxjob --bench,
     /// TASK-330.5): a run of a quarter hour touches every page it has, and with the short mode's
     /// sizes, its guests' 7.5 GiB, its daemons' 3 GiB caches full and RustFS's 1 GB, a daemon was
     /// killed for memory at 16 GiB and again at 18 GiB, the hosts' every job's.
@@ -274,7 +274,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
         base: PathBuf,
     }
 
-    /// A VM of the run, by its number: its role, its host, and whether its own store, if it has
+    /// A VM of the run, by its number: its role, its host, and whether its own cell, if it has
     /// one, is mapped through a DAX window.
     struct Sandbox {
         vm: usize,
@@ -286,7 +286,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
     impl Sandbox {
         /// The `vm`th of a run: the roles in turn, the hosts in turn, each round of the roles' on
         /// the hosts the other way round from the round before, so that each host has each role;
-        /// and every other round with DAX windows on the VMs' own stores.
+        /// and every other round with DAX windows on the VMs' own cells.
         fn nth(vm: usize) -> Self {
             let (role, round) = (Role::ALL[vm % Role::ALL.len()], vm / Role::ALL.len());
             Self { vm, role, host: (vm + round) % 2, dax: round % 2 == 0 }
@@ -499,8 +499,8 @@ RUN apk add --no-cache postgresql postgresql-contrib git
         }
     }
 
-    /// What host `host`'s stores wrote, as its daemon's stats file in `dir` counts it (TASK-310):
-    /// its guests' bytes, raw, and its stores' in all.
+    /// What host `host`'s cells wrote, as its daemon's stats file in `dir` counts it (TASK-310):
+    /// its guests' bytes, raw, and its cells' in all.
     fn host_writes(dir: &Path, host: &str) -> anyhow::Result<(u64, u64)> {
         let stats = crate::common::daemon_stats(&dir.join(format!("{host}-stats.txt")))?;
         let kind = |kind: &str| stats.get(&format!("written_{kind}_bytes")).copied();
@@ -510,7 +510,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
         let written: u64 =
             ["raw", "copied", "framed", "own", "log"].into_iter().filter_map(kind).sum();
         eprintln!(
-            "sandboxes: {host}: guest_gib={:.2} stores_written_gib={:.2} ratio={:.2} \
+            "sandboxes: {host}: guest_gib={:.2} cells_written_gib={:.2} ratio={:.2} \
              segments_framed_in_place={} framing_read_gib={:.2} seen_ahead_gib={:.2} \
              held_parts_gib={:.2} held_parts_taken_gib={:.2} held_parts_peak_mib={:.1} \
              held_parts_evicted_gib={:.2} held_parts_evicted={} held_parts_late={} \
@@ -523,8 +523,8 @@ RUN apk add --no-cache postgresql postgresql-contrib git
             // (TASK-400).
             stats.get("framing_read_bytes").copied().unwrap_or(0) as f64 / GIB as f64,
             stats.get("seen_ahead_bytes").copied().unwrap_or(0) as f64 / GIB as f64,
-            // cladefs: the parts packed as segments filled, held until their framings: in all, taken
-            // by them, at most at once, and let go of by the memory governor (TASK-400).
+            // cladefs: the parts packed as segments filled, held until their framings: in all,
+            // taken by them, at most at once, and let go of by the memory governor (TASK-400).
             stats.get("held_parts_held_bytes").copied().unwrap_or(0) as f64 / GIB as f64,
             stats.get("held_parts_taken_bytes").copied().unwrap_or(0) as f64 / GIB as f64,
             stats.get("held_parts_peak_bytes").copied().unwrap_or(0) as f64 / (1 << 20) as f64,
@@ -651,7 +651,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
             }
             // Their stats files, written within a poll of the last change.
             std::thread::sleep(Duration::from_secs(2));
-            let (mut guests, mut stores, mut counted) = (0, 0, true);
+            let (mut guests, mut cells, mut counted) = (0, 0, true);
             let (mut framings, mut costs) = (Vec::new(), Vec::new());
             for host in &mut hosts {
                 let log = std::fs::read_to_string(dir.join(format!("{}.log", host.name)))?;
@@ -697,7 +697,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
                 }
                 framings.extend(slow.iter().map(|framing| framing.ms));
                 match host_writes(dir, host.name) {
-                    Ok((raw, written)) => (guests, stores) = (guests + raw, stores + written),
+                    Ok((raw, written)) => (guests, cells) = (guests + raw, cells + written),
                     Err(err) => {
                         counted = false;
                         tally.failed.push(format!("writes: {}'s daemon: {err:#}", host.name));
@@ -725,15 +725,15 @@ RUN apk add --no-cache postgresql postgresql-contrib git
                 },
             );
             if counted {
-                let ratio = stores as f64 / guests.max(1) as f64;
-                eprintln!("sandboxes: the stores wrote {ratio:.2} times what the guests did");
+                let ratio = cells as f64 / guests.max(1) as f64;
+                eprintln!("sandboxes: the cells wrote {ratio:.2} times what the guests did");
                 measured.higher("sandboxes.guests.written", "GiB", guests as f64 / GIB as f64);
                 measured.lower("sandboxes.stores.per_guest_byte", "x", ratio);
                 let disk = disk_written as f64 / guests.max(1) as f64;
                 measured.lower("sandboxes.daemons.disk_per_guest_byte", "x", disk);
                 if ratio > WRITES_BUDGET {
                     tally.failed.push(format!(
-                        "writes: the stores wrote {ratio:.2} times what the guests did, past \
+                        "writes: the cells wrote {ratio:.2} times what the guests did, past \
                          {WRITES_BUDGET}"
                     ));
                 }
@@ -741,7 +741,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
             say_failures(&tally.failed, measured);
             let failed = tally.failed.len();
             ensure!(failed == 0, "{failed} checks failed");
-            // Passed: its stores, caches and image go, gigabytes of them; its logs stay.
+            // Passed: its cells, caches and image go, gigabytes of them; its logs stay.
             for entry in std::fs::read_dir(dir)? {
                 let path = entry?.path();
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
@@ -802,7 +802,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
 
         /// TASK-330.1: each round of the roles has each on a host, the hosts the other way round
         /// from the round before, so that every host serves every role in a short run's eight;
-        /// and the rounds' own stores alternate, mapped through a DAX window and not.
+        /// and the rounds' own cells alternate, mapped through a DAX window and not.
         #[test]
         fn every_host_serves_every_role_with_a_window_and_without() {
             let sandboxes: Vec<Sandbox> = (0..8).map(Sandbox::nth).collect();
@@ -953,7 +953,7 @@ mod guest {
         text
     }
 
-    /// The git role: a repository of CLADEFS_SANDBOX_GIT_FILES files on the VM's own store, made
+    /// The git role: a repository of CLADEFS_SANDBOX_GIT_FILES files on the VM's own cell, made
     /// over CLADEFS_SANDBOX_GIT_COMMITS commits, each changing a tenth of its files and adding one;
     /// packed; cloned, not by links, and the clone checked whole.
     fn git_role() {
@@ -990,7 +990,7 @@ mod guest {
         println!("OK git {commits} commits of {files} files");
     }
 
-    /// Mounts the VM's own store's Fxfs at [`MNT`], made as it mounts.
+    /// Mounts the VM's own cell's Fxfs at [`MNT`], made as it mounts.
     fn mount_data() {
         fs::create_dir_all(MNT).unwrap();
         let (source, target, fstype) = (c"extents", c"/mnt/fxfs", c"cladefs");

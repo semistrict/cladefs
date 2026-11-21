@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs's own: cells of extent stores kept in object storage (backlog doc-7, TASK-28).
+//! cladefs's own: cells kept in object storage (backlog doc-7, TASK-28).
 //!
 //! A cell is a VM's filesystem: extents its guest wrote, in segments whose footers say what
 //! each commit did, with checkpoints of its index. A writer holds the cell's head; its segments,
@@ -22,8 +22,8 @@
 
 /// cladefs: a step of the protocol, which the failpoint of its name fails (the `fail` crate's,
 /// TASK-44.10): the function it is in returns an error there, or whatever a test set the failpoint
-/// to do happens. Nothing without the crate's `failpoints` feature, which `cladefs/failpoints` turns
-/// on.
+/// to do happens. Nothing without the crate's `failpoints` feature, which `cladefs/failpoints`
+/// turns on.
 macro_rules! failpoint {
     ($name:literal) => {
         fail::fail_point!($name, |_| Err($crate::Error::Read(format!("failpoint {}", $name))))
@@ -166,13 +166,13 @@ pub enum Error {
         ours = layout::FORMAT
     )]
     Format { cell: layout::CellId, format: u32 },
-    /// What a writer was to upload, it could not read where it is kept: a store's file.
+    /// What a writer was to upload, it could not read where it is kept: a cell's file.
     #[error("reading {0}")]
     Read(String),
     /// Another writer's commits moved the cell on from the host's write-ahead log's: the cell's
     /// last commit is neither one of the log's nor the one the log started from. Its commits were
-    /// never acknowledged, and no writer puts them after another's: the store opens only once
-    /// `cladefsctl take` drops the log (doc-14, Opening a store).
+    /// never acknowledged, and no writer puts them after another's: the cell opens only once
+    /// `cladefsctl take` drops the log (doc-14, Opening a cell).
     #[error("another writer's commits moved the cell on from the write-ahead log's")]
     Diverged,
     /// cladefs: the cell is of another kind, this one: a cell has one (doc-20).
@@ -343,23 +343,23 @@ pub struct Rules {
     /// (TASK-175).
     /// TLA+: `specs/bucket/mutations/NoMovesTakenFirst.cfg`.
     pub moves_taken_first: bool,
-    /// A host's store reading the extents its writer's checkpoints record as moved names them
-    /// where they went, as the writer does, before the checkpoint lands
-    /// ([`Writer::following`](crate::Writer::following)): it names none further back along its
-    /// way than the writer's newest checkpoint, from which the collector keeps the moves (TASK-195).
-    /// Simulation only (`sim::stores_need_to_follow_moves`): specs/bucket models the writer's
-    /// state, not a store's names.
-    pub stores_follow_moves: bool,
+    /// A host's cell reading the extents its writer's checkpoints record as moved names them where
+    /// they went, as the writer does, before the checkpoint lands
+    /// ([`Writer::following`](crate::Writer::following)): it names none further back along its way
+    /// than the writer's newest checkpoint, from which the collector keeps the moves (TASK-195).
+    /// Simulation only (`sim::hosts_need_to_follow_moves`): specs/bucket models the writer's state,
+    /// not a cell's names.
+    pub hosts_follow_moves: bool,
     /// A host's write-ahead log is put after the cell's end only if the cell's last commit is
     /// one of the log's or the one it started from: otherwise another writer's commits came after
-    /// what the log holds, and it diverged (doc-14, Opening a store).
+    /// what the log holds, and it diverged (doc-14, Opening a cell).
     /// TLA+: `specs/bucket/mutations/NoWalFollows.cfg`.
     pub wal_follows: bool,
     /// cladefs: a fork of a cell to a child in another cell, a writable fork or a version's clone,
-    /// has a reference under the parent's cell ([`layout::reference`]), for which that cell's passes
-    /// keep the parent's state at the origin: a pass lists nothing of the child's cell, and,
-    /// the parent deleted, would delete what the child inherits (TASK-395.3).
-    /// TLA+: `specs/bucket/mutations/NoReferences.cfg`.
+    /// has a reference under the parent's cell ([`layout::reference`]), for which that cell's
+    /// passes keep the parent's state at the origin: a pass lists nothing of the child's cell, and,
+    /// the parent deleted, would delete what the child inherits (TASK-395.3). TLA+:
+    /// `specs/bucket/mutations/NoReferences.cfg`.
     pub references: bool,
     /// A version's clone writes its reference before it reads its cell's head (and after its own
     /// record, [`Rules::clones_record_first`]), whatever its cell, its origin's own too
@@ -383,11 +383,11 @@ pub struct Rules {
     /// TLA+: `specs/bucket/mutations/NoForkPointsKept.cfg`.
     pub origins_kept: bool,
     /// A version's clone creates its record, saying it is being made, before its reference
-    /// ([`lifecycle::fork_version`]): a reference then always has a record naming its origin, by which
-    /// its child's cell's pass retires it, the clone's host dying or not; and a clone refused by a
-    /// record there writes none. The other way round, a host dying between the two leaves a
-    /// reference no record names, which no pass retires (TASK-395.10).
-    /// TLA+: `specs/bucket/mutations/NoForksRecordFirst.cfg`.
+    /// ([`lifecycle::fork_version`]): a reference then always has a record naming its origin, by
+    /// which its child's cell's pass retires it, the clone's host dying or not; and a clone refused
+    /// by a record there writes none. The other way round, a host dying between the two leaves a
+    /// reference no record names, which no pass retires (TASK-395.10). TLA+:
+    /// `specs/bucket/mutations/NoForksRecordFirst.cfg`.
     pub clones_record_first: bool,
     /// A reference retired, or taken back, is marked first ([`layout::retired`]), the mark kept for
     /// good under the parent's cell, and a pass over that cell deletes the references it lists
@@ -397,19 +397,19 @@ pub struct Rules {
     /// (TASK-395.14). Its write changes the parent's cell's listing, whose next pass finds it.
     /// TLA+: `specs/bucket/mutations/NoRetirementsMarked.cfg`.
     pub retirements_marked: bool,
-    /// cladefs: a fork of a version resumed by another than its host, a store opening its child,
-    /// writes its reference before it makes it, as its host does ([`lifecycle::resume_version_fork`]).
-    /// Without it, as a test shows it needed, a host dying between the fork's record and its
-    /// reference leaves a clone made of no reference, whose origin's state at the origin no
-    /// pass keeps once the version is gone.
-    /// TLA+: `specs/bucket/mutations/NoResumesRefer.cfg`.
+    /// cladefs: a fork of a version resumed by another than its host, a cell opening its child,
+    /// writes its reference before it makes it, as its host does
+    /// ([`lifecycle::resume_version_fork`]). Without it, as a test shows it needed, a host dying
+    /// between the fork's record and its reference leaves a clone made of no reference, whose
+    /// origin's state at the origin no pass keeps once the version is gone. TLA+:
+    /// `specs/bucket/mutations/NoResumesRefer.cfg`.
     pub resumes_refer: bool,
-    /// cladefs: a fork of a version resumed says so in its record ([`record::Record::resumed`]), with
-    /// a condition, before its reference is written again, and a clone made so retires its
+    /// cladefs: a fork of a version resumed says so in its record ([`record::Record::resumed`]),
+    /// with a condition, before its reference is written again, and a clone made so retires its
     /// reference marked: its host, slow, may write it after the clone was made, deleted and its
-    /// cell removed. Without it, as a test shows it needed, retired unmarked, that reference
-    /// stands for good, keeping its base's state at the origin (TASK-455's review).
-    /// TLA+: `specs/bucket/mutations/NoResumesMarked.cfg`.
+    /// cell removed. Without it, as a test shows it needed, retired unmarked, that reference stands
+    /// for good, keeping its base's state at the origin (TASK-455's review). TLA+:
+    /// `specs/bucket/mutations/NoResumesMarked.cfg`.
     pub resumes_marked: bool,
     /// cladefs: a pass keeps, for each version a live cell's head names, the cell's whole state
     /// at it and what recovering it reads, as for an origin (doc-18, TASK-476). Without it, as a
@@ -428,7 +428,7 @@ pub struct Rules {
     /// name among them, at a segment the head does not hold.
     /// TLA+: `specs/bucket/mutations/NoVersionsAcked.cfg`.
     pub versions_acked: bool,
-    /// cladefs: a take of a replicated cell whose store opened holding more than the members of
+    /// cladefs: a take of a replicated cell opened holding more than the members of
     /// the configuration it fenced gave, its own write-ahead log's commits, activates its own
     /// configuration only by the acknowledgement that names them all (`local_cell::upload`'s
     /// `Shared::replicate`, TASK-678): without it, the head names a configuration none of whose
@@ -456,7 +456,7 @@ impl Rules {
         collector_abandons: true,
         ways_from_seals: true,
         moves_taken_first: true,
-        stores_follow_moves: true,
+        hosts_follow_moves: true,
         wal_follows: true,
         references: true,
         clones_refer_first: true,

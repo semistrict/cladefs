@@ -14,7 +14,7 @@ use fxfs::object_handle::{ObjectHandle, WriteObjectHandle};
 use fxfs::object_store::directory::Directory;
 use fxfs::object_store::transaction::{LockKey, Options, lock_keys};
 use fxfs::object_store::{HandleOptions, ObjectStore};
-use local_cell::{Description, LocalCell, MemDir, Options as StoreOptions};
+use local_cell::{Description, LocalCell, MemDir, Options as CellOptions};
 use shuttle::scheduler::RandomScheduler;
 use shuttle::{Config, Runner};
 use std::sync::Arc;
@@ -46,9 +46,9 @@ async fn read(fs: &OpenFxFilesystem, file: &str) -> Vec<u8> {
 
 async fn write_and_follow() {
     let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
-    let store =
-        Arc::new(LocalCell::create(MemDir::new(), description, StoreOptions::default()).unwrap());
-    let device = DeviceHolder::new(CellDevice::new(store.clone()));
+    let cell =
+        Arc::new(LocalCell::create(MemDir::new(), description, CellOptions::default()).unwrap());
+    let device = DeviceHolder::new(CellDevice::new(cell.clone()));
     let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
     let root_store = fs.root_store();
     let root = Directory::open(&root_store, root_store.root_directory_object_id())
@@ -71,7 +71,7 @@ async fn write_and_follow() {
         .expect("sync failed");
 
     // A follower as of now, which goes on reading it as the writer changes it.
-    let view = DeviceHolder::new(ViewDevice::new(store.clone(), store.view()));
+    let view = DeviceHolder::new(ViewDevice::new(cell.clone(), cell.view()));
     let follower =
         FxFilesystemBuilder::new().read_only(true).open(view).await.expect("follower failed");
     assert_eq!(read(&follower, "file").await, vec![7; BLOCK]);
@@ -83,7 +83,7 @@ async fn write_and_follow() {
     assert_eq!(read(&follower, "file").await, vec![7; BLOCK]);
 
     // A follower as of then reads the new.
-    let view = DeviceHolder::new(ViewDevice::new(store.clone(), store.view()));
+    let view = DeviceHolder::new(ViewDevice::new(cell.clone(), cell.view()));
     let later = FxFilesystemBuilder::new().read_only(true).open(view).await.expect("later failed");
     assert_eq!(read(&later, "file").await, vec![8; BLOCK]);
     later.close().await.expect("close failed");

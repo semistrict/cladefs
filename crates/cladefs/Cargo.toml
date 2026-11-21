@@ -9,11 +9,11 @@ publish = false
 
 [features]
 # Images for tests of importing them, here and in the guest's (`import::testing`); what tests,
-# here and in sqlite_cladefs', look for on the host's disk beside stores (`testing`); and the
+# here and in sqlite_cladefs', look for on the host's disk beside cells (`testing`); and the
 # tests' KMS, which tests' processes and benches encrypt under (`remote::testing`, TASK-411.28).
 testing = ["extent_keys/testing"]
-# The extent daemon's registry of open stores and its requests on them (open_stores and
-# cell_requests, TASK-44.6), and the kernel and its DAX windows, with their userfaultfd stage (dax,
+# The extent daemon's registry of open cells and its requests on them (cell_requests,
+# TASK-44.6), and the kernel and its DAX windows, with their userfaultfd stage (dax,
 # TASK-44.3), on Shuttle's locks, whose scheduler then chooses every interleaving of their tests'
 # threads. Only for those tests: `cargo nextest run -p cladefs --features shuttle --lib
 # shuttle_tests::`.
@@ -34,7 +34,7 @@ loom = ["dep:loom"]
 # cladefs: a host whose environment names no KMS and gives no master key encrypts under the tests' KMS,
 # every tenant's KEK one known key (`remote::testing`, TASK-411.28), as every process does that
 # this crate's tests and sqlite_cladefs' start (cladefsd, cladefsctl, cladefs-mount), agreeing
-# with them: every store is encrypted, and a process given no KMS refuses to start, but a test's needs
+# with them: every cell is encrypted, and a process given no KMS refuses to start, but a test's needs
 # none. Never a host's: a release build refuses it.
 tests-kms = ["testing"]
 
@@ -85,7 +85,7 @@ astral-tokio-tar = "0.7.1"
 [dev-dependencies]
 async-trait.workspace = true
 cladefs = { path = ".", features = ["failpoints", "testing", "tests-kms"] }
-# Panics holding a lock shared beyond one store, in tests that ask (TASK-149.24).
+# Panics holding a lock shared beyond one cell, in tests that ask (TASK-149.24).
 local_cell = { workspace = true, features = ["testing"] }
 # Tests' cells, of a cell of their own (`layout::test_cell`, TASK-364).
 bucket_cell = { workspace = true, features = ["testing"] }

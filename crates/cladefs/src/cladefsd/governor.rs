@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: the daemon's memory as a page cache (TASK-358): as Linux's page cache, it has no size of
-//! its own, but takes whatever of the host's memory is free, and gives it back as others need it.
-//! Under DAX, the daemon's memory is a guest's only cache of its files, and cladefs is the only thing
-//! on its hosts: memory left free is memory wasted.
+//! cladefs: the daemon's memory as a page cache (TASK-358): as Linux's page cache, it has no size
+//! of its own, but takes whatever of the host's memory is free, and gives it back as others need
+//! it. Under DAX, the daemon's memory is a guest's only cache of its files, and cladefs is the only
+//! thing on its hosts: memory left free is memory wasted.
 //!
 //! A thread looks at the host's memory every [`INTERVAL`]: what is available to the daemon, the
 //! host's (`MemAvailable`) or, if less, its cgroups', each ancestor's limit less what it holds
@@ -13,19 +13,19 @@
 //! memory to grow into between looks and for the host ([`headroom`]). It sets the limit on every
 //! tenant's memory together to that ([`super::memory::govern`]); held past it, the daemon evicts at
 //! once, each tenant first down to its share of it by weight ([`shares`]), then any, least recently
-//! used first. cladefs: what it holds counts the parts of segments its stores pack as they fill,
+//! used first. cladefs: what it holds counts the parts of segments its cells pack as they fill,
 //! held until their framings, which it lets go of first, before any tenant's page: derived, their
 //! framings read them back (`super::memory::held_parts`, TASK-400).
 //!
 //! A daemon given its memory's size (`cladefsd SOCKET MEMORY_BYTES`) is not governed: its
 //! memory is that, as a test's daemon's may be.
 //!
-//! cladefs: the host's disk, governed alike (backlog doc-22, TASK-539.9): each filesystem the daemon
-//! keeps stores or its part cache on, a disk (`bucket_cell::host_disk`), is the daemon's but for a
-//! headroom ([`disk_headroom`]), and no more than `CLADEFSD_DISK_BYTES` of all of them together, if
-//! that is set. Its stores come first; the part cache takes what they leave, evicted at once as
-//! they need it; then, its stores near the allowance ([`pressured`]), their uploaders are urged,
-//! and past it their guests' writes refused. The policy is here, its look at the disks in
+//! cladefs: the host's disk, governed alike (backlog doc-22, TASK-539.9): each filesystem the
+//! daemon keeps cells or its part cache on, a disk (`bucket_cell::host_disk`), is the daemon's but
+//! for a headroom ([`disk_headroom`]), and no more than `CLADEFSD_DISK_BYTES` of all of them
+//! together, if that is set. Its cells come first; the part cache takes what they leave, evicted at
+//! once as they need it; then, its cells near the allowance ([`pressured`]), their uploaders are
+//! urged, and past it their guests' writes refused. The policy is here, its look at the disks in
 //! `super::disk`.
 
 use super::memory;
@@ -224,9 +224,9 @@ pub fn disk_headroom_of(value: Option<&str>) -> Result<Option<DiskHeadroom>, Str
     }
 }
 
-/// cladefs: what the disk governor leaves free of a filesystem of `size` bytes: `set`, or, unset,
-/// a twentieth of it, 4 GiB at least, half of it at most: room for others' writes between its looks,
-/// for what its stores' commits add unadmitted (TASK-539.15), and a neighbour's (user, 2026-11-18:
+/// cladefs: what the disk governor leaves free of a filesystem of `size` bytes: `set`, or, unset, a
+/// twentieth of it, 4 GiB at least, half of it at most: room for others' writes between its looks,
+/// for what its cells' commits add unadmitted (TASK-539.15), and a neighbour's (user, 2026-11-18:
 /// 5%, 4 GiB at least).
 pub fn disk_headroom(size: u64, set: Option<DiskHeadroom>) -> u64 {
     match set {
@@ -243,7 +243,7 @@ pub fn disk_allowance(held: u64, free: u64, in_flight: u64, headroom: u64) -> u6
     (held + free).saturating_sub(in_flight + headroom)
 }
 
-/// cladefs: whether a disk whose stores leave `spare` of its allowance is under pressure, `was` it
+/// cladefs: whether a disk whose cells leave `spare` of its allowance is under pressure, `was` it
 /// as the last look found it: entered under `headroom`, left only past it and a quarter more, so
 /// that a disk at its edge doesn't urge its uploaders on and off at every look.
 pub fn pressured(was: bool, spare: u64, headroom: u64) -> bool {

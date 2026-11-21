@@ -1,11 +1,11 @@
 # What a file's writing back waits for is written again once written back: the open segment's raw
 # file, past what write-behind keeps begun (TASK-221's 6e5d8b0db, bed99ce0c), and each framed
 # file's pieces, reach the host's disk twice, as TASK-310's write-behind was suspected of, which
-# nothing the store counts says (TASK-330.2). Under the stores' page cache (TASK-433), what it
+# nothing the cell counts says (TASK-330.2). Under the cells' page cache (TASK-433), what it
 # wrote back is written again past it, to the file under it (TASK-461; its CachedFile since
 # TASK-433.5, the host's and the memory directory's alike, TASK-467).
 # Kind: writes
-# Killer: bucket::write_budgets::a_hosts_store_writes_what_its_design_says
+# Killer: bucket::write_budgets::a_hosts_cell_writes_what_its_design_says
 --- a/crates/local_cell/src/cached.rs
 +++ b/crates/local_cell/src/cached.rs
 @@ -264,7 +264,10 @@ impl<F: File> File for CachedFile<F> {

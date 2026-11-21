@@ -79,5 +79,5 @@ virtio_extent requests::tests::maps_carry_their_pieces
 virtio_extent requests::tests::notices_and_window_requests_reach_their_ends
 virtio_extent requests::tests::roots_and_info_are_written_whole
 virtio_extent requests::tests::unsafe_devices_commit_ordered
-virtio_extent requests::tests::writes_and_reads_go_through_the_store
+virtio_extent requests::tests::writes_and_reads_go_through_the_cell
 virtio_extent requests::tests::writes_carry_their_barriers

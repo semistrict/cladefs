@@ -20,26 +20,26 @@
 //! reached with credentials from the environment's `AWS_*`, `GOOGLE_*` or `AZURE_*` variables. It
 //! collects once, or every SECONDS, a cell at a time (TASK-395.4): every cell of the bucket, found
 //! by delimiter listings a page at a time, listing none of their objects, PASSES of them at once
-//! (16 by default, TASK-395.5; `bucket_cell::sweep`), or the one `--cell` names, its IDs in
-//! base 32. Each cell's pass takes the cell's own lease, lists the cell alone, and deletes there
-//! alone, but for the references it retires of its deleted children's under their parents' cells.
-//! It holds the lease for `--lease` SECONDS (600 by default), renewing it between its steps and
-//! letting it go as it ends: a pass, of this process or of any other collecting the bucket at
-//! once, that finds its cell held leaves it and goes on to the next, as it does a cell another
-//! pass went over since its sweep began; so processes collecting one bucket at once split its
-//! cells. A process gone holds the cells its passes held until their leases expire, and the next
-//! sweep after that collects them. A pass that fails says so and stops none of the others; the next
-//! pass tries it again. A compacted object goes, and moves no state names, a grace period after (60
-//! s by default); objects whose live extents take less than FRACTION of them (0.5) are compacted.
-//! Every cell's objects are encrypted (TASK-411.28), and compacted under its keys (TASK-411.6): its
-//! KEK unwrapped once a pass, by the host's KMS, as every cladefs process chooses it
+//! (16 by default, TASK-395.5; `bucket_cell::sweep`), or the one `--cell` names, its IDs in base
+//! 32. Each cell's pass takes the cell's own lease, lists the cell alone, and deletes there alone,
+//! but for the references it retires of its deleted children's under their parents' cells. It holds
+//! the lease for `--lease` SECONDS (600 by default), renewing it between its steps and letting it
+//! go as it ends: a pass, of this process or of any other collecting the bucket at once, that finds
+//! its cell held leaves it and goes on to the next, as it does a cell another pass went over since
+//! its sweep began; so processes collecting one bucket at once split its cells. A process gone
+//! holds the cells its passes held until their leases expire, and the next sweep after that
+//! collects them. A pass that fails says so and stops none of the others; the next pass tries it
+//! again. A compacted object goes, and moves no state names, a grace period after (60 s by
+//! default); objects whose live extents take less than FRACTION of them (0.5) are compacted. Every
+//! cell's objects are encrypted (TASK-411.28), and compacted under its keys (TASK-411.6): its KEK
+//! unwrapped once a pass, by the host's KMS, as every cladefs process chooses it
 //! (`bucket_cell::bucket_kms::from_env`: the one `CLADEFS_KMS` names; else, given
-//! `CLADEFS_MASTER_KEY` or `CLADEFS_MASTER_KEY_FILE`, the bucket KMS over URL's bucket, TASK-411.27),
-//! and only by a pass compacting something. With neither variable giving a KMS, or one that can't
-//! be had, cladefs-gc refuses to start collecting or deleting a cell, saying so; a dry run,
-//! `--cells`, `--usage` and `--rotate-master-key` read no data, and need none. With its tenant's
-//! KEK revoked or destroyed, a pass marks and deletes as ever but leaves what it would compact
-//! uncompacted, warning of the cell and why, and its line says so. Passes after it skip the
+//! `CLADEFS_MASTER_KEY` or `CLADEFS_MASTER_KEY_FILE`, the bucket KMS over URL's bucket,
+//! TASK-411.27), and only by a pass compacting something. With neither variable giving a KMS, or
+//! one that can't be had, cladefs-gc refuses to start collecting or deleting a cell, saying so; a
+//! dry run, `--cells`, `--usage` and `--rotate-master-key` read no data, and need none. With its
+//! tenant's KEK revoked or destroyed, a pass marks and deletes as ever but leaves what it would
+//! compact uncompacted, warning of the cell and why, and its line says so. Passes after it skip the
 //! cell, unchanged, while its tenant's KEK is still not to be had, which a sweep asks the KMS once
 //! a tenant (TASK-411.13), saying nothing of it but in the sweep's lines; once it is, the next
 //! passes over it in full and compacts.
@@ -82,12 +82,13 @@
 //! cell, whose child has no record yet, authenticates its checkpoint at the origin under the
 //! cell's DEK, through the host's KMS (TASK-411.14).
 //!
-//! `--usage` says what each cell takes, and each tenant, every cell's or `--tenant`'s alone, as
-//! the collector's last pass over each cell to end found it, writing nothing (TASK-394,
-//! TASK-395.8): it reads each cell's collector lease, where that pass recorded it, listing none of
-//! the cells' objects, the tenants and their cells listed a page at a time, so that what it holds
-//! at once is a page of each, however many tenants, cells and objects the bucket holds. It streams a JSON object a line: one for each cell of a tenant, then one for
-//! the tenant, IDs in base 32. A cell's: `{"scope":"cell","tenant":"1","cell":"1/2f",
+//! `--usage` says what each cell takes, and each tenant, every cell's or `--tenant`'s alone, as the
+//! collector's last pass over each cell to end found it, writing nothing (TASK-394, TASK-395.8): it
+//! reads each cell's collector lease, where that pass recorded it, listing none of the cells'
+//! objects, the tenants and their cells listed a page at a time, so that what it holds at once is a
+//! page of each, however many tenants, cells and objects the bucket holds. It streams a JSON object
+//! a line: one for each cell of a tenant, then one for the tenant, IDs in base 32. A cell's:
+//! `{"scope":"cell","tenant":"1","cell":"1/2f",
 //! "measured_unix_ms":...,"objects":...,"bytes":...,"kinds":{"segment":{"objects":...,
 //! "bytes":...},...}}`, `measured_unix_ms` when the listing it is of began, by the bucket's clock,
 //! and all four null for a cell no pass ran over to its end yet. A tenant's: `{"scope":"tenant",
@@ -101,13 +102,13 @@
 //!
 //! `--rotate-master-key` rewraps every tenant's KEK object the bucket KMS keeps in the bucket
 //! (`tenants/<tenant>/kek`, TASK-411.27, doc-16 The bucket KMS) under the newest master key, the
-//! first of `CLADEFS_MASTER_KEY`'s (or `CLADEFS_MASTER_KEY_FILE`'s), each by a conditional update, the
-//! others given unwrapping those under them; the KEKs stay as they are. It says on standard error
-//! how many it rewrapped, how many were under the newest already, and how many tenants are
+//! first of `CLADEFS_MASTER_KEY`'s (or `CLADEFS_MASTER_KEY_FILE`'s), each by a conditional update,
+//! the others given unwrapping those under them; the KEKs stay as they are. It says on standard
+//! error how many it rewrapped, how many were under the newest already, and how many tenants are
 //! shredded (tombstones, left), naming the newest key by its ID. A KEK object under none of the
-//! keys given is left as it is, said, and fails the run, which, done again with its key among
-//! them, finishes. Once it ran refusing none, hosts need the newest key alone. Done again, it
-//! rewraps nothing.
+//! keys given is left as it is, said, and fails the run, which, done again with its key among them,
+//! finishes. Once it ran refusing none, hosts need the newest key alone. Done again, it rewraps
+//! nothing.
 
 // Every unsafe block says why it is sound, other threads included (TASK-444.4).
 #![deny(clippy::undocumented_unsafe_blocks)]
@@ -370,10 +371,10 @@ impl Tenant {
     }
 }
 
-/// Writes to `out` what each cell of `bucket` takes, and each tenant, every tenant's or `named`'s, a
-/// line each as it reads them (`--usage`): reading each cell's collector lease, a few at once, the
-/// tenants and each one's cells listed a page at a time, so that it holds a page of each at most,
-/// whatever the bucket holds (TASK-395.8).
+/// Writes to `out` what each cell of `bucket` takes, and each tenant, every tenant's or `named`'s,
+/// a line each as it reads them (`--usage`): reading each cell's collector lease, a few at once,
+/// the tenants and each one's cells listed a page at a time, so that it holds a page of each at
+/// most, whatever the bucket holds (TASK-395.8).
 async fn say_usage(
     bucket: &ObjectBucket,
     named: Option<u64>,
@@ -451,7 +452,8 @@ async fn collect(
         };
         let swept = match named {
             Some(cell) => sweep.run_cell(bucket, cell, observe).await,
-            // cladefs: copies of other buckets' cells' versions here, by its own store (TASK-633.8).
+            // cladefs: copies of other buckets' cells' versions here, by its own bucket
+            // (TASK-633.8).
             None => sweep.run_with_own(bucket, Some(&bucket.own()), observe).await,
         };
         sweeps += 1;
@@ -666,8 +668,9 @@ impl Histogram {
 /// `passes` says, ended at `now`, the process having taken `peak` bytes of memory at most so far:
 /// in Prometheus' text format, the last sweep's.
 ///
-/// - `cladefs_gc_sweeps_total`: the sweeps the process ran; `cladefs_gc_sweep_end_timestamp_seconds`
-///   and `cladefs_gc_sweep_seconds`: when its last ended, and how long it took.
+/// - `cladefs_gc_sweeps_total`: the sweeps the process ran;
+///   `cladefs_gc_sweep_end_timestamp_seconds` and `cladefs_gc_sweep_seconds`: when its last ended,
+///   and how long it took.
 /// - `cladefs_gc_sweep_cells{outcome}`: its cells, by what came of each: `passed` (in full),
 ///   `skipped` (unchanged since its last pass, TASK-395.6), `failed`, `held` (left to a pass
 ///   holding it), `swept` (left to a pass that went over it since).
@@ -1067,8 +1070,8 @@ mod tests {
     }
 
     /// TASK-264: a dry run lists each object a pass would delete, and each it would compact, with
-    /// its kind and size, and says their counts and bytes, and that a pass deletes more; and that it
-    /// may be stale, if fenced.
+    /// its kind and size, and says their counts and bytes, and that a pass deletes more; and that
+    /// it may be stale, if fenced.
     #[test]
     fn dry_runs_list_what_goes_and_say_it_is_less() {
         let meta = |key: String, size| Meta { key, version: Version::default(), size, modified: 0 };
@@ -1247,8 +1250,8 @@ mod tests {
         assert_eq!(bucket.stats().requests(Request::ListDelimited), 6);
     }
 
-    /// TASK-395.8: `--usage` says a cell's objects and bytes, of each kind and in all, and when they
-    /// were measured, a JSON object a line, IDs in base 32; nulls for a cell not measured. A
+    /// TASK-395.8: `--usage` says a cell's objects and bytes, of each kind and in all, and when
+    /// they were measured, a JSON object a line, IDs in base 32; nulls for a cell not measured. A
     /// tenant's line sums its cells measured, and says how many there are, and the oldest and
     /// newest measurement.
     #[test]

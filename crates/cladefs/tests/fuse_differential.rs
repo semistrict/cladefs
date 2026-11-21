@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Random sequences of file system calls made on a FUSE mount of a new store (`cladefs::fuse`) and
+//! Random sequences of file system calls made on a FUSE mount of a new cell (`cladefs::fuse`) and
 //! on a directory of Linux's own tmpfs beside it, their results compared (TASK-149.37): Linux's
 //! filesystem the oracle of the host's `Node` layer, which plays Linux's VFS for Fxfs, of
 //! fxfs-posix under it, and of the FUSE server over it, as the guest's fsx differential holds the
@@ -13,7 +13,7 @@
 //! permissions, owner, group, links, size, device, which paths are links of one node, contents,
 //! symlink targets and extended attributes; and which nodes' modification and change times the
 //! call changed, the reference's coarse clock having ticked before it, so that a change it made
-//! shows. At the end the mount is unmounted, its store checked (fsck) and mounted directly, and its
+//! shows. At the end the mount is unmounted, its cell checked (fsck) and mounted directly, and its
 //! tree compared with the reference's, beyond what the kernel caches.
 //!
 //! What the two may differ in, and the calls left out as only their differences would show, are
@@ -185,8 +185,8 @@ fn allowed(allowed: Allowed) -> &'static str {
     found.map(|(_, why)| *why).unwrap_or_else(|| panic!("{allowed:?} is not in ALLOWED"))
 }
 
-/// A memory store's size: room for what a case writes.
-const STORE_SIZE: u64 = 128 << 20;
+/// A memory cell's size: room for what a case writes.
+const CELL_SIZE: u64 = 128 << 20;
 
 /// The most files a case holds open at once: an open past them closes the oldest first.
 const MAX_FDS: usize = 6;
@@ -1192,8 +1192,8 @@ fn xattrs(path: &Path) -> Result<BTreeMap<Bytes, Bytes>, Errno> {
     }
 }
 
-/// The tree of the filesystem `fs`, read through its nodes, as the store holds it.
-async fn store_tree(fs: &Filesystem) -> Tree {
+/// The tree of the filesystem `fs`, read through its nodes, as the cell holds it.
+async fn cell_tree(fs: &Filesystem) -> Tree {
     let mut found = BTreeMap::new();
     let root = fs.root().clone();
     let attr = root.getattr().await.unwrap();
@@ -1239,15 +1239,15 @@ async fn store_tree(fs: &Filesystem) -> Tree {
     Tree::of(found)
 }
 
-/// The store's tree differs from the reference's, if it does: wholly, if the reference's was all
+/// The cell's tree differs from the reference's, if it does: wholly, if the reference's was all
 /// read; else in what the reference's walk could read, as a user's may not read all its run made
 /// (a file its mode keeps from it, a directory it can't list).
-fn store_difference(reference: &Tree, store: &Tree) -> Option<String> {
+fn cell_difference(reference: &Tree, cell: &Tree) -> Option<String> {
     if reference.whole() {
-        return tree_difference(reference, store);
+        return tree_difference(reference, cell);
     }
     for (path, theirs) in &reference.entries {
-        let Some(ours) = store.entries.get(path) else {
+        let Some(ours) = cell.entries.get(path) else {
             return Some(format!("{path} is on the reference alone: {theirs:?}"));
         };
         if matches!(theirs.data, Contents::Unstatted(_)) {
@@ -1259,24 +1259,24 @@ fn store_difference(reference: &Tree, store: &Tree) -> Option<String> {
             || (theirs.xattrs.is_ok() && ours.xattrs != theirs.xattrs);
         if differs {
             return Some(format!(
-                "{path} differs:\n  reference: {theirs:?}\n  store:     {ours:?}"
+                "{path} differs:\n  reference: {theirs:?}\n  cell:      {ours:?}"
             ));
         }
     }
-    // What the store has beyond is in a directory the reference's walk couldn't list, or read.
+    // What the cell has beyond is in a directory the reference's walk couldn't list, or read.
     let unlisted: Vec<&String> = (reference.entries.iter())
         .filter(|(_, entry)| {
             matches!(entry.data, Contents::Directory(Err(_)) | Contents::Unstatted(_))
         })
         .map(|(path, _)| path)
         .collect();
-    let extra = store.entries.keys().find(|path| {
+    let extra = cell.entries.keys().find(|path| {
         !reference.entries.contains_key(*path)
             && !unlisted
                 .iter()
                 .any(|dir| path.starts_with(&format!("{dir}/")) || dir.as_str() == ".")
     });
-    extra.map(|path| format!("{path} is in the store alone"))
+    extra.map(|path| format!("{path} is in the cell alone"))
 }
 
 /// Waits until the coarse clock, which tmpfs's times are taken from, has ticked: a time a call
@@ -1351,7 +1351,7 @@ impl Drop for References {
     }
 }
 
-/// What a case is made on: the reference, and the subject, a FUSE mount of a new store, or, to
+/// What a case is made on: the reference, and the subject, a FUSE mount of a new cell, or, to
 /// test the test, another directory of the reference's tmpfs.
 struct Case<'a> {
     run: &'a Run,
@@ -1400,9 +1400,9 @@ impl<'a> Case<'a> {
         // SAFETY: Plain calls setting the process's umask.
         unsafe { libc::umask(0o022) };
         let mount = (subject == Subject::Mount).then(|| {
-            let fs = block_on(Filesystem::format(Storage::memory(STORE_SIZE))).unwrap();
-            // A user's run mounts a root of its own, as a store made for it would be; root's keeps
-            // a new store's, which has no POSIX attributes of its own (0755, root's).
+            let fs = block_on(Filesystem::format(Storage::memory(CELL_SIZE))).unwrap();
+            // A user's run mounts a root of its own, as a cell made for it would be; root's keeps
+            // a new cell's, which has no POSIX attributes of its own (0755, root's).
             if !run.root {
                 let owner = SetAttr { uid: Some(me.uid), gid: Some(me.gid), ..Default::default() };
                 block_on(fs.root().setattr(&owner)).unwrap();
@@ -1452,7 +1452,7 @@ impl<'a> Case<'a> {
     }
 
     /// Makes `ops`' calls on both, comparing as it goes; then, with a mount, unmounts it, checks
-    /// its store, and compares the store's tree with the reference's.
+    /// its cell, and compares the cell's tree with the reference's.
     fn run(&mut self, ops: &[Op]) -> Result<(), String> {
         let mut now = self.run.identities[0].clone();
         let (mut theirs, mut ours) = self.trees(&now);
@@ -1552,14 +1552,14 @@ impl<'a> Case<'a> {
         mount.unmount(true).map_err(|error| format!("unmounting: {error:#}"))?;
         let storage = mount.join().map_err(|error| format!("closing: {error:#}"))?;
         let storage = block_on(storage.check())
-            .map_err(|error| format!("the store is not whole: {error:#}"))?;
-        let store = block_on(async {
+            .map_err(|error| format!("the cell is not whole: {error:#}"))?;
+        let cell = block_on(async {
             let fs = Filesystem::mount(storage).await.unwrap();
-            let tree = store_tree(&fs).await;
+            let tree = cell_tree(&fs).await;
             fs.close().await.unwrap();
             tree
         });
-        match store_difference(&theirs, &store) {
+        match cell_difference(&theirs, &cell) {
             Some(difference) => {
                 Err(self.failed(ops.len(), format!("after unmounting, {difference}")))
             }
@@ -1916,8 +1916,8 @@ fn differential(subject: Subject, cases: u32) {
     }
 }
 
-/// TASK-149.37: random calls on a FUSE mount of a new store come to what they come to on Linux's
-/// tmpfs, as do its tree and times after each, and the store's tree once unmounted: see the
+/// TASK-149.37: random calls on a FUSE mount of a new cell come to what they come to on Linux's
+/// tmpfs, as do its tree and times after each, and the cell's tree once unmounted: see the
 /// module's docs.
 #[test]
 fn random_calls_on_a_mount_come_to_what_they_do_on_tmpfs() {

@@ -28,7 +28,7 @@ struct sim_fiber *host_fiber_self(void);
 void host_fiber_switch(struct sim_fiber *from, struct sim_fiber *to);
 void host_fiber_free(struct sim_fiber *fiber);
 
-/* The store's memory: a memfd of `len` bytes, all zeros. */
+/* The extent store's memory: a memfd of `len` bytes, all zeros. */
 void host_store_init(u64 len);
 void host_store_read(u64 offset, void *buf, size_t len);
 void host_store_write(u64 offset, const void *buf, size_t len);
@@ -36,11 +36,11 @@ void host_store_zero(u64 offset, size_t len);
 
 /*
  * The window: `len` bytes of address space, inaccessible until mapped, and mapped read-only. A
- * store it faults on calls `store(offset)`, in the middle of the store, which may make the page
- * private and return NULL, the store then going on; or returns why the host refuses it, which
+ * write it faults on calls `write(offset)`, in the middle of the write, which may make the page
+ * private and return NULL, the write then going on; or returns why the host refuses it, which
  * stops the run.
  */
-void *host_window_init(u64 len, const char *(*store)(u64 offset));
+void *host_window_init(u64 len, const char *(*on_write)(u64 offset));
 void host_window_map(u64 offset, u64 store_offset, u64 len);
 void host_window_map_zeros(u64 offset, u64 len);
 void host_window_unmap(u64 offset, u64 len);

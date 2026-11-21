@@ -84,7 +84,7 @@ class Budgets(unittest.TestCase):
         status, said, _ = self.run_budgets("--bucket-in-memory", case / "cladefsd-stats.txt")
         self.assertEqual(status, 1)
         self.assertIn("fxfs-guest-x/cladefsd-stats.txt: disk: PAST ITS BUDGET: the kernel wrote "
-                      "800.0 MiB for it, it says 151.6 MiB at most: stores 150.0 MiB, pages 1.6 "
+                      "800.0 MiB for it, it says 151.6 MiB at most: cells 150.0 MiB, pages 1.6 "
                       "MiB, stats 0.0 MiB, log 0.0 MiB, bucket 0.0 MiB, cache 0.0 MiB", said)
 
 

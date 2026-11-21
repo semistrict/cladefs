@@ -8,7 +8,7 @@ updated_date: '2026-11-17 01:09'
 # Shared volumes: Fxfs volumes over read-only bases
 
 Status, 2026-11-08. Built: the guest's mounts of volumes (TASK-136.2), volumes over base layers in
-Fxfs (TASK-136.3), attaching a base to a store (TASK-136.5), and publishing from a sandbox and
+Fxfs (TASK-136.3), attaching a base to a cell (TASK-136.5), and publishing from a sandbox and
 importing in another (TASK-136.4), which the test `fxfs-guest-shared-volumes` runs with Git; lookups
 that attach, and idle mounts that expire (TASK-136.6, `fxfs-guest-automount`); and `git fetch`
 moving onto a newer generation (TASK-136.7, `fxfs-guest-git-fetch`). Measured on a Linux-sized
@@ -21,7 +21,7 @@ The feature is generic: a shared volume is a read-only base that any sandbox can
 over, privately. Git is its first use, not part of it: many users clone the same repos over and over
 and keep them up to date, so a sandbox keeps a checkout current in a volume, and other sandboxes get
 it with a writable layer of their own, mounted at a subpath in the VFS, not as the root, with
-overlay semantics from Fxfs primitives. Nothing in Fxfs, the store or the daemon knows of Git.
+overlay semantics from Fxfs primitives. Nothing in Fxfs, the cell or the daemon knows of Git.
 
 ## Decisions
 
@@ -40,9 +40,9 @@ Ramon's, 2026-10-30 and 2026-10-31:
 
 Proposals, not yet confirmed: new mounts taking the latest generation, and untouched repos advancing at their next mount.
 
-## Why not bake repos into a base store
+## Why not bake repos into a base cell
 
-A store fork already makes every volume private, with no `snapshot_volume`, and needs no store or
+A cell fork already makes every volume private, with no `snapshot_volume`, and needs no cell or
 device change. But the base's whole size lands on each cold mount:
 
 - Every mount opens every volume (`crates/fxfs/src/object_store/object_manager.rs:261`), loading
@@ -58,7 +58,7 @@ base's lineage, or takes a second boot device per base.
 
 One checkout is cheap to bake. Linux's volume has 18.9 MB of layers and 1,557 allocator records
 (Proof). The argument rests on the hundreds: baking 256 such checkouts would put about 400,000
-records into every mount's allocator scan and 4.8 GB of layers into every store.
+records into every mount's allocator scan and 4.8 GB of layers into every cell.
 
 ## The model
 
@@ -134,7 +134,7 @@ The sandbox's allocator and root store never learn of the base. Limits:
 
 ### Publishing (TASK-136.4)
 
-Built. A sandbox keeps the volume current with ordinary commands, and the host forks its store and
+Built. A sandbox keeps the volume current with ordinary commands, and the host forks its cell and
 keeps the manifest, so that no guest replays its journal. The fork is the generation: it holds every
 extent as of the fork (doc-4), so the sandbox moves on with no `snapshot_volume`. The three ioctls
 are in `guest/linux/fs/cladefs/vfs.h`. In order:
@@ -147,9 +147,9 @@ are in `guest/linux/fs/cladefs/vfs.h`. In order:
 4. `FIFREEZE` on every other mounted volume, which freezes the filesystem. The host's fork needs
    this whatever is published: it refuses (`EBUSY`) with anything open on the device.
 5. `FXFS_IOC_MANIFEST` on the volume. The filesystem must be frozen (`EINVAL` otherwise), so no
-   compaction frees what the manifest names before the fork holds it, with no hold on the store to
+   compaction frees what the manifest names before the fork holds it, with no hold on the cell to
    release. It fails with `EBUSY` if the journal holds anything of the volume: thaw and repeat.
-6. The host forks the store, and marks the fork public if it is (`MakePublic` with `generation`).
+6. The host forks the cell, and marks the fork public if it is (`MakePublic` with `generation`).
 7. `FITHAW` on them all.
 
 A consumer asks the sandbox manager to attach the generation, then `FXFS_IOC_IMPORT` with the
@@ -177,10 +177,10 @@ What running the publisher in a sandbox asks of it:
   Git in its publisher reaches every sandbox attaching that volume, and fsck doesn't change that.
   So one publisher per public repo, at most one per tenant for private ones, and the host treats a
   manifest as opaque, never parsing it.
-- **A long-lived store, one per volume.** Inherited extents keep the branch that minted them, so a
+- **A long-lived cell, one per volume.** Inherited extents keep the branch that minted them, so a
   chain of throwaway forks spreads a generation over a growing list of branches to route. Generations
-  fork sideways off one store, which `MakePublic` with `generation` leaves writable. A generation
-  pins that whole store, so scratch files stay out of it.
+  fork sideways off one cell, which `MakePublic` with `generation` leaves writable. A generation
+  pins that whole cell, so scratch files stay out of it.
 - **The Fxfs format is a contract between VMs.** `EARLIEST_SUPPORTED_VERSION` is `LATEST_VERSION`,
   61: nothing is migrated (AGENTS.md), so a kernel takes a manifest, and opens base layers, of its own
   version alone, older and newer refused (TASK-141.1). Every format change strands every generation,
@@ -203,20 +203,20 @@ extent's ID (`Bases`, `crates/cladefs/src/extents.rs`). The extent cache is keye
 pages stay one copy. However many are attached, each costs a line and map entries until it is read.
 
 This changes doc-4's rule that an extent is the guest's or inherited, in the VM attachment, not the
-store core: `crates/extent_store` didn't change. The record is a file beside the store, in its
+store core: `crates/extent_store` didn't change. The record is a file in the cell
 directory (`attached-bases`), which a fork copies before its commit, so that forks and
-restored VMs keep it, and which goes with the store. A guest has no request that touches it.
+restored VMs keep it, and which goes with the cell. A guest has no request that touches it.
 
 A guest names the extent IDs it reads, so everything reachable from an attached base is readable to
-it. Tenancy rests on what is attached: a store that isn't public attaches only to a store in its
+it. Tenancy rests on what is attached: a cell that isn't public attaches only to a cell in its
 tenant's directory (`EACCES` otherwise). A generation made public with `MakePublic`'s `generation`
-is marked alone, so its store stays writable, and its pages are the default arena's through it.
+is marked alone, so its cell stays writable, and its pages are the default arena's through it.
 
 Limits:
 
-- A generation is the caller's to keep. `DeleteStore` refuses one a VM has open, but a stopped store
+- A generation is the caller's to keep. `DeleteCell` refuses one a VM has open, but a stopped cell
   doesn't hold it, and then reads `ENOENT` of it, and opens all the same.
-- The record is local to the host. A store taken from object storage on another host has nothing
+- The record is local to the host. A cell taken from object storage on another host has nothing
   attached, and a generation open on several hosts takes its branch from one another; reads of it
   are expected to go on, unchecked.
 - A guest maps a base's extents by ranges, not regions, as the allocator has no size for them
@@ -346,9 +346,9 @@ A sandbox's checkout over the published base, three sandboxes in turn, then 256 
   DAX. So a Linux-sized index carries over, as the 200-file one does (TASK-136.4).
 - The volume has 18.9 MB of layers, 1,557-1,560 allocator records and a 600-byte manifest. Its base
   takes 706-711 MiB in the bucket, compressed. A sandbox's writes, its status and its read add
-  1.6 MiB to the bucket and 0.1 MiB to its store.
+  1.6 MiB to the bucket and 0.1 MiB to its cell.
 - The overlay costs nothing a status or a write can see: a sandbox does what a fresh VM on the
-  publisher's own store does.
+  publisher's own cell does.
 - Volumes closed after a reboot hold nothing: the booted VM's memory is the same as one with none.
 
 What the numbers ask of the design:
@@ -381,8 +381,8 @@ What the numbers ask of the design:
   (Proof). Two ways to share more, neither tried: warm a zygote before snapshotting it, which relies on Firecracker's private mapping of
   the memory file, unchecked here; and map base layers through the DAX window, as
   `LayerObject::as_slice` allows, if layers' block sizes permit.
-- **Pinned generations.** How long they stay while a sandbox store outlives its use of them, and
-  who keeps a stopped store's from going.
+- **Pinned generations.** How long they stay while a sandbox cell outlives its use of them, and
+  who keeps a stopped cell's from going.
 - **Attachments across hosts.** The record is local, and a generation's branch has one writer
   at a time.
 - **Whether an in-place swap is worth building**, once the writable layers' growth under

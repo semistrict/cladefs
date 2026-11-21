@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: the messages of the wire ([`super::wire`]) as types, each encoded and decoded here alone,
-//! so that both ends read a field at the index they write it at (TASK-160.9): the requests a VM
-//! process makes ([`Request`]), what it says of the stage operations it made ([`Made`]), what the
-//! daemon tells it unasked ([`Told`]), its stage operations among that ([`Stage`]), and what
+//! cladefs: the messages of the wire ([`super::wire`]) as types, each encoded and decoded here
+//! alone, so that both ends read a field at the index they write it at (TASK-160.9): the requests a
+//! VM process makes ([`Request`]), what it says of the stage operations it made ([`Made`]), what
+//! the daemon tells it unasked ([`Told`]), its stage operations among that ([`Stage`]), and what
 //! replies say besides their status ([`Opened`], [`Info`], [`Advanced`], [`mappings`]). The bytes
 //! are those each end wrote by hand before.
 //!
@@ -17,7 +17,7 @@
 //! flags it knows together that it doesn't, an argument out of its range, a payload or descriptors
 //! it has no use for, a status, which replies alone have, and a path that is empty or holds a NUL.
 //! The words a kind doesn't use it ignores. What a request names is checked as far as the message
-//! goes: whether its tenant may name it, and its store holds it, is the daemon's to say.
+//! goes: whether its tenant may name it, and its cell holds it, is the daemon's to say.
 
 use super::wire::*;
 use crate::pages::{ArenaId, PhysLocation};
@@ -34,8 +34,8 @@ use std::path::{Path, PathBuf};
 #[derive(Debug)]
 #[cfg_attr(test, derive(PartialEq))]
 pub(crate) enum Request<'a> {
-    /// [`OPEN`]: the store at `path`, opened as `opening` says. Its paths are owned: the daemon
-    /// opens a store to write holding no thread, beyond the message.
+    /// [`OPEN`]: the cell at `path`, opened as `opening` says. Its paths are owned: the daemon
+    /// opens a cell to write holding no thread, beyond the message.
     Open { path: PathBuf, opening: Opening },
     /// [`READ`]: `len` bytes at `offset` in `extent`, into its reply's payload, [`MAX_PAYLOAD`]
     /// at most, or the connection's transfer area.
@@ -67,7 +67,7 @@ pub(crate) enum Request<'a> {
     Fault(Fault),
     /// [`FORK`]: to `cell`, a new directory at `path`.
     Fork { path: PathBuf },
-    /// [`FORK`] with [`FORK_QUIESCENT`]: a version of the store's cell, a VM snapshot's.
+    /// [`FORK`] with [`FORK_QUIESCENT`]: a version of the cell, a VM snapshot's.
     Version,
     /// cladefs: [`FORK`] with [`FORK_DROP`]: drops the version `version`, one the connection made.
     DropVersion { version: u64 },
@@ -95,7 +95,7 @@ pub(crate) enum Request<'a> {
     Stats { ask: u64, guest: Option<&'a str> },
 }
 
-/// How an [`OPEN`] opens its store.
+/// How an [`OPEN`] opens its cell.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Opening {
     /// To write, if it exists (no flags).
@@ -133,7 +133,7 @@ pub(crate) enum Data<'a> {
 pub(crate) struct Fault {
     /// Where in the window.
     pub offset: u64,
-    /// A store ([`FAULT_WRITE`]), or not.
+    /// A write ([`FAULT_WRITE`]), or not.
     pub access: Access,
     /// On that page alone ([`FAULT_PAGE`]).
     pub page: bool,
@@ -246,7 +246,7 @@ impl<'a> Request<'a> {
         }
     }
 
-    /// The paths it names, of stores: which the daemon authorizes, all of them, before it serves
+    /// The paths it names, of cells: which the daemon authorizes, all of them, before it serves
     /// it.
     pub fn paths(&self) -> impl Iterator<Item = &Path> {
         match self {
@@ -578,14 +578,14 @@ impl<'a> Request<'a> {
     }
 }
 
-/// cladefs: the bytes of data the request `header` is of moves through the stream: its payload, and,
-/// a `READ`'s, its reply's: [`MAX_PAYLOAD`] at most, as one asking for more is refused (`EINVAL`),
-/// its reply's payload empty, whatever the VM process asks for: so a word that would overflow the
-/// bytes counted is counted as no more (TASK-79.16). Of the header alone, as the daemon admits a
-/// request before it reads its payload, and decodes it. cladefs: and what the daemon makes of a
-/// payload besides, as long as it holds the payload, counted too (TASK-614): a `FREE_MANY`'s
-/// extents, decoded, as many bytes again; a `MAP_MANY`'s mappings, and the window's pieces mapping
-/// them makes, [`MAP_MANY_HELD`] times its payload in all.
+/// cladefs: the bytes of data the request `header` is of moves through the stream: its payload,
+/// and, a `READ`'s, its reply's: [`MAX_PAYLOAD`] at most, as one asking for more is refused
+/// (`EINVAL`), its reply's payload empty, whatever the VM process asks for: so a word that would
+/// overflow the bytes counted is counted as no more (TASK-79.16). Of the header alone, as the
+/// daemon admits a request before it reads its payload, and decodes it. cladefs: and what the
+/// daemon makes of a payload besides, as long as it holds the payload, counted too (TASK-614): a
+/// `FREE_MANY`'s extents, decoded, as many bytes again; a `MAP_MANY`'s mappings, and the window's
+/// pieces mapping them makes, [`MAP_MANY_HELD`] times its payload in all.
 pub(crate) fn stream_bytes(header: &Header) -> u64 {
     match header.kind {
         READ if header.flags & READ_TRANSFER == 0 => header.len + header.args[3].min(MAX_PAYLOAD),
@@ -747,7 +747,7 @@ impl Made {
 pub(crate) enum Told {
     /// A stage operation, which the VM process makes of its window.
     Stage(Stage),
-    /// [`CAPACITY`]: the store's capacity is `capacity` bytes now; or, if `ask`, the guest is asked
+    /// [`CAPACITY`]: the cell's capacity is `capacity` bytes now; or, if `ask`, the guest is asked
     /// to shrink to it ([`CAPACITY_ASK`]).
     Capacity { capacity: u64, ask: bool },
     /// cladefs: [`COMMITTED`].
@@ -893,11 +893,11 @@ pub(crate) fn with_version(mut header: Header) -> Header {
 /// What a reply to an [`OPEN`] says, with the physical memory it carries (TASK-43, TASK-79.17).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Opened {
-    /// The store's cell.
+    /// The cell.
     pub cell: u64,
     /// The arena of the memory it carries first: the VM process's tenant's.
     pub arena: ArenaId,
-    /// cladefs: a follower's view's commit number; 0 of a store opened to write.
+    /// cladefs: a follower's view's commit number; 0 of a cell opened to write.
     pub commit: u64,
     /// cladefs: how many mappings the host lets a process make, if it limits them
     /// (`physmem::max_map_count`), which the VM process's window budgets its own by: the daemon
@@ -924,7 +924,7 @@ impl Opened {
     }
 }
 
-/// What a reply to an [`INFO`] says: the store's [`ExtentInfo`].
+/// What a reply to an [`INFO`] says: the cell's [`ExtentInfo`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Info(pub ExtentInfo);
 
@@ -949,7 +949,7 @@ pub(crate) struct Advanced {
 /// cladefs: a [`FORK`]'s reply: the fork's cell's ID, the bucket's to give (TASK-364).
 pub(crate) struct Forked {
     pub cell: u64,
-    /// cladefs: of a quiescent [`FORK`], the version of the store's cell made, a VM snapshot's, and
+    /// cladefs: of a quiescent [`FORK`], the version of the cell made, a VM snapshot's, and
     /// the cell's tenant; else 0.
     pub version: u64,
     pub tenant: u64,

@@ -15,7 +15,7 @@
 # The disk is CLADEFS_SANDBOX_DISK's (default: TMPDIR's), which must be ext4: the run's directory
 # there holds the bucket's data, which RustFS serves (scripts/test-e2e-rustfs.sh, which runs the
 # case), and scripts/test-e2e.sh's results (CLADEFS_E2E_RESULTS, by default in the run's directory),
-# the case's stores and the daemons' part caches among them; and RustFS's log (rustfs.log) and what
+# the case's cells and the daemons' part caches among them; and RustFS's log (rustfs.log) and what
 # the host and the run spend (resources.log, scripts/lib/resources.sh). What test-e2e.sh takes from
 # the environment passes through (CLADEFS_GUEST_KERNEL, CLADEFS_E2E_PREBUILT). The bucket's data
 # goes at the end, and the run's directory with it unless it holds the results.
@@ -54,7 +54,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Its bucket's objects on the disk, as LangSmith's RustFS kept them beside the hosts' stores
+# Its bucket's objects on the disk, as LangSmith's RustFS kept them beside the hosts' cells
 # (scripts/test-e2e-rustfs.sh).
 status=0
 # TMPDIR left as it is, short: the cases' sockets are there (the runner refuses a long one).

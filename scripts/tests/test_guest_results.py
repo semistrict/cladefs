@@ -103,7 +103,7 @@ class GuestResults(unittest.TestCase):
         """TASK-165.12: each extent daemon's last counts (its stats file, CLADEFSD_STATS, the
         run's and each case's own, `NAME-stats.txt`): the bytes it downloaded from its bucket
         against those its page-ins read of the bucket's data, through its part cache, and of its
-        store's. A case's daemon with no part cache downloaded the same parts four times over (GCE
+        cell's. A case's daemon with no part cache downloaded the same parts four times over (GCE
         r741: 2.3 GB)."""
         guest_results.start(self.results, 1, ["fxfs-guest-pgbench-dax-forked"])
         logs = self.results / "fxfs-guest-pgbench-dax-forked" / "fxfs-guest-pgbench-dax-forked"
@@ -131,9 +131,9 @@ class GuestResults(unittest.TestCase):
         self.assertEqual(guest_results.report(summary), [
             "fxfs-guest-pgbench-dax-forked: passed",
             "  cladefsd: downloaded 774.0 kB for 4.7 GB read of its bucket's, 202.1 MB of its "
-            "store's",
+            "cell's",
             "the run's cladefsd: downloaded 2.5 GB for 500.0 MB read of its bucket's, 0 B of its "
-            "store's",
+            "cell's",
             "the run ended with 0",
         ])
 

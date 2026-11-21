@@ -2,7 +2,7 @@
 // Copyright 2026 The cladefs Authors.
 /*
  * A model of Fxfs, as much of fs/cladefs/cladefs.h as dax.c calls: files as arrays of blocks, in extents
- * of the store, with the rules of guest/rust/cladefs-linux and crates/fxfs that the window's protocol
+ * of the write, with the rules of guest/rust/cladefs-linux and crates/fxfs that the window's protocol
  * rests on (doc-13: the window maps sealed extents alone, and writes copy on write):
  *
  * - An extent is open as it is minted, until a seal, for good: minted, open, sealed, and never back
@@ -164,7 +164,7 @@ struct cladefs *cladefs_sim_new(void)
 
 /*
  * Every acknowledged object exists (TASK-149.18): each block a file names is of an extent the
- * model holds and the store holds written that far, which a crash after the commit naming it would
+ * model holds and the write holds written that far, which a crash after the commit naming it would
  * read; and each extent's counts are what the files' blocks say, which its death, and its free
  * after a flush, go by. As the filesystem goes, nothing under way.
  */
@@ -179,7 +179,7 @@ static void check_blocks(struct cladefs *fs)
 			const struct block *block = &file->blocks[page];
 
 			if (block->sequence && !sim_device_holds(block->sequence, block->page))
-				sim_panic("the model: ino %llu's block %llu names extent %llu's page %llu, which the store doesn't hold",
+				sim_panic("the model: ino %llu's block %llu names extent %llu's page %llu, which the extent store doesn't hold",
 					  file->ino, page, block->sequence, block->page);
 		}
 	}
@@ -821,7 +821,7 @@ int cladefs_write_many(struct cladefs *fs, u64 ino, const struct cladefs_write_p
 	struct written *pages;
 	char *copies;
 	size_t i, n = 0, total = 0;
-	u64 page, end = 0, store, first = 0;
+	u64 page, end = 0, device_at, first = 0;
 	bool writes_last = false, fail;
 	int err;
 
@@ -874,8 +874,8 @@ int cladefs_write_many(struct cladefs *fs, u64 ino, const struct cladefs_write_p
 	mutex_unlock(&fs->lock);
 	if (n) {
 		sim_point("a Fxfs write");
-		store = sim_device_store_offset(extent->sequence) + (first << PAGE_SHIFT);
-		host_store_write(store, copies, n << PAGE_SHIFT);
+		device_at = sim_device_store_offset(extent->sequence) + (first << PAGE_SHIFT);
+		host_store_write(device_at, copies, n << PAGE_SHIFT);
 		sim_device_wrote(extent->sequence, first, n);
 		sim_point("a Fxfs write's reply");
 	}

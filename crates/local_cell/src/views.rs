@@ -2,17 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs's own: views of a cell as of a commit, through which followers read the store while
+//! cladefs's own: views of a cell as of a commit, through which followers read the cell while
 //! its writer goes on (backlog doc-8, LocalCell views; TASK-42.2).
 //!
 //! A commit seals every extent written before it, and an extent's ID is never used again, so the
-//! cell as of commit N is the extents it held then, each as it is still, wherever its data is
-//! now, here or in the bucket (TASK-165.8), and its root then. A view is no copy of the extent table: it is an epoch
-//! and a root, and reads through the store. What it needs kept is the extents freed since N: a
-//! free of an extent sealed before is kept while a view older than the free lives, or a view pins
-//! it ([`View::pin`], a follower's graveyard), and its data counts as used.
+//! cell as of commit N is the extents it held then, each as it is still, wherever its data is now,
+//! here or in the bucket (TASK-165.8), and its root then. A view is no copy of the extent table: it
+//! is an epoch and a root, and reads through the cell. What it needs kept is the extents freed
+//! since N: a free of an extent sealed before is kept while a view older than the free lives, or a
+//! view pins it ([`View::pin`], a follower's graveyard), and its data counts as used.
 //!
-//! Opening, advancing and dropping a view take this module's lock alone, never the store's state,
+//! Opening, advancing and dropping a view take this module's lock alone, never the cell's state,
 //! so they never wait for a commit. Each commit publishes itself here ([`Views::publish`]),
 //! holding the state, and decides in the same critical section which frees are kept: a view that
 //! opened before is as of an earlier commit, and counted; one that opens after is as of this one,
@@ -31,7 +31,7 @@ use storage_device::ExtentId;
 
 /// The error of a view cut off: it fell too far behind, and keeps nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("the view fell too far behind the store's writer, and was cut off")]
+#[error("the view fell too far behind the cell's writer, and was cut off")]
 pub struct CutOff;
 
 /// The context of a view's `NoExtent` for an extent it let go of: freed by a commit before the
@@ -408,7 +408,7 @@ impl Views {
 
     /// Publishes commit `epoch`, whose root is `root`, which views open as of from now on; cuts
     /// off the views past `limits`, `kept_bytes` saying how many bytes of frees views would keep;
-    /// and returns what the views left keep. The store holds its state, so that what is kept is
+    /// and returns what the views left keep. The cell holds its state, so that what is kept is
     /// decided in the same critical section as the commit is published.
     pub fn publish(
         &self,

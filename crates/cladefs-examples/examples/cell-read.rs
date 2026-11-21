@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Says what a stopped store's Fxfs holds at a file's offset, as the host reads it: for a guest
-//! test's failure, whose store its results keep (TASK-133). Mounting replays its journal: give it
+//! Says what a stopped cell's Fxfs holds at a file's offset, as the host reads it: for a guest
+//! test's failure, whose cell its results keep (TASK-133). Mounting replays its journal: give it
 //! a copy.
 //!
 //! ```sh
-//! cargo run -p cladefs-examples --example cell-read -- STORE NAME OFFSET LEN
+//! cargo run -p cladefs-examples --example cell-read -- CELL_DIR NAME OFFSET LEN
 //! ```
 
 use anyhow::Context as _;
@@ -16,13 +16,13 @@ use futures::executor::block_on;
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let [store, name, offset, len] = &args[..] else {
-        anyhow::bail!("usage: cell-read STORE NAME OFFSET LEN");
+    let [cell_dir, name, offset, len] = &args[..] else {
+        anyhow::bail!("usage: cell-read CELL_DIR NAME OFFSET LEN");
     };
     let number = |text: &str| u64::from_str_radix(text.trim_start_matches("0x"), 16);
     let (offset, len) = (number(offset).context("OFFSET")?, number(len).context("LEN")?);
     block_on(async {
-        let fs = Filesystem::mount(Storage::open(store).await?.check().await?).await?;
+        let fs = Filesystem::mount(Storage::open(cell_dir).await?.check().await?).await?;
         let (mut file, mut attr) = (None, None);
         for part in name.split('/') {
             let dir = file.as_ref().unwrap_or(fs.root());

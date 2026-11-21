@@ -76,15 +76,15 @@ type PeerClient interface {
 	DropLogs(ctx context.Context, in *DropLogsRequest, opts ...grpc.CallOption) (*DropLogsResponse, error)
 	// Live migration of an ephemeral cell to this host (backlog doc-25, TASK-698.4;
 	// specs/ephemeral): the source prepares it here, which writes this host's reference to the
-	// cell's origin before taking anything (targetRefersFirst); sends its store's files, kept
+	// cell's origin before taking anything (targetRefersFirst); sends its cell's files, kept
 	// segments first, as rounds while its guest runs, the rest once it gave the cell up; then asks
 	// this host to take it over, naming every file it sent. FAILED_PRECONDITION on a host keeping no
 	// ephemeral cells (CLADEFSD_EPHEMERAL).
 	MigratePrepare(ctx context.Context, in *MigratePrepareRequest, opts ...grpc.CallOption) (*MigratePrepareResponse, error)
-	// A piece of a file of the store being migrated, or its holes.
+	// A piece of a file of the cell being migrated, or its holes.
 	MigrateFile(ctx context.Context, in *MigrateFileRequest, opts ...grpc.CallOption) (*MigrateFileResponse, error)
 	// Takes the migrated cell over, if this host holds every file named whole (openAtNamed): its
-	// store put at its path, durably, and the migration remembered as accepted for good
+	// cell put at its path, durably, and the migration remembered as accepted for good
 	// (remembersAccepted), so that this answers yes to it again, however often asked. Otherwise no,
 	// what it took dropped and its reference retired, so that it never takes that migration after
 	// (refuseFinal). No to a migration it never prepared, or of another incarnation of this host's.
@@ -245,15 +245,15 @@ type PeerServer interface {
 	DropLogs(context.Context, *DropLogsRequest) (*DropLogsResponse, error)
 	// Live migration of an ephemeral cell to this host (backlog doc-25, TASK-698.4;
 	// specs/ephemeral): the source prepares it here, which writes this host's reference to the
-	// cell's origin before taking anything (targetRefersFirst); sends its store's files, kept
+	// cell's origin before taking anything (targetRefersFirst); sends its cell's files, kept
 	// segments first, as rounds while its guest runs, the rest once it gave the cell up; then asks
 	// this host to take it over, naming every file it sent. FAILED_PRECONDITION on a host keeping no
 	// ephemeral cells (CLADEFSD_EPHEMERAL).
 	MigratePrepare(context.Context, *MigratePrepareRequest) (*MigratePrepareResponse, error)
-	// A piece of a file of the store being migrated, or its holes.
+	// A piece of a file of the cell being migrated, or its holes.
 	MigrateFile(context.Context, *MigrateFileRequest) (*MigrateFileResponse, error)
 	// Takes the migrated cell over, if this host holds every file named whole (openAtNamed): its
-	// store put at its path, durably, and the migration remembered as accepted for good
+	// cell put at its path, durably, and the migration remembered as accepted for good
 	// (remembersAccepted), so that this answers yes to it again, however often asked. Otherwise no,
 	// what it took dropped and its reference retired, so that it never takes that migration after
 	// (refuseFinal). No to a migration it never prepared, or of another incarnation of this host's.

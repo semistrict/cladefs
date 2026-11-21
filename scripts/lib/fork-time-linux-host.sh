@@ -27,7 +27,7 @@ results=${2:?results directory required}
 shift 2
 (( $# > 0 )) || { echo "Name a LABEL=TREE to time" >&2; exit 2; }
 source "$(dirname "${BASH_SOURCE[0]}")/linux-host-setup.sh"
-# cladefs: the daemon's stores encrypted under the bucket KMS of a test master key, unless the environment
+# cladefs: the daemon's cells encrypted under the bucket KMS of a test master key, unless the environment
 # names a KMS (TASK-411.28).
 source "$(dirname "${BASH_SOURCE[0]}")/test-kms.sh"
 test_master_key
@@ -42,7 +42,7 @@ mkdir -p "$scratch"
 
 # The base's image: a tar archive of one layer, as `docker export` makes, of random files.
 layer=$scratch/layer-$files-$mib.tar
-# The store's capacity: the image's data, half again for Fxfs's own, and a GiB.
+# The cell's capacity: the image's data, half again for Fxfs's own, and a GiB.
 capacity=$(( (files * mib << 20) * 3 / 2 + (1 << 30) ))
 for pair in "$@"; do
     [[ ${pair%%=*} =~ ^[a-z0-9-]+$ ]] || { echo "${pair%%=*}: a label is a word" >&2; exit 2; }

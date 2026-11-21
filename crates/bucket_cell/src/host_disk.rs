@@ -2,16 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: a filesystem the host keeps stores or the part cache on, as the disk governor sees it
-//! (backlog doc-22, TASK-539): what the daemon's stores and its part cache hold on it, counted as
+//! cladefs: a filesystem the host keeps cells or the part cache on, as the disk governor sees it
+//! (backlog doc-22, TASK-539): what the daemon's cells and its part cache hold on it, counted as
 //! they write, and what the governor allows them, sampled from the filesystem itself. One per
-//! filesystem, however many directories of it are opened ([`HostDisk::of`]): every store and the
+//! filesystem, however many directories of it are opened ([`HostDisk::of`]): every cell and the
 //! part cache on it charge the same counters, which the governor weighs against its free space.
 //!
 //! What is counted is lengths, each file's rounded up to [`GRANULE`], as written: deterministic,
 //! alike on every filesystem and in memory, and known before the filesystem's own block counts
 //! catch up (ZFS reports a write's blocks only once its transaction group syncs, TASK-355). A
-//! store's directory in memory has a disk of its own, of a capacity a test gives it, which refuses
+//! cell directory in memory has a disk of its own, of a capacity a test gives it, which refuses
 //! what would pass it with `ENOSPC`, as a full filesystem does ([`HostDisk::in_memory`]).
 
 use std::io;
@@ -68,29 +68,30 @@ impl Count {
     }
 }
 
-/// How many times what a store's own work may still add, never refused, its unframed bytes and
-/// its open extents' are: each byte of an open extent copied once by the commit that seals it,
-/// held once in a log's record, and framed once in a copy, and each raw byte framed once in a copy
-/// (backlog doc-22). What a store's own work took, its guest's writes stopped, was at most 2.5 times
-/// those, or 1.08 times past [`RESERVE_PER_STORE`] (`local_cell/tests/reserve.rs`, TASK-539.7).
+/// How many times what an open cell's own work may still add, never refused, its unframed bytes and
+/// its open extents' are: each byte of an open extent copied once by the commit that seals it, held
+/// once in a log's record, and framed once in a copy, and each raw byte framed once in a copy
+/// (backlog doc-22). What an open cell's own work took, its guest's writes stopped, was at most 2.5
+/// times those, or 1.08 times past [`RESERVE_PER_STORE`] (`local_cell/tests/reserve.rs`,
+/// TASK-539.7).
 pub const RESERVE_FACTOR: u64 = 3;
 
-/// What each store open may still add, never refused, whatever it holds unframed or open: a
+/// What each open cell may still add, never refused, whatever it holds unframed or open: a
 /// segment's log's header, its framed file being made durable, its write-ahead log's records; at
 /// most 28 KiB as measured (TASK-539.7).
 pub const RESERVE_PER_STORE: u64 = 64 << 10;
 
-/// What stores take of a disk, counted, and may still take: their files' bytes, and of them their
+/// What cells take of a disk, counted, and may still take: their files' bytes, and of them their
 /// unframed files', raw data whose framing, or sealing in place, is still to come; the bytes of
-/// their extents open, each as far as it goes, which the commits sealing them copy; the stores
-/// open; and the writes admitted and not yet landed. One per store, summed by each allotment, every
-/// allotment and each disk.
+/// their extents open, each as far as it goes, which the commits sealing them copy; the cells
+/// open; and the writes admitted and not yet landed. One per open cell, summed by each allotment,
+/// every allotment and each disk.
 #[derive(Debug, Default)]
 pub struct Tally {
     bytes: Count,
     unframed: Count,
     open: Count,
-    stores: Count,
+    cells: Count,
     pledged: Count,
 }
 
@@ -101,7 +102,7 @@ impl Tally {
             bytes: Count::new(),
             unframed: Count::new(),
             open: Count::new(),
-            stores: Count::new(),
+            cells: Count::new(),
             pledged: Count::new(),
         }
     }
@@ -121,9 +122,9 @@ impl Tally {
         self.open.get()
     }
 
-    /// The stores open.
-    pub fn stores(&self) -> u64 {
-        self.stores.get()
+    /// The cells open.
+    pub fn cells(&self) -> u64 {
+        self.cells.get()
     }
 
     /// The writes admitted and not yet landed.
@@ -131,9 +132,9 @@ impl Tally {
         self.pledged.get()
     }
 
-    /// What the stores' own work may still add, never refused ([`RESERVE_FACTOR`]).
+    /// What the cells' own work may still add, never refused ([`RESERVE_FACTOR`]).
     pub fn reserved(&self) -> u64 {
-        RESERVE_FACTOR * (self.unframed() + self.open()) + RESERVE_PER_STORE * self.stores.get()
+        RESERVE_FACTOR * (self.unframed() + self.open()) + RESERVE_PER_STORE * self.cells.get()
     }
 
     /// What is taken, reserved and pledged: what an admission weighs a write against.
@@ -173,11 +174,11 @@ impl Tally {
         }
     }
 
-    /// Counts a store opened, or closed, if not `open`.
-    pub fn store(&self, open: bool) {
+    /// Counts a cell opened, or closed, if not `open`.
+    pub fn cell(&self, open: bool) {
         match open {
-            true => self.stores.add(1),
-            false => self.stores.sub(1),
+            true => self.cells.add(1),
+            false => self.cells.sub(1),
         }
     }
 
@@ -190,8 +191,8 @@ impl Tally {
     }
 }
 
-/// What a disk urges as it comes under pressure ([`HostDisk::urge`]): a store's uploader, which
-/// closes its store's open segment then and uploads it, rather than wait for its guest to fill it,
+/// What a disk urges as it comes under pressure ([`HostDisk::urge`]): an open cell's uploader,
+/// which closes its open segment then and uploads it, rather than wait for its guest to fill it,
 /// so that what it held leaves the disk.
 pub trait Urge: Send + Sync {
     fn urge(&self);
@@ -204,18 +205,18 @@ enum Sampler {
     Memory(Box<dyn Fn() -> Sample + Send + Sync>),
 }
 
-/// A filesystem the daemon keeps stores or the part cache on. See the module docs.
+/// A filesystem the daemon keeps cells or the part cache on. See the module docs.
 pub struct HostDisk {
     sampler: Sampler,
-    /// What the stores on it hold: their files' lengths, counted ([`counted`]), each file once
+    /// What the cells on it hold: their files' lengths, counted ([`counted`]), each file once
     /// however many names it has, and their directories, a [`GRANULE`] each; and of that, their
     /// unframed files'.
-    pub stores: Tally,
+    pub cells: Tally,
     /// What the part cache on it holds, its fills in flight included.
     pub cache: Count,
     /// Of `cache`, its fills in flight, counted but not yet written.
     pub cache_writing: Count,
-    /// What the governor allows the daemon to keep on it, stores and part cache together:
+    /// What the governor allows the daemon to keep on it, cells and part cache together:
     /// `u64::MAX` while no governor looks at it.
     allowance: AtomicU64,
     /// What the governor leaves free of it.
@@ -251,7 +252,7 @@ impl HostDisk {
         Ok(disk)
     }
 
-    /// A disk in memory, which `sample` says the space of: a store's directory in memory's
+    /// A disk in memory, which `sample` says the space of: a cell directory in memory's
     /// (`local_cell::MemDisk`). It is no host's filesystem: [`HostDisk::all`] leaves it out.
     pub fn in_memory(sample: impl Fn() -> Sample + Send + Sync + 'static) -> Arc<Self> {
         Arc::new(Self::with(Sampler::Memory(Box::new(sample))))
@@ -260,7 +261,7 @@ impl HostDisk {
     fn with(sampler: Sampler) -> Self {
         Self {
             sampler,
-            stores: Tally::default(),
+            cells: Tally::default(),
             cache: Count::default(),
             cache_writing: Count::default(),
             allowance: AtomicU64::new(u64::MAX),
@@ -292,9 +293,9 @@ impl HostDisk {
         }
     }
 
-    /// What the daemon keeps on it: its stores' and its part cache's.
+    /// What the daemon keeps on it: its cells' and its part cache's.
     pub fn held(&self) -> u64 {
-        self.stores.bytes() + self.cache.get()
+        self.cells.bytes() + self.cache.get()
     }
 
     /// What the governor allows the daemon to keep on it: `u64::MAX` while none looks at it.
@@ -319,7 +320,7 @@ impl HostDisk {
         all.push(urged);
     }
 
-    /// Urges what it urges under pressure ([`HostDisk::on_pressure`]): the uploaders of the stores
+    /// Urges what it urges under pressure ([`HostDisk::on_pressure`]): the uploaders of the cells
     /// on it, which close and upload their open segments.
     pub fn urge(&self) {
         let urged: Vec<_> = self.urged.lock().unwrap().iter().filter_map(Weak::upgrade).collect();
@@ -350,7 +351,7 @@ impl std::fmt::Debug for HostDisk {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HostDisk")
             .field("dev", &self.dev())
-            .field("stores", &self.stores)
+            .field("cells", &self.cells)
             .field("cache", &self.cache)
             .field("allowance", &self.allowance())
             .finish_non_exhaustive()
@@ -358,7 +359,7 @@ impl std::fmt::Debug for HostDisk {
 }
 
 /// cladefs: the space of a simulated host's disk in memory, a terabyte, holding nothing as the
-/// governor counts it (doc-24): what its stores hold is counted as they write it.
+/// governor counts it (doc-24): what its cells hold is counted as they write it.
 #[cfg(madsim)]
 fn fs_sample(_: &host_fs::File) -> io::Result<Sample> {
     Ok(Sample { size: 1 << 40, free: 1 << 40, used: 0 })
@@ -386,7 +387,7 @@ node_local::node_local! {
 }
 
 /// Has the governor look at the disks again at once: a write refused, or the part cache past what
-/// the stores leave it.
+/// the cells leave it.
 pub fn wake_governor() {
     let (woken, wake) = WOKEN.get();
     *woken.lock().unwrap() = true;
@@ -446,11 +447,11 @@ mod tests {
         assert_eq!(disk.sample().unwrap(), Sample { size: 100, free: 60, used: 40 });
         assert_eq!((disk.dev(), disk.allowance(), disk.under_pressure()), (None, u64::MAX, false));
         assert!(!HostDisk::all().iter().any(|alive| Arc::ptr_eq(alive, &disk)));
-        disk.stores.charge(3 * GRANULE, true);
+        disk.cells.charge(3 * GRANULE, true);
         disk.cache.add(GRANULE);
-        disk.stores.discharge(GRANULE, false);
-        disk.stores.reframe(GRANULE, false);
-        assert_eq!((disk.stores.bytes(), disk.stores.unframed()), (2 * GRANULE, 2 * GRANULE));
+        disk.cells.discharge(GRANULE, false);
+        disk.cells.reframe(GRANULE, false);
+        assert_eq!((disk.cells.bytes(), disk.cells.unframed()), (2 * GRANULE, 2 * GRANULE));
         assert_eq!(disk.held(), 3 * GRANULE);
         disk.govern(50, 10, true);
         assert_eq!((disk.allowance(), disk.headroom(), disk.under_pressure()), (50, 10, true));

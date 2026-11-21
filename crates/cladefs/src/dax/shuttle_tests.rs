@@ -3,10 +3,10 @@
 // found in the LICENSE file.
 
 //! DAX windows under Shuttle (awslabs/shuttle), on Shuttle's locks: faults, the source that
-//! brings their pages in, and the store that maps and frees them, on threads of their own, in
+//! brings their pages in, and the cell that maps and frees them, on threads of their own, in
 //! every interleaving Shuttle's scheduler chooses (TASK-44.3).
 //!
-//! The race of a guest's stores and loads with a free is run against a [`Guest`]: a guest's view
+//! The race of a guest's writes and loads with a free is run against a [`Guest`]: a guest's view
 //! of the window through a second stage, here one that records what the window maps
 //! ([`FakeStage`]), and, on Linux, the userfaultfd second stage over a model of its host memory
 //! (`uffd::shuttle_tests`).
@@ -82,10 +82,10 @@ pub(super) trait Guest: Send + Sync + 'static {
     /// Where a page's memory is, which tells a page's copies apart.
     type Where: Copy + PartialEq + std::fmt::Debug + Send;
 
-    /// A vCPU's access of `kind` to the page at `offset`, storing `write` if it is a store.
+    /// A vCPU's access of `kind` to the page at `offset`, storing `write` if it is a write.
     fn access(&self, offset: u64, kind: Access, write: Option<u8>) -> Outcome<'_>;
 
-    /// The pages a store would change without faulting: cladefs: private pages alone (backlog
+    /// The pages a write would change without faulting: cladefs: private pages alone (backlog
     /// doc-13).
     fn writable(&self) -> Vec<u64>;
 
@@ -119,12 +119,12 @@ pub(super) fn byte(fd: RawFd, offset: u64, write: Option<u8>) -> u8 {
     value
 }
 
-/// What a sealed extent's pages hold, and what a vCPU stores.
+/// What a sealed extent's pages hold, and what a vCPU writes.
 pub(super) const SEALED: u8 = 0xb;
 pub(super) const STORED: u8 = 0xc;
 
 /// What a page of the window holds, in the order it changes: a sealed extent's, then, freed,
-/// zeros; or, stored to, a private page holding the store, which a free leaves.
+/// zeros; or, stored to, a private page holding the write, which a free leaves.
 fn rank(value: u8) -> u8 {
     match value {
         SEALED => 0,
@@ -144,11 +144,11 @@ pub(super) enum Event {
     Faulted,
     /// An access failed, and was retried.
     Failed,
-    /// A store refused, past the window's private pages.
-    StoreRefused,
-    /// cladefs: a store's private copy that a `MAP` after it ended.
+    /// A write refused, past the window's private pages.
+    WriteRefused,
+    /// cladefs: a write's private copy that a `MAP` after it ended.
     MapEndedCopy,
-    /// cladefs: a store's private copy of what a `MAP` before it mapped.
+    /// cladefs: a write's private copy of what a `MAP` before it mapped.
     CopiedAfterMap,
 }
 
@@ -188,12 +188,12 @@ pub(super) fn reaching<S: Scheduler + 'static>(
 pub(super) const ATTEMPTS: usize = 100;
 
 /// A vCPU's access of `kind` to the page at `offset` through `guest`, of `window`, storing
-/// [`STORED`] if it is a store, retried as each fault is resolved, and as it fails: the page's
-/// first byte after it; or none, for a store the window refused, past its private pages, which
+/// [`STORED`] if it is a write, retried as each fault is resolved, and as it fails: the page's
+/// first byte after it; or none, for a write the window refused, past its private pages, which
 /// one of the guest's that faults says (`EACCES`), and one of a guest's own memory by failing.
 fn access<G: Guest>(guest: &G, window: &DaxWindow, offset: u64, kind: Access) -> Option<u8> {
     let write = (kind == Access::Write).then_some(STORED);
-    // Once a page is private, the window holds as many as it may: a store to another is refused.
+    // Once a page is private, the window holds as many as it may: a write to another is refused.
     let refused = || kind == Access::Write && window.private_pages() > 0;
     for _ in 0..ATTEMPTS {
         match guest.access(offset, kind, write) {
@@ -222,17 +222,17 @@ fn access<G: Guest>(guest: &G, window: &DaxWindow, offset: u64, kind: Access) ->
     panic!("a {kind:?} at {offset:#x} never completed");
 }
 
-/// cladefs: two vCPUs store to and load two pages of a sealed extent's mapping, in a window that
-/// copies on write and holds one private page at most (`dax`, of two pages), while the store frees
-/// the extent, mapping zeros in its place (backlog doc-13). Each stores to a page of its own as
-/// each round begins, and loads the other's: one store is made, in a private page, which the free
+/// cladefs: two vCPUs write to and load two pages of a sealed extent's mapping, in a window that
+/// copies on write and holds one private page at most (`dax`, of two pages), while the cell frees
+/// the extent, mapping zeros in its place (backlog doc-13). Each writes to a page of its own as
+/// each round begins, and loads the other's: one write is made, in a private page, which the free
 /// leaves, the guest's; the other is refused, past the window's private pages, and its vCPU loads
 /// its page instead, each round, as zeros are mapped over the page it refused. Each access `guest`
 /// refuses faults, and is retried once the fault is resolved, or fails, and is retried. Each vCPU
 /// goes on until it reads both pages freed or stored to, as a guest polling them would. Checked: a
 /// vCPU never reads a page older than one it read; once the free returns, no page of the extent
-/// is mapped; one store is made, its private page the one page writable; every access completes.
-pub(super) fn stores_race_frees<G: Guest>(mut dax: Dax, guest: Arc<G>) {
+/// is mapped; one write is made, its private page the one page writable; every access completes.
+pub(super) fn writes_race_frees<G: Guest>(mut dax: Dax, guest: Arc<G>) {
     let ps = page_size();
     let sealed = TestSource::filled(2, SEALED);
     let window = DaxWindow(dax.window.clone());
@@ -250,7 +250,7 @@ pub(super) fn stores_race_frees<G: Guest>(mut dax: Dax, guest: Arc<G>) {
                     for (page, kind) in kinds.into_iter().enumerate() {
                         let offset = page as u64 * ps;
                         let read = access(&*guest, &window, offset, kind).unwrap_or_else(|| {
-                            reached(Event::StoreRefused);
+                            reached(Event::WriteRefused);
                             let read = access(&*guest, &window, offset, Access::Read);
                             read.expect("a load refused")
                         });
@@ -266,7 +266,7 @@ pub(super) fn stores_race_frees<G: Guest>(mut dax: Dax, guest: Arc<G>) {
         .collect();
 
     let freeing = guest.clone();
-    let store = thread::spawn(move || {
+    let freer = thread::spawn(move || {
         assert_eq!(dax.map_zeros_over(&sealed), [0..2 * ps]);
         let still: Vec<_> =
             freeing.mapped().into_iter().filter(|(_, at)| extent.contains(at)).collect();
@@ -276,8 +276,8 @@ pub(super) fn stores_race_frees<G: Guest>(mut dax: Dax, guest: Arc<G>) {
     for vcpu in vcpus {
         vcpu.join().unwrap();
     }
-    let _dax = store.join().unwrap();
-    assert_eq!(window.private_pages(), 1, "stores made");
+    let _dax = freer.join().unwrap();
+    assert_eq!(window.private_pages(), 1, "writes made");
     let writable = guest.writable();
     assert_eq!(writable.len(), 1, "writable but the private page: {writable:#x?}");
 }
@@ -357,7 +357,7 @@ fn page_bytes(phys: PhysLocation) -> Vec<u8> {
 }
 
 /// A guest whose second stage is a [`FakeStage`], as the extent daemon's connection to a VM
-/// process is: an access the stage doesn't allow, a store to a page of physical memory or an
+/// process is: an access the stage doesn't allow, a write to a page of physical memory or an
 /// access to nothing mapped, faults, and the VM process passes the fault to the window.
 struct StageGuest {
     stage: Arc<FakeStage>,
@@ -406,19 +406,19 @@ impl Guest for StageGuest {
 fn frees_on_a_fake_stage() {
     let stage = Arc::new(FakeStage::default());
     let (dax, window) = super::tests::copying(2, 1, Some(stage.clone()));
-    stores_race_frees(dax, Arc::new(StageGuest { stage, window }));
+    writes_race_frees(dax, Arc::new(StageGuest { stage, window }));
 }
 
 const STAGE_EVENTS: [Event; 5] =
-    [Event::ReadSealed, Event::ReadZeros, Event::ReadStored, Event::Faulted, Event::StoreRefused];
+    [Event::ReadSealed, Event::ReadZeros, Event::ReadStored, Event::Faulted, Event::WriteRefused];
 
 #[test]
-fn stores_race_frees_randomly() {
+fn writes_race_frees_randomly() {
     reaching(|| RandomScheduler::new(runs(RUNS)), frees_on_a_fake_stage, &STAGE_EVENTS);
 }
 
 #[test]
-fn stores_race_frees_by_pct() {
+fn writes_race_frees_by_pct() {
     reaching(|| PctScheduler::new(3, runs(RUNS)), frees_on_a_fake_stage, &STAGE_EVENTS);
 }
 
@@ -437,31 +437,31 @@ fn needs_frees_to_map_zeros() {
 const FIRST: u8 = 0x1a;
 const SECOND: u8 = 0x1b;
 
-/// cladefs: a vCPU's store of [`STORED`] to the page at `offset`, retried as each fault is resolved:
-/// whether it was made, or refused (`EACCES`).
+/// cladefs: a vCPU's write of [`STORED`] to the page at `offset`, retried as each fault is
+/// resolved: whether it was made, or refused (`EACCES`).
 fn stored(guest: &StageGuest, offset: u64) -> bool {
     for _ in 0..ATTEMPTS {
         match guest.access(offset, Access::Write, Some(STORED)) {
             Outcome::Made(read) => {
-                assert_eq!(read, STORED, "the store at {offset:#x} read back otherwise");
+                assert_eq!(read, STORED, "the write at {offset:#x} read back otherwise");
                 return true;
             }
             Outcome::Faulted(fault) => match future::block_on(fault) {
                 Ok(()) => {}
                 Err(Errno::EACCES) => return false,
-                Err(err) => panic!("a store's fault at {offset:#x}: {err:?}"),
+                Err(err) => panic!("a write's fault at {offset:#x}: {err:?}"),
             },
             Outcome::Failed => unreachable!("a fake stage's accesses fault"),
         }
     }
-    panic!("a store at {offset:#x} never completed");
+    panic!("a write at {offset:#x} never completed");
 }
 
-/// cladefs TASK-164.1: a vCPU stores to a page that a window copying on write maps read-only, an
+/// cladefs TASK-164.1: a vCPU writes to a page that a window copying on write maps read-only, an
 /// extent's, while the guest's `MAP` maps another's there: as the guest doesn't (it holds its
 /// file's semaphore), but the host stays whole whatever it does. Checked once both are done: the
-/// page maps the `MAP`'s, read-only, the copy the store made before ended; or a private copy of
-/// it, holding the store: never a copy of what the `MAP` replaced. The window counts the private
+/// page maps the `MAP`'s, read-only, the copy the write made before ended; or a private copy of
+/// it, holding the write: never a copy of what the `MAP` replaced. The window counts the private
 /// pages the stage maps writable.
 fn copies_race_maps() {
     let ps = page_size();
@@ -471,7 +471,7 @@ fn copies_race_maps() {
     dax.map(0, &first.source(), 0, ps);
     let guest = Arc::new(StageGuest { stage: stage.clone(), window: window.clone() });
     let storing = guest.clone();
-    let vcpu = thread::spawn(move || assert!(stored(&storing, 0), "the store was refused"));
+    let vcpu = thread::spawn(move || assert!(stored(&storing, 0), "the write was refused"));
     let mapped = second.source();
     let map = thread::spawn(move || {
         dax.map(0, &mapped, 0, ps);
@@ -492,7 +492,7 @@ fn copies_race_maps() {
         }
         Frame::Private(number) => {
             let bytes = stage.0.lock().unwrap().private[&number].clone();
-            assert_eq!(bytes[0], STORED, "the private page lost the store");
+            assert_eq!(bytes[0], STORED, "the private page lost the write");
             assert_eq!(bytes[1], SECOND, "a copy of what the MAP replaced");
             reached(Event::CopiedAfterMap);
         }
@@ -501,7 +501,7 @@ fn copies_race_maps() {
 
 const COPY_EVENTS: [Event; 2] = [Event::MapEndedCopy, Event::CopiedAfterMap];
 
-/// For the invariants alone: a random schedule practically never lets the store's copy finish
+/// For the invariants alone: a random schedule practically never lets the write's copy finish
 /// before the `MAP` (none of 800), which the PCT schedules below reach.
 #[test]
 fn copies_race_maps_randomly() {
@@ -513,7 +513,7 @@ fn copies_race_maps_by_pct() {
     reaching(|| PctScheduler::new(3, runs(RUNS)), copies_race_maps, &COPY_EVENTS);
 }
 
-/// cladefs: a store's copy mapped whatever the window maps by then: one of what a `MAP` replaced
+/// cladefs: a write's copy mapped whatever the window maps by then: one of what a `MAP` replaced
 /// meanwhile is mapped in place of the `MAP`'s pages.
 #[test]
 fn needs_copies_to_recheck_their_mappings() {
@@ -523,8 +523,8 @@ fn needs_copies_to_recheck_their_mappings() {
     });
 }
 
-/// cladefs TASK-164.1: two vCPUs store to two pages of a window that holds one private page at
-/// most: one store is made, in a private copy, and the other refused, never both copied.
+/// cladefs TASK-164.1: two vCPUs write to two pages of a window that holds one private page at
+/// most: one write is made, in a private copy, and the other refused, never both copied.
 fn copies_race_their_bound() {
     let ps = page_size();
     let stage = Arc::new(FakeStage::default());
@@ -544,7 +544,7 @@ fn copies_race_their_bound() {
         private <= 1 && writable <= 1,
         "past the window's private pages: {private}, {writable}"
     );
-    assert_eq!(made.iter().filter(|made| **made).count(), 1, "stores made: {made:?}");
+    assert_eq!(made.iter().filter(|made| **made).count(), 1, "writes made: {made:?}");
     drop(dax);
 }
 
@@ -553,7 +553,7 @@ fn copies_race_their_bound_by_pct() {
     Runner::new(PctScheduler::new(3, runs(RUNS)), config()).run(copies_race_their_bound);
 }
 
-/// cladefs: copies counted against the bound before they are made alone: two stores each find room
+/// cladefs: copies counted against the bound before they are made alone: two writes each find room
 /// for one, and both are mapped.
 #[test]
 fn needs_copies_counted_as_they_are_mapped() {

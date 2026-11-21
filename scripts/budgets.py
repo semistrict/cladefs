@@ -13,12 +13,12 @@ NAME-stats.txt), its last lines:
 
 - **memory**: no sample of the daemon's anonymous memory past its budget, which the daemon weighs
   each against as it takes it (`process:`'s `over-budget`, cladefs::cladefsd::process): the sum of
-  what its design bounds, its uploads' memory, a framing for each store written at once, its
+  what its design bounds, its uploads' memory, a framing for each cell written at once, its
   fetches', its tenants' bytes in flight and its own;
 - **uploads**: what they held at once within their budget, the host's upload memory
   (`uploads:`, TASK-317);
 - **disk**: what the daemon's process had its kernel write to its disk (`io_write_bytes`, every
-  page as it dirtied it) no more than what it says it wrote: its stores' files, by kind
+  page as it dirtied it) no more than what it says it wrote: its cells' files, by kind
   (`written_*_bytes`), each write a page more at most (`written_writes`), its stats file's pages
   (`stats_written_bytes`), its log, the file beside the stats file, its bucket's objects, if a file
   bucket on a disk (`object-store:`'s `up-*`, and what was in flight as it stopped, its upload
@@ -28,7 +28,7 @@ NAME-stats.txt), its last lines:
 
 And says, of each, what it wrote by kind for each byte its guests wrote (`written_raw_bytes`, every
 guest byte once), and its CPU time a request, which a workload's own case holds to its design
-(`cladefs::bucket::write_budgets`, of a host's store; the guest cases' own).
+(`cladefs::bucket::write_budgets`, of a host's cell; the guest cases' own).
 
     budgets.py [--bucket-in-memory STATS]... RESULTS    each daemon's under RESULTS; exits 1 past one
 
@@ -66,7 +66,7 @@ def check(stats, bucket_in_memory=False):
     figures."""
     kept = fields(stats)
     process, uploads = kept.get("process", {}), kept.get("uploads", {})
-    daemon, store = kept.get("daemon", {}), kept.get("object-store", {})
+    daemon, objects = kept.get("daemon", {}), kept.get("object-store", {})
     checks, figures = [], {}
     mib = lambda count: f"{count / (1 << 20):.1f} MiB"
     if "over-budget" in process:
@@ -86,14 +86,14 @@ def check(stats, bucket_in_memory=False):
         written = {kind: daemon[f"written_{kind}_bytes"] for kind in kinds}
         log = log_of(stats)
         allowed = {
-            "stores": sum(written.values()),
+            "cells": sum(written.values()),
             "pages": daemon["written_writes"] * PAGE,
             "stats": daemon.get("stats_written_bytes", 0),
             "log": log.stat().st_size if log.exists() else 0,
             # Its objects uploaded, and those whose PUTs it had in flight as it stopped, killed, as
             # a case's daemon is: no more than its uploads hold at once, their budget.
             "bucket": 0 if bucket_in_memory else
-            sum(count for name, count in store.items() if name.startswith("up-"))
+            sum(count for name, count in objects.items() if name.startswith("up-"))
             + uploads.get("budget", 0),
             "cache": daemon.get("fetched-bytes", 0),
         }

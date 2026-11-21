@@ -27,7 +27,7 @@ punched): that is the daemon, which faults each chunk in as an arena takes it
 and writes pages before mapping them to a VM. So the daemon's cgroup is charged
 for every VM's cached file pages, and the VMs' cgroups are not: give the
 daemon a cgroup of its own whose `memory.max` holds `MEMORY_BYTES` and its heap
-(the stores' metadata, the connections' buffers, the uploads in flight), and limit tenants through the control API, as cgroups cannot see them apart.
+(the open cells' metadata, the connections' buffers, the uploads in flight), and limit tenants through the control API, as cgroups cannot see them apart.
 A bucket behind costs the heap no more than its upload memory, `CLADEFSD_UPLOAD_MEMORY`
 (512 MiB by default): what waits is on the host's disk (backlog doc-7, Uploads, Memory); on the test host
 a docker build's backlog held the daemon's anonymous memory to 718 MB, against 5.9 GB before (TASK-317). A
@@ -37,7 +37,7 @@ lower `MEMORY_BYTES` or the total limit instead.
 ## The host's disk
 
 Governed as the memory is (backlog doc-22): every filesystem the daemon keeps
-stores or its part cache on is the daemon's but for a headroom
+cell directories or its part cache on is the daemon's but for a headroom
 (`CLADEFSD_DISK_HEADROOM`, bytes or `N%`; by default a twentieth of the
 filesystem, 4 GiB at least, half of it at most), and, if `CLADEFSD_DISK_BYTES`
 is set, no more than that on all of them together. A disk governor looks at
@@ -46,32 +46,32 @@ what the daemon may keep there, its allowance, is what it holds and what is
 free, less the headroom and what it holds not yet on the disk. A machine given
 to cladefs alone needs nothing set.
 
-What is counted is lengths: each file of a store's, rounded up to 4 KiB, once
-however many names it has, and its directories, counted as the store writes
+What is counted is lengths: each file of a cell directory's, rounded up to 4 KiB, once
+however many names it has, and its directories, counted as the cell writes
 them, as its page cache takes a write, not when the write reaches the disk; and
 what the part cache keeps. Nothing walks a directory to count it but once, as a
-tenant is granted, and as a store is opened by this process after another had it
+tenant is granted, and as a cell is opened by this process after another had it
 (TASK-539.5). `GetTenantDisk` and `/metrics` read those counts.
 
-The stores come first. The part cache (`CLADEFSD_PART_CACHE`), copies of the
-bucket's objects that any tenant's stores read, which is no tenant's, keeps what
-the stores leave of the allowance, `CLADEFSD_PART_CACHE_BYTES` at most if set,
+The cells come first. The part cache (`CLADEFSD_PART_CACHE`), copies of the
+bucket's objects that any tenant's cells read, which is no tenant's, keeps what
+the cells leave of the allowance, `CLADEFSD_PART_CACHE_BYTES` at most if set,
 and gives it back at once as they need it, least recently read first. Their
-stores near the allowance, within the headroom of it, the disk is under
+cells near the allowance, within the headroom of it, the disk is under
 pressure: their uploaders are urged, closing and uploading their open segments
 at once, and each tenant's writes are refused past its share, by its weight
 (`SetDiskWeight`, 1 each by default), of what the allowance leaves the tenants.
 Past the allowance, writes are refused with `ENOSPC`, which the guest sees as a
-full disk; the daemon and every store go on.
+full disk; the daemon and every cell go on.
 
-Each write is admitted by its store before it takes any of the disk: what it
-writes, and what the store's own work may still add for it, its commit copying
+Each write is admitted by its cell before it takes any of the disk: what it
+writes, and what the cell's own work may still add for it, its commit copying
 it, its log holding it, its framing copying it, which nothing refuses; three
 times what is written and not framed, and what open extents hold, holes and all,
-and 64 KiB a store open (measured, `local_cell/tests/reserve.rs`). So data
+and 64 KiB an open cell (measured, `local_cell/tests/reserve.rs`). So data
 written and not committed costs seven times its size against a limit until its
 commit, four times until it is framed, and its size until it uploads, when it
-leaves the store's directory. Guests that commit as they write, as filesystems
+leaves the cell directory. Guests that commit as they write, as filesystems
 do, see the difference only near a limit. Commits go on, whatever is full:
 what was written commits, uploads, and leaves the disk, as do frees; a commit's
 own records, some 115 bytes each, are not admitted (TASK-539.15), and the
@@ -79,17 +79,17 @@ headroom absorbs them.
 
 The control API limits, at runtime, the disk of each tenant and of every tenant
 together (`SetDiskLimit`, none by default), which admission holds as hard
-bounds: what a tenant's stores take, reserve and have admitted. A tenant takes
-what its stores' files do, the stores in its directory, the one its VM processes
-name stores in; a store in no granted directory is no tenant's, counted on its
+bounds: what a tenant's cells take, reserve and have admitted. A tenant takes
+what its cells' files do, the cells in its directory, the one its VM processes
+name cells in; a cell in no granted directory is no tenant's, counted on its
 disk alone. A fork's directory holds what the fork wrote, its base's data being
-in the bucket. Set a tenant's limit above what its stores need at once: each
+in the bucket. Set a tenant's limit above what its cells need at once: each
 holds about the lag bound (1 GiB) not yet uploaded, and its open segment, each
 with its reserve.
 
 `/metrics` shows, for each disk by its device (`MAJOR:MINOR`), its size, free
-bytes, headroom, allowance, what its stores take, of that unframed, their
-reserves and writes admitted, the cache, the spare the stores leave of the
+bytes, headroom, allowance, what its cells take, of that unframed, their
+reserves and writes admitted, the cache, the spare the cells leave of the
 allowance, what the filesystem holds that the daemon counts as none of its own
 (`cladefsd_host_disk_other_bytes`: on a dedicated disk, its metadata; more, an
 uncounted writer), and whether it is under pressure; and each tenant's bytes,
@@ -97,9 +97,9 @@ reserve, limit, weight and, under pressure, share, by its ID. The stats file
 says the disks on a `disks:` line.
 
 A filesystem's directory quota would not do it: it refuses whichever write of
-the directory comes past it, a store framing a closed segment, which fails the
-store, or a flush appending a commit's record, rather than the guest's next
-write, which the daemon refuses before the store takes any of it; and it is the
+the directory comes past it, a cell framing a closed segment, which fails the
+cell, or a flush appending a commit's record, rather than the guest's next
+write, which the daemon refuses before the cell takes any of it; and it is the
 host's setup, of a filesystem that has them, which the daemon can't make as it
 grants tenants.
 
@@ -114,11 +114,11 @@ cut off neither takes a cell back nor deletes it from under a later one
 single-node mode. Tests and development use an in-memory bucket
 (`memory:///NAME`), or one in a directory of the host's (`file:///DIR`), which
 outlives the daemon and is shared with cladefsctl and cladefs-gc. What a bucket has
-acknowledged leaves the store's directory (TASK-165.8): an in-memory bucket is
-its process's, and what left for it is gone once that process exits, so a store
+acknowledged leaves the cell directory (TASK-165.8): an in-memory bucket is
+its process's, and what left for it is gone once that process exits, so a cell
 used by more than one process, or across a daemon's restarts, needs a file or
-cloud bucket. cladefsctl, without the daemon, changes existing stores'
-cells on the same terms, and makes new stores (`take`, `import`) anywhere.
+cloud bucket. cladefsctl, without the daemon, changes existing cells on the same terms, and makes new cell directories (`take`, `import`)
+anywhere.
 
 ### Replicated cells' replica directories
 
@@ -132,7 +132,7 @@ deletes its replica directory before its daemon starts: it comes back as a new
 member, whose configurations replace it as they replace a lost disk.
 
 A cell more of whose members are lost for good than its f can't be taken: take it
-forced (TASK-681), on a host holding its store by placing that forced
+forced (TASK-681), on a host holding its cell by placing that forced
 (`cladefsctl place --force DIR TOKEN`, `PlaceCell`'s `force`), on a new host by
 taking it forced (`cladefsctl take --force DIR CAPACITY CELL TOKEN`,
 `CreateCell`'s `force`). That placement's takes go on with the members that answer
@@ -187,12 +187,12 @@ under the KMS its own environment names, as below.
 
 ## Encryption and shredding
 
-Design doc-16 is the design. Every store is encrypted, always:
-the bucket, the stores' directories and the part cache hold its data encrypted,
+Design doc-16 is the design. Every cell is encrypted, always:
+the bucket, the cell directories and the part cache hold its data encrypted,
 under its cell's KEK, which its tenant's KEK wraps. Every process that opens
-stores (cladefsd, cladefsctl, cladefs-mount, cladefs-gc to collect) refuses to start
+cells (cladefsd, cladefsctl, cladefs-mount, cladefs-gc to collect) refuses to start
 unless `CLADEFS_KMS` names the host's KMS or `CLADEFS_MASTER_KEY` gives a master key
-for the bucket KMS (below); a tenant the KMS has no KEK of gets no store,
+for the bucket KMS (below); a tenant the KMS has no KEK of gets no cell,
 refused as destroyed (`EACCES`). The KMS `CLADEFS_KMS` names is `local:///DIR`, a
 fake for tests and development, AWS KMS or Google Cloud KMS (below), or
 OpenBao's Transit engine:
@@ -216,8 +216,8 @@ deployment's recovery needs allow); on GCS, object versioning off, or a
 lifecycle rule deleting non-current versions (`isLive: false`, or
 `daysSinceNoncurrentTime`). Until that rule has run, the old version's wrapped
 KEK unwraps while the tenant's KEK lives. A bucket with versioning off needs
-nothing. A host told either halts the stores of the tenant or cell it has open
-(`EACCES`) and drops their keys and cached pages; a halted store's own keys stay
+nothing. A host told either halts the cells of the tenant or cell it has open
+(`EACCES`) and drops their keys and cached pages; a halted cell's own keys stay
 in memory until its VM process closes it.
 
 **The bucket KMS** (doc-16, The bucket KMS), the default. With no `CLADEFS_KMS`, a
@@ -225,7 +225,7 @@ host given a master key, `CLADEFS_MASTER_KEY` (64 hex digits: `openssl rand -hex
 32`) or `CLADEFS_MASTER_KEY_FILE` (a file of 32 raw bytes, or of the same text),
 keeps each tenant's KEK in its bucket, at `tenants/<tenant>/kek`, wrapped by the
 master key and made on the tenant's first use: every tenant's cells are encrypted,
-with no setup per tenant. Every process that opens stores (cladefsd, cladefsctl,
+with no setup per tenant. Every process that opens cells (cladefsd, cladefsctl,
 mounts, cladefs-gc) is given the same key, and the bucket never holds it; logs and
 errors name it only by its ID, a short hash. To rotate it, give every host
 `CLADEFS_MASTER_KEY=NEW,OLD` (comma- or line-separated, the newest first: it
@@ -320,5 +320,5 @@ What a host can tell from a VM process's status (TASK-70):
 | 152, 153 | `BadConfiguration`, `ArgParsing` | How it was started. |
 | 157 | `SIGILL` | A VMM bug, or a host of another CPU. |
 | 158 | `CladefsdLost` | Storage: its extent daemon went, and the VM can't go on. What it was told stays as doc-12 says. |
-| 159 | `AccessRefused` | The guest: an access stayed refused, of a part of its DAX window nothing maps, or a store past its private pages' bound (`private_max`, backlog doc-13). That VM alone stops (TASK-77). |
+| 159 | `AccessRefused` | The guest: an access stayed refused, of a part of its DAX window nothing maps, or a write past its private pages' bound (`private_max`, backlog doc-13). That VM alone stops (TASK-77). |
 | Killed by SIGABRT | A panic | A VMM bug: Firecracker panics abort, and an unresolved DAX window fault does. |

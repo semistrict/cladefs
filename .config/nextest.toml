@@ -39,7 +39,7 @@ not (
         test(=bucket::tests::cells_make_so_many_versions_at_most)
         | test(=bucket::tests::commits_stalled_on_the_lag_end_with_their_segment_closed_for_room)
         | test(=bucket::tests::extents_compacted_read_once_their_host_died_and_its_cache_went)
-        | test(=bucket::tests::extents_compacted_twice_read_where_the_store_names_them)
+        | test(=bucket::tests::extents_compacted_twice_read_where_the_cell_names_them)
         | test(=bucket::tests::forks_open_at_once_share_what_they_inherited)
         | test(=bucket::tests::forks_read_what_they_inherited_compacted_twice)
         | test(=bucket::tests::forks_read_what_they_inherited_compacted_twice_their_checkpoint_late)
@@ -56,8 +56,8 @@ not (
         | test(=storage::kept::tests::passes_run_among_an_image_and_its_forks_commits)))
     | (binary_id(cladefs::cells) & test(=forks_and_takes_cells))
     | (binary_id(cladefs::cladefsctl) & (
-        test(=stores_open_elsewhere_are_left_alone_locally)
-        | test(=stores_open_elsewhere_are_left_alone_through_the_daemon)))
+        test(=cells_open_elsewhere_are_left_alone_locally)
+        | test(=cells_open_elsewhere_are_left_alone_through_the_daemon)))
     | (package(cladefs) & (
         test(=cladefsd::tests::whatever_a_vm_process_says_harms_no_other)
         | test(=cladefsd::tests::serves_hundreds_of_forks_of_a_base)
@@ -70,22 +70,22 @@ not (
         | test(=cladefsd::tests::forks_opening_reads_nothing_more_of_a_larger_base)
         | test(=cladefsd::tests::counting_followers_walks_no_extents)
         | test(=cladefsd::tests::restores_wait_for_a_version_however_long_its_opening_takes)))
-    | (binary_id(cladefs::fuse_mount) & test(=a_store_mounted_is_not_mounted_again))
+    | (binary_id(cladefs::fuse_mount) & test(=a_cell_mounted_is_not_mounted_again))
     | (binary_id(cladefs::control) & (
         test(=shrinks_waiting_for_their_guests_hold_no_threads)
         | test(=tenants_encrypted_under_the_bucket_kms_and_shredded_through_the_control_api)))
     | (binary_id(cladefs::fuse_differential)
         & test(=random_calls_on_a_mount_come_to_what_they_do_on_tmpfs))
-    | (binary_id(cladefs::handover) & test(=stores_open_whole_in_another_process_once_their_vm_goes))
+    | (binary_id(cladefs::handover) & test(=cells_open_whole_in_another_process_once_their_vm_goes))
     | (package(extent_frame) & test(=tests::objects_of_raw_files_sectors_read_under_their_key_alone))
     | (package(fxfs) & (
         test(=object_store::allocator::tests::test_compaction_of_middle_layer_keeps_its_removals)
         | test(=object_store::tests::test_key_rolled_when_unlocked)))
     | (package(local_cell) & (
         test(=footprint::tests::footprints_count_what_directories_of_the_hosts_hold)
-        | test(=upload::encrypted::encrypted_stores_frame_in_place_writing_what_clear_stores_write)
-        | test(=upload::encrypted::encrypted_stores_hold_parts_packed_ahead_and_encrypt_them_framing)
-        | test(=upload::encrypted::encrypted_stores_raw_files_and_logs_hold_no_plaintext)
+        | test(=upload::encrypted::encrypted_cells_frame_in_place_writing_what_clear_cells_write)
+        | test(=upload::encrypted::encrypted_cells_hold_parts_packed_ahead_and_encrypt_them_framing)
+        | test(=upload::encrypted::encrypted_cells_raw_files_and_logs_hold_no_plaintext)
         | test(=upload::encrypted::segments_framed_in_place_encrypted_recover_from_crashes)
         | test(=upload::tests::heads_are_swapped_as_fast_as_gcs_takes_them)))
     | (binary_id(local_cell::cell) & (

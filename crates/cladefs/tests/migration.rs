@@ -5,7 +5,7 @@
 //! Live migration of an ephemeral cell between two extent daemons sharing a bucket (backlog doc-25,
 //! TASK-698.4): forked from a version on the first, written there while the second takes its kept
 //! segments in rounds, handed over once its guest is gone, read whole on the second; its
-//! reference then the second's alone. A hand-over while its store is open is refused, and one
+//! reference then the second's alone. A hand-over while its cell is open is refused, and one
 //! asked again after it was accepted answers so again.
 
 #![cfg(target_os = "linux")]
@@ -42,7 +42,7 @@ struct Daemon {
     ephemeral: PathBuf,
 }
 
-/// A daemon serving in `dir`, keeping its stores' cells in the file bucket at `bucket`, its
+/// A daemon serving in `dir`, keeping its cells in the file bucket at `bucket`, its
 /// ephemeral cells' directory in `dir`, serving its peers at `peers`' first address.
 fn daemon(dir: &Path, bucket: &Path, peers: &[String]) -> Daemon {
     let (vms, control, ephemeral) =
@@ -104,14 +104,14 @@ fn data(sequence: u64) -> Vec<u8> {
         .collect()
 }
 
-fn write(store: &CellClient, extent: ExtentId) {
-    store.write(extent, 0, &[VolatileSlice::from(&data(extent.sequence)[..])]).unwrap();
-    store.commit(None).unwrap();
+fn write(client: &CellClient, extent: ExtentId) {
+    client.write(extent, 0, &[VolatileSlice::from(&data(extent.sequence)[..])]).unwrap();
+    client.commit(None).unwrap();
 }
 
-fn read(store: &CellClient, extent: ExtentId) -> Vec<u8> {
+fn read(client: &CellClient, extent: ExtentId) -> Vec<u8> {
     let mut read = vec![0; EXTENT];
-    store.read(extent, 0, &mut [VolatileSliceMut::from(&mut read[..])]).unwrap();
+    client.read(extent, 0, &mut [VolatileSliceMut::from(&mut read[..])]).unwrap();
     read
 }
 
@@ -148,10 +148,10 @@ fn ephemeral_cells_migrate_live_between_hosts() {
 
     // A version on the source, its parent's extent inherited by the ephemeral cell forked from it.
     let base = hosts[0].join("base");
-    let store = CellClient::connect(&source.vms, &base, CAPACITY).unwrap();
-    let inherited = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, inherited);
-    drop(store);
+    let client = CellClient::connect(&source.vms, &base, CAPACITY).unwrap();
+    let inherited = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, inherited);
+    drop(client);
     let version = source.control.make_version(&base, None).unwrap();
     source.control.sync_cell(&base).unwrap();
     let stated = source.control.stat_cell(&base).unwrap();
@@ -159,23 +159,23 @@ fn ephemeral_cells_migrate_live_between_hosts() {
     let here = hosts[0].join("ephemeral-cell");
     let child = source.control.fork_ephemeral(from, &here).unwrap();
 
-    let store = CellClient::connect(&source.vms, &here, CAPACITY).unwrap();
+    let client = CellClient::connect(&source.vms, &here, CAPACITY).unwrap();
     let own = |sequence| ExtentId { cell: child.id, sequence };
     for sequence in 1..=BEFORE {
-        write(&store, own(sequence));
+        write(&client, own(sequence));
     }
     let there = hosts[1].join("ephemeral-cell");
     source.control.migrate_cell(&here, &target_at, &there).unwrap();
     for sequence in BEFORE + 1..=BEFORE + DURING {
-        write(&store, own(sequence));
+        write(&client, own(sequence));
     }
     std::thread::sleep(Duration::from_secs(2));
-    // Open still, the store is not handed over.
+    // Open still, the cell is not handed over.
     let busy = source.control.hand_over_cell(&here).unwrap_err();
     assert_eq!(busy.errno(), Some(cladefs::Errno::EBUSY));
-    drop(store);
+    drop(client);
     source.control.hand_over_cell(&here).unwrap();
-    assert!(!here.exists(), "the source's store goes once handed over");
+    assert!(!here.exists(), "the source's cell directory goes once handed over");
     let incarnation = std::fs::read_to_string(target.ephemeral.join("incarnation")).unwrap();
     let incarnation: u64 = incarnation.trim().parse().unwrap();
     let named = referring(&bucket);
@@ -184,26 +184,26 @@ fn ephemeral_cells_migrate_live_between_hosts() {
         |daemon: &Daemon| std::fs::read_dir(daemon.ephemeral.join("cells")).unwrap().count();
     assert_eq!((noted(&source), noted(&target)), (0, 1), "the cell is the target's alone");
 
-    let store = CellClient::connect(&target.vms, &there, CAPACITY).unwrap();
-    assert_eq!(store.cell(), child.id);
-    assert!(read(&store, inherited) == data(1), "the parent's extent read otherwise");
+    let client = CellClient::connect(&target.vms, &there, CAPACITY).unwrap();
+    assert_eq!(client.cell(), child.id);
+    assert!(read(&client, inherited) == data(1), "the parent's extent read otherwise");
     for sequence in 1..=BEFORE + DURING {
-        assert!(read(&store, own(sequence)) == data(sequence), "extent {sequence} read otherwise");
+        assert!(read(&client, own(sequence)) == data(sequence), "extent {sequence} read otherwise");
     }
     let next = own(BEFORE + DURING + 1);
-    write(&store, next);
-    drop(store);
-    let store = CellClient::connect(&target.vms, &there, CAPACITY).unwrap();
-    assert!(read(&store, next) == data(next.sequence));
-    drop(store);
+    write(&client, next);
+    drop(client);
+    let client = CellClient::connect(&target.vms, &there, CAPACITY).unwrap();
+    assert!(read(&client, next) == data(next.sequence));
+    drop(client);
     println!(
         "{} MiB migrated, the target's incarnation {incarnation:x}, its reference {named:?}",
         BEFORE + DURING
     );
 }
 
-/// A cell forked on the source, written there, its store closed: the directory the bucket and
-/// both hosts are in, each host's peers, the source's and target's daemons, the cell's path on the
+/// A cell forked on the source, written there, closed: the directory the bucket and both
+/// hosts are in, each host's peers, the source's and target's daemons, the cell's path on the
 /// source and its ID.
 struct Forked {
     dir: tempfile::TempDir,
@@ -216,7 +216,7 @@ struct Forked {
 }
 
 /// Forks an ephemeral cell on a source, of a version of a base there, and writes `extents` of its
-/// own, its store closed after.
+/// own, closed after.
 fn forked(extents: u64) -> Forked {
     let dir = tempfile::tempdir().unwrap();
     let bucket = dir.path().join("bucket");
@@ -229,21 +229,21 @@ fn forked(extents: u64) -> Forked {
     let source = daemon(&hosts[0], &bucket, &peers[0]);
     let target = daemon(&hosts[1], &bucket, &peers[1]);
     let base = hosts[0].join("base");
-    let store = CellClient::connect(&source.vms, &base, CAPACITY).unwrap();
-    let inherited = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, inherited);
-    drop(store);
+    let client = CellClient::connect(&source.vms, &base, CAPACITY).unwrap();
+    let inherited = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, inherited);
+    drop(client);
     let version = source.control.make_version(&base, None).unwrap();
     source.control.sync_cell(&base).unwrap();
     let stated = source.control.stat_cell(&base).unwrap();
     let from = cladefs::CellVersion { tenant: stated.tenant, cell: stated.cell, version };
     let here = hosts[0].join("ephemeral-cell");
     let child = source.control.fork_ephemeral(from, &here).unwrap();
-    let store = CellClient::connect(&source.vms, &here, CAPACITY).unwrap();
+    let client = CellClient::connect(&source.vms, &here, CAPACITY).unwrap();
     for sequence in 1..=extents {
-        write(&store, ExtentId { cell: child.id, sequence });
+        write(&client, ExtentId { cell: child.id, sequence });
     }
-    drop(store);
+    drop(client);
     Forked { dir, peers, source, target, here, child, inherited }
 }
 
@@ -286,29 +286,29 @@ impl Forked {
         assert!(!there.exists());
         assert_eq!(self.noted(), (1, 0), "the cell is the source's alone");
         assert_eq!(referring(&self.bucket()).len(), 1, "the source's reference alone");
-        let store = CellClient::connect(&self.source.vms, &self.here, CAPACITY).unwrap();
-        assert!(read(&store, self.inherited) == data(1), "the parent's extent read otherwise");
+        let client = CellClient::connect(&self.source.vms, &self.here, CAPACITY).unwrap();
+        assert!(read(&client, self.inherited) == data(1), "the parent's extent read otherwise");
         for sequence in [1, extents / 2, extents] {
             let extent = ExtentId { cell: self.child.id, sequence };
-            assert!(read(&store, extent) == data(sequence), "extent {sequence} read otherwise");
+            assert!(read(&client, extent) == data(sequence), "extent {sequence} read otherwise");
         }
     }
 
     /// Asserts the cell handed over to the target, at `there`: noted there alone, referred to by
     /// it alone, its `extents` reading as written.
     fn assert_handed_over(&self, there: &Path, extents: u64) {
-        assert!(!self.here.exists(), "the source's store goes once handed over");
+        assert!(!self.here.exists(), "the source's cell directory goes once handed over");
         assert_eq!(self.noted(), (0, 1), "the cell is the target's alone");
         assert_eq!(referring(&self.bucket()).len(), 1, "the target's reference alone");
-        let store = CellClient::connect(&self.target.vms, there, CAPACITY).unwrap();
+        let client = CellClient::connect(&self.target.vms, there, CAPACITY).unwrap();
         for sequence in 1..=extents {
             let extent = ExtentId { cell: self.child.id, sequence };
-            assert!(read(&store, extent) == data(sequence), "extent {sequence} read otherwise");
+            assert!(read(&client, extent) == data(sequence), "extent {sequence} read otherwise");
         }
     }
 }
 
-/// A hand-over the target never answers leaves the cell given up on the source, its store opened
+/// A hand-over the target never answers leaves the cell given up on the source, open
 /// there no more, the source restarted too; the target restarted gives up the migration it was
 /// taking, and its reference;
 /// asked again, it refuses, and the source serves the cell again, holding all it held, the only
@@ -395,8 +395,8 @@ fn a_migration_its_source_lost_is_superseded_by_the_next() {
 }
 
 /// board 2934: a hand-over whose last files failed to land, asked again, sends them again and
-/// names every file of the store, so that the target takes it whole, never a hand-over naming
-/// nothing, which the target would take as whole.
+/// names every file of the cell directory, so that the target takes it whole, never a
+/// hand-over naming nothing, which the target would take as whole.
 #[test]
 fn hand_overs_asked_again_send_and_name_every_file() {
     let forked = forked(4);
@@ -404,8 +404,8 @@ fn hand_overs_asked_again_send_and_name_every_file() {
     let control = &forked.source.control;
     let migration = control.migrate_cell(&forked.here, forked.target_at(), &there).unwrap();
     let staged = staging(&forked.host(1), migration);
-    // A file of the store's, not a kept segment, that the hand-over sends: a directory in its
-    // place in the target's staging, so that writing it fails.
+    // A file of the cell directory's, not a kept segment, that the hand-over sends: a directory in
+    // its place in the target's staging, so that writing it fails.
     let mut files = Vec::new();
     let mut dirs = vec![PathBuf::new()];
     while let Some(dir) = dirs.pop() {
@@ -423,7 +423,7 @@ fn hand_overs_asked_again_send_and_name_every_file() {
         }
     }
     files.sort();
-    let blocked = staged.join(files.last().expect("the store's files"));
+    let blocked = staged.join(files.last().expect("the cell directory's files"));
     std::fs::create_dir_all(&blocked).unwrap();
     let unanswered = control.hand_over_cell(&forked.here).unwrap_err();
     assert_eq!(unanswered.errno(), Some(cladefs::Errno::ENOTCONN));

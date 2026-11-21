@@ -10,19 +10,19 @@
 //!   kind, as the daemon served them, from their dispatch to their reply's sending.
 //! - `cladefsd_build_info{commit}`, 1: the commit the daemon was built of
 //!   (`crate::BUILD_COMMIT`); `cladefsd_vm_build_info{cell,commit}`: the VM processes
-//!   connected, by their store's cell, in base 32, and the commit they said they were built
+//!   connected, by their cell, in base 32, and the commit they said they were built
 //!   of (`wire::BUILD`), a writer and its followers counted together (TASK-111.7).
 //! - `cladefsd_connections`, `cladefsd_stores_open` and `cladefsd_follower_views`:
-//!   the VM processes connected, the stores their connections write, and the followers' views.
-//! - `cladefsd_extent_cache_pinned_entries` and `cladefsd_extent_cache_idle_entries`:
-//!   the sealed extents cached that something but the cache holds, and those nothing else does
-//!   (`crate::cache::entries`); `cladefsd_window_mappings`,
-//!   `cladefsd_window_mapped_bytes` and `cladefsd_window_pages`: the ranges the VMs'
-//!   windows map, their bytes, and the pages of them mapped in the VM processes (`crate::dax::live`,
-//!   TASK-131.6); cladefs: `cladefsd_window_private_pages`, of those, the private copies of
-//!   windows that copy on write, and `cladefsd_window_open_maps_refused_total`, the `MAP`s of
-//!   open extents refused, which no guest makes (backlog doc-13).
-//! - cladefs: of each VM process connected that opened a store, by its store's cell, in
+//!   the VM processes connected, the cells their connections write, and the followers' views.
+//! - `cladefsd_extent_cache_pinned_entries` and `cladefsd_extent_cache_idle_entries`: the sealed
+//!   extents cached that something but the cache holds, and those nothing else does
+//!   (`crate::cache::entries`); `cladefsd_window_mappings`, `cladefsd_window_mapped_bytes` and
+//!   `cladefsd_window_pages`: the ranges the VMs' windows map, their bytes, and the pages of them
+//!   mapped in the VM processes (`crate::dax::live`, TASK-131.6); cladefs:
+//!   `cladefsd_window_private_pages`, of those, the private copies of windows that copy on write,
+//!   and `cladefsd_window_open_maps_refused_total`, the `MAP`s of open extents refused, which no
+//!   guest makes (backlog doc-13).
+//! - cladefs: of each VM process connected that opened a cell, by its cell, in
 //!   base 32, and its connection's number (`connection`), which tells a writer and its
 //!   followers apart (TASK-111.5): `cladefsd_vm_window_mappings`,
 //!   `cladefsd_vm_window_mapped_bytes`, `cladefsd_vm_window_pages` and
@@ -34,7 +34,8 @@
 //! - `cladefsd_<counter>_total`: the counters the control API's `GetCounters` reports
 //!   (`crate::stats::Stats::named`, its dashes underscores): maps, faults, page-ins, reads and
 //!   their nanoseconds and bytes; the VM processes' changes to their windows (`stage_ops`) and
-//!   their nanoseconds in them (`stage_ns`), whose ratio is what a window change costs a VM process.
+//!   their nanoseconds in them (`stage_ns`), whose ratio is what a window change costs a VM
+//!   process.
 //! - `cladefsd_memory_bytes`, `cladefsd_memory_limit_bytes` and
 //!   `cladefsd_memory_capacity_bytes`: the memory the daemon's cached extents' pages
 //!   hold, every tenant's together, its limit, if any, and the most the daemon's kernel has
@@ -42,36 +43,36 @@
 //!   `cladefsd_tenant_memory_limit_bytes{tenant}`: each tenant's alive, by its ID, in
 //!   base 32, as cells name it.
 //! - `cladefsd_disk_bytes`, `cladefsd_disk_reserved_bytes` and `cladefsd_disk_limit_bytes`: the
-//!   host's disk every tenant's stores take together, counted as they write, what they hold past
+//!   host's disk every tenant's cells take together, counted as they write, what they hold past
 //!   it against the limit (their reserves and writes admitted), and the limit, if any (TASK-94,
 //!   doc-22); `cladefsd_tenant_disk_bytes{tenant}`, `cladefsd_tenant_disk_reserved_bytes{tenant}`,
 //!   `cladefsd_tenant_disk_limit_bytes{tenant}`, `cladefsd_tenant_disk_weight{tenant}` and,
 //!   under pressure, `cladefsd_tenant_disk_share_bytes{tenant}`: each tenant's alive, by its ID
 //!   (`super::disk`).
-//! - cladefs: `cladefsd_host_disk_*_bytes{device}`, for each filesystem the daemon keeps stores or
+//! - cladefs: `cladefsd_host_disk_*_bytes{device}`, for each filesystem the daemon keeps cells or
 //!   the part cache on, by its device as `MAJOR:MINOR` (doc-22, TASK-539.11): its `size`, `free`,
-//!   the governor's `headroom` and `allowance`, what its `stores` take, of that `unframed`, their
-//!   `reserved` and `pledged` bytes, what the `cache` keeps, the `spare` the stores leave of the
+//!   the governor's `headroom` and `allowance`, what its `cells` take, of that `unframed`, their
+//!   `reserved` and `pledged` bytes, what the `cache` keeps, the `spare` the cells leave of the
 //!   allowance, and the `other` bytes used on it that the daemon counts as none of its own, an
 //!   uncounted writer's on a dedicated disk; `cladefsd_host_disk_pressure{device}`, 1 while under
 //!   pressure.
 //! - `cladefsd_upload_pending_bytes{cell}`, `cladefsd_upload_oldest_pending_seconds
-//!   {cell}` and `cladefsd_upload_stalls_total{cell}`: for each open store whose commits
+//!   {cell}` and `cladefsd_upload_stalls_total{cell}`: for each open cell whose commits
 //!   upload, its commits' bytes not yet uploaded, how long the oldest of them has waited, and how
 //!   many commits waited for the lag to shrink (TASK-91.3); its cell as `TENANT/CELL`, in
 //!   base 32 (TASK-364).
 //! - cladefs: `cladefsd_replication_degraded{cell}` and `cladefsd_replication_members_up{cell}`:
-//!   for each open store of a replicated cell, 1 while it is degraded (fewer than f members of its
+//!   for each open cell of a replicated cell, 1 while it is degraded (fewer than f members of its
 //!   configuration take its writer's commits, or it dropped to f = 0, its commits waiting for the
 //!   bucket), and how many members do (doc-21, Degraded; TASK-537.3.5).
 //! - cladefs: `cladefsd_upload_held_bytes`, `cladefsd_upload_held_max_bytes` and
-//!   `cladefsd_upload_memory_bytes`: the bytes of objects the stores' uploads hold in memory,
-//!   every store's together, now and at most, and their budget, `CLADEFSD_UPLOAD_MEMORY`
+//!   `cladefsd_upload_memory_bytes`: the bytes of objects the cells' uploads hold in memory,
+//!   every cell's together, now and at most, and their budget, `CLADEFSD_UPLOAD_MEMORY`
 //!   (`crate::bucket::upload_memory`, TASK-317).
 //! - cladefs: `cladefsd_part_cache_bytes` and `cladefsd_part_cache_capacity_bytes`: what
-//!   the host's part cache keeps, once a store opened it, and its budget,
+//!   the host's part cache keeps, once a cell opened it, and its budget,
 //!   `CLADEFSD_PART_CACHE_BYTES` (TASK-406.1).
-//! - cladefs: `cladefsd_peer_parts_total{outcome}`: the parts the stores' fetchers asked the
+//! - cladefs: `cladefsd_peer_parts_total{outcome}`: the parts the cells' fetchers asked the
 //!   peers that own them for, by what came of it (`given`, `missing`, `failed`), and
 //!   `cladefsd_peer_served_parts_total{outcome}`, those the daemon's peers asked it for
 //!   (`served`, `missing`), if it serves peers (TASK-406.2).
@@ -87,7 +88,7 @@
 //!   `cladefsd_object_storage_bucket_gets_total{bucket}` and
 //!   `cladefsd_object_storage_bucket_downloaded_bytes_total{bucket}`, by bucket number, its own and
 //!   those of other buckets' cells (TASK-633.4),
-//!   once it opened a store.
+//!   once it opened a cell.
 
 use super::wire::*;
 use std::fmt::Write as _;
@@ -235,7 +236,7 @@ pub fn render() -> String {
     let name = "cladefsd_vm_build_info";
     let _ = writeln!(
         out,
-        "# HELP {name} VM processes connected, by their store's cell and the commit they were \
+        "# HELP {name} VM processes connected, by their cell and the commit they were \
          built of, as they said."
     );
     let _ = writeln!(out, "# TYPE {name} gauge");
@@ -267,7 +268,7 @@ pub fn render() -> String {
         ("vm_window_pages", "Pages a VM's DAX window has mapped in its VM process.", |vm| {
             Some(vm.window?.pages)
         }),
-        ("vm_window_private_pages", "Of those, private copies of pages stores made.", |vm| {
+        ("vm_window_private_pages", "Of those, private copies of pages the guest wrote.", |vm| {
             Some(vm.window?.private_pages)
         }),
         (
@@ -393,17 +394,17 @@ pub fn render() -> String {
     for (name, help, value) in [
         (
             "cladefsd_upload_held_bytes",
-            "Bytes of objects the stores' uploads hold in memory now, every store's together.",
+            "Bytes of objects the cells' uploads hold in memory now, every cell's together.",
             memory.held,
         ),
         (
             "cladefsd_upload_held_max_bytes",
-            "The most bytes of objects the stores' uploads held in memory at once.",
+            "The most bytes of objects the cells' uploads held in memory at once.",
             memory.max_held,
         ),
         (
             "cladefsd_upload_memory_bytes",
-            "The most bytes of objects the stores' uploads may hold in memory at once.",
+            "The most bytes of objects the cells' uploads may hold in memory at once.",
             memory.budget,
         ),
     ] {
@@ -501,13 +502,13 @@ pub fn render() -> String {
         (
             "upload_pending_bytes",
             "gauge",
-            "Bytes of a store's commits not yet uploaded, by its cell.",
+            "Bytes of a cell's commits not yet uploaded, by its cell.",
             |status| status.pending_bytes.to_string(),
         ),
         (
             "upload_oldest_pending_seconds",
             "gauge",
-            "How long a store's oldest commit not yet uploaded has waited, by its cell.",
+            "How long a cell's oldest commit not yet uploaded has waited, by its cell.",
             |status| {
                 let waited = status.oldest_pending.and_then(|since| since.elapsed().ok());
                 waited.unwrap_or_default().as_secs_f64().to_string()
@@ -516,7 +517,7 @@ pub fn render() -> String {
         (
             "upload_stalls_total",
             "counter",
-            "A store's commits that waited for its upload lag to shrink, by its cell.",
+            "A cell's commits that waited for its upload lag to shrink, by its cell.",
             |status| status.stalls.to_string(),
         ),
     ];
@@ -621,10 +622,10 @@ pub(super) fn gauges() -> Vec<(&'static str, &'static str, u64)> {
         ("connections", "VM processes connected.", super::server::connections() as u64),
         (
             "stores_open",
-            "Stores VM processes' connections write.",
+            "Cells VM processes' connections write.",
             super::cells::open_count() as u64,
         ),
-        ("follower_views", "Followers' views of stores.", super::cells::follower_views() as u64),
+        ("follower_views", "Followers' views of cells.", super::cells::follower_views() as u64),
         (
             "extent_cache_pinned_entries",
             "Sealed extents cached that a window's mapping, a read or a page-in holds.",
@@ -644,7 +645,7 @@ pub(super) fn gauges() -> Vec<(&'static str, &'static str, u64)> {
         ),
         (
             "window_private_pages",
-            "Of those, private copies of pages stores made, of windows that copy on write.",
+            "Of those, private copies of pages the guest wrote, of windows that copy on write.",
             live.private_pages,
         ),
         ("memory_bytes", "Memory extents' pages hold, every tenant's.", physmem::arenas_bytes()),
@@ -655,11 +656,11 @@ pub(super) fn gauges() -> Vec<(&'static str, &'static str, u64)> {
     }
     // cladefs: TASK-94.
     let disk = super::disk::total();
-    gauges.push(("disk_bytes", "The host's disk every tenant's stores take.", disk));
+    gauges.push(("disk_bytes", "The host's disk every tenant's cells take.", disk));
     let reserved = super::disk::count(None).map_or(0, |counted| counted.reserved);
     gauges.push((
         "disk_reserved_bytes",
-        "What every tenant's stores hold past what they take against the limit.",
+        "What every tenant's cells hold past what they take against the limit.",
         reserved,
     ));
     if let Some(limit) = super::disk::total_limit() {

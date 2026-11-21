@@ -130,7 +130,7 @@ impl<'a> Reader<'a> {
         Self { segments: &buffers.readable, offset: 0 }
     }
 
-    /// The next `len` bytes, as the store copies them out of guest memory: as long as the request
+    /// The next `len` bytes, as the cell copies them out of guest memory: as long as the request
     /// lives, so that what comes after them can be read too.
     pub(crate) fn slices(&mut self, len: usize) -> Result<Vec<cladefs::VolatileSlice<'a>>, Errno> {
         let parts = range(self.segments, self.offset, len).ok_or(Errno::EINVAL)?;
@@ -176,7 +176,7 @@ impl Writer<'_> {
         Writer { segments: &buffers.writable }
     }
 
-    /// `len` bytes at `offset`, as the store copies into guest memory.
+    /// `len` bytes at `offset`, as the cell copies into guest memory.
     pub(crate) fn slices(
         &self,
         offset: usize,

@@ -1,7 +1,7 @@
 import { After, Inv, Predict, Ref, Scenes } from "../../../ui/mdx.tsx";
 import { sharedScene, storeScenes } from "../scene.ts";
 
-Fork A's process stores one byte to page 0. The page is mapped read-only, so the store faults
+Fork A's process writes one byte to page 0. The page is mapped read-only, so the write faults
 into Fxfs's DAX code in A's kernel.
 
 <Scenes scenes={[sharedScene]} />
@@ -22,7 +22,7 @@ into Fxfs's DAX code in A's kernel.
 
 <After id="copier">
 
-Step through it. The order is the point: private first, dirty second, store last.
+Step through it. The order is the point: private first, dirty second, write last.
 
 <Scenes scenes={storeScenes} />
 
@@ -31,7 +31,7 @@ Step through it. The order is the point: private first, dirty second, store last
 <Inv id="private-max" />
 
 The guest side: `cladefs_dax_dirty` asks for `PRIVATE` before anything is dirty, holding the file's
-semaphore shared until the store or copy is done.
+semaphore shared until the write or copy is done.
 
 <Ref id="guest_dirty" />
 <Ref id="guest_device_private" />

@@ -5,8 +5,8 @@
 //! The daemon's control API (TASK-43.3): gRPC over a Unix socket, for the host's VM manager, which
 //! launches the VMMs. Its calls and their errors are `proto/cladefs/cladefsd/v1/cladefsd.proto`'s.
 //!
-//! The store operations it serves are futures ([`super::cells`], TASK-43.6): their waits, for
-//! uploads, guests' answers, and stores to be let go, hold no thread, and their stores' I/O runs on
+//! The cell operations it serves are futures ([`super::cells`], TASK-43.6): their waits, for
+//! uploads, guests' answers, and cells to be let go, hold no thread, and their cells' I/O runs on
 //! the runtime's blocking threads, so that many calls waiting, syncs while object storage is slow,
 //! keep no other call waiting.
 
@@ -43,13 +43,13 @@ pub const ERRNO: &str = "cladefs-errno";
 /// How many threads serve the API's calls, and their waits, which hold none (TASK-43.6).
 const THREADS: usize = 2;
 
-/// How many threads the calls' stores' I/O runs on at most: what waits holds none of them, so that
+/// How many threads the calls' cells' I/O runs on at most: what waits holds none of them, so that
 /// many calls waiting, for uploads or guests, leave them to the others' I/O.
 pub const BLOCKING_THREADS: usize = 32;
 
 /// Serves the control API to the callers that connect to `listener`, until accepting fails; the
-/// sockets of the tenants it grants go in the directory `tenants`. cladefs: and the Mount service of
-/// the daemon's FUSE mount of cells, if it has one ([`super::mount`], TASK-475.2): its calls,
+/// sockets of the tenants it grants go in the directory `tenants`. cladefs: and the Mount service
+/// of the daemon's FUSE mount of cells, if it has one ([`super::mount`], TASK-475.2): its calls,
 /// counted and refused as the daemon drains as the API's are; without a mount, they fail
 /// `UNIMPLEMENTED`.
 #[cfg(not(madsim))]
@@ -327,7 +327,7 @@ fn status(errno: Errno) -> Status {
 }
 
 /// The status of a call that failed with `errno`, saying `message`: as this API's errors are, and
-/// those of the API of FUSE mounts of many stores (`crate::fuse::control`).
+/// those of the API of FUSE mounts of many cells (`crate::fuse::control`).
 pub(crate) fn saying(errno: Errno, message: String) -> Status {
     let code = match errno {
         Errno::ENOENT => Code::NotFound,
@@ -376,7 +376,7 @@ fn fsync_level(fsync: bucket_cell::layout::Fsync) -> FsyncLevel {
 }
 
 /// The reply to a call that did, or failed with an errno.
-/// What StatCell says of a store that is and holds `state`.
+/// What StatCell says of a cell that is and holds `state`.
 fn stat_response(state: cells::CellState) -> StatCellResponse {
     let upload = state.upload.unwrap_or(local_cell::upload::UploadStatus {
         taking: None,
@@ -428,7 +428,7 @@ fn reply<T>(done: Result<T, Errno>) -> Result<Response<T>, Status> {
     done.map(Response::new).map_err(status)
 }
 
-/// The store a request names by `path`.
+/// The cell a request names by `path`.
 fn path(path: String) -> Result<PathBuf, Status> {
     if path.is_empty() {
         return Err(status(Errno::EINVAL));
@@ -436,17 +436,17 @@ fn path(path: String) -> Result<PathBuf, Status> {
     Ok(PathBuf::from(path))
 }
 
-/// The API's calls, served from the daemon's stores, and its grants.
+/// The API's calls, served from the daemon's cells, and its grants.
 struct Control {
     grants: Arc<Grants>,
 }
 
 impl Control {
-    /// The tenant of a new cell whose store is made at `path`, that the caller names `tenant`
+    /// The tenant of a new cell made at `path`, that the caller names `tenant`
     /// (TASK-364): in a granted tenant's directory, that tenant's, which `tenant` is or is 0 for
-    /// (`EPERM` otherwise); elsewhere, `tenant`. A store of a cell there already, a version the VM
+    /// (`EPERM` otherwise); elsewhere, `tenant`. A cell there already, a version the VM
     /// manager gives a tenant to restore from (TASK-154), may be another tenant's: the tenant's VM
-    /// processes write no store of it (`Tenant::reaches`), and its restores are of their own.
+    /// processes write none of it (`Tenant::reaches`), and its restores are of their own.
     fn new_cell_at(&self, path: &Path, tenant: u64) -> Result<u64, Status> {
         match self.grants.tenant_at(path) {
             Some(granted) if tenant == crate::host_cell::DEFAULT_TENANT || tenant == granted => {
@@ -465,7 +465,7 @@ impl Cladefsd for Control {
         request: Request<CreateCellRequest>,
     ) -> Result<Response<CreateCellResponse>, Status> {
         let CreateCellRequest {
-            path: store,
+            path: cell_dir,
             capacity,
             token,
             tenant,
@@ -475,7 +475,7 @@ impl Cladefsd for Control {
             fsync,
             force,
         } = request.into_inner();
-        let store = path(store)?;
+        let cell_dir = path(cell_dir)?;
         let replication = wish(replicas, fsync)?;
         // cladefs: a replicated cell's members are the daemon's peers, in their replica
         // directories (doc-21): without them, refused before anything is made.
@@ -494,11 +494,11 @@ impl Cladefsd for Control {
             Err(_) => return Err(status(Errno::EINVAL)),
         };
         let tenant = match cell {
-            0 => self.new_cell_at(&store, tenant)?,
+            0 => self.new_cell_at(&cell_dir, tenant)?,
             _ => tenant,
         };
         let cell = crate::CellId { tenant, id: cell };
-        let made = cells::create(store, capacity, cell, (token, kind, replication, force)).await;
+        let made = cells::create(cell_dir, capacity, cell, (token, kind, replication, force)).await;
         reply(made.map(|made| CreateCellResponse { tenant: made.tenant, cell: made.id }))
     }
 
@@ -506,12 +506,12 @@ impl Cladefsd for Control {
         &self,
         request: Request<ImportImageRequest>,
     ) -> Result<Response<ImportImageResponse>, Status> {
-        let ImportImageRequest { path: store, capacity, image, reference, tenant } =
+        let ImportImageRequest { path: cell_dir, capacity, image, reference, tenant } =
             request.into_inner();
-        let (store, image) = (path(store)?, path(image)?);
+        let (cell_dir, image) = (path(cell_dir)?, path(image)?);
         let reference = Some(reference).filter(|reference| !reference.is_empty());
-        let tenant = self.new_cell_at(&store, tenant)?;
-        let made = cells::import(store, capacity, image, reference, tenant).await;
+        let tenant = self.new_cell_at(&cell_dir, tenant)?;
+        let made = cells::import(cell_dir, capacity, image, reference, tenant).await;
         reply(made.map(|made| ImportImageResponse { tenant: made.tenant, cell: made.id }))
     }
 
@@ -539,9 +539,9 @@ impl Cladefsd for Control {
         &self,
         request: Request<MigrateCellRequest>,
     ) -> Result<Response<MigrateCellResponse>, Status> {
-        let MigrateCellRequest { path: store, peer, to } = request.into_inner();
-        let store = path(store)?;
-        let migrating = super::migration::migrate(store, peer, to).await;
+        let MigrateCellRequest { path: cell_dir, peer, to } = request.into_inner();
+        let cell_dir = path(cell_dir)?;
+        let migrating = super::migration::migrate(cell_dir, peer, to).await;
         reply(migrating.map(|migration| MigrateCellResponse { migration }))
     }
 
@@ -549,8 +549,8 @@ impl Cladefsd for Control {
         &self,
         request: Request<HandOverCellRequest>,
     ) -> Result<Response<HandOverCellResponse>, Status> {
-        let store = path(request.into_inner().path)?;
-        reply(super::migration::hand_over(store).await.map(|()| HandOverCellResponse {}))
+        let cell_dir = path(request.into_inner().path)?;
+        reply(super::migration::hand_over(cell_dir).await.map(|()| HandOverCellResponse {}))
     }
 
     async fn decommission_host(
@@ -569,53 +569,53 @@ impl Cladefsd for Control {
         &self,
         request: Request<DeleteCellRequest>,
     ) -> Result<Response<DeleteCellResponse>, Status> {
-        let store = path(request.into_inner().path)?;
-        reply(cells::delete(store).await.map(|()| DeleteCellResponse {}))
+        let cell_dir = path(request.into_inner().path)?;
+        reply(cells::delete(cell_dir).await.map(|()| DeleteCellResponse {}))
     }
 
     async fn drop_cell(
         &self,
         request: Request<DropCellRequest>,
     ) -> Result<Response<DropCellResponse>, Status> {
-        let store = path(request.into_inner().path)?;
-        reply(cells::drop_here(store).await.map(|()| DropCellResponse {}))
+        let cell_dir = path(request.into_inner().path)?;
+        reply(cells::drop_here(cell_dir).await.map(|()| DropCellResponse {}))
     }
 
     async fn resize_cell(
         &self,
         request: Request<ResizeCellRequest>,
     ) -> Result<Response<ResizeCellResponse>, Status> {
-        let ResizeCellRequest { path: store, capacity } = request.into_inner();
-        let store = path(store)?;
-        reply(cells::resize(store, capacity).await.map(|()| ResizeCellResponse {}))
+        let ResizeCellRequest { path: cell_dir, capacity } = request.into_inner();
+        let cell_dir = path(cell_dir)?;
+        reply(cells::resize(cell_dir, capacity).await.map(|()| ResizeCellResponse {}))
     }
 
     async fn place_cell(
         &self,
         request: Request<PlaceCellRequest>,
     ) -> Result<Response<PlaceCellResponse>, Status> {
-        let PlaceCellRequest { path: store, token, force } = request.into_inner();
-        let store = path(store)?;
-        reply(cells::place(store, token, force).await.map(|()| PlaceCellResponse {}))
+        let PlaceCellRequest { path: cell_dir, token, force } = request.into_inner();
+        let cell_dir = path(cell_dir)?;
+        reply(cells::place(cell_dir, token, force).await.map(|()| PlaceCellResponse {}))
     }
 
     async fn make_public(
         &self,
         request: Request<MakePublicRequest>,
     ) -> Result<Response<MakePublicResponse>, Status> {
-        let MakePublicRequest { path: store, attach_only } = request.into_inner();
-        let store = path(store)?;
-        reply(cells::make_public(store, attach_only).await.map(|()| MakePublicResponse {}))
+        let MakePublicRequest { path: cell_dir, attach_only } = request.into_inner();
+        let cell_dir = path(cell_dir)?;
+        reply(cells::make_public(cell_dir, attach_only).await.map(|()| MakePublicResponse {}))
     }
 
     async fn make_version(
         &self,
         request: Request<MakeVersionRequest>,
     ) -> Result<Response<MakeVersionResponse>, Status> {
-        let MakeVersionRequest { path: store, keep_last } = request.into_inner();
-        let store = path(store)?;
+        let MakeVersionRequest { path: cell_dir, keep_last } = request.into_inner();
+        let cell_dir = path(cell_dir)?;
         let keep_last = Some(keep_last).filter(|&keep| keep > 0);
-        let made = cells::make_version(store, keep_last).await;
+        let made = cells::make_version(cell_dir, keep_last).await;
         reply(made.map(|version| MakeVersionResponse { version }))
     }
 
@@ -623,8 +623,8 @@ impl Cladefsd for Control {
         &self,
         request: Request<ListVersionsRequest>,
     ) -> Result<Response<ListVersionsResponse>, Status> {
-        let store = path(request.into_inner().path)?;
-        reply(cells::versions(store).await.map(|versions| {
+        let cell_dir = path(request.into_inner().path)?;
+        reply(cells::versions(cell_dir).await.map(|versions| {
             ListVersionsResponse {
                 versions: (versions.into_iter())
                     .map(|crate::VersionInfo { id, uploaded, shared }| Version {
@@ -641,9 +641,9 @@ impl Cladefsd for Control {
         &self,
         request: Request<DropVersionsRequest>,
     ) -> Result<Response<DropVersionsResponse>, Status> {
-        let DropVersionsRequest { path: store, versions } = request.into_inner();
-        let store = path(store)?;
-        let dropped = cells::drop_versions(store, versions.into_iter().collect()).await;
+        let DropVersionsRequest { path: cell_dir, versions } = request.into_inner();
+        let cell_dir = path(cell_dir)?;
+        let dropped = cells::drop_versions(cell_dir, versions.into_iter().collect()).await;
         reply(dropped.map(|()| DropVersionsResponse {}))
     }
 
@@ -651,9 +651,9 @@ impl Cladefsd for Control {
         &self,
         request: Request<ShareVersionRequest>,
     ) -> Result<Response<ShareVersionResponse>, Status> {
-        let ShareVersionRequest { path: store, version, shared } = request.into_inner();
-        let store = path(store)?;
-        let shared = cells::share_version(store, version, shared).await;
+        let ShareVersionRequest { path: cell_dir, version, shared } = request.into_inner();
+        let cell_dir = path(cell_dir)?;
+        let shared = cells::share_version(cell_dir, version, shared).await;
         reply(shared.map(|()| ShareVersionResponse {}))
     }
 
@@ -661,39 +661,39 @@ impl Cladefsd for Control {
         &self,
         request: Request<AttachBaseRequest>,
     ) -> Result<Response<AttachBaseResponse>, Status> {
-        let AttachBaseRequest { path: store, base } = request.into_inner();
-        let (store, base) = (path(store)?, path(base)?);
+        let AttachBaseRequest { path: cell_dir, base } = request.into_inner();
+        let (cell_dir, base) = (path(cell_dir)?, path(base)?);
         let grants = self.grants.clone();
-        let allowed = move |store: &Path, base: &Path| grants.same_tenant(store, base);
-        reply(cells::attach(store, base, allowed).await.map(|()| AttachBaseResponse {}))
+        let allowed = move |cell_dir: &Path, base: &Path| grants.same_tenant(cell_dir, base);
+        reply(cells::attach(cell_dir, base, allowed).await.map(|()| AttachBaseResponse {}))
     }
 
     async fn sync_cell(
         &self,
         request: Request<SyncCellRequest>,
     ) -> Result<Response<SyncCellResponse>, Status> {
-        let store = path(request.into_inner().path)?;
-        reply(cells::sync(store).await.map(|()| SyncCellResponse {}))
+        let cell_dir = path(request.into_inner().path)?;
+        reply(cells::sync(cell_dir).await.map(|()| SyncCellResponse {}))
     }
 
     async fn stat_cell(
         &self,
         request: Request<StatCellRequest>,
     ) -> Result<Response<StatCellResponse>, Status> {
-        let store = path(request.into_inner().path)?;
-        reply(cells::stat(store).await.map(stat_response))
+        let cell_dir = path(request.into_inner().path)?;
+        reply(cells::stat(cell_dir).await.map(stat_response))
     }
 
     async fn list_cells(
         &self,
         _request: Request<ListCellsRequest>,
     ) -> Result<Response<ListCellsResponse>, Status> {
-        let listed = cells::list().map(|stores| {
-            let stores = stores.into_iter().map(|(path, state)| ListedCell {
+        let listed = cells::list().map(|cells| {
+            let cells = cells.into_iter().map(|(path, state)| ListedCell {
                 path: path.to_string_lossy().into_owned(),
                 stat: Some(stat_response(state)),
             });
-            ListCellsResponse { stores: stores.collect() }
+            ListCellsResponse { stores: cells.collect() }
         });
         reply(listed)
     }
@@ -988,7 +988,7 @@ impl Client {
         Ok(Self { runtime, client })
     }
 
-    /// Makes an empty store at `path` of `capacity` bytes, of `cell`, an Fxfs cell:
+    /// Makes an empty cell at `path` of `capacity` bytes, of `cell`, an Fxfs cell:
     /// of a new cell if its cell's ID is 0, and a new cell there if its ID is; placed at `token`
     /// if given, its taking forced if `force` (TASK-681); and returns its cell (`CreateCell`,
     /// TASK-364).
@@ -1010,13 +1010,13 @@ impl Client {
             ..CreateCellRequest::default()
         };
         let response = self
-            .call(format!("making the store at {}", path.display()), |mut c| async move {
+            .call(format!("making the cell at {}", path.display()), |mut c| async move {
                 c.create_cell(request).await
             })?;
         Ok(crate::CellId { tenant: response.tenant, id: response.cell })
     }
 
-    /// Makes a store at `path` of `capacity` bytes holding the container image at `image`, the one
+    /// Makes a cell at `path` of `capacity` bytes holding the container image at `image`, the one
     /// `reference` names in it if given, a new cell of the default tenant's, and
     /// returns its cell (`ImportImage`).
     pub fn import_image(
@@ -1039,10 +1039,10 @@ impl Client {
         Ok(crate::CellId { tenant: response.tenant, id: response.cell })
     }
 
-    /// Forks the store at `from` to a new cell at `to`, and returns its cell (`ForkCell`).
+    /// Forks the cell at `from` to a new cell at `to`, and returns its cell (`ForkCell`).
     pub fn fork_cell(&self, from: &Path, to: &Path) -> Result<crate::CellId, crate::Error> {
         let request = ForkCellRequest { from: name(from)?, to: name(to)?, ..Default::default() };
-        let what = format!("forking the store at {} to {}", from.display(), to.display());
+        let what = format!("forking the cell at {} to {}", from.display(), to.display());
         let response = self.call(what, |mut c| async move { c.fork_cell(request).await })?;
         Ok(crate::CellId { tenant: response.tenant, id: response.cell })
     }
@@ -1084,21 +1084,21 @@ impl Client {
         Ok(crate::CellId { tenant: response.tenant, id: response.cell })
     }
 
-    /// cladefs: begins the live migration of the ephemeral cell of the store at `path` to the daemon
-    /// whose peer address is `peer`, its store going at `to` there (`MigrateCell`): returns its ID.
+    /// cladefs: begins the live migration of the ephemeral cell at `path` to the daemon
+    /// whose peer address is `peer`, its cell going at `to` there (`MigrateCell`): returns its ID.
     pub fn migrate_cell(&self, path: &Path, peer: &str, to: &Path) -> Result<u64, crate::Error> {
         let request =
             MigrateCellRequest { path: name(path)?, peer: peer.to_owned(), to: name(to)? };
-        let what = format!("migrating the store at {} to {peer}", path.display());
+        let what = format!("migrating the cell at {} to {peer}", path.display());
         let response = self.call(what, |mut c| async move { c.migrate_cell(request).await })?;
         Ok(response.migration)
     }
 
-    /// cladefs: hands the ephemeral cell of the store at `path` over to its migration's target
+    /// cladefs: hands the ephemeral cell at `path` over to its migration's target
     /// (`HandOverCell`).
     pub fn hand_over_cell(&self, path: &Path) -> Result<(), crate::Error> {
         let request = HandOverCellRequest { path: name(path)? };
-        let what = format!("handing the store at {} over", path.display());
+        let what = format!("handing the cell at {} over", path.display());
         self.call(what, |mut c| async move { c.hand_over_cell(request).await })?;
         Ok(())
     }
@@ -1113,77 +1113,77 @@ impl Client {
         Ok(response.retired)
     }
 
-    /// Makes a version of the cell of the store at `path`, keeping its newest `keep_last` if given,
+    /// Makes a version of the cell at `path`, keeping its newest `keep_last` if given,
     /// and returns its ID (`MakeVersion`).
     pub fn make_version(&self, path: &Path, keep_last: Option<u32>) -> Result<u64, crate::Error> {
         let request = MakeVersionRequest { path: name(path)?, keep_last: keep_last.unwrap_or(0) };
-        let what = format!("making a version of the store at {}", path.display());
+        let what = format!("making a version of the cell at {}", path.display());
         let response = self.call(what, |mut c| async move { c.make_version(request).await })?;
         Ok(response.version)
     }
 
-    /// The versions of the cell of the store at `path` (`ListVersions`).
+    /// The versions of the cell at `path` (`ListVersions`).
     pub fn list_versions(&self, path: &Path) -> Result<Vec<crate::VersionInfo>, crate::Error> {
         let request = ListVersionsRequest { path: name(path)? };
-        let what = format!("listing the versions of the store at {}", path.display());
+        let what = format!("listing the versions of the cell at {}", path.display());
         let response = self.call(what, |mut c| async move { c.list_versions(request).await })?;
         Ok((response.versions.into_iter())
             .map(|Version { id, uploaded, shared }| crate::VersionInfo { id, uploaded, shared })
             .collect())
     }
 
-    /// Drops the versions `ids` of the cell of the store at `path` (`DropVersions`).
+    /// Drops the versions `ids` of the cell at `path` (`DropVersions`).
     pub fn drop_versions(&self, path: &Path, ids: &[u64]) -> Result<(), crate::Error> {
         let request = DropVersionsRequest { path: name(path)?, versions: ids.to_vec() };
-        let what = format!("dropping versions of the store at {}", path.display());
+        let what = format!("dropping versions of the cell at {}", path.display());
         self.call(what, |mut c| async move { c.drop_versions(request).await }).map(drop)
     }
 
-    /// Shares the version `id` of the cell of the store at `path`, or no longer (`ShareVersion`).
+    /// Shares the version `id` of the cell at `path`, or no longer (`ShareVersion`).
     pub fn share_version(&self, path: &Path, id: u64, shared: bool) -> Result<(), crate::Error> {
         let request = ShareVersionRequest { path: name(path)?, version: id, shared };
-        let what = format!("sharing version {id} of the store at {}", path.display());
+        let what = format!("sharing version {id} of the cell at {}", path.display());
         self.call(what, |mut c| async move { c.share_version(request).await }).map(drop)
     }
 
-    /// Deletes the store at `path` (`DeleteCell`).
+    /// Deletes the cell at `path` (`DeleteCell`).
     pub fn delete_cell(&self, path: &Path) -> Result<(), crate::Error> {
         let request = DeleteCellRequest { path: name(path)? };
-        let what = format!("deleting the store at {}", path.display());
+        let what = format!("deleting the cell at {}", path.display());
         self.call(what, |mut c| async move { c.delete_cell(request).await }).map(drop)
     }
 
-    /// Deletes this host's copy of the store at `path`, its cell staying in the daemon's bucket
+    /// Deletes this host's copy of the cell at `path`, its branch staying in the daemon's bucket
     /// (`DropCell`).
     pub fn drop_cell(&self, path: &Path) -> Result<(), crate::Error> {
         let request = DropCellRequest { path: name(path)? };
-        let what = format!("dropping the store at {}", path.display());
+        let what = format!("dropping the cell at {}", path.display());
         self.call(what, |mut c| async move { c.drop_cell(request).await }).map(drop)
     }
 
-    /// Sets the capacity of the store at `path` to `capacity` bytes (`ResizeCell`).
+    /// Sets the capacity of the cell at `path` to `capacity` bytes (`ResizeCell`).
     pub fn resize_cell(&self, path: &Path, capacity: u64) -> Result<(), crate::Error> {
         let request = ResizeCellRequest { path: name(path)?, capacity };
-        let what = format!("resizing the store at {} to {capacity} bytes", path.display());
+        let what = format!("resizing the cell at {} to {capacity} bytes", path.display());
         self.call(what, |mut c| async move { c.resize_cell(request).await }).map(drop)
     }
 
-    /// Places the store at `path` at the placement whose fencing token is `token` (`PlaceCell`),
+    /// Places the cell at `path` at the placement whose fencing token is `token` (`PlaceCell`),
     /// its takings forced if `force`.
     pub fn place_cell(&self, path: &Path, token: u64, force: bool) -> Result<(), crate::Error> {
         let request = PlaceCellRequest { path: name(path)?, token, force };
-        let what = format!("placing the store at {}", path.display());
+        let what = format!("placing the cell at {}", path.display());
         self.call(what, |mut c| async move { c.place_cell(request).await }).map(drop)
     }
 
-    /// Makes the store at `path` a public base (`MakePublic`).
+    /// Makes the cell at `path` a public base (`MakePublic`).
     pub fn make_public(&self, path: &Path) -> Result<(), crate::Error> {
         let request = MakePublicRequest { path: name(path)?, attach_only: false };
-        let what = format!("making the store at {} public", path.display());
+        let what = format!("making the cell at {} public", path.display());
         self.call(what, |mut c| async move { c.make_public(request).await }).map(drop)
     }
 
-    /// Makes the fork at `path` public, its cell alone, to attach to stores, not to fork
+    /// Makes the fork at `path` public, its cell alone, to attach to cells, not to fork
     /// (`MakePublic` with `attach_only`).
     pub fn make_public_attach_only(&self, path: &Path) -> Result<(), crate::Error> {
         let request = MakePublicRequest { path: name(path)?, attach_only: true };
@@ -1191,48 +1191,48 @@ impl Client {
         self.call(what, |mut c| async move { c.make_public(request).await }).map(drop)
     }
 
-    /// Attaches the fork at `base` to the store at `path` (`AttachBase`).
+    /// Attaches the fork at `base` to the cell at `path` (`AttachBase`).
     pub fn attach_base(&self, path: &Path, base: &Path) -> Result<(), crate::Error> {
         let request = AttachBaseRequest { path: name(path)?, base: name(base)? };
         let what = format!("attaching {} to {}", base.display(), path.display());
         self.call(what, |mut c| async move { c.attach_base(request).await }).map(drop)
     }
 
-    /// What the store at `path` is, and holds (`StatCell`).
+    /// What the cell at `path` is, and holds (`StatCell`).
     pub fn stat_cell(&self, path: &Path) -> Result<StatCellResponse, crate::Error> {
         let request = StatCellRequest { path: name(path)? };
-        let what = format!("asking what the store at {} holds", path.display());
+        let what = format!("asking what the cell at {} holds", path.display());
         self.call(what, |mut c| async move { c.stat_cell(request).await })
     }
 
-    /// The stores the daemon serves, with what each is and holds (`ListCells`).
+    /// The cells the daemon serves, with what each is and holds (`ListCells`).
     pub fn list_cells(&self) -> Result<Vec<ListedCell>, crate::Error> {
-        let what = "listing the daemon's stores".to_owned();
+        let what = "listing the daemon's cells".to_owned();
         let listed =
             self.call(what, |mut c| async move { c.list_cells(ListCellsRequest {}).await })?;
         Ok(listed.stores)
     }
 
-    /// The cell of the store at `path`, in its cell (`StatCell`'s `tenant`, `cell` and
+    /// The ID of the cell at `path` (`StatCell`'s `tenant`, `cell` and
     /// `cell`, TASK-364).
     pub fn cell(&self, path: &Path) -> Result<crate::CellId, crate::Error> {
         let stat = self.stat_cell(path)?;
         Ok(crate::CellId { tenant: stat.tenant, id: stat.cell })
     }
 
-    /// The commit number of the latest commit of the store at `path` (`StatCell`'s `committed`).
+    /// The commit number of the latest commit of the cell at `path` (`StatCell`'s `committed`).
     pub fn committed(&self, path: &Path) -> Result<u64, crate::Error> {
         Ok(self.stat_cell(path)?.committed)
     }
 
-    /// Waits until every commit of the store at `path` is in the daemon's bucket (`SyncCell`).
+    /// Waits until every commit of the cell at `path` is in the daemon's bucket (`SyncCell`).
     pub fn sync_cell(&self, path: &Path) -> Result<(), crate::Error> {
         let request = SyncCellRequest { path: name(path)? };
-        let what = format!("waiting for the store at {} to be uploaded", path.display());
+        let what = format!("waiting for the cell at {} to be uploaded", path.display());
         self.call(what, |mut c| async move { c.sync_cell(request).await }).map(drop)
     }
 
-    /// Grants the tenant of the ID `tenant` in the bucket (TASK-364), whose stores are in `dir`,
+    /// Grants the tenant of the ID `tenant` in the bucket (TASK-364), whose cells are in `dir`,
     /// its VM socket, given to `uid` and `gid` where named, and returns its path (`Grant`).
     pub fn grant(
         &self,
@@ -1248,7 +1248,7 @@ impl Client {
     }
 
     /// Revokes the tenant `tenant`'s grant: its VM socket goes, its VM processes connected keep
-    /// their stores (`Revoke`).
+    /// their cells (`Revoke`).
     pub fn revoke(&self, tenant: u64) -> Result<(), crate::Error> {
         let request = RevokeRequest { tenant };
         let what = format!("revoking tenant {tenant}", tenant = base32_id::Short(tenant));
@@ -1329,8 +1329,8 @@ impl Client {
         Ok((response.keks_removed, response.forgotten.unwrap_or_default()))
     }
 
-    /// cladefs: has the daemon forget what it holds of the keys of the tenant `tenant`, whose KEK is
-    /// revoked or destroyed in the KMS, as `why` says (`ForgetTenantKeys`, TASK-411.7): what it
+    /// cladefs: has the daemon forget what it holds of the keys of the tenant `tenant`, whose KEK
+    /// is revoked or destroyed in the KMS, as `why` says (`ForgetTenantKeys`, TASK-411.7): what it
     /// forgot.
     pub fn forget_tenant_keys(&self, tenant: u64, why: &str) -> Result<Forgotten, crate::Error> {
         let request = ForgetTenantKeysRequest { tenant, why: why.to_owned() };
@@ -1340,9 +1340,9 @@ impl Client {
         Ok(response.forgotten.unwrap_or_default())
     }
 
-    /// cladefs: shreds the tenant `tenant` under the daemon's bucket KMS, its KEK object replaced by
-    /// a tombstone, and has the daemon forget its keys (`ShredTenant`, TASK-411.27): whether this
-    /// call shredded it (not already), and what the daemon forgot.
+    /// cladefs: shreds the tenant `tenant` under the daemon's bucket KMS, its KEK object replaced
+    /// by a tombstone, and has the daemon forget its keys (`ShredTenant`, TASK-411.27): whether
+    /// this call shredded it (not already), and what the daemon forgot.
     pub fn shred_tenant(&self, tenant: u64) -> Result<(bool, Forgotten), crate::Error> {
         let request = ShredTenantRequest { tenant };
         let what = format!("shredding tenant {tenant}");
@@ -1350,8 +1350,8 @@ impl Client {
         Ok((response.shredded_now, response.forgotten.unwrap_or_default()))
     }
 
-    /// cladefs: what the disk of the tenant `tenant`, or of every tenant without one, takes, counted
-    /// now, in bytes, and its limit, if it has one (`GetTenantDisk`, TASK-94).
+    /// cladefs: what the disk of the tenant `tenant`, or of every tenant without one, takes,
+    /// counted now, in bytes, and its limit, if it has one (`GetTenantDisk`, TASK-94).
     pub fn tenant_disk(&self, tenant: Option<u64>) -> Result<(u64, Option<u64>), crate::Error> {
         let request = GetTenantDiskRequest { tenant };
         let what = format!("counting the disk of {}", whom(tenant, "every tenant"));

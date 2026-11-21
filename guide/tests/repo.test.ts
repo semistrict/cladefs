@@ -67,15 +67,15 @@ describe("the symbol index", () => {
 
   test("it finds cladefs's and Fuchsia's symbols, with their docs and anchors", async () => {
     const symbols = await indexRepo();
-    const store = symbols.find((s) => s.path === "crates/cladefs/src/open_cell.rs" && s.name === "OpenCell" && s.kind === "struct");
-    expect(store).toEqual({
+    const openCell = symbols.find((s) => s.path === "crates/cladefs/src/open_cell.rs" && s.name === "OpenCell" && s.kind === "struct");
+    expect(openCell).toEqual({
       path: "crates/cladefs/src/open_cell.rs",
       kind: "struct",
       name: "OpenCell",
       container: "",
       signature: "pub struct OpenCell",
       unique: true,
-      doc: "An extent store a guest's filesystem lives on.",
+      doc: "An open cell: the extent store a guest's filesystem lives on.",
       origin: "cladefs",
     });
     const commit = symbols.find((s) => s.path === "crates/fxfs/src/object_store/journal.rs" && s.name === "commit" && s.container === "Journal");

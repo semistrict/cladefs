@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! What serving extent stores cost this process, counted since it started, and what its VM
+//! What serving cells costs this process, counted since it started, and what its VM
 //! processes' changes to their windows cost them, as they told it: the extent daemon's, which it
 //! reports to whoever asks ([`crate::cladefsd::stats`]), for benchmarks to compare.
 //! Counters only grow; a measurement is the difference of two readings ([`Stats::since`]).
@@ -23,7 +23,7 @@ pub struct Stats {
     pub fault_ns: u64,
     /// The pager's reads of sealed extents' data into the extent cache.
     pub page_ins: u64,
-    /// The bytes page-ins read from the local store.
+    /// The bytes page-ins read from the local cell.
     pub page_in_bytes: u64,
     /// The bytes page-ins fetched from object storage.
     pub fetched_bytes: u64,
@@ -31,7 +31,7 @@ pub struct Stats {
     pub reads: u64,
     /// The bytes `READ` requests read.
     pub read_bytes: u64,
-    /// Of those, the bytes read straight from the local store or object storage: of open extents,
+    /// Of those, the bytes read straight from the local cell or object storage: of open extents,
     /// and followers'. Sealed extents' are read through the extent cache, whose page-ins count what
     /// it reads of them (TASK-32).
     pub read_stored_bytes: u64,
@@ -51,26 +51,26 @@ pub struct Stats {
     pub commits: u64,
     /// The nanoseconds they took, all of them.
     pub commit_ns: u64,
-    /// Of those, committing the store.
+    /// Of those, committing the cell.
     pub commit_store_ns: u64,
     /// Of those, waiting for object storage: for the upload of a durable commit, or for the
     /// uploads to come within the lag an ordered one allows.
     pub commit_wait_ns: u64,
-    /// The segments stores closed and framed (`local_cell::segment_closes`).
+    /// The segments cells closed and framed (`local_cell::segment_closes`).
     pub segment_closes: u64,
     /// The nanoseconds closing them took.
     pub segment_close_ns: u64,
     /// cladefs: the maps of pages the extent daemon sent its VM processes' windows
-    /// (`cladefsd::wire::STAGE_MAP`): one for each run of consecutive pages of the kernel's physical
-    /// memory that a window maps, so that more of them for as many bytes, `stage_map_bytes`, say
-    /// that memory is more fragmented (TASK-108.1).
+    /// (`cladefsd::wire::STAGE_MAP`): one for each run of consecutive pages of the kernel's
+    /// physical memory that a window maps, so that more of them for as many bytes,
+    /// `stage_map_bytes`, say that memory is more fragmented (TASK-108.1).
     pub stage_maps: u64,
     /// The bytes they mapped.
     pub stage_map_bytes: u64,
-    /// cladefs: the VM processes' changes to their windows that took access away from pages they had
-    /// installed, as they told the daemon (`cladefsd::wire::STAGE_COUNTS`): each flushes the host's
-    /// TLBs and the hypervisor's, interrupting the guest's vCPUs (TASK-91.16). Memory installed
-    /// over theirs, as a map over a range mapped makes it.
+    /// cladefs: the VM processes' changes to their windows that took access away from pages they
+    /// had installed, as they told the daemon (`cladefsd::wire::STAGE_COUNTS`): each flushes the
+    /// host's TLBs and the hypervisor's, interrupting the guest's vCPUs (TASK-91.16). Memory
+    /// installed over theirs, as a map over a range mapped makes it.
     pub stage_overwrites: u64,
     /// Theirs left out, as an unmap, or what a map anew leaves uncovered, makes it.
     pub stage_leave_outs: u64,
@@ -78,19 +78,19 @@ pub struct Stats {
     pub cache_trims: u64,
     /// The nanoseconds they took, under the cache's lock.
     pub cache_trim_ns: u64,
-    /// cladefs: of `faults`, those VM processes asked for as the guest's stores to pages they had
+    /// cladefs: of `faults`, those VM processes asked for as the guest's writes to pages they had
     /// installed read-only (`cladefsd::wire::FAULT` without `FAULT_PAGE`); the rest were on pages
     /// they hadn't installed (TASK-111.1).
     pub fault_stores: u64,
-    /// Of `faults`, the stores refused: to a window that doesn't copy on write, or past its private
+    /// Of `faults`, the writes refused: to a window that doesn't copy on write, or past its private
     /// pages.
     pub fault_refusals: u64,
     /// Of `faults`, those that waited for the pager to read their pages in.
     pub fault_waits: u64,
-    /// cladefs: of the maps of pages the windows made (`stage_maps`), the runs of pages consecutive in
-    /// the window and present together that they were made of: as many as the maps, a window maps
-    /// short runs as its pages are short of each other; fewer, as the pages are apart in physical
-    /// memory (TASK-131.1).
+    /// cladefs: of the maps of pages the windows made (`stage_maps`), the runs of pages consecutive
+    /// in the window and present together that they were made of: as many as the maps, a window
+    /// maps short runs as its pages are short of each other; fewer, as the pages are apart in
+    /// physical memory (TASK-131.1).
     pub stage_segments: u64,
     /// cladefs: of the VM processes' stage operations (`stage_ops`), the runs of private pages they
     /// made, each at once (`dax::SecondStage::make_private`), as they told the daemon

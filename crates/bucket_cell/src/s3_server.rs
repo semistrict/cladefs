@@ -124,7 +124,7 @@ impl S3Server {
         crate::object_bucket::reach(&url, self.options(), client).unwrap().objects
     }
 
-    /// The options of an S3 store of its bucket, `s3://cladefs/...`.
+    /// The options of an S3 backend onto its bucket, `s3://cladefs/...`.
     pub fn options(&self) -> Vec<(String, String)> {
         [
             ("aws_endpoint", format!("http://{}", self.address)),

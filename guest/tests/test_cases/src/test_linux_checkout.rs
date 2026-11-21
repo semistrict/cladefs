@@ -11,31 +11,32 @@
 //! filesystem holds, then checks it out, and syncs. Then, its caches dropped, it runs `git status`
 //! cold and warm, and once `sync` has written what that left, such as directories' access times;
 //! and reads the tree whole, every file of the checkout but `.git`'s, cold and warm. A second VM,
-//! booted on the same disk or store, does the same, a guest that has seen nothing of it. On ext4,
+//! booted on the same disk or cell, does the same, a guest that has seen nothing of it. On ext4,
 //! that is all.
 //!
 //! On Fxfs, the first VM checks Linux out into a volume and publishes it. Then, in fresh VMs, each
-//! on a store of its own, the guest measures what a sandbox pays for the shared volume:
+//! on a cell of its own, the guest measures what a sandbox pays for the shared volume:
 //! `SANDBOXES` VMs in turn attach the generation and mount it alone, run the same statuses and
 //! reads, the first `git status` lstatting every tracked file and hashing none, and write to a file
 //! of the base and a new one; and a last one mounts it `REPOS` times over, as volumes of its own,
 //! and boots again with them closed. The host measures the bytes of the volume's layers and its
-//! records in the allocator's tree, which are what baking the checkout into a store would cost
-//! every mount (doc-10), and what each store and bucket takes on its disk after each VM.
+//! records in the allocator's tree, which are what baking the checkout into a cell would cost
+//! every mount (doc-10), and what each cell and bucket takes on its disk after each VM.
 //!
-//! Every VM is measured as its guest asks ([`crate::measure`]): the host's memory, the VM
-//! process's and the extent daemon's, which the case starts for itself, and the guest's, on the
-//! log's `memory:` lines. The guest's timings are lines of standard output, `measure ROLE NAME
-//! VALUE UNIT`, which the log keeps; a memory stage whose name ends in `-pinned` is measured after
+//! Every VM is measured as its guest asks ([`crate::measure`]): the host's memory, the VM process's
+//! and the extent daemon's, which the case starts for itself, and the guest's, on the log's
+//! `memory:` lines. The guest's timings are lines of standard output, `measure ROLE NAME VALUE
+//! UNIT`, which the log keeps; a memory stage whose name ends in `-pinned` is measured after
 //! dropping the guest's caches. In no suite, for what it takes: each case runs by name
 //! (`CLADEFS_E2E_TEST=linux-checkout-fxfs-dax scripts/test-host.sh`), and
 //! scripts/linux-checkout-report.py makes tables of what they said. CLADEFS_LINUX_CHECKOUT_WINDOW
 //! sets the DAX window's bytes (as large as the data, [`crate::common::dax_window`]), and
-//! CLADEFS_LINUX_CHECKOUT_CLADEFSD_MEMORY the daemon's (by default, a page cache of the host's free memory, TASK-358): each
-//! larger than the tree, its warm reread finds it all still there, as ext4's finds the host's page
-//! cache; a window or memory smaller than the tree, 1 GiB, finds nothing of it the second time
-//! (GCE r870 and r881: 25.6 s against 600 ms, TASK-227). ext4's disk, and its pmem device, is an 8 GiB image file, the host's page cache
-//! holding what it has of it: a virtio-pmem device maps the file into the guest whole.
+//! CLADEFS_LINUX_CHECKOUT_CLADEFSD_MEMORY the daemon's (by default, a page cache of the host's free
+//! memory, TASK-358): each larger than the tree, its warm reread finds it all still there, as
+//! ext4's finds the host's page cache; a window or memory smaller than the tree, 1 GiB, finds
+//! nothing of it the second time (GCE r870 and r881: 25.6 s against 600 ms, TASK-227). ext4's disk,
+//! and its pmem device, is an 8 GiB image file, the host's page cache holding what it has of it: a
+//! virtio-pmem device maps the file into the guest whole.
 
 use macros::{guest, host};
 
@@ -109,7 +110,7 @@ RUN git clone --bare --depth 1 --branch v6.18 https://github.com/torvalds/linux 
         Ok(Some(value.parse().with_context(|| format!("{name} is a count of bytes"))?))
     }
 
-    /// Says what the volume of the first VM's store at `path` takes of its metadata.
+    /// Says what the volume of the first VM's cell at `path` takes of its metadata.
     fn measure_metadata(path: &Path) -> anyhow::Result<()> {
         block_on(async {
             let image = Image::mount(Storage::open(path)?).await?;
@@ -138,7 +139,7 @@ RUN git clone --bare --depth 1 --branch v6.18 https://github.com/torvalds/linux 
         Ok(bytes)
     }
 
-    /// Says what each of the stores, buckets and images in `dir` takes of the host's disk, after
+    /// Says what each of the cells, buckets and images in `dir` takes of the host's disk, after
     /// the VM of `role` ran.
     fn measure_disk(dir: &Path, role: &str) -> anyhow::Result<()> {
         let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<Result<_, _>>()?;
@@ -207,7 +208,7 @@ RUN git clone --bare --depth 1 --branch v6.18 https://github.com/torvalds/linux 
         measure_disk(dir, "reopened")
     }
 
-    /// The checkout on Fxfs: in the first VM's store, which a second VM opens, and published, which
+    /// The checkout on Fxfs: in the first VM's cell, which a second VM opens, and published, which
     /// sandboxes attach.
     fn fxfs(vms: &Vms, dir: &Path) -> anyhow::Result<()> {
         let control = control(&vms.cladefsd)?;
@@ -228,10 +229,10 @@ RUN git clone --bare --depth 1 --branch v6.18 https://github.com/torvalds/linux 
             vms.run_consumer(&role, &dir.join(&role), &control, &generations)?;
             measure_disk(dir, &role)?;
         }
-        let store = dir.join("hundreds");
-        vms.run_consumer("hundreds", &store, &control, &generations)?;
+        let cell_dir = dir.join("hundreds");
+        vms.run_consumer("hundreds", &cell_dir, &control, &generations)?;
         measure_disk(dir, "hundreds")?;
-        vms.run("rebooted", &store, false)?.0.wait()
+        vms.run("rebooted", &cell_dir, false)?.0.wait()
     }
 
     impl Test for TestLinuxCheckout {
@@ -420,9 +421,9 @@ mod guest {
         assert_eq!(measure.time("read-warm", || read_tree(Path::new(path), &mut buffer)), bytes);
     }
 
-    /// The `git status`es of the repo at `path`, which find it clean: the first, its caches dropped,
-    /// the next, the first once `sync` has written what they left, such as directories' access
-    /// times, and the one after.
+    /// The `git status`es of the repo at `path`, which find it clean: the first, its caches
+    /// dropped, the next, the first once `sync` has written what they left, such as directories'
+    /// access times, and the one after.
     fn statuses(measure: &Measure, path: &str) {
         let status = ["status", "--porcelain"];
         // What a program costs to load isn't what this measures.

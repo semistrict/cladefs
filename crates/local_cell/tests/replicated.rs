@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 //! TASK-537.3.3 (doc-21): what a member holds of a replicated cell's writer's logs recovers. A
-//! store's commits, made after its replicator started, are sent to its members; its host lost,
-//! what one member holds, written into a new store's directory as its write-ahead log
+//! cell's commits, made after its replicator started, are sent to its members; its host lost,
+//! what one member holds, written into a new cell's directory as its write-ahead log
 //! (`replicate::restore`), opens holding every one of them, beside the bucket's.
 
 mod common;
@@ -138,13 +138,13 @@ async fn until(what: &str, done: impl AsyncFn() -> bool) {
 }
 
 impl Host {
-    /// Every extent `store` holds, read from it, or from the bucket where it says it is, and its
+    /// Every extent `cell` holds, read from it, or from the bucket where it says it is, and its
     /// root.
-    async fn contents(&self, store: &LocalCell<MemDir>) -> (BTreeMap<ExtentId, Vec<u8>>, Vec<u8>) {
+    async fn contents(&self, cell: &LocalCell<MemDir>) -> (BTreeMap<ExtentId, Vec<u8>>, Vec<u8>) {
         let mut extents = BTreeMap::new();
-        for (extent, len) in store.extents().unwrap() {
+        for (extent, len) in cell.extents().unwrap() {
             let mut data = vec![0; len as usize];
-            if let Err(err) = store.read(extent, 0, &mut data) {
+            if let Err(err) = cell.read(extent, 0, &mut data) {
                 let local_cell::BucketData { location, .. } = err
                     .downcast_ref::<local_cell::BucketData>()
                     .cloned()
@@ -154,7 +154,7 @@ impl Host {
             }
             extents.insert(extent, data);
         }
-        (extents, store.root().unwrap())
+        (extents, cell.root().unwrap())
     }
 }
 
@@ -170,38 +170,39 @@ async fn what_a_member_holds_recovers_on_another_host() {
 
     let dir = MemDir::new();
     LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
-    let (store, uploader) = lost.open(LocalCell::recover_unmade(dir).unwrap(), 1).await;
-    store.made().unwrap();
+    let (open_cell, uploader) = lost.open(LocalCell::recover_unmade(dir).unwrap(), 1).await;
+    open_cell.made().unwrap();
     // What it made opening, uploaded, its segment closed: what no member holds is in the bucket.
-    let base = store.last_commit().unwrap();
+    let base = open_cell.last_commit().unwrap();
     uploader.uploaded(base).await.unwrap();
-    store.close_segment().unwrap();
+    open_cell.close_segment().unwrap();
     let member = Arc::new(Member::default());
     let links: Vec<Arc<dyn MemberLink>> = vec![member.clone(), Arc::new(Down)];
-    let replicator = Replicator::start(1, base, store.spool().unwrap(), links, uploader.waker());
-    store.replicate_to(replicator.clone()).await;
+    let replicator =
+        Replicator::start(1, base, open_cell.spool().unwrap(), links, uploader.waker());
+    open_cell.replicate_to(replicator.clone()).await;
 
     // Commits spanning segments, and extents stored on their own.
-    let mut sequence = store.info().unwrap().next_sequence;
+    let mut sequence = open_cell.info().unwrap().next_sequence;
     for round in 0..12u64 {
         let len = if round % 3 == 0 { 40 << 10 } else { BLOCK * (1 + round as usize % 4) };
         let extent = ExtentId { cell: cell.id, sequence };
         sequence += 1;
-        store.write(extent, 0, &common::noise(round, len)).await.unwrap();
-        store.commit_ordered(Some(format!("root {round}").as_bytes())).await.unwrap();
+        open_cell.write(extent, 0, &common::noise(round, len)).await.unwrap();
+        open_cell.commit_ordered(Some(format!("root {round}").as_bytes())).await.unwrap();
     }
-    store.flush().await.unwrap();
-    let last = store.last_commit().unwrap();
+    open_cell.flush().await.unwrap();
+    let last = open_cell.last_commit().unwrap();
     until("the commits replicated", async || replicator.told(uploader.last_uploaded()) >= last)
         .await;
     uploader.replicated(last).await.unwrap();
-    let expected = lost.contents(&store).await;
+    let expected = lost.contents(&open_cell).await;
     assert!(member.logs.lock().unwrap().keys().any(|log| log & 1 == 1), "own extents sent");
-    // What it sends is spooled on the store's disk, not held in memory (TASK-537.3.3).
+    // What it sends is spooled on the cell's disk, not held in memory (TASK-537.3.3).
     assert!(replicator.spooled() > 0);
 
     // The host is lost: what the member holds, and the bucket, are all there is.
-    lose(lost, (uploader, store, replicator));
+    lose(lost, (uploader, open_cell, replicator));
     let bucket = bucket_cell::recover(&*host.bucket, cell, None).await.unwrap();
     let uploaded = bucket.state.last_commit.map_or(0, extent_frame::segment::epoch_of);
     assert!(uploaded < last, "the bucket holds commit {uploaded}, of {last}: nothing to recover");
@@ -395,7 +396,7 @@ impl local_cell::upload::Members for Peers {
 }
 
 impl Host {
-    /// Opens the store `recovering` recovered as `holder`, a replicated cell's, asking for
+    /// Opens the cell `recovering` recovered as `holder`, a replicated cell's, asking for
     /// `replication` if any, its members `peers`.
     async fn open_replicated(
         &self,
@@ -450,33 +451,33 @@ async fn takes_recover_what_a_lost_writers_members_hold() {
     let dir = MemDir::new();
     LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
     let wish = bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated);
-    let (store, uploader) = lost
+    let (open_cell, uploader) = lost
         .open_replicated(LocalCell::recover_unmade(dir).unwrap(), 1, wish, peers("a", &all))
         .await
         .unwrap();
-    let replicator = store.replicator().expect("replicating");
+    let replicator = open_cell.replicator().expect("replicating");
     // What it made opening, uploaded, its segment closed and uploaded too, the uploader left with
     // nothing to close: the commits after are on the members alone.
-    store.made().unwrap();
-    store.close_segment().unwrap();
-    uploader.uploaded(store.last_commit().unwrap()).await.unwrap();
-    let mut sequence = store.info().unwrap().next_sequence;
+    open_cell.made().unwrap();
+    open_cell.close_segment().unwrap();
+    uploader.uploaded(open_cell.last_commit().unwrap()).await.unwrap();
+    let mut sequence = open_cell.info().unwrap().next_sequence;
     for round in 0..9u64 {
         let len = if round % 3 == 0 { 40 << 10 } else { BLOCK * (1 + round as usize % 4) };
-        store
+        open_cell
             .write(ExtentId { cell: cell.id, sequence }, 0, &common::noise(round, len))
             .await
             .unwrap();
         sequence += 1;
-        store.commit_ordered(Some(format!("root {round}").as_bytes())).await.unwrap();
+        open_cell.commit_ordered(Some(format!("root {round}").as_bytes())).await.unwrap();
     }
-    store.flush().await.unwrap();
-    let last = store.last_commit().unwrap();
+    open_cell.flush().await.unwrap();
+    let last = open_cell.last_commit().unwrap();
     uploader.replicated(last).await.unwrap();
-    let expected = lost.contents(&store).await;
+    let expected = lost.contents(&open_cell).await;
 
     // Host a is lost, its disk and replica directory with it; d takes the cell from b and c.
-    lose(lost, (uploader, store, replicator));
+    lose(lost, (uploader, open_cell, replicator));
     // The bucket holds not all of them: the take must recover the rest from the members.
     let bucket = bucket_cell::recover(&*host.bucket, cell, None).await.unwrap();
     let uploaded = bucket.state.last_commit.map_or(0, extent_frame::segment::epoch_of);
@@ -523,10 +524,10 @@ async fn takes_without_enough_members_to_fence_are_refused() {
     LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
     let wish = bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated);
     let a = Peers { me: "a".into(), all: all.clone(), lost: Lost::default() };
-    let (store, uploader) =
+    let (open_cell, uploader) =
         host.open_replicated(LocalCell::recover_unmade(dir).unwrap(), 1, wish, a).await.unwrap();
-    store.made().unwrap();
-    drop((uploader, store));
+    open_cell.made().unwrap();
+    drop((uploader, open_cell));
     // a and c lost: b alone answers, of the two a take must fence.
     let mut left = all.clone();
     left.remove("a");
@@ -596,21 +597,22 @@ async fn replicated_waiters_are_woken_by_members_or_the_bucket() {
     bucket_cell::lifecycle::create(&*host.bucket, cell, 1).await.unwrap();
     let dir = MemDir::new();
     LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
-    let (store, uploader) = host.open(LocalCell::recover_unmade(dir).unwrap(), 1).await;
-    store.made().unwrap();
-    store.close_segment().unwrap();
-    let base = store.last_commit().unwrap();
+    let (open_cell, uploader) = host.open(LocalCell::recover_unmade(dir).unwrap(), 1).await;
+    open_cell.made().unwrap();
+    open_cell.close_segment().unwrap();
+    let base = open_cell.last_commit().unwrap();
     uploader.uploaded(base).await.unwrap();
     let gated = Arc::new(Gated::default());
     let links: Vec<Arc<dyn MemberLink>> = vec![gated.clone(), Arc::new(Down)];
-    let replicator = Replicator::start(1, base, store.spool().unwrap(), links, uploader.waker());
-    store.replicate_to(replicator.clone()).await;
+    let replicator =
+        Replicator::start(1, base, open_cell.spool().unwrap(), links, uploader.waker());
+    open_cell.replicate_to(replicator.clone()).await;
 
-    let extent = ExtentId { cell: cell.id, sequence: store.info().unwrap().next_sequence };
-    store.write(extent, 0, &common::noise(1, BLOCK)).await.unwrap();
-    store.commit_ordered(Some(b"one")).await.unwrap();
-    store.flush().await.unwrap();
-    let epoch = store.last_commit().unwrap();
+    let extent = ExtentId { cell: cell.id, sequence: open_cell.info().unwrap().next_sequence };
+    open_cell.write(extent, 0, &common::noise(1, BLOCK)).await.unwrap();
+    open_cell.commit_ordered(Some(b"one")).await.unwrap();
+    open_cell.flush().await.unwrap();
+    let epoch = open_cell.last_commit().unwrap();
     let uploader = Arc::new(uploader);
     let waiting = {
         let uploader = uploader.clone();
@@ -625,10 +627,10 @@ async fn replicated_waiters_are_woken_by_members_or_the_bucket() {
     // Its members down: degraded, its waiters woken by the bucket.
     drop(replicator);
     let links: Vec<Arc<dyn MemberLink>> = vec![Arc::new(Down), Arc::new(Down)];
-    let down = Replicator::start(1, epoch, store.spool().unwrap(), links, uploader.waker());
-    store.replicate_to(down.clone()).await;
-    store.close_segment().unwrap();
-    store
+    let down = Replicator::start(1, epoch, open_cell.spool().unwrap(), links, uploader.waker());
+    open_cell.replicate_to(down.clone()).await;
+    open_cell.close_segment().unwrap();
+    open_cell
         .write(
             ExtentId { cell: cell.id, sequence: extent.sequence + 1 },
             0,
@@ -636,9 +638,9 @@ async fn replicated_waiters_are_woken_by_members_or_the_bucket() {
         )
         .await
         .unwrap();
-    store.commit_ordered(Some(b"two")).await.unwrap();
-    store.flush().await.unwrap();
-    let epoch = store.last_commit().unwrap();
+    open_cell.commit_ordered(Some(b"two")).await.unwrap();
+    open_cell.flush().await.unwrap();
+    let epoch = open_cell.last_commit().unwrap();
     until("degraded", async || down.degraded()).await;
     uploader.replicated(epoch).await.unwrap();
     // The head named it as the waiter was woken: the replicator counts the logs it dropped as the
@@ -674,18 +676,18 @@ fn addresses(configuration: &bucket_cell::layout::Configuration) -> Vec<&str> {
     configuration.members.iter().map(|member| member.address.as_str()).collect()
 }
 
-/// Commits `rounds` writes of `store`'s, from `round`, flushed: the last's epoch.
-async fn commit(store: &LocalCell<MemDir>, round: u64, rounds: u64) -> u64 {
-    let mut sequence = store.info().unwrap().next_sequence;
+/// Commits `rounds` writes of `cell`'s, from `round`, flushed: the last's epoch.
+async fn commit(cell: &LocalCell<MemDir>, round: u64, rounds: u64) -> u64 {
+    let mut sequence = cell.info().unwrap().next_sequence;
     for round in round..round + rounds {
         let len = if round % 3 == 0 { 40 << 10 } else { BLOCK * (1 + round as usize % 4) };
         let extent = ExtentId { cell: DESCRIPTION.cell.id, sequence };
-        store.write(extent, 0, &common::noise(round, len)).await.unwrap();
+        cell.write(extent, 0, &common::noise(round, len)).await.unwrap();
         sequence += 1;
-        store.commit_ordered(Some(format!("root {round}").as_bytes())).await.unwrap();
+        cell.commit_ordered(Some(format!("root {round}").as_bytes())).await.unwrap();
     }
-    store.flush().await.unwrap();
-    store.last_commit().unwrap()
+    cell.flush().await.unwrap();
+    cell.last_commit().unwrap()
 }
 
 /// TASK-537.3.5 (doc-21, Replacing a member): a member lost, its writer replaces it, by a swap of
@@ -703,17 +705,17 @@ async fn lost_members_are_replaced_and_commits_stay_replicated() {
     LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
     let wish = bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated);
     let recovering = LocalCell::recover_unmade(dir).unwrap();
-    let (store, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).await.unwrap();
-    store.made().unwrap();
-    store.close_segment().unwrap();
-    uploader.uploaded(store.last_commit().unwrap()).await.unwrap();
+    let (cell, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).await.unwrap();
+    cell.made().unwrap();
+    cell.close_segment().unwrap();
+    uploader.uploaded(cell.last_commit().unwrap()).await.unwrap();
     assert_eq!(addresses(&configuration_named(&host).await), ["a", "b", "c"]);
-    let last = commit(&store, 0, 4).await;
+    let last = commit(&cell, 0, 4).await;
     uploader.replicated(last).await.unwrap();
 
     // b lost: c alone holds what comes next, until the writer replaces b.
     lost.lock().unwrap().insert("b".into());
-    let last = commit(&store, 4, 3).await;
+    let last = commit(&cell, 4, 3).await;
     uploader.replicated(last).await.unwrap();
     until("b replaced", async || configuration_named(&host).await.number == 2).await;
     let configuration = configuration_named(&host).await;
@@ -727,12 +729,12 @@ async fn lost_members_are_replaced_and_commits_stay_replicated() {
 
     // c lost too: d, given the tail, holds every commit.
     lost.lock().unwrap().insert("c".into());
-    let last = commit(&store, 7, 3).await;
+    let last = commit(&cell, 7, 3).await;
     uploader.replicated(last).await.unwrap();
     assert!(uploader.last_uploaded() < last, "told replicated by the bucket, not d");
-    let expected = writer.contents(&store).await;
-    let replicator = store.replicator().unwrap();
-    lose(writer, (uploader, store, replicator));
+    let expected = writer.contents(&cell).await;
+    let replicator = cell.replicator().unwrap();
+    lose(writer, (uploader, cell, replicator));
 
     // a lost, and c back: e takes the cell, fencing c and d, and recovers every commit.
     lost.lock().unwrap().extend(["a".to_string()]);
@@ -760,13 +762,13 @@ async fn degraded_cells_drop_to_f_zero_and_come_back() {
     let wish = bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated);
     let recovering = LocalCell::recover_unmade(dir).unwrap();
     let a = Peers { me: "a".into(), all: all.clone(), lost: lost.clone() };
-    let (store, uploader) = host.open_replicated(recovering, 1, wish, a).await.unwrap();
-    store.made().unwrap();
-    let last = commit(&store, 0, 3).await;
+    let (cell, uploader) = host.open_replicated(recovering, 1, wish, a).await.unwrap();
+    cell.made().unwrap();
+    let last = commit(&cell, 0, 3).await;
     uploader.replicated(last).await.unwrap();
 
     lost.lock().unwrap().extend(["b".to_string(), "c".to_string()]);
-    let last = commit(&store, 3, 3).await;
+    let last = commit(&cell, 3, 3).await;
     // Woken by the bucket: the interval an hour, its upload asked for at once as it is degraded.
     uploader.replicated(last).await.unwrap();
     // The head named it as the waiter was woken; the uploader's progress says so a moment after.
@@ -781,7 +783,7 @@ async fn degraded_cells_drop_to_f_zero_and_come_back() {
     })
     .await;
     // Its commits go on, each waiting for the bucket, uploaded at once.
-    let last = commit(&store, 6, 2).await;
+    let last = commit(&cell, 6, 2).await;
     uploader.replicated(last).await.unwrap();
 
     lost.lock().unwrap().clear();
@@ -790,7 +792,7 @@ async fn degraded_cells_drop_to_f_zero_and_come_back() {
     assert_eq!((configuration.number, addresses(&configuration)), (3, vec!["a", "b", "c"]));
     until("degraded no more", async || !uploader.status().unwrap().replication.unwrap().degraded)
         .await;
-    let last = commit(&store, 8, 2).await;
+    let last = commit(&cell, 8, 2).await;
     uploader.replicated(last).await.unwrap();
     assert!(uploader.last_uploaded() < last, "told replicated by the bucket, not its members");
 
@@ -798,11 +800,11 @@ async fn degraded_cells_drop_to_f_zero_and_come_back() {
     // (Codex's review): it serves degraded, its commits waiting for the bucket.
     lost.lock().unwrap().extend(["b".to_string(), "c".to_string()]);
     // A writer finds its members lost as it sends them what it commits.
-    let last = commit(&store, 10, 1).await;
+    let last = commit(&cell, 10, 1).await;
     uploader.replicated(last).await.unwrap();
     until("dropped to f = 0 again", async || configuration_named(&host).await.f == 0).await;
-    let expected = host.contents(&store).await;
-    drop((uploader, store));
+    let expected = host.contents(&cell).await;
+    drop((uploader, cell));
     let elsewhere = MemDir::new();
     LocalCell::make(&elsewhere, DESCRIPTION, Some(URL), None).unwrap();
     let recovering = LocalCell::recover_unmade(elsewhere).unwrap();
@@ -832,15 +834,15 @@ async fn takes_asking_for_f_zero_drop_once_the_bucket_holds_what_was_told() {
     LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
     let wish = bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated);
     let recovering = LocalCell::recover_unmade(dir).unwrap();
-    let (store, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).await.unwrap();
-    store.made().unwrap();
-    store.close_segment().unwrap();
-    uploader.uploaded(store.last_commit().unwrap()).await.unwrap();
-    let last = commit(&store, 0, 5).await;
+    let (cell, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).await.unwrap();
+    cell.made().unwrap();
+    cell.close_segment().unwrap();
+    uploader.uploaded(cell.last_commit().unwrap()).await.unwrap();
+    let last = commit(&cell, 0, 5).await;
     uploader.replicated(last).await.unwrap();
-    let expected = writer.contents(&store).await;
-    let replicator = store.replicator().unwrap();
-    lose(writer, (uploader, store, replicator));
+    let expected = writer.contents(&cell).await;
+    let replicator = cell.replicator().unwrap();
+    lose(writer, (uploader, cell, replicator));
     lost.lock().unwrap().insert("a".into());
 
     let elsewhere = MemDir::new();
@@ -878,21 +880,22 @@ async fn retakes_on_the_writers_disk_install_what_its_own_log_holds() {
     LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
     let wish = bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated);
     let recovering = LocalCell::recover_unmade(dir.clone()).unwrap();
-    let (store, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).await.unwrap();
-    store.made().unwrap();
-    store.close_segment().unwrap();
-    uploader.uploaded(store.last_commit().unwrap()).await.unwrap();
+    let (open_cell, uploader) =
+        writer.open_replicated(recovering, 1, wish, peers("a")).await.unwrap();
+    open_cell.made().unwrap();
+    open_cell.close_segment().unwrap();
+    uploader.uploaded(open_cell.last_commit().unwrap()).await.unwrap();
     assert_eq!(addresses(&configuration_named(&host).await), ["a", "b", "c"]);
 
     // c out of reach: b alone holds the commits, with a's own log.
     lost.lock().unwrap().insert("c".into());
-    let last = commit(&store, 0, 5).await;
+    let last = commit(&open_cell, 0, 5).await;
     uploader.replicated(last).await.unwrap();
     assert!(uploader.last_uploaded() < last, "told replicated by b, not the bucket");
-    let expected = writer.contents(&store).await;
-    let replicator = store.replicator().unwrap();
+    let expected = writer.contents(&open_cell).await;
+    let replicator = open_cell.replicator().unwrap();
     // a's daemon restarts before it replaces c, its disk kept.
-    lose(writer, (uploader, store, replicator));
+    lose(writer, (uploader, open_cell, replicator));
     assert_eq!(configuration_named(&host).await.number, 1, "c replaced before the restart");
 
     // b out of reach now, c back: a takes the cell again on its own disk, fencing c alone.
@@ -925,7 +928,7 @@ async fn retakes_on_the_writers_disk_install_what_its_own_log_holds() {
     drop(uploader);
 }
 
-/// The cell the tests' stores keep.
+/// The cell the tests' cells keep.
 fn cell() -> bucket_cell::layout::CellId {
     DESCRIPTION.cell
 }
@@ -945,16 +948,17 @@ async fn takes_of_cells_whose_members_are_lost_go_on_by_force() {
     LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
     let wish = bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated);
     let recovering = LocalCell::recover_unmade(dir).unwrap();
-    let (store, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).await.unwrap();
-    store.made().unwrap();
-    store.close_segment().unwrap();
-    uploader.uploaded(store.last_commit().unwrap()).await.unwrap();
+    let (open_cell, uploader) =
+        writer.open_replicated(recovering, 1, wish, peers("a")).await.unwrap();
+    open_cell.made().unwrap();
+    open_cell.close_segment().unwrap();
+    uploader.uploaded(open_cell.last_commit().unwrap()).await.unwrap();
     assert_eq!(addresses(&configuration_named(&host).await), ["a", "b", "c"]);
-    let last = commit(&store, 0, 4).await;
+    let last = commit(&open_cell, 0, 4).await;
     uploader.replicated(last).await.unwrap();
     assert!(uploader.last_uploaded() < last, "told replicated by b and c, not the bucket");
-    let replicator = store.replicator().unwrap();
-    lose(writer, (uploader, store, replicator));
+    let replicator = open_cell.replicator().unwrap();
+    lose(writer, (uploader, open_cell, replicator));
     let bucket = bucket_cell::recover(&*host.bucket, cell(), None).await.unwrap();
     let uploaded = bucket.state.last_commit.map_or(0, extent_frame::segment::epoch_of);
 
@@ -985,9 +989,9 @@ async fn takes_of_cells_whose_members_are_lost_go_on_by_force() {
 
 /// TASK-683 (the spec's Take, its `self`): a writer whose daemon restarts with every commit
 /// uploaded, its write-ahead log empty, takes its cell again on its own disk, one member of its
-/// configuration lost: its copy, empty, counts, as its store took the cell as the configuration's
-/// writer, and one member more answering is enough for f = 1. It needed two before, the store's
-/// log holding nothing to say it was the writer's. A store made anew on its host is not its copy:
+/// configuration lost: its copy, empty, counts, as its cell took the cell as the configuration's
+/// writer, and one member more answering is enough for f = 1. It needed two before, the cell's
+/// log holding nothing to say it was the writer's. A cell made anew on its host is not its copy:
 /// refused.
 #[tokio::test(flavor = "multi_thread")]
 async fn retakes_on_the_writers_disk_count_its_empty_log() {
@@ -1000,22 +1004,22 @@ async fn retakes_on_the_writers_disk_count_its_empty_log() {
     LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
     let wish = bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated);
     let recovering = LocalCell::recover_unmade(dir.clone()).unwrap();
-    let (store, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).await.unwrap();
-    store.made().unwrap();
-    let last = commit(&store, 0, 4).await;
+    let (cell, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).await.unwrap();
+    cell.made().unwrap();
+    let last = commit(&cell, 0, 4).await;
     uploader.replicated(last).await.unwrap();
-    store.close_segment().unwrap();
-    uploader.uploaded(store.last_commit().unwrap()).await.unwrap();
+    cell.close_segment().unwrap();
+    uploader.uploaded(cell.last_commit().unwrap()).await.unwrap();
     assert_eq!(addresses(&configuration_named(&host).await), ["a", "b", "c"]);
-    let expected = writer.contents(&store).await;
+    let expected = writer.contents(&cell).await;
     // a's daemon restarts, every commit uploaded, its disk kept; b's disk lost meanwhile.
-    let replicator = store.replicator().unwrap();
-    lose(writer, (uploader, store, replicator));
+    let replicator = cell.replicator().unwrap();
+    lose(writer, (uploader, cell, replicator));
     lost.lock().unwrap().insert("b".into());
     let recovering = LocalCell::recover(dir.crash(1)).unwrap();
     assert!(!recovering.has_wal(), "its log holds what the bucket does not");
 
-    // A store made anew on a: not a's copy, and c alone answers.
+    // A cell made anew on a: not a's copy, and c alone answers.
     let anew = MemDir::new();
     LocalCell::make(&anew, DESCRIPTION, Some(URL), None).unwrap();
     let refused = LocalCell::recover_unmade(anew).unwrap();
@@ -1025,7 +1029,7 @@ async fn retakes_on_the_writers_disk_count_its_empty_log() {
         "{failure}"
     );
 
-    // a's own store: its copy, and c's, enough.
+    // a's own cell: its copy, and c's, enough.
     let again = Host { runtime: host_runtime::HostRuntime::new(), bucket: host.bucket.clone() };
     let (retaken, uploader) = again.open_replicated(recovering, 3, None, peers("a")).await.unwrap();
     assert!(retaken.last_commit().unwrap() >= last);
@@ -1035,7 +1039,7 @@ async fn retakes_on_the_writers_disk_count_its_empty_log() {
     drop(uploader);
 }
 
-/// TASK-683's review: a writer's store whose write-ahead log is dropped, as a take recovering from
+/// TASK-683's review: a writer's cell whose write-ahead log is dropped, as a take recovering from
 /// members ahead of it drops it before restoring theirs, is its writer's copy no more, from before
 /// the log goes, whatever a crash keeps of what follows: else a take after a crash, or a failure,
 /// in the restore, counted its log, empty, as the copy that held commits told replicated.
@@ -1049,13 +1053,13 @@ async fn dropped_logs_are_no_writers_copy() {
     let wish = bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated);
     let recovering = LocalCell::recover_unmade(dir.clone()).unwrap();
     let writer = Host { runtime: host_runtime::HostRuntime::new(), bucket: host.bucket.clone() };
-    let (store, uploader) = writer.open_replicated(recovering, 1, wish, peers).await.unwrap();
-    store.made().unwrap();
-    let last = commit(&store, 0, 4).await;
+    let (cell, uploader) = writer.open_replicated(recovering, 1, wish, peers).await.unwrap();
+    cell.made().unwrap();
+    let last = commit(&cell, 0, 4).await;
     uploader.replicated(last).await.unwrap();
     let configuration = configuration_named(&host).await;
-    let replicator = store.replicator().unwrap();
-    lose(writer, (uploader, store, replicator));
+    let replicator = cell.replicator().unwrap();
+    lose(writer, (uploader, cell, replicator));
     let restarted = dir.crash(1);
     let mut recovering = LocalCell::recover(restarted.clone()).unwrap();
     assert!(recovering.has_wal(), "its log holds commits the bucket does not");
@@ -1069,7 +1073,7 @@ async fn dropped_logs_are_no_writers_copy() {
     }
 }
 
-/// A store in memory taking `cell` on `host` as a replicated cell's, its bucket's writes failing
+/// A cell in memory taking `cell` on `host` as a replicated cell's, its bucket's writes failing
 /// as `faults` say.
 async fn faulty_host(faults: &Arc<bucket_cell::faults::Faults>) -> Host {
     let objects = Arc::new(InMemory::new());
@@ -1101,7 +1105,7 @@ fn writes_fail(faults: &bucket_cell::faults::Faults, fail: bool) {
 /// and crashes before its own sync, its log ending before them. A retake on a, b out of reach,
 /// defers its configuration's activation, commits one of its own at the place of the first, and
 /// crashes with the bucket's writes failing. A retake on a again, c out of reach now, fences b
-/// alone: b's logs are the old writer's, past what this store's own log went on from. Given to the
+/// alone: b's logs are the old writer's, past what this cell's own log went on from. Given to the
 /// new configuration's members, a later take finds an old writer's segment naming a commit past
 /// the head's last, and refuses the cell for good, having lost what was told replicated since;
 /// given up, every commit told replicated is there after the next take, elsewhere.
@@ -1130,11 +1134,12 @@ async fn earlier_writers_logs_given_up(budget: u64) -> bool {
     LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
     let wish = bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated);
     let recovering = LocalCell::recover_unmade(dir.clone()).unwrap();
-    let (store, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).await.unwrap();
-    store.made().unwrap();
-    store.close_segment().unwrap();
-    uploader.uploaded(store.last_commit().unwrap()).await.unwrap();
-    let told = commit(&store, 0, 2).await;
+    let (open_cell, uploader) =
+        writer.open_replicated(recovering, 1, wish, peers("a")).await.unwrap();
+    open_cell.made().unwrap();
+    open_cell.close_segment().unwrap();
+    uploader.uploaded(open_cell.last_commit().unwrap()).await.unwrap();
+    let told = commit(&open_cell, 0, 2).await;
     uploader.replicated(told).await.unwrap();
     let first = configuration_named(&host).await;
     assert_eq!(addresses(&first), ["a", "b", "c"]);
@@ -1142,17 +1147,17 @@ async fn earlier_writers_logs_given_up(budget: u64) -> bool {
     // c out of reach: commits on a's log and b's, past c's; then two flushed, sent to b, the log's
     // sync failing.
     lost.lock().unwrap().insert("c".into());
-    let synced = commit(&store, 2, 2).await;
+    let synced = commit(&open_cell, 2, 2).await;
     uploader.replicated(synced).await.unwrap();
     let before = ends(&all["b"], &first);
-    for (sequence, round) in (store.info().unwrap().next_sequence..).zip(4..6) {
+    for (sequence, round) in (open_cell.info().unwrap().next_sequence..).zip(4..6) {
         let extent = ExtentId { cell: cell().id, sequence };
-        store.write(extent, 0, &common::noise(round, BLOCK)).await.unwrap();
-        store.commit_ordered(Some(format!("root {round}").as_bytes())).await.unwrap();
+        open_cell.write(extent, 0, &common::noise(round, BLOCK)).await.unwrap();
+        open_cell.commit_ordered(Some(format!("root {round}").as_bytes())).await.unwrap();
     }
-    let unsynced = store.last_commit().unwrap();
+    let unsynced = open_cell.last_commit().unwrap();
     dir.fail_after(Some(budget));
-    let flushed = store.flush().await;
+    let flushed = open_cell.flush().await;
     dir.fail_after(None);
     let started = Instant::now();
     while flushed.is_err() && ends(&all["b"], &first) == before {
@@ -1162,8 +1167,8 @@ async fn earlier_writers_logs_given_up(budget: u64) -> bool {
         std::thread::sleep(Duration::from_millis(5));
     }
     let sent = flushed.is_err() && ends(&all["b"], &first) > before;
-    let replicator = store.replicator().unwrap();
-    lose(writer, (uploader, store, replicator));
+    let replicator = open_cell.replicator().unwrap();
+    lose(writer, (uploader, open_cell, replicator));
     if !sent {
         return false;
     }
@@ -1317,21 +1322,21 @@ async fn takes_prefer_whole_authentic_copies_to_longer_garbled_ones() {
     LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
     let wish = bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated);
     let recovering = LocalCell::recover_unmade(dir).unwrap();
-    let (store, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).await.unwrap();
-    store.made().unwrap();
-    store.close_segment().unwrap();
-    uploader.uploaded(store.last_commit().unwrap()).await.unwrap();
+    let (cell, uploader) = writer.open_replicated(recovering, 1, wish, peers("a")).await.unwrap();
+    cell.made().unwrap();
+    cell.close_segment().unwrap();
+    uploader.uploaded(cell.last_commit().unwrap()).await.unwrap();
     assert_eq!(addresses(&configuration_named(&host).await), ["a", "b", "c"]);
-    let both = commit(&store, 0, 2).await;
+    let both = commit(&cell, 0, 2).await;
     uploader.replicated(both).await.unwrap();
     // c out of reach: b alone holds what comes next.
     lost.lock().unwrap().insert("c".into());
-    let last = commit(&store, 2, 3).await;
+    let last = commit(&cell, 2, 3).await;
     uploader.replicated(last).await.unwrap();
     assert!(uploader.last_uploaded() < last, "told replicated by b, not the bucket");
-    let expected = writer.contents(&store).await;
-    let replicator = store.replicator().unwrap();
-    lose(writer, (uploader, store, replicator));
+    let expected = writer.contents(&cell).await;
+    let replicator = cell.replicator().unwrap();
+    lose(writer, (uploader, cell, replicator));
 
     // a lost, c back, answering its logs as longer than b's: d takes the cell.
     lost.lock().unwrap().remove("c");

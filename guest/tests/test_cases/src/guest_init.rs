@@ -94,9 +94,9 @@ pub fn set_up() -> Init {
     Init { console, forwarded }
 }
 
-/// cladefs: says on the console, beside the kernel's messages, how long the guest took to boot:
-/// its kernel from its start to running init, as the kernel's log has it, and the guest to here,
-/// the agent set up, by CLOCK_BOOTTIME, as `cladefs: boot kernel_ns=K agent_ns=A` (TASK-267 compared
+/// cladefs: says on the console, beside the kernel's messages, how long the guest took to boot: its
+/// kernel from its start to running init, as the kernel's log has it, and the guest to here, the
+/// agent set up, by CLOCK_BOOTTIME, as `cladefs: boot kernel_ns=K agent_ns=A` (TASK-267 compared
 /// virtio-PCI's boot with MMIO's by it).
 fn say_boot(mut console: &File) {
     let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
@@ -188,9 +188,9 @@ fn say_to(console: &mut File, (start, end): (u8, u8), line: &str) {
     console.write_all(&framed).expect("write to the console");
 }
 
-/// cladefs: [`say`]s `line`, which has left the guest once this returns: the agent's standard output
-/// waits in its pipe and the console, which a VM stopping loses, though what follows the line
-/// reached the store (a crash soak's repeat 21 of 50, 2026-10-31).
+/// cladefs: [`say`]s `line`, which has left the guest once this returns: the agent's standard
+/// output waits in its pipe and the console, which a VM stopping loses, though what follows the
+/// line reached the cell (a crash soak's repeat 21 of 50, 2026-10-31).
 pub fn say_out(line: &str) {
     say_drained((STDOUT_START, STDOUT_END), line);
 }

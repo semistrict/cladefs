@@ -6,12 +6,12 @@
 //! of one moment, each with the commit it was built of (TASK-111.4): the control API's `GetStats`,
 //! which `cladefsctl stats --json` prints.
 //!
-//! The daemon asks every VM process that opened a store for its stats
-//! ([`super::wire::STATS_ASK`]); each says its stage counts and answers with its guest's stats,
-//! which its device asks the guest's driver for (backlog doc-4's `STATS`), or with none, if its
-//! guest takes no asks ([`super::wire::STATS`]). Once every one answered, or the wait is over, the daemon reads its own
-//! counters: the stats are as of then, each VM's within the wait before it, which says how long
-//! its answer took. Separate reads of `/metrics`, the guests' `/proc/fs/cladefs` and the VM processes'
+//! The daemon asks every VM process that opened a cell for its stats ([`super::wire::STATS_ASK`]);
+//! each says its stage counts and answers with its guest's stats, which its device asks the guest's
+//! driver for (backlog doc-4's `STATS`), or with none, if its guest takes no asks
+//! ([`super::wire::STATS`]). Once every one answered, or the wait is over, the daemon reads its own
+//! counters: the stats are as of then, each VM's within the wait before it, which says how long its
+//! answer took. Separate reads of `/metrics`, the guests' `/proc/fs/cladefs` and the VM processes'
 //! threads, which the sandbox team diffed, were taken at moments apart, and said no build.
 
 use super::codec::{StageCounts, Told};
@@ -44,21 +44,21 @@ pub(crate) struct HostStats {
     pub counters: Vec<(String, u64)>,
     /// Its gauges, by the names its metrics give them, without `cladefsd_`.
     pub gauges: Vec<(&'static str, u64)>,
-    /// Its VM processes, those that opened a store, in the order they connected.
+    /// Its VM processes, those that opened a cell, in the order they connected.
     pub vms: Vec<Vm>,
 }
 
 /// A VM process, and its guest, as it answered, or as the daemon has it if it didn't.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Vm {
-    /// Its connection's number, which the daemon gives each in turn: what tells a store's writer
+    /// Its connection's number, which the daemon gives each in turn: what tells a cell's writer
     /// and followers apart, of one cell.
     pub connection: u64,
-    /// Its store's cell.
+    /// Its cell.
     pub cell: u64,
-    /// Its store's directory, as the daemon has it: without symbolic links.
+    /// Its cell's directory, as the daemon has it: without symbolic links.
     pub path: PathBuf,
-    /// Whether it follows its store (backlog doc-8), or writes it.
+    /// Whether it follows its cell (backlog doc-8), or writes it.
     pub follower: bool,
     /// The commit it said it was built of, if it did ([`super::wire::BUILD`]).
     pub build: Option<String>,
@@ -197,13 +197,13 @@ fn of_daemon(vms: Vec<Vm>) -> HostStats {
     }
 }
 
-/// The VM processes connected that opened a store, as the daemon has them now, in the order they
+/// The VM processes connected that opened a cell, as the daemon has them now, in the order they
 /// connected (`metrics`, TASK-111.5).
 pub(super) fn vms() -> Vec<Vm> {
     reports().iter().filter_map(|report| report.vm()).collect()
 }
 
-/// The builds the VM processes connected said, by their stores' cells, each with how many said
+/// The builds the VM processes connected said, by their cells, each with how many said
 /// it (`metrics`, TASK-111.7): a writer and its followers are of one cell. In order of cell and
 /// commit.
 pub(super) fn vm_builds() -> Vec<((u64, String), usize)> {
@@ -218,13 +218,13 @@ pub(super) fn vm_builds() -> Vec<((u64, String), usize)> {
 
 /// What the daemon reports of a connection's VM process, which the connection keeps up to date
 /// (TASK-111.4, TASK-111.5): what the daemon's metrics and stats hold, rather than the
-/// connection, the last to let go of which closes its store.
+/// connection, the last to let go of which closes its cell.
 pub(super) struct Report {
     /// The connection's number, the count of connections made as it was.
     id: u64,
     /// Where what the connection tells its VM process goes, as long as the connection is.
     sender: Weak<AsyncSender>,
-    /// Its store, once it opened one.
+    /// Its cell, once it opened one.
     opened: OnceLock<Opened>,
     /// The build its VM process said ([`super::wire::BUILD`]), once.
     build: OnceLock<String>,
@@ -242,7 +242,7 @@ pub(super) struct Report {
     asked: Mutex<Vec<Asked>>,
 }
 
-/// The store a connection opened.
+/// The cell a connection opened.
 struct Opened {
     /// Its directory, without symbolic links.
     path: PathBuf,
@@ -299,11 +299,11 @@ impl Report {
         report
     }
 
-    /// The connection opened the store of `cell` at `path`, which it follows if `follower`, once
+    /// The connection opened the cell of `cell` at `path`, which it follows if `follower`, once
     /// for good.
     pub fn opened(&self, path: PathBuf, cell: u64, follower: bool) {
         let opened = self.opened.set(Opened { path, cell, follower });
-        assert!(opened.is_ok(), "a connection opened a second store");
+        assert!(opened.is_ok(), "a connection opened a second cell");
     }
 
     /// The connection made its window, whose gauges are `gauges`, its VM process keeping `budget`
@@ -359,7 +359,7 @@ impl Report {
         }
     }
 
-    /// Its VM process, as the daemon has it now, if it opened a store: not yet answered.
+    /// Its VM process, as the daemon has it now, if it opened a cell: not yet answered.
     fn vm(&self) -> Option<Vm> {
         let Opened { path, cell, follower } = self.opened.get()?;
         let costs = self.costs.each_ref().map(|count| count.load(Ordering::Relaxed));
@@ -380,7 +380,7 @@ impl Report {
     }
 
     /// Asks its VM process for its stats, as ask `ask`, made at `at` ([`super::wire::STATS_ASK`]):
-    /// what its answer will say, unless it opened no store, or can't be asked.
+    /// what its answer will say, unless it opened no cell, or can't be asked.
     fn ask(&self, ask: u64, at: Instant) -> Option<tokio::sync::oneshot::Receiver<Vm>> {
         self.opened.get()?;
         let sender = self.sender.upgrade()?;
@@ -403,7 +403,7 @@ impl Report {
 
     /// Its VM process answered ask `ask` ([`super::wire::STATS`]), and those before it, with its
     /// guest's stats, `guest`, if it has a guest that answered: as of now, its stage counts said
-    /// just before. `EBADF` before it opened a store.
+    /// just before. `EBADF` before it opened a cell.
     pub fn answered(&self, ask: u64, guest: Option<&str>) -> Result<(), Errno> {
         let vm = self.vm().ok_or(Errno::EBADF)?;
         let answered: Vec<Asked> = {

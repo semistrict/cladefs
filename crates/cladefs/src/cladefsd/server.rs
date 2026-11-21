@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The daemon's side of a connection: a VM process's store and window, served from this process's
-//! stores, extent cache and kernel.
+//! The daemon's side of a connection: a VM process's cell and window, served from this process's
+//! cells, extent cache and kernel.
 
-use super::cells::{self, open_store, store_key};
+use super::cells::{self, cell_dir_key, open_cell_at};
 use super::codec::{
     self, Advanced, Data, Fault, Forked, Info, Made, Opened, ReadInto, Request, Stage, StageOp,
     Told, stream_bytes,
@@ -31,20 +31,19 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak, mpsc};
 /// for one of them, then, on the threads every connection shares ([`Pool`]).
 const WORKERS: usize = 8;
 
-/// cladefs: how many of a connection's faults and `PRIVATE`s the daemon resolves at once (TASK-149.34),
-/// each paging in what it waits for: a part of an extent, a MiB, and the two after it if it reads
-/// on (`cache::PARTS_AHEAD`), each part's frames of its tenant's memory held until its read, or
-/// fetch from the bucket, answers. A fault waiting for the pager holds no worker (TASK-92.20), so
-/// as many paged in at once as the VM process kept faults in flight, 4,096 at most
-/// (`MAX_REQUESTS`): 256 faults on cold extents held 258 MiB of the tenant's memory, and 123 MiB
-/// of the heap as their fetches answered; 66 and 39 now. Those past it wait their turn, holding
-/// nothing. A guest
-/// faults as many pages at once as it has threads faulting: its vCPUs, and on x86 KVM's
-/// asynchronous page faults' workers, 64 a vCPU queued at most; resolving 64 at once, each a part
-/// from object storage in 30 to 100 ms, pages in hundreds of MiB a second for it.
+/// cladefs: how many of a connection's faults and `PRIVATE`s the daemon resolves at once
+/// (TASK-149.34), each paging in what it waits for: a part of an extent, a MiB, and the two after
+/// it if it reads on (`cache::PARTS_AHEAD`), each part's frames of its tenant's memory held until
+/// its read, or fetch from the bucket, answers. A fault waiting for the pager holds no worker
+/// (TASK-92.20), so as many paged in at once as the VM process kept faults in flight, 4,096 at most
+/// (`MAX_REQUESTS`): 256 faults on cold extents held 258 MiB of the tenant's memory, and 123 MiB of
+/// the heap as their fetches answered; 66 and 39 now. Those past it wait their turn, holding
+/// nothing. A guest faults as many pages at once as it has threads faulting: its vCPUs, and on x86
+/// KVM's asynchronous page faults' workers, 64 a vCPU queued at most; resolving 64 at once, each a
+/// part from object storage in 30 to 100 ms, pages in hundreds of MiB a second for it.
 pub(super) const PAGE_INS: usize = 64;
 
-/// The runtime that receives every connection's requests, and works behind their stores
+/// The runtime that receives every connection's requests, and works behind their cells
 /// (TASK-34): a few threads, whatever the number of connections, as each waits for its VM process
 /// mostly. A thread that received a request serves it, out of the runtime, which another thread
 /// takes over meanwhile ([`receive`]); what else blocks runs on its blocking threads.
@@ -67,8 +66,8 @@ const FLUSH_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
 /// going: how long its going may take.
 const COMMITS_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// Serves the VM processes that connect to `listener`, for as long as it listens ([`serve_as`]): the
-/// default tenant's ([`default_tenant`]). Their requests run on threads every connection shares
+/// Serves the VM processes that connect to `listener`, for as long as it listens ([`serve_as`]):
+/// the default tenant's ([`default_tenant`]). Their requests run on threads every connection shares
 /// (TASK-34).
 pub fn serve(listener: UnixListener) {
     super::SERVING.get().send_replace(true);
@@ -82,9 +81,9 @@ pub fn serve_tenant(listener: UnixListener, tenant: Arc<Tenant>) {
     serve_as(listener, move || Ok(tenant.clone()))
 }
 
-/// cladefs: how many mappings the host lets a process make, which the reply to an `OPEN` tells the VM
-/// process ([`Opened`]), as it can't read it in a jail without /proc (TASK-172): Linux's default,
-/// said, if this process can't either.
+/// cladefs: how many mappings the host lets a process make, which the reply to an `OPEN` tells the
+/// VM process ([`Opened`]), as it can't read it in a jail without /proc (TASK-172): Linux's
+/// default, said, if this process can't either.
 fn max_map_count() -> Option<u64> {
     #[cfg(test)]
     if let Some(&given) = MAX_MAP_COUNT_GIVEN.get() {
@@ -140,10 +139,10 @@ fn serve_as(listener: UnixListener, tenant: impl Fn() -> Result<Arc<Tenant>, Err
 }
 
 node_local::node_local! {
-    /// cladefs: the descriptors of the listeners of the VM sockets served ([`serve_as`]), the daemon's
-    /// own and its tenants', which a drain shuts down ([`stop_accepting`], TASK-141.4). Each is there
-    /// while its listener lives ([`Accepting`]): not a descriptor of its own, which a daemon with as
-    /// many files open as it may would have none of (TASK-79.35).
+    /// cladefs: the descriptors of the listeners of the VM sockets served ([`serve_as`]), the
+    /// daemon's own and its tenants', which a drain shuts down ([`stop_accepting`], TASK-141.4).
+    /// Each is there while its listener lives ([`Accepting`]): not a descriptor of its own, which a
+    /// daemon with as many files open as it may would have none of (TASK-79.35).
     static ACCEPTING: Mutex<Vec<std::os::fd::RawFd>> = Mutex::new(Vec::new());
 }
 
@@ -178,19 +177,19 @@ pub(super) fn stop_accepting() {
     }
 }
 
-/// A tenant of the daemon (TASK-43): its VM processes' stores' pages are of an arena of the
+/// A tenant of the daemon (TASK-43): its VM processes' cells' pages are of an arena of the
 /// kernel's physical memory of its own, which they hold, with the default arena, read-only, whose
-/// pages are those of the public bases its stores are forks of, and nothing of another tenant's;
-/// and its stores are in a directory of its own, which its VM processes name no store outside of.
+/// pages are those of the public bases its cells are forks of, and nothing of another tenant's;
+/// and its cells are in a directory of its own, which its VM processes name no cell outside of.
 /// This is defence in depth: a VM process escaped from its guest reaches its tenant's pages and
-/// stores alone. Guest isolation is the security boundary, which nothing relies on tenants for.
+/// cells alone. Guest isolation is the security boundary, which nothing relies on tenants for.
 /// What else its VM processes may do its [`Policy`] says: a granted tenant's, or the default
 /// tenant's, of the daemon's own socket ([`default_tenant`]).
 ///
 /// Its arena goes, and the extents cached in it, once it is gone, as its VM processes are, and the
-/// stores opened in its arena, and what reads into the extent cache for them (`pages::Arena`).
+/// cells opened in its arena, and what reads into the extent cache for them (`pages::Arena`).
 pub struct Tenant {
-    /// cladefs: its ID in the bucket (TASK-364), whose cells its stores are, which names
+    /// cladefs: its ID in the bucket (TASK-364), whose cells its cells are, which names
     /// it in every call of the control API: a granted tenant's, its grant's; the default tenant's,
     /// [`DEFAULT_TENANT`](crate::host_cell::DEFAULT_TENANT).
     id: u64,
@@ -202,15 +201,15 @@ pub struct Tenant {
 
 /// cladefs: what a tenant's VM processes may do (TASK-160.10), which its connections hold them to.
 struct Policy {
-    /// Where they name stores.
-    stores: Stores,
+    /// Where they name cells.
+    cell_dirs: CellDirs,
     /// Whether they follow a public base (backlog doc-8): the default tenant's do; a granted
     /// tenant's opens no public base, only forks of it (TASK-43).
     follows_public_bases: bool,
 }
 
-/// cladefs: where a tenant's VM processes name stores ([`Policy`]).
-enum Stores {
+/// cladefs: where a tenant's VM processes name cells ([`Policy`]).
+enum CellDirs {
     /// In its directory alone, canonical (TASK-43.4).
     Dir(PathBuf),
     /// In the daemon's roots, if it has any ([`roots`]); anywhere, if it has none: the default
@@ -219,19 +218,19 @@ enum Stores {
 }
 
 impl Policy {
-    /// A granted tenant's, whose stores are in `dir`, canonical.
+    /// A granted tenant's, whose cells are in `dir`, canonical.
     fn granted(dir: PathBuf) -> Self {
-        Self { stores: Stores::Dir(dir), follows_public_bases: false }
+        Self { cell_dirs: CellDirs::Dir(dir), follows_public_bases: false }
     }
 
     /// The default tenant's ([`default_tenant`]).
     fn default_tenant() -> Self {
-        Self { stores: Stores::Roots(roots()), follows_public_bases: true }
+        Self { cell_dirs: CellDirs::Roots(roots()), follows_public_bases: true }
     }
 }
 
 /// The memory a tenant's VM processes hold (TASK-43): its arena of physical memory,
-/// which its stores' own pages are of, and the default arena, read-only, whose pages are public
+/// which its cells' own pages are of, and the default arena, read-only, whose pages are public
 /// bases'. The default tenant's is as any other's ([`default_tenant`], TASK-79.17).
 struct Memory {
     arena: Arc<crate::pages::Arena>,
@@ -293,12 +292,12 @@ pub(super) fn default_tenant_made() -> Option<Arc<Tenant>> {
     DEFAULT.get().get().cloned()
 }
 
-/// cladefs: the default tenant, of the daemon's own socket, which its user's VM processes connect to
-/// (TASK-155), made as the first does, for as long as the daemon runs: granted by no one, and
+/// cladefs: the default tenant, of the daemon's own socket, which its user's VM processes connect
+/// to (TASK-155), made as the first does, for as long as the daemon runs: granted by no one, and
 /// limited by every tenant's limits alone. Its policy is its own ([`Policy::default_tenant`]); its
 /// memory is as a granted tenant's (TASK-79.17): an arena of its own, so that the default arena
-/// holds public bases' pages, which every VM process holds read-only, and nothing of a VM
-/// process's own. `EIO`, logged, if its memory can't be made.
+/// holds public bases' pages, which every VM process holds read-only, and nothing of a VM process's
+/// own. `EIO`, logged, if its memory can't be made.
 pub(super) fn default_tenant() -> Result<Arc<Tenant>, Errno> {
     if let Some(tenant) = DEFAULT.get().get() {
         return Ok(tenant.clone());
@@ -314,7 +313,7 @@ pub(super) fn default_tenant() -> Result<Arc<Tenant>, Errno> {
 }
 
 impl Tenant {
-    /// A new tenant, granted, of the ID `id` in the bucket (TASK-364), whose stores are in `dir`,
+    /// A new tenant, granted, of the ID `id` in the bucket (TASK-364), whose cells are in `dir`,
     /// with an arena of its own.
     pub fn new(id: u64, dir: impl AsRef<Path>) -> std::io::Result<Arc<Self>> {
         let dir = host_fs::canonicalize(&dir.as_ref())?;
@@ -331,32 +330,32 @@ impl Tenant {
     }
 
     /// cladefs: its ID, if it is granted (TASK-364): the default tenant's VM processes are the
-    /// daemon's user's (TASK-155), which reach any tenant's stores, and make them of the default
+    /// daemon's user's (TASK-155), which reach any tenant's cells, and make them of the default
     /// tenant's.
     fn granted(&self) -> Option<u64> {
         self.dir().map(|_| self.id)
     }
 
-    /// cladefs: `EACCES` if it is granted and the store at `path` is another tenant's cell, or
+    /// cladefs: `EACCES` if it is granted and the cell at `path` is another tenant's cell, or
     /// cell (TASK-364), as its description says, read before it is opened, which would take its
-    /// cell from its writer: the daemon makes its own cells' stores alone in its directory, but
+    /// cell from its writer: the daemon makes its own cells alone in its directory, but
     /// for the versions of others' its VM manager gives it, which it restores from, as forks of its
-    /// own; and a store put there by other means is no more its than it was.
+    /// own; and a cell put there by other means is no more its than it was.
     fn reaches(&self, path: &Path) -> Result<(), Errno> {
         let Some(id) = self.granted() else { return Ok(()) };
         match local_cell::host_cell(path) {
             Ok(cell) if cell.tenant != id => Err(Errno::EACCES),
-            // No store yet, which it makes of its own cell; or one its opening fails, saying why.
+            // No cell yet, which it makes of its own cell; or one its opening fails, saying why.
             _ => Ok(()),
         }
     }
 
-    /// Its stores' directory, if it is a granted tenant's: the default tenant has none
-    /// ([`Stores::Roots`]).
+    /// Its cells' directory, if it is a granted tenant's: the default tenant has none
+    /// ([`CellDirs::Roots`]).
     pub fn dir(&self) -> Option<&Path> {
-        match &self.policy.stores {
-            Stores::Dir(dir) => Some(dir),
-            Stores::Roots(_) => None,
+        match &self.policy.cell_dirs {
+            CellDirs::Dir(dir) => Some(dir),
+            CellDirs::Roots(_) => None,
         }
     }
 
@@ -377,16 +376,16 @@ impl Tenant {
         self.disk.as_ref()
     }
 
-    /// Whether its VM processes may name the store at `path`, whichever way `path` names it:
-    /// `EACCES` unless it is where they name stores ([`Stores`]).
+    /// Whether its VM processes may name the cell at `path`, whichever way `path` names it:
+    /// `EACCES` unless it is where they name cells ([`CellDirs`]).
     fn holds(&self, path: &Path) -> Result<(), Errno> {
-        let held = match &self.policy.stores {
-            Stores::Dir(dir) => in_dir(path, dir),
-            Stores::Roots(Some(roots)) => {
-                let key = store_key(path);
+        let held = match &self.policy.cell_dirs {
+            CellDirs::Dir(dir) => in_dir(path, dir),
+            CellDirs::Roots(Some(roots)) => {
+                let key = cell_dir_key(path);
                 roots.iter().any(|root| key_in_dir(&key, root))
             }
-            Stores::Roots(None) => true,
+            CellDirs::Roots(None) => true,
         };
         if held { Ok(()) } else { Err(Errno::EACCES) }
     }
@@ -416,7 +415,7 @@ fn reopen_read_only(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<std::os:
 }
 
 /// Serves the VM process at the other end of `stream`, of `tenant`, until it closes the
-/// connection, or exits: then its store and window go. Returns then: for tests, which serve
+/// connection, or exits: then its cell and window go. Returns then: for tests, which serve
 /// connections one by one.
 #[cfg(test)]
 pub(crate) fn serve_connection(stream: UnixStream, tenant: Arc<Tenant>) {
@@ -456,7 +455,7 @@ fn start_connection(stream: super::wire::Stream, tenant: Arc<Tenant>) -> mpsc::R
     finished
 }
 
-/// The VM processes connected, served or being let go of (`metrics`), until their stores are
+/// The VM processes connected, served or being let go of (`metrics`), until their cells are
 /// closed: which a drain waits for (TASK-141.4).
 pub(super) static CONNECTIONS: super::drain::Work = super::drain::Work::new();
 
@@ -466,7 +465,7 @@ pub(super) fn connections() -> usize {
 }
 
 /// Receives the VM process's messages, serving its requests ([`receive`]), until it is gone; then,
-/// once its requests are done, lets its store go.
+/// once its requests are done, lets its cell go.
 async fn run_connection(stream: super::wire::Stream, tenant: Arc<Tenant>) {
     let sender = match stream.try_clone().and_then(|clone| {
         clone.set_nonblocking(true)?;
@@ -479,7 +478,8 @@ async fn run_connection(stream: super::wire::Stream, tenant: Arc<Tenant>) {
             return;
         }
     };
-    // cladefs: one the daemon could not let go of, once it stopped answering, it refuses (TASK-79.9).
+    // cladefs: one the daemon could not let go of, once it stopped answering, it refuses
+    // (TASK-79.9).
     let peer = match Peer::connected(&stream, sender) {
         Ok(peer) => peer,
         Err(err) => {
@@ -492,7 +492,7 @@ async fn run_connection(stream: super::wire::Stream, tenant: Arc<Tenant>) {
         this: this.clone(),
         tenant,
         peer: peer.clone(),
-        store: OnceLock::new(),
+        open_cell: OnceLock::new(),
         reads: OnceLock::new(),
         phase: SharedLock::new("connection phase", Mutex::new(Phase::Unopened)),
         window: SharedLock::new("connection window", Mutex::new(None)),
@@ -516,8 +516,8 @@ async fn run_connection(stream: super::wire::Stream, tenant: Arc<Tenant>) {
             let (gone, mut went) = tokio::sync::oneshot::channel();
             IO.spawn(receive(connection.clone(), receiver, gone));
             // cladefs: its process gone, so is it, whoever it left the socket's end to, as a child,
-            // which would hold its store open for good (TASK-79.101). And as the daemon drains,
-            // its VM told so, as at the daemon's exit, and its store closed as a connection going
+            // which would hold its cell open for good (TASK-79.101). And as the daemon drains,
+            // its VM told so, as at the daemon's exit, and its cell closed as a connection going
             // closes it (TASK-141.4).
             let ended = tokio::select! {
                 ended = &mut went => ended,
@@ -560,24 +560,24 @@ async fn run_connection(stream: super::wire::Stream, tenant: Arc<Tenant>) {
         }
         drained.await;
     }
-    // What it committed is durable before another connection may open its store.
+    // What it committed is durable before another connection may open its cell.
     let behind = connection.behind.with(Mutex::lock).take();
     if let Some((stop, behind)) = behind {
         drop(stop);
         let _ = behind.await;
     }
     // cladefs: and in the bucket, as the daemon drains, the open segment's commits too, which a
-    // store closed leaves for the next to open it to upload (TASK-141.4).
+    // cell closed leaves for the next to open it to upload (TASK-141.4).
     if super::drain::draining()
-        && let (Some(_), Some(store)) = (connection.hold(), connection.store())
-        && let Err(errno) = cells::uploaded(store).await
+        && let (Some(_), Some(open_cell)) = (connection.hold(), connection.cell())
+        && let Err(errno) = cells::uploaded(open_cell).await
     {
-        log::error!("cladefsd: uploading a store's last commits as the daemon drains: {errno}");
+        log::error!("cladefsd: uploading a cell's last commits as the daemon drains: {errno}");
     }
     finish_connection(connection).await;
-    // Its store goes, with its window and open extents, before another connection may open it:
+    // Its cell goes, with its window and open extents, before another connection may open it:
     // once nothing holds the connection any more, as a request's job, its receiving task, or the
-    // control API's work through it may still, whose last to let go closes its store and then
+    // control API's work through it may still, whose last to let go closes its cell and then
     // lets its path go (TASK-54, TASK-79.34). cladefs: but for its followers'.
     let _ = gone_for_good.await;
     peer.forget();
@@ -664,12 +664,13 @@ fn receive(
 pub(super) const QUEUED_CREDIT: u64 = 16 << 20;
 
 impl Connection {
-    /// cladefs: whether its VM process, should it live on, reaches pages still: those its window has
-    /// mapped, or those of an operation taking access away it left unacknowledged (TASK-79.100).
+    /// cladefs: whether its VM process, should it live on, reaches pages still: those its window
+    /// has mapped, or those of an operation taking access away it left unacknowledged
+    /// (TASK-79.100).
     fn reaches_pages(&self) -> bool {
-        // cladefs: a halted store's window, which a panic may have left half changed, isn't looked
+        // cladefs: a halted cell's window, which a panic may have left half changed, isn't looked
         // at: it may, as far as anyone knows (TASK-153.16).
-        if self.store().is_some_and(|store| store.is_halted()) {
+        if self.cell().is_some_and(|open_cell| open_cell.is_halted()) {
             return true;
         }
         let window = self.window.with(Mutex::lock);
@@ -677,17 +678,17 @@ impl Connection {
     }
 }
 
-/// Lets the store of `connection`, whose VM process is gone and whose requests are done, go: once
+/// Lets the cell of `connection`, whose VM process is gone and whose requests are done, go: once
 /// what it committed is durable, if it writes it.
 async fn finish_connection(connection: Arc<Connection>) {
-    if let (Some(hold), Some(store)) = (connection.hold(), connection.store()) {
+    if let (Some(hold), Some(open_cell)) = (connection.hold(), connection.cell()) {
         // cladefs: its disk work off the runtime's threads (doc-24, step 9).
-        if let Err(err) = local_cell::upload::blocking(|| store.flush()).await {
-            log::error!("cladefsd: making a store's last commits durable: {err:?}");
+        if let Err(err) = local_cell::upload::blocking(|| open_cell.flush()).await {
+            log::error!("cladefsd: making a cell's last commits durable: {err:?}");
         }
         // cladefs: what it wrote since its last commit no next writer knows of, nor takes over.
-        if store.is_quiescent() != Ok(true) {
-            cells::retire(&hold, store);
+        if open_cell.is_quiescent() != Ok(true) {
+            cells::retire(&hold, open_cell);
         }
     }
     // cladefs: the trace of its guest's reads, if it keeps one, its requests done (TASK-702.1).
@@ -808,14 +809,14 @@ impl Drop for Turn {
 }
 
 /// A request's answer, which it is owed until sent ([`Answer::send`]): its reply, or its error.
-/// cladefs: its bytes of stream data counted in its connection's requests until its reply is queued,
-/// and not after, as its VM process's credit counts it then ([`Peer::credit`]), rather than both
-/// for a while, which held a VM process keeping to the protocol's bounds past them (TASK-79.16);
-/// and, its serving panicking, it answers `EIO` as it is dropped, rather than leave its VM process
-/// waiting for good, those bytes counted for good; and halts its store, which the panic went
-/// through: past the store's locks, which halt it themselves (`crate::halt`, TASK-153.16).
-/// cladefs: and the request's span, which ends as it is answered, before its reply is sent
-/// (`super::otel`, TASK-258).
+/// cladefs: its bytes of stream data counted in its connection's requests until its reply is
+/// queued, and not after, as its VM process's credit counts it then ([`Peer::credit`]), rather than
+/// both for a while, which held a VM process keeping to the protocol's bounds past them
+/// (TASK-79.16); and, its serving panicking, it answers `EIO` as it is dropped, rather than leave
+/// its VM process waiting for good, those bytes counted for good; and halts its cell, which the
+/// panic went through: past the cell's locks, which halt it themselves (`crate::halt`,
+/// TASK-153.16). cladefs: and the request's span, which ends as it is answered, before its reply is
+/// sent (`super::otel`, TASK-258).
 struct Answer {
     connection: Arc<Connection>,
     request: Header,
@@ -836,7 +837,7 @@ impl Answer {
         charge: Option<Charge>,
     ) -> Self {
         let started = std::time::Instant::now();
-        let cell = connection.store().map(|store| store.cell());
+        let cell = connection.cell().map(|open_cell| open_cell.cell());
         let span = super::otel::request_span(&request, cell, guest);
         Self { connection: connection.clone(), request, started, sent: false, span, charge }
     }
@@ -868,25 +869,25 @@ impl Answer {
         self.sent = true;
         let header = self.request;
         if let Err(errno) = result {
-            // A full store: which request found it so, and how full: of its extents' bytes, or
+            // A full cell: which request found it so, and how full: of its extents' bytes, or
             // of the host's disk, which it may fill far from its capacity (TASK-79.105). cladefs:
             // not its tenant's disk at its limit, which says so itself (TASK-94).
             let tenant_full = self.connection.tenant.disk().is_some_and(|disk| disk.is_full());
             if errno == Errno::ENOSPC
                 && !tenant_full
-                && let Some(store) = self.connection.store()
+                && let Some(open_cell) = self.connection.cell()
             {
-                let used = store.info().map(|info| (info.used, info.capacity));
-                let disk = store.disk_bytes();
+                let used = open_cell.info().map(|info| (info.used, info.capacity));
+                let disk = open_cell.disk_bytes();
                 log::warn!(
-                    "cladefsd: request {} (flags {:#x}, args {:#x?}) found the store full: \
+                    "cladefsd: request {} (flags {:#x}, args {:#x?}) found the cell full: \
                      used and capacity {used:?}, {disk} bytes of the host's disk",
                     header.kind,
                     header.flags,
                     header.args
                 );
             }
-            // A request the store refuses as malformed is the guest's mistake: which it was.
+            // A request the cell refuses as malformed is the guest's mistake: which it was.
             if errno == Errno::EINVAL {
                 log::warn!(
                     "cladefsd: request {} refused with EINVAL: flags {:#x}, args {:#x?}",
@@ -917,10 +918,10 @@ impl Answer {
 impl Drop for Answer {
     fn drop(&mut self) {
         if std::thread::panicking()
-            && let Some(store) = self.connection.store()
+            && let Some(open_cell) = self.connection.cell()
         {
             let kind = self.request.kind;
-            store.halt(|| format!("a panic serving request {kind}"));
+            open_cell.halt(|| format!("a panic serving request {kind}"));
         }
         if !self.sent {
             let reply = self.reply_header();
@@ -929,8 +930,8 @@ impl Drop for Answer {
     }
 }
 
-/// cladefs: says what `request` asks for on `span`, its span: the bytes it reads, writes or maps, and
-/// the extents it frees or maps (TASK-258).
+/// cladefs: says what `request` asks for on `span`, its span: the bytes it reads, writes or maps,
+/// and the extents it frees or maps (TASK-258).
 fn traced(span: &trace::Span, request: &Request<'_>) {
     if !span.is_on() {
         return;
@@ -964,11 +965,11 @@ fn traced(span: &trace::Span, request: &Request<'_>) {
     }
 }
 
-/// cladefs: serves a request admitted, in `turn`, as `serving` serves it, a future, which answers it
-/// (TASK-92.20): on this thread until it first waits, in its turn; then on the [`Pool`], polled
-/// there as it is woken, deferred meanwhile ([`Turn::defer`]). So a request waiting for what it
-/// is served on, as a fault for the pager's fetch from object storage, holds neither a thread nor
-/// one of the connection's [`WORKERS`], which its next requests are served by. It is polled where
+/// cladefs: serves a request admitted, in `turn`, as `serving` serves it, a future, which answers
+/// it (TASK-92.20): on this thread until it first waits, in its turn; then on the [`Pool`], polled
+/// there as it is woken, deferred meanwhile ([`Turn::defer`]). So a request waiting for what it is
+/// served on, as a fault for the pager's fetch from object storage, holds neither a thread nor one
+/// of the connection's [`WORKERS`], which its next requests are served by. It is polled where
 /// blocking is allowed, a pool's thread or one out of the runtime's (`receive`), the runtime's
 /// timers and tasks at hand.
 fn serve_future(turn: Turn, serving: impl std::future::Future<Output = ()> + Send + 'static) {
@@ -1017,7 +1018,7 @@ impl Writer for Connection {
     }
 }
 
-/// The directories the daemon serves stores in to the default tenant's connections,
+/// The directories the daemon serves cells in to the default tenant's connections,
 /// `CLADEFSD_ROOTS` (separated by colons), if it names any (TASK-43.4). One that doesn't exist
 /// is no root, and with none, the daemon refuses every path.
 fn roots() -> Option<&'static [PathBuf]> {
@@ -1044,13 +1045,13 @@ fn roots() -> Option<&'static [PathBuf]> {
         .as_deref()
 }
 
-/// Whether `path` names a store in `dir`, a canonical directory, whichever way it names it:
+/// Whether `path` names a cell in `dir`, a canonical directory, whichever way it names it:
 /// through symlinks, or `..`.
 pub(super) fn in_dir(path: &Path, dir: &Path) -> bool {
-    key_in_dir(&store_key(path), dir)
+    key_in_dir(&cell_dir_key(path), dir)
 }
 
-/// Membership for an already resolved store key.
+/// Membership for an already resolved cell key.
 pub(super) fn key_in_dir(key: &Path, dir: &Path) -> bool {
     use std::path::Component;
     // A path not resolved, its directory not there, holds no `..` that leads out.
@@ -1062,26 +1063,26 @@ pub(super) fn key_in_dir(key: &Path, dir: &Path) -> bool {
 /// How long a shrink waits for the guest's answer.
 const SHRINK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// What works behind a connection's store, a task, and what stops it, dropped.
+/// What works behind a connection's cell, a task, and what stops it, dropped.
 type Behind = (tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<()>);
 
-/// A connection's store and window.
+/// A connection's cell and window.
 pub(super) struct Connection {
     this: Weak<Connection>,
     /// cladefs: the tenant it is of (TASK-43).
     tenant: Arc<Tenant>,
     /// Its VM process, which it sends to: cladefs: as the daemon depends on it (TASK-79.9).
     peer: Arc<Peer>,
-    /// Its store, once open: set once, as its `OPEN` is, before its phase says how it has it;
+    /// Its cell, once open: set once, as its `OPEN` is, before its phase says how it has it;
     /// read by its every request, without a lock. cladefs: a follower's, if read-only (backlog
     /// doc-8).
-    store: OnceLock<Arc<OpenCell>>,
-    /// Where it is in its life: whether it has its store, and how (TASK-160.8). Its locks are
-    /// its requests', its teardown's and its window's, beyond what halts its store: a panic
+    open_cell: OnceLock<Arc<OpenCell>>,
+    /// Where it is in its life: whether it has its cell, and how (TASK-160.8). Its locks are
+    /// its requests', its teardown's and its window's, beyond what halts its cell: a panic
     /// holding one aborts the daemon (`local_cell::shared`, TASK-149.24).
     phase: SharedLock<Mutex<Phase>>,
     window: SharedLock<Mutex<Option<DaxWindow>>>,
-    /// What works behind the store, a task, and what stops it, dropped: making a writer's commits
+    /// What works behind the cell, a task, and what stops it, dropped: making a writer's commits
     /// durable behind them; cladefs: telling a follower's VM process of its writer's commits.
     behind: SharedLock<Mutex<Option<Behind>>>,
     /// The shrink the guest was asked to take, and where its answer goes ([`RESIZED`]).
@@ -1091,7 +1092,7 @@ pub(super) struct Connection {
     /// cladefs: the versions its VM process made ([`FORK_QUIESCENT`]), which alone it drops
     /// ([`FORK_DROP`], TASK-575).
     versions_made: SharedLock<Mutex<std::collections::BTreeSet<u64>>>,
-    /// Whether its VM process is gone, and its store goes once durable.
+    /// Whether its VM process is gone, and its cell goes once durable.
     closing: AtomicBool,
     /// cladefs: whether its receiving ended, and what says so ([`Connection::end_receiving`]).
     ended: AtomicBool,
@@ -1101,60 +1102,60 @@ pub(super) struct Connection {
     /// Its requests received and not done (TASK-34), and what says when none is left.
     requests: SharedLock<Mutex<Requests>>,
     drained: Arc<event_listener::Event>,
-    /// cladefs: what the daemon reports of its VM process (TASK-111.4): its store, its build, what
+    /// cladefs: what the daemon reports of its VM process (TASK-111.4): its cell, its build, what
     /// it says of its window's second stage, and its answers to asks for its stats.
     report: Arc<stats::Report>,
     /// cladefs: its faults, `PRIVATE`s and `READ`s resolving, [`PAGE_INS`] at most (TASK-149.34).
     page_ins: tokio::sync::Semaphore,
-    /// cladefs: its store's path, once open, which names the guest requests it serves calls for
+    /// cladefs: its cell's path, once open, which names the guest requests it serves calls for
     /// (`crate::request::RequestId::store`, TASK-260).
     named: OnceLock<Arc<str>>,
-    /// cladefs: the trace of its guest's reads, from its store's opening, if the daemon writes
+    /// cladefs: the trace of its guest's reads, from its cell's opening, if the daemon writes
     /// traces (`CLADEFSD_READ_TRACES`, TASK-702.1): written as it goes ([`finish_connection`]).
     reads: OnceLock<super::reads::Trace>,
-    /// What says, as it drops, that the connection has: dropped after its store, window and open
-    /// extents, and its hold of its store's path (TASK-79.34), by its teardown ([`Connection`]'s
+    /// What says, as it drops, that the connection has: dropped after its cell, window and open
+    /// extents, and its hold of its cell's path (TASK-79.34), by its teardown ([`Connection`]'s
     /// drop).
     alive: Option<tokio::sync::oneshot::Sender<std::convert::Infallible>>,
 }
 
-/// Where a connection is in its life ([`Connection::phase`]): one `OPEN` at a time, and one store
-/// ([`Connection::store`]), which it writes, holding its path, or follows (TASK-150.5,
+/// Where a connection is in its life ([`Connection::phase`]): one `OPEN` at a time, and one cell
+/// ([`Connection::cell`]), which it writes, holding its path, or follows (TASK-150.5,
 /// TASK-160.8).
 enum Phase {
-    /// Its VM process opened no store yet.
+    /// Its VM process opened no cell yet.
     Unopened,
     /// cladefs: an [`OPEN`] in progress, the only one ([`Opening`]).
     Opening,
-    /// It writes its store, which it holds in the daemon's table (`cells::table`) until it is
-    /// dropped, after its store and window ([`Connection`]'s drop). Shared only with what retires
-    /// the store as the connection goes ([`finish_connection`]), which holds the connection.
+    /// It writes its cell, which it holds in the daemon's table (`cells::table`) until it is
+    /// dropped, after its cell and window ([`Connection`]'s drop). Shared only with what retires
+    /// the cell as the connection goes ([`finish_connection`]), which holds the connection.
     Writing(Arc<cells::Hold>),
-    /// cladefs: it follows its store, read-only (backlog doc-8): the store connections have open,
+    /// cladefs: it follows its cell, read-only (backlog doc-8): the cell connections have open,
     /// which the table has, and which it holds none of.
     Following,
 }
 
 /// cladefs: an [`OPEN`] in progress on a connection ([`Connection::opening`]), the only one, until
-/// dropped; only it gives the connection its store, which it has once: its phase goes back to
+/// dropped; only it gives the connection its cell, which it has once: its phase goes back to
 /// [`Phase::Unopened`] unless it opened one.
 struct Opening<'a>(&'a Connection);
 
 impl Opening<'_> {
-    /// The connection has `store`, at `path`, from now on, as `opened` says: [`Phase::Writing`] or
-    /// [`Phase::Following`]. Checked without the phase's lock, which a panic would poison.
-    fn opened(self, path: &Path, store: Arc<OpenCell>, opened: Phase) {
+    /// The connection has `open_cell`, at `path`, from now on, as `opened` says: [`Phase::Writing`]
+    /// or [`Phase::Following`]. Checked without the phase's lock, which a panic would poison.
+    fn opened(self, path: &Path, open_cell: Arc<OpenCell>, opened: Phase) {
         // cladefs: its guest's reads traced from now, if the daemon traces them (TASK-702.1).
-        if let Some(trace) = super::reads::Trace::opened(store.cell().id) {
+        if let Some(trace) = super::reads::Trace::opened(open_cell.cell().id) {
             drop(self.0.reads.set(trace));
         }
         let follower = matches!(opened, Phase::Following);
-        let key = store_key(path);
+        let key = cell_dir_key(path);
         drop(self.0.named.set(key.to_string_lossy().into()));
-        self.0.report.opened(key, store.cell().id, follower);
-        assert!(self.0.store.set(store).is_ok(), "a connection opened a second store");
+        self.0.report.opened(key, open_cell.cell().id, follower);
+        assert!(self.0.open_cell.set(open_cell).is_ok(), "a connection opened a second cell");
         let was = std::mem::replace(&mut *self.0.phase.with(Mutex::lock), opened);
-        assert!(matches!(was, Phase::Opening), "a connection opened a store not opening one");
+        assert!(matches!(was, Phase::Opening), "a connection opened a cell not opening one");
     }
 }
 
@@ -1168,24 +1169,24 @@ impl Drop for Opening<'_> {
 }
 
 impl Drop for Connection {
-    /// Its store goes, then its window, as they did before (TASK-79.34), and only then its hold of
-    /// its store's path, which those waiting to open it may then (TASK-54): all it has open is
+    /// Its cell goes, then its window, as they did before (TASK-79.34), and only then its hold of
+    /// its cell's path, which those waiting to open it may then (TASK-54): all it has open is
     /// closed by then, but for what its followers have. Then what says it is gone. cladefs: in a
-    /// task of its own, its store let go awaited, closed if this was its last (`open_cell::release`):
-    /// whatever drops the connection last, a request, its receiving or the control API, closes no
-    /// store in its drop, which blocks (doc-24, step 9).
+    /// task of its own, its cell let go awaited, closed if this was its last
+    /// (`open_cell::release`): whatever drops the connection last, a request, its receiving or the
+    /// control API, closes no cell in its drop, which blocks (doc-24, step 9).
     ///
     /// A lock a panic poisoned is taken all the same: what it guards is whole, each changed at
     /// once, and what it holds must go, in this order, whatever panicked.
     fn drop(&mut self) {
-        let store = self.store.take();
+        let open_cell = self.open_cell.take();
         let window = self.window.get_mut().get_mut().unwrap_or_else(PoisonError::into_inner).take();
         let phase = self.phase.get_mut().get_mut().unwrap_or_else(PoisonError::into_inner);
         let phase = std::mem::replace(phase, Phase::Unopened);
         let alive = self.alive.take();
         drop(IO.spawn(async move {
-            if let Some(store) = store {
-                crate::open_cell::release(store).await;
+            if let Some(open_cell) = open_cell {
+                crate::open_cell::release(open_cell).await;
             }
             drop(window);
             drop(phase);
@@ -1194,8 +1195,8 @@ impl Drop for Connection {
     }
 }
 
-/// cladefs: refuses the [`OPEN`] of `header`, of a VM process of another wire version, its connection
-/// opening nothing (TASK-141.3): logged, naming both versions, and replied to with
+/// cladefs: refuses the [`OPEN`] of `header`, of a VM process of another wire version, its
+/// connection opening nothing (TASK-141.3): logged, naming both versions, and replied to with
 /// `EPROTONOSUPPORT` and the daemon's version.
 fn refuse_version(header: &Header, answer: Answer) {
     log::error!(
@@ -1223,12 +1224,12 @@ pub(super) fn failpoint(kind: u32) -> Option<&'static str> {
 }
 
 impl Connection {
-    /// Its store, once it has opened one.
-    pub(super) fn store(&self) -> Option<&Arc<OpenCell>> {
-        self.store.get()
+    /// Its cell, once it has opened one.
+    pub(super) fn cell(&self) -> Option<&Arc<OpenCell>> {
+        self.open_cell.get()
     }
 
-    /// Its hold of its store, if it writes it.
+    /// Its hold of its cell, if it writes it.
     fn hold(&self) -> Option<Arc<cells::Hold>> {
         match &*self.phase.with(Mutex::lock) {
             Phase::Writing(hold) => Some(hold.clone()),
@@ -1236,7 +1237,7 @@ impl Connection {
         }
     }
 
-    /// The arena of physical memory its store's own pages are of: its tenant's.
+    /// The arena of physical memory its cell's own pages are of: its tenant's.
     fn arena(&self) -> &Arc<crate::pages::Arena> {
         &self.tenant.memory.arena
     }
@@ -1246,7 +1247,7 @@ impl Connection {
         self.arena().id()
     }
 
-    /// Runs `work` behind its store, a task on the daemon's runtime, until it is told to stop: the
+    /// Runs `work` behind its cell, a task on the daemon's runtime, until it is told to stop: the
     /// sender of the receiver it is given dropped.
     fn start_behind<F: std::future::Future<Output = ()> + Send + 'static>(
         &self,
@@ -1260,11 +1261,11 @@ impl Connection {
     /// cladefs: admits a message of `header`, before its payload is read, as the protocol's bounds
     /// allow what its VM process keeps in flight (TASK-79.16): its requests not answered
     /// ([`MAX_REQUESTS`]), and their stream data ([`MAX_STREAM_BYTES`]), with what the connection
-    /// has queued for the VM process, within its credit ([`Peer::credit`]). Counted in, a request's, until
-    /// its reply is queued ([`Answer`]). Past them, `QuotaExceeded`: the VM process broke the
-    /// protocol, and is let go, rather than held without end in the daemon's memory. cladefs: and its
-    /// stream data in the bytes in flight its tenant's connections share, waiting, before its
-    /// payload is read, until what they hold leaves enough for it (TASK-149.35,
+    /// has queued for the VM process, within its credit ([`Peer::credit`]). Counted in, a
+    /// request's, until its reply is queued ([`Answer`]). Past them, `QuotaExceeded`: the VM
+    /// process broke the protocol, and is let go, rather than held without end in the daemon's
+    /// memory. cladefs: and its stream data in the bytes in flight its tenant's connections share,
+    /// waiting, before its payload is read, until what they hold leaves enough for it (TASK-149.35,
     /// [`super::memory::InFlight`]).
     async fn within_bounds(self: Arc<Self>, header: Header) -> std::io::Result<Charge> {
         // cladefs: nor what its stage operations cost, which it says unasked (TASK-91.16): of no
@@ -1369,8 +1370,8 @@ impl Connection {
     /// [`Pool`], in turn with every other connection's: whether serving it returned or panicked,
     /// which would otherwise leave it counted running for good (TASK-79.1). cladefs: a fault, and a
     /// writer's opening, are futures, deferred as they wait ([`serve_future`]): for the pager
-    /// (TASK-92.20), and for a connection going to let the store go, or a restore's version
-    /// (TASK-92.5). A request its kind gives no meaning ([`Request::decode`]), or naming a store
+    /// (TASK-92.20), and for a connection going to let the cell go, or a restore's version
+    /// (TASK-92.5). A request its kind gives no meaning ([`Request::decode`]), or naming a cell
     /// its tenant's VM processes don't ([`Connection::authorize`]), is refused, whatever it is, in
     /// one place (TASK-160.9).
     fn serve_in_turn(self: Arc<Self>, message: Message, charge: Charge) {
@@ -1379,7 +1380,7 @@ impl Connection {
         // TASK-260).
         let guest = match codec::guest_request(&message) {
             Ok((Some(guest), _)) => {
-                Some(crate::request::RequestId { guest, store: self.named.get().cloned() })
+                Some(crate::request::RequestId { guest, open_cell: self.named.get().cloned() })
             }
             // Refused as it is decoded, if it says one it doesn't hold.
             Ok((None, _)) | Err(_) => None,
@@ -1396,16 +1397,16 @@ impl Connection {
     }
 
     /// cladefs: serves the request `message` is, as `answer` owes (TASK-685.3): refused if its
-    /// store halted, or it is malformed, or names a store its tenant doesn't hold.
+    /// cell halted, or it is malformed, or names a cell its tenant doesn't hold.
     async fn serve_message(self: Arc<Self>, message: Message, answer: Answer) {
         let refuse = |answer: Answer, errno| {
             let reply = answer.reply_header();
             answer.send(Err(errno), reply, Vec::new(), Vec::new())
         };
-        // cladefs: a store a panic went through serves nothing more, of whatever the panic left half
+        // cladefs: a cell a panic went through serves nothing more, of whatever the panic left half
         // done (`crate::halt`, TASK-153.16): `EIO`; nor one whose tenant's or cell's keys the
         // daemon forgot, `EACCES` (TASK-411.7).
-        if let Some(errno) = self.store().and_then(|store| store.halted()) {
+        if let Some(errno) = self.cell().and_then(|open_cell| open_cell.halted()) {
             return refuse(answer, errno);
         }
         let request = Request::decode(&message).and_then(|request| {
@@ -1423,7 +1424,7 @@ impl Connection {
             Ok(Request::Private { window_offset, len }) => {
                 self.clone().make_private(window_offset, len, answer).await
             }
-            // cladefs: boxed, as an opening's future holds all a store's opening awaits, some 22 KB,
+            // cladefs: boxed, as an opening's future holds all a cell's opening awaits, some 22 KB,
             // which every request's future, commits' and writes' too, would hold and be copied
             // with, onto the heap in `serve_future`: some 15% of the daemon's CPU under pgbench
             // (TASK-707).
@@ -1477,8 +1478,8 @@ impl Connection {
         }
     }
 
-    /// Whether it may name the store at `path`: `EACCES` unless the store is where its tenant's
-    /// VM processes name stores (TASK-43.4).
+    /// Whether it may name the cell at `path`: `EACCES` unless the cell is where its tenant's
+    /// VM processes name cells (TASK-43.4).
     fn authorize(&self, path: &Path) -> Result<(), Errno> {
         self.tenant.holds(path)
     }
@@ -1502,15 +1503,15 @@ impl Connection {
         fds: &mut Vec<std::os::fd::BorrowedFd<'a>>,
     ) -> Result<(), Errno> {
         if let Request::Open { path, opening: codec::Opening::ReadOnly } = request {
-            // Boxed, as a store's opening is (`serve_message`, TASK-707).
+            // Boxed, as a cell's opening is (`serve_message`, TASK-707).
             let cell = Box::pin(self.follow(path)).await?;
-            let commit = self.store().ok_or(Errno::EBADF)?.view_commit()?;
+            let commit = self.cell().ok_or(Errno::EBADF)?.view_commit()?;
             let max_map_count = max_map_count();
             reply.args = Opened { cell, arena: self.arena_id(), commit, max_map_count }.args();
             fds.extend(self.memories());
             return Ok(());
         }
-        let store = self.store().ok_or(Errno::EBADF)?;
+        let open_cell = self.cell().ok_or(Errno::EBADF)?;
         // cladefs: a request failing, with the errno given (EIO by default), or waiting, as
         // FAILPOINTS says, in a daemon built with the failpoints feature (TASK-44.10):
         // `cladefsd::map=1%return(5)` fails one MAP in a hundred with EIO, `cladefsd::commit=
@@ -1533,8 +1534,8 @@ impl Connection {
                 // cladefs: in its turn, as a fault's, as what it pages in holds memory: a read
                 // served as a future holds no thread to bound it by (TASK-149.34, doc-24 step 5).
                 let _turn = self.page_ins.acquire().await.map_err(|_| Errno::EIO)?;
-                store.read(*extent, *offset, &mut [area.slice_mut(*at, *len)?]).await?;
-                self.traced(Kind::Read, began, store, *extent, *offset, *len);
+                open_cell.read(*extent, *offset, &mut [area.slice_mut(*at, *len)?]).await?;
+                self.traced(Kind::Read, began, open_cell, *extent, *offset, *len);
                 Ok(())
             }
             // As much as a reply holds, the codec has it (TASK-79.16).
@@ -1543,8 +1544,8 @@ impl Connection {
                 payload.resize(*len as usize, 0);
                 let _turn = self.page_ins.acquire().await.map_err(|_| Errno::EIO)?;
                 let mut into = [VolatileSliceMut::from(&mut payload[..])];
-                store.read(*extent, *offset, &mut into).await?;
-                self.traced(Kind::Read, began, store, *extent, *offset, *len);
+                open_cell.read(*extent, *offset, &mut into).await?;
+                self.traced(Kind::Read, began, open_cell, *extent, *offset, *len);
                 Ok(())
             }
             Request::Write { extent, offset, data, barriers } => {
@@ -1554,61 +1555,63 @@ impl Connection {
                         self.transfer.get().ok_or(Errno::EINVAL)?.slice(at, len)?
                     }
                 };
-                // cladefs: within its disk and its tenant's limits, as its store admits it (doc-22).
-                store.write_with_barriers(*extent, *offset, &[data], *barriers).await
+                // cladefs: within its disk and its tenant's limits, as its cell admits it (doc-22).
+                open_cell.write_with_barriers(*extent, *offset, &[data], *barriers).await
             }
-            Request::Free(extent) => store.free(*extent),
+            Request::Free(extent) => open_cell.free(*extent),
             // cladefs: and those after it, in order (TASK-92.13).
             Request::FreeMany { first, rest } => {
                 let mut extents = std::iter::once(first).chain(rest.iter());
-                extents.try_for_each(|extent| store.free(*extent))
+                extents.try_for_each(|extent| open_cell.free(*extent))
             }
             Request::Map(mapping @ WindowMapping { window_offset, len, contents }) => {
                 let began = std::time::Instant::now();
                 match *contents {
-                    MappingContents::Zeros => store.map_zeros_at(*window_offset, *len)?,
+                    MappingContents::Zeros => open_cell.map_zeros_at(*window_offset, *len)?,
                     MappingContents::Extent { extent, offset } => {
-                        store.map(extent, offset, *len, *window_offset).await?
+                        open_cell.map(extent, offset, *len, *window_offset).await?
                     }
                 }
-                self.traced_maps(began, store, std::slice::from_ref(mapping));
+                self.traced_maps(began, open_cell, std::slice::from_ref(mapping));
                 Ok(())
             }
             // cladefs: in one change of the window (TASK-92.14).
             Request::MapMany(mappings) => {
                 let began = std::time::Instant::now();
-                store.map_many(mappings).await?;
-                self.traced_maps(began, store, mappings);
+                open_cell.map_many(mappings).await?;
+                self.traced_maps(began, open_cell, mappings);
                 Ok(())
             }
             Request::Mappings => {
-                *payload = codec::mappings_payload(&store.window_mappings()?);
+                *payload = codec::mappings_payload(&open_cell.window_mappings()?);
                 Ok(())
             }
-            Request::Unmap { window_offset, len } => store.unmap(*window_offset, *len),
-            Request::Commit { commit: Commit::Uploaded, root } => store.commit(*root).await,
-            Request::Commit { commit: Commit::Local, root } => store.commit_local(*root).await,
-            Request::Commit { commit: Commit::Ordered, root } => store.commit_ordered(*root).await,
-            Request::Root => store.root().map(|root| *payload = root),
-            Request::Advance => {
-                store.advance().map(|commit| reply.args = Advanced { commit }.args())
+            Request::Unmap { window_offset, len } => open_cell.unmap(*window_offset, *len),
+            Request::Commit { commit: Commit::Uploaded, root } => open_cell.commit(*root).await,
+            Request::Commit { commit: Commit::Local, root } => open_cell.commit_local(*root).await,
+            Request::Commit { commit: Commit::Ordered, root } => {
+                open_cell.commit_ordered(*root).await
             }
-            Request::LetGo { commit } => store.let_go(*commit),
-            Request::Pin(extent) => store.pin(*extent),
-            Request::Unpin(extent) => store.unpin(*extent),
+            Request::Root => open_cell.root().map(|root| *payload = root),
+            Request::Advance => {
+                open_cell.advance().map(|commit| reply.args = Advanced { commit }.args())
+            }
+            Request::LetGo { commit } => open_cell.let_go(*commit),
+            Request::Pin(extent) => open_cell.pin(*extent),
+            Request::Unpin(extent) => open_cell.unpin(*extent),
             Request::Version => {
-                // A VM snapshot's: a version of the store's cell, made here (doc-20), refused while
+                // A VM snapshot's: a version of the cell, made here (doc-20), refused while
                 // the window holds private pages, whose bytes no extent holds (TASK-203). Each
                 // refusal says why here, as the VMM's error can't (TASK-92.14).
-                // Boxed, as a store's opening is (`serve_message`, TASK-707).
-                let version = Box::pin(store.make_version(None)).await.map_err(|err| {
+                // Boxed, as a cell's opening is (`serve_message`, TASK-707).
+                let version = Box::pin(open_cell.make_version(None)).await.map_err(|err| {
                     if err.errno() == Some(Errno::EBUSY) {
                         log::warn!("cladefsd: a version refused: {err:#}");
                     }
                     cells::errno_of(format_args!("making a version"), err)
                 })?;
                 self.versions_made.with(Mutex::lock).insert(version);
-                let cell = store.cell();
+                let cell = open_cell.cell();
                 reply.args = Forked { cell: cell.id, version, tenant: cell.tenant }.args();
                 Ok(())
             }
@@ -1619,7 +1622,7 @@ impl Connection {
                     return Err(Errno::EPERM);
                 }
                 let ids = std::collections::BTreeSet::from([*version]);
-                Box::pin(store.drop_versions(&ids)).await.map_err(|err| {
+                Box::pin(open_cell.drop_versions(&ids)).await.map_err(|err| {
                     cells::errno_of(format_args!("dropping version {version:x}"), err)
                 })?;
                 self.versions_made.with(Mutex::lock).remove(version);
@@ -1627,8 +1630,8 @@ impl Connection {
             }
             // Authorized, as every path a request names ([`Connection::serve_in_turn`]).
             Request::Fork { path } => {
-                // cladefs: a new cell of the store's tenant's, its ID the bucket's (TASK-364).
-                let forked = Box::pin(store.fork(path, store.cell().tenant)).await;
+                // cladefs: a new cell of the cell's tenant's, its ID the bucket's (TASK-364).
+                let forked = Box::pin(open_cell.fork(path, open_cell.cell().tenant)).await;
                 if let Err(err) = &forked
                     && err.errno() == Some(Errno::EBUSY)
                 {
@@ -1642,7 +1645,7 @@ impl Connection {
                 reply.args = Forked { cell: cell.id, version: 0, tenant: 0 }.args();
                 Ok(())
             }
-            Request::Info => store.info().map(|info| reply.args = Info(info).args()),
+            Request::Info => open_cell.info().map(|info| reply.args = Info(info).args()),
             // No larger than the daemon makes room for, the codec has it (TASK-150.3).
             Request::Window { size, private_max, budget } => {
                 let (sender, acks) = (self.peer.sender.clone(), self.peer.acks.clone());
@@ -1655,14 +1658,14 @@ impl Connection {
                 let writer = self.hold().is_some();
                 let window = match private_max {
                     Some(most) if writer => {
-                        store.create_copying_dax_window(*size, Some(stage), *most)
+                        open_cell.create_copying_dax_window(*size, Some(stage), *most)
                     }
-                    None if !writer => store.create_dax_window(*size, Some(stage)),
+                    None if !writer => open_cell.create_dax_window(*size, Some(stage)),
                     _ => return Err(Errno::EINVAL),
                 };
                 let window = window.map_err(|err| {
                     log::warn!("cladefsd: creating a window: {err:#}");
-                    // cladefs: no memory for it, or a store that takes none, say so.
+                    // cladefs: no memory for it, or a cell that takes none, say so.
                     match err.errno() {
                         Some(errno @ (Errno::ENOMEM | Errno::EROFS | Errno::EPERM)) => errno,
                         _ => Errno::EINVAL,
@@ -1711,7 +1714,7 @@ impl Connection {
         if !page {
             crate::stats::add(crate::stats::Counter::FaultStores, 1);
         }
-        // cladefs: a store refused, or an access to a page the window maps nothing at, stops its
+        // cladefs: a write refused, or an access to a page the window maps nothing at, stops its
         // VM if the guest goes on with it for a second, with no more than KVM_RUN's EFAULT to say
         // so: what the window had there, and its latest MAPs and UNMAPs, each refusal of the
         // first thousand, a run's few, and every power of two after (TASK-99, TASK-101). Those of
@@ -1724,11 +1727,11 @@ impl Connection {
             static REFUSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let count = REFUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             if (count <= 1000 || count.is_power_of_two())
-                && let Some(store) = self.store()
+                && let Some(open_cell) = self.cell()
             {
                 log::warn!(
                     "cladefsd: {what} at DAX window offset {offset:#x} refused ({count} so far): {}",
-                    store.refused(offset - offset % crate::pages::page_size(), what)
+                    open_cell.refused(offset - offset % crate::pages::page_size(), what)
                 );
             }
         }
@@ -1759,8 +1762,8 @@ impl Connection {
         [memory.memory.as_fd(), memory.public.as_fd()]
     }
 
-    /// cladefs: opens a follower of the store at `path`, authorized (backlog doc-8), of the store
-    /// a writer's connection, or followers', have open, or, if none has, of the store as of its
+    /// cladefs: opens a follower of the cell at `path`, authorized (backlog doc-8), of the cell
+    /// a writer's connection, or followers', have open, or, if none has, of the cell as of its
     /// last commit, which a writer opening it then takes over ([`cells::followed`]); tells its VM
     /// process of the writer's commits after its view's ([`COMMITTED`]); and returns its cell.
     async fn follow(&self, path: &Path) -> Result<u64, Errno> {
@@ -1770,18 +1773,18 @@ impl Connection {
         if follower.access().public && !self.tenant.policy.follows_public_bases {
             return Err(Errno::EPERM);
         }
-        let store = Arc::new(follower);
+        let open_cell = Arc::new(follower);
         let (commit, sender, told) =
-            (store.view_commit()?, self.peer.sender.clone(), store.clone());
+            (open_cell.view_commit()?, self.peer.sender.clone(), open_cell.clone());
         self.start_behind(move |stopped| tell_commits(told, commit, sender, stopped));
-        let cell = store.cell().id;
-        opening.opened(path, store, Phase::Following);
+        let cell = open_cell.cell().id;
+        opening.opened(path, open_cell, Phase::Following);
         Ok(cell)
     }
 
     /// cladefs: the connection's one [`OPEN`] at a time: `EBUSY` if another is in progress, as its
-    /// requests are served side by side, or it has its store (TASK-150.5). What an `OPEN` holds
-    /// meanwhile, its store's path among it, its [`Opening`] gives the connection, or it lets go of.
+    /// requests are served side by side, or it has its cell (TASK-150.5). What an `OPEN` holds
+    /// meanwhile, its cell's path among it, its [`Opening`] gives the connection, or it lets go of.
     fn opening(&self) -> Result<Opening<'_>, Errno> {
         let mut phase = self.phase.with(Mutex::lock);
         match *phase {
@@ -1793,7 +1796,7 @@ impl Connection {
         }
     }
 
-    /// cladefs: serves an [`OPEN`] of the store at `path` to write, as `how` says
+    /// cladefs: serves an [`OPEN`] of the cell at `path` to write, as `how` says
     /// ([`Connection::open`]), and replies with its cell and physical memory: a future, which
     /// holds no thread while it waits (TASK-92.5), served so ([`serve_future`]).
     async fn serve_open(self: Arc<Self>, path: PathBuf, how: codec::Opening, answer: Answer) {
@@ -1811,21 +1814,22 @@ impl Connection {
     }
 
     /// cladefs: records in its trace of its guest's reads, if it keeps one (TASK-702.1), a read of
-    /// `kind` the guest began at `began`, of `len` bytes at `offset` in `extent`, of `store`.
+    /// `kind` the guest began at `began`, of `len` bytes at `offset` in `extent`, of `open_cell`.
     fn traced(
         &self,
         kind: Kind,
         began: std::time::Instant,
-        store: &OpenCell,
+        open_cell: &OpenCell,
         extent: crate::ExtentId,
         offset: u64,
         len: u64,
     ) {
-        // cladefs: its store's version's read evidence, if it records it (TASK-702.2).
-        store.guest_read(extent, offset, len, began);
+        // cladefs: its cell's version's read evidence, if it records it (TASK-702.2).
+        open_cell.guest_read(extent, offset, len, began);
         if let Some(trace) = self.reads.get() {
-            // An extent the store can't say the length of, an attached base's, is of 0.
-            let extent_len = store.stored_extent(extent).ok().flatten().map_or(0, |(len, _)| len);
+            // An extent the cell can't say the length of, an attached base's, is of 0.
+            let extent_len =
+                open_cell.stored_extent(extent).ok().flatten().map_or(0, |(len, _)| len);
             trace.record(kind, began, extent, extent_len, offset, len);
         }
     }
@@ -1833,13 +1837,18 @@ impl Connection {
     /// cladefs: records in its trace, as [`Connection::traced`] does, the guest's `MAP`s of
     /// `mappings`, begun at `began` and made: each of a sealed extent's bytes, as the guest maps a
     /// file's range it touches, whose pages a warm host installs without a fault.
-    fn traced_maps(&self, began: std::time::Instant, store: &OpenCell, mappings: &[WindowMapping]) {
-        if self.reads.get().is_none() && !store.records_reads() {
+    fn traced_maps(
+        &self,
+        began: std::time::Instant,
+        open_cell: &OpenCell,
+        mappings: &[WindowMapping],
+    ) {
+        if self.reads.get().is_none() && !open_cell.records_reads() {
             return;
         }
         for mapping in mappings {
             if let MappingContents::Extent { extent, offset } = mapping.contents {
-                self.traced(Kind::Map, began, store, extent, offset, mapping.len);
+                self.traced(Kind::Map, began, open_cell, extent, offset, mapping.len);
             }
         }
     }
@@ -1854,52 +1863,52 @@ impl Connection {
         offset: u64,
         access: crate::Access,
     ) {
-        let Some(store) = self.store() else { return };
-        if self.reads.get().is_none() && !store.records_reads() {
+        let Some(open_cell) = self.cell() else { return };
+        if self.reads.get().is_none() && !open_cell.records_reads() {
             return;
         }
         let Some((extent, at)) = window.extent_at(offset) else { return };
         let kind = match access {
             crate::Access::Read => Kind::Fault,
-            crate::Access::Write => Kind::Store,
+            crate::Access::Write => Kind::Write,
         };
-        self.traced(kind, began, store, extent, at, crate::pages::page_size());
+        self.traced(kind, began, open_cell, extent, at, crate::pages::page_size());
     }
 
-    /// Opens the store at `path`, authorized, as `how` says: creating it if it doesn't exist, or
+    /// Opens the cell at `path`, authorized, as `how` says: creating it if it doesn't exist, or
     /// forking it from the version `how` names if it doesn't exist ([`cells::fork_version`]);
-    /// unless another connection has it open; and returns its cell. cladefs: a store followers
+    /// unless another connection has it open; and returns its cell. cladefs: a cell followers
     /// have open, it takes over ([`cells::take_over`]). Its waits, for a connection whose VM
-    /// process is gone to let the store go, and for a restore's version, hold no thread
+    /// process is gone to let the cell go, and for a restore's version, hold no thread
     /// (TASK-92.5); its I/O blocks. A version of another tenant's than the connection's forks only
     /// if it is shared (`EACCES`, TASK-395.7).
     async fn open(&self, path: &Path, how: codec::Opening) -> Result<u64, Errno> {
         let opening = self.opening()?;
-        let hold = cells::hold_to_write(&store_key(path), self.this.clone()).await?;
+        let hold = cells::hold_to_write(&cell_dir_key(path), self.this.clone()).await?;
         // cladefs: nor one of another tenant's cells (TASK-364).
         self.tenant.reaches(path)?;
-        // cladefs: a store it makes, within its disk and its tenant's limits, as its making admits
+        // cladefs: a cell it makes, within its disk and its tenant's limits, as its making admits
         // it (doc-22).
         // Closed before its hold lets its path go, if it fails here.
-        let store = self.open_held(path, &hold, &how).await?;
-        // A VM process opens no store to write that its writer may not write
+        let open_cell = self.open_held(path, &hold, &how).await?;
+        // A VM process opens no cell to write that its writer may not write
         // ([`crate::CellAccess::may_write`]): a public base, only forks of it (TASK-43), what it
         // wrote being every tenant's, its pages the default arena's, which every VM process holds
         // (TASK-79.17); cladefs: nor a version, which nothing writes (doc-7, Versions).
-        store.access().may_write()?;
-        let flushed = store.clone();
+        open_cell.access().may_write()?;
+        let flushed = open_cell.clone();
         self.start_behind(move |stopped| flush_behind(flushed, stopped));
-        let cell = store.cell().id;
-        // cladefs: should its VM process go, and a writer wait for its store to close, the store's
+        let cell = open_cell.cell().id;
+        // cladefs: should its VM process go, and a writer wait for its cell to close, the cell's
         // uploader stops at once rather than upload what it holds first (TASK-216).
-        if let Some(cut_short) = store.cut_short() {
+        if let Some(cut_short) = open_cell.cut_short() {
             hold.when_wanted(cut_short);
         }
-        opening.opened(path, store, Phase::Writing(Arc::new(hold)));
+        opening.opened(path, open_cell, Phase::Writing(Arc::new(hold)));
         Ok(cell)
     }
 
-    /// Opens the store at `path`, which `hold` holds, as [`Connection::open`] does: the store
+    /// Opens the cell at `path`, which `hold` holds, as [`Connection::open`] does: the cell
     /// connections have open there from now on.
     async fn open_held(
         &self,
@@ -1908,47 +1917,47 @@ impl Connection {
         how: &codec::Opening,
     ) -> Result<Arc<OpenCell>, Errno> {
         let arena = self.arena();
-        // cladefs: a restore's store there already, which the snapshot was taken of or an earlier
+        // cladefs: a restore's cell there already, which the snapshot was taken of or an earlier
         // restore forked, holds the version's state, or is refused, as it is (TASK-194).
         let mut there = None;
         if let codec::Opening::ForkOf { tenant, cell, version, capacity } = *how
             && host_fs::exists(&path)
             && !crate::host_cell::unmade(path)
         {
-            let store = match hold.instance() {
-                Some((store, _)) => store,
-                None => Arc::new(open_store(path, None, Some(arena)).await?),
+            let open_cell = match hold.instance() {
+                Some((open_cell, _)) => open_cell,
+                None => Arc::new(open_cell_at(path, None, Some(arena)).await?),
             };
             cells::at_version(
                 (crate::CellId { tenant, id: cell }, version),
                 capacity,
                 path,
-                &store,
+                &open_cell,
             )
             .await?;
-            there = Some(store);
+            there = Some(open_cell);
         }
-        if let Some(store) = cells::take_over(hold, arena)? {
-            return Ok(store);
+        if let Some(open_cell) = cells::take_over(hold, arena)? {
+            return Ok(open_cell);
         }
-        let store = match (there, how) {
-            (Some(store), _) => store,
-            // cladefs: or where a store's making was left unmade, its host crashing, which is no
-            // store: removed first, as deleting it would (TASK-79.84).
+        let open_cell = match (there, how) {
+            (Some(open_cell), _) => open_cell,
+            // cladefs: or where a cell's making was left unmade, its host crashing, which is no
+            // cell: removed first, as deleting it would (TASK-79.84).
             (None, &codec::Opening::ForkOf { tenant, cell, version, capacity }) => {
                 cells::removed_if_unmade(path)?;
                 let forked = (crate::CellId { tenant, id: cell }, version);
                 cells::fork_version(forked, capacity, (path, self.tenant.granted())).await?;
-                Arc::new(open_store(path, None, Some(arena)).await?)
+                Arc::new(open_cell_at(path, None, Some(arena)).await?)
             }
             (None, codec::Opening::Create(capacity, kind)) => {
                 let new = cells::New { capacity: *capacity, kind: *kind, tenant: self.tenant.id };
-                Arc::new(open_store(path, Some(new), Some(arena)).await?)
+                Arc::new(open_cell_at(path, Some(new), Some(arena)).await?)
             }
-            (None, _) => Arc::new(open_store(path, None, Some(arena)).await?),
+            (None, _) => Arc::new(open_cell_at(path, None, Some(arena)).await?),
         };
-        hold.open(&store)?;
-        Ok(store)
+        hold.open(&open_cell)?;
+        Ok(open_cell)
     }
 
     /// Whether a shrink waits for the guest's answer.
@@ -1971,18 +1980,18 @@ impl Connection {
 }
 
 impl Resizes for Connection {
-    /// Sets its store's capacity to `capacity` bytes (the control API's `ResizeCell`): grows it,
+    /// Sets its cell's capacity to `capacity` bytes (the control API's `ResizeCell`): grows it,
     /// and tells the guest; or asks the guest to shrink, and shrinks it if the guest does, holding
-    /// no thread while it waits for the guest's answer (TASK-43.6). The store's I/O runs on a
+    /// no thread while it waits for the guest's answer (TASK-43.6). The cell's I/O runs on a
     /// blocking thread.
     async fn resize(&self, capacity: u64) -> Result<(), Errno> {
-        let store = cells::Live(self.store().ok_or(Errno::EBADF)?.clone());
-        cell_requests::resize_held(&store, self, &self.shrinking, capacity, SHRINK_WAIT).await
+        let open_cell = cells::Live(self.cell().ok_or(Errno::EBADF)?.clone());
+        cell_requests::resize_held(&open_cell, self, &self.shrinking, capacity, SHRINK_WAIT).await
     }
 }
 
 impl Guest for Connection {
-    /// Tells the VM process the store's capacity is `capacity` bytes, or, if `ask`, asks its guest
+    /// Tells the VM process the cell's capacity is `capacity` bytes, or, if `ask`, asks its guest
     /// to shrink to it ([`CAPACITY`]).
     fn tell(&self, capacity: u64, ask: bool) -> Result<(), Errno> {
         let told = Told::Capacity { capacity, ask }.encode();
@@ -2148,76 +2157,76 @@ impl Drop for TransferArea {
     }
 }
 
-/// cladefs: makes `store`'s commits durable within [`FLUSH_EVERY`] of being ordered, until
-/// `stopped` says to stop: on the daemon's runtime, [`FLUSHES`] stores' flushes at once
-/// ([`FLUSH_TURNS`]), each holding its thread only for its syncs (board 2944). Looking at every turn, every store open
-/// took a blocking thread at every turn, which hundreds of stores, their turns coming at once,
-/// kept as many of, each idle for a while after (TASK-34). And so did their flushes, every
-/// store's whose guest committed, on the runtime's blocking threads (TASK-92.49): no more threads
-/// do them than [`FLUSHES`], the work beyond waiting its turn, holding none. What the guest frees
-/// leaves the host's disk with the segments acknowledged in the bucket, whose collector takes it
-/// back, not collected behind the guest's commits as it was (TASK-79.2, TASK-165.8).
-async fn flush_behind(store: Arc<OpenCell>, mut stopped: tokio::sync::oneshot::Receiver<()>) {
+/// cladefs: makes `open_cell`'s commits durable within [`FLUSH_EVERY`] of being ordered, until
+/// `stopped` says to stop: on the daemon's runtime, [`FLUSHES`] cells' flushes at once
+/// ([`FLUSH_TURNS`]), each holding its thread only for its syncs (board 2944). Looking at every
+/// turn, every cell open took a blocking thread at every turn, which hundreds of cells, their turns
+/// coming at once, kept as many of, each idle for a while after (TASK-34). And so did their
+/// flushes, every cell's whose guest committed, on the runtime's blocking threads (TASK-92.49): no
+/// more threads do them than [`FLUSHES`], the work beyond waiting its turn, holding none. What the
+/// guest frees leaves the host's disk with the segments acknowledged in the bucket, whose collector
+/// takes it back, not collected behind the guest's commits as it was (TASK-79.2, TASK-165.8).
+async fn flush_behind(open_cell: Arc<OpenCell>, mut stopped: tokio::sync::oneshot::Receiver<()>) {
     while tokio::time::timeout(FLUSH_EVERY, &mut stopped).await.is_err() {
-        if !store.flush_pending() {
-            store.flush_turned();
+        if !open_cell.flush_pending() {
+            open_cell.flush_turned();
             continue;
         }
         let flushed = async {
             let _turn = FLUSH_TURNS.get().acquire().await.expect("never closed");
-            match store.flush_pending() {
-                true => store.flush().await,
+            match open_cell.flush_pending() {
+                true => open_cell.flush().await,
                 false => Ok(()),
             }
         };
         match futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(flushed)).await {
-            Ok(Ok(())) => store.flush_turned(),
+            Ok(Ok(())) => open_cell.flush_turned(),
             Ok(Err(err)) => {
-                log::error!("cladefsd: making a store's commits durable: {err:?}");
+                log::error!("cladefsd: making a cell's commits durable: {err:?}");
                 break;
             }
-            // Its panic went through the store (board 1212).
+            // Its panic went through the cell (board 1212).
             Err(_) => {
-                store.halt(|| "a panic making its commits durable".into());
+                open_cell.halt(|| "a panic making its commits durable".into());
                 break;
             }
         }
     }
 }
 
-/// cladefs: how many stores' flushes run at once, at most ([`flush_behind`], board 744), each on a
+/// cladefs: how many cells' flushes run at once, at most ([`flush_behind`], board 744), each on a
 /// thread of the runtime's for its syncs alone (board 2944): as many syncs at once as a host's disk
 /// takes, those past them waiting a few milliseconds for their turn, holding no thread; and the
 /// 15 a flush of many files syncs them on beside its own, which every flush shares
-/// (`local_cell`'s `HELPERS`), threads of the store's pool, kept (`local_cell::pool`). A
-/// blocking thread each, for every store whose flush came due at its turn, hundreds of stores'
+/// (`local_cell`'s `HELPERS`), threads of the cell's pool, kept (`local_cell::pool`). A
+/// blocking thread each, for every cell whose flush came due at its turn, hundreds of cells'
 /// guests committing together kept as many as their syncs' waits took, each idle 10 s after,
-/// and made no store durable sooner: on a GCE host's disk, 300 stores' guests committing at once
+/// and made no cell durable sooner: on a GCE host's disk, 300 cells' guests committing at once
 /// kept 297, their commits durable within 54 ms, the median, as with these; half as many took
 /// twice as long (`hundreds_of_writers_flush_on_threads_they_share`).
 pub(super) const FLUSHES: usize = 32;
 
 node_local::node_local! {
-    /// cladefs: the turns stores' flushes take, [`FLUSHES`] at once.
+    /// cladefs: the turns cells' flushes take, [`FLUSHES`] at once.
     static FLUSH_TURNS: tokio::sync::Semaphore = tokio::sync::Semaphore::new(FLUSHES);
 }
 
 /// cladefs: tells the VM process at the other end of `sender` of each commit of its follower's
-/// store after the one numbered `commit` ([`COMMITTED`]): the latest, of each run of them; until
+/// cell after the one numbered `commit` ([`COMMITTED`]): the latest, of each run of them; until
 /// `stopped` says to stop. It waits for the writer's commits holding no thread (TASK-34), or
 /// [`COMMITS_POLL`] at most, for commits made otherwise. What it tells a VM process that stopped
 /// reading waits for it as one message, the latest commit's, rather than one for each, which the
 /// daemon would hold for it without end, the writer's commits going on (TASK-79.9).
 async fn tell_commits(
-    store: Arc<OpenCell>,
+    open_cell: Arc<OpenCell>,
     mut commit: u64,
     sender: Arc<AsyncSender>,
     mut stopped: tokio::sync::oneshot::Receiver<()>,
 ) {
     use tokio::sync::oneshot::error::TryRecvError;
     while let Err(TryRecvError::Empty) = stopped.try_recv() {
-        let committed = store.commits();
-        let Some(latest) = store.newer(commit, std::time::Duration::ZERO).await else {
+        let committed = open_cell.commits();
+        let Some(latest) = open_cell.newer(commit, std::time::Duration::ZERO).await else {
             let _ = tokio::time::timeout(COMMITS_POLL, committed).await;
             continue;
         };
@@ -2322,9 +2331,9 @@ impl Acks {
     }
 
     /// cladefs: how long, as of `now`, the VM process has acknowledged nothing with an operation
-    /// taking access away unacknowledged, as the watchdog looks every so often (TASK-79.9): since it
-    /// first found that so, or none. A backlog it works through is no silence: a burst of tens of
-    /// thousands takes seconds, where each of them takes its time on a slow host (TASK-148).
+    /// taking access away unacknowledged, as the watchdog looks every so often (TASK-79.9): since
+    /// it first found that so, or none. A backlog it works through is no silence: a burst of tens
+    /// of thousands takes seconds, where each of them takes its time on a slow host (TASK-148).
     fn unanswered(&self, now: std::time::Instant) -> std::time::Duration {
         let mut state = self.state.lock().unwrap();
         if state.closed || state.acked >= state.last_taking {
@@ -2352,9 +2361,10 @@ impl Acks {
         now.saturating_duration_since(watched.answered)
     }
 
-    /// cladefs: how long, as of `now`, the operation taking access away that the watchdog is waiting
-    /// for has been unacknowledged, whatever was acknowledged meanwhile, as of its last look
-    /// ([`Acks::unanswered`]): an acknowledgement every so often holds nothing for ever (TASK-148).
+    /// cladefs: how long, as of `now`, the operation taking access away that the watchdog is
+    /// waiting for has been unacknowledged, whatever was acknowledged meanwhile, as of its last
+    /// look ([`Acks::unanswered`]): an acknowledgement every so often holds nothing for ever
+    /// (TASK-148).
     fn behind(&self, now: std::time::Instant) -> std::time::Duration {
         let state = self.state.lock().unwrap();
         let since = state.watched.as_ref().map(|watched| watched.since);
@@ -2456,17 +2466,17 @@ const UNRESPONSIVE: std::time::Duration = std::time::Duration::from_secs(5);
 /// waited for. Its pace is measured over windows as long.
 const BEHIND: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// cladefs: how long a VM process behind for [`BEHIND`] may take to clear its backlog, at the pace it
-/// acknowledged over the last [`BEHIND`], before the daemon lets it go (TASK-249): what keeps one
-/// acknowledging just often enough not to be silent from holding every page freed for hours, as
+/// cladefs: how long a VM process behind for [`BEHIND`] may take to clear its backlog, at the pace
+/// it acknowledged over the last [`BEHIND`], before the daemon lets it go (TASK-249): what keeps
+/// one acknowledging just often enough not to be silent from holding every page freed for hours, as
 /// one acknowledging an operation a second, tens of thousands behind, would. Every page freed
 /// meanwhile waits for it, so not much longer. A VM process acknowledging thousands a second
 /// catches up within it from any backlog the daemon queues, being let go only once it stalls.
 const CATCHING_UP: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// cladefs: how long a VM process whose connection went, and that may still reach pages, has to exit,
-/// as one exiting does just after its connection goes, before the daemon lets it go ([`Peer::gone`],
-/// TASK-79.100): long past what the rest of an exit takes.
+/// cladefs: how long a VM process whose connection went, and that may still reach pages, has to
+/// exit, as one exiting does just after its connection goes, before the daemon lets it go
+/// ([`Peer::gone`], TASK-79.100): long past what the rest of an exit takes.
 const EXITING: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// cladefs: how often the watchdog looks for VM processes that stopped answering ([`watch`]).
@@ -2660,12 +2670,13 @@ impl VmProcess {
     }
 }
 
-/// cladefs: the process at the other end of `stream`, as a pidfd, unless it is this one: the socket's
-/// (`SO_PEERPIDFD`, Linux 6.5); or, on a kernel without it, the process that connected, opened by
-/// the pid the socket keeps of it (`SO_PEERCRED`, `pidfd_open`, 5.3). A process that exited before
-/// it was opened may have left its pid to another, which the daemon would kill in its place: so,
-/// the socket's other end hung up by then, the connection is refused. That leaves a race, on a
-/// kernel before 6.5, with a VM process that exits leaving the socket to another, as its child.
+/// cladefs: the process at the other end of `stream`, as a pidfd, unless it is this one: the
+/// socket's (`SO_PEERPIDFD`, Linux 6.5); or, on a kernel without it, the process that connected,
+/// opened by the pid the socket keeps of it (`SO_PEERCRED`, `pidfd_open`, 5.3). A process that
+/// exited before it was opened may have left its pid to another, which the daemon would kill in its
+/// place: so, the socket's other end hung up by then, the connection is refused. That leaves a
+/// race, on a kernel before 6.5, with a VM process that exits leaving the socket to another, as its
+/// child.
 #[cfg(madsim)]
 fn peer_process(_: &super::wire::Stream) -> std::io::Result<Option<VmProcess>> {
     // cladefs: a simulated guest's, in this process, as a test's is (doc-24).
@@ -2731,10 +2742,11 @@ fn peer_process(stream: &UnixStream) -> std::io::Result<Option<VmProcess>> {
 }
 
 /// cladefs: what of the guest's access a fault the window resolved as `faulted` refused, if it
-/// refused any, to tell of: a store to a page mapped read-only, or an access to a page mapped
-/// nothing at. A probe ([`FAULT_PROBE`]) is the VM process's own, of the page after one a store
+/// refused any, to tell of: a write to a page mapped read-only, or an access to a page mapped
+/// nothing at. A probe ([`FAULT_PROBE`]) is the VM process's own, of the page after one a write
 /// faulted on, which the guest may map nothing at: its refusal refuses the guest nothing. Told of
 /// as the guest's, it filled cladefsd's log with refusals no access of the guest's met (r544).
+/// The words are the log's, which `scripts/dax-refusals.py` reads: a write is a "store" there.
 fn refusal(fault: &Fault, faulted: Result<(), Errno>) -> Option<&'static str> {
     match faulted {
         _ if fault.probe => None,
@@ -2749,19 +2761,19 @@ mod refusal_tests {
     use super::{Errno, Fault, refusal};
     use crate::Access;
 
-    /// cladefs: a probe of a page mapped nothing at, the VM process's own after a store's fault,
-    /// refuses the guest nothing, and isn't told of; the guest's own access to it is, as a store
+    /// cladefs: a probe of a page mapped nothing at, the VM process's own after a write's fault,
+    /// refuses the guest nothing, and isn't told of; the guest's own access to it is, as a write
     /// refused is. Red with probes told of as the guest's accesses.
     #[test]
     fn probes_refuse_the_guest_nothing() {
-        let (load, store) = (Access::Read, Access::Write);
-        let probe = Fault { offset: 0x1000, access: load, page: true, probe: true };
+        let (read, write) = (Access::Read, Access::Write);
+        let probe = Fault { offset: 0x1000, access: read, page: true, probe: true };
         let guests = Fault { probe: false, ..probe };
         let nothing_mapped = Err(Errno::ENOENT);
         assert_eq!(refusal(&probe, nothing_mapped), None);
         assert_eq!(refusal(&guests, nothing_mapped), Some("an access to nothing mapped"));
-        let stored = Fault { access: store, page: false, ..guests };
-        assert_eq!(refusal(&stored, Err(Errno::EACCES)), Some("a store"));
+        let written = Fault { access: write, page: false, ..guests };
+        assert_eq!(refusal(&written, Err(Errno::EACCES)), Some("a store"));
         assert_eq!(refusal(&guests, Ok(())), None);
     }
 }
@@ -3050,8 +3062,8 @@ mod acks_tests {
 
     /// TASK-249: a VM process that acknowledges at the pace a slow host lets it, behind a backlog
     /// it clears slowly, the daemon sending more all the while, is kept however long it is behind:
-    /// 300 s, five times [`BEHIND`]. The cap of [`BEHIND`] let go of one making a DAX clone of the Linux checkout,
-    /// which went on to finish 100 s behind.
+    /// 300 s, five times [`BEHIND`]. The cap of [`BEHIND`] let go of one making a DAX clone of the
+    /// Linux checkout, which went on to finish 100 s behind.
     #[test]
     fn slow_vm_processes_acknowledging_are_kept_however_long_behind() {
         let acks = Acks::default();
@@ -3188,25 +3200,25 @@ mod request_future_tests {
         std::mem::size_of::<F>()
     }
 
-    /// A request's future is small: as a commit's, not as a store's opening, which it boxes. At
+    /// A request's future is small: as a commit's, not as a cell's opening, which it boxes. At
     /// 23 KB, copied as it was spawned, it cost the daemon some 15% more CPU a transaction under
     /// pgbench than serving requests in place did (TASK-707).
     #[test]
-    fn a_requests_future_holds_no_stores_opening() {
+    fn a_requests_future_holds_no_cells_opening() {
         let request = returned_size(Connection::serve_message);
         assert!(request <= 4096, "a request's future is {request} bytes");
     }
 }
 
-/// TASK-43.4: which paths name stores in a directory.
+/// TASK-43.4: which paths name cells in a directory.
 #[cfg(test)]
 mod in_dir_tests {
     use super::in_dir;
 
-    /// A store is in a directory by whatever path names it: not outside it, through symlinks or
+    /// A cell is in a directory by whatever path names it: not outside it, through symlinks or
     /// `..`, nor the directory itself.
     #[test]
-    fn paths_name_stores_in_a_directory_however_they_name_them() {
+    fn paths_name_cells_in_a_directory_however_they_name_them() {
         let dir = tempfile::tempdir().unwrap();
         let (ours, theirs) = (dir.path().join("ours"), dir.path().join("theirs"));
         host_fs::create_dir(&ours).unwrap();

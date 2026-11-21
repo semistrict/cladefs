@@ -6,20 +6,21 @@
 //! their references name, and a journal of them, by which it retires the references of those it
 //! holds no more as it starts (specs/ephemeral, `retireOnlyUnheld`).
 //!
-//! Its directory (`CLADEFSD_EPHEMERAL`), on the disk its ephemeral cells' stores are on, holds:
+//! Its directory (`CLADEFSD_EPHEMERAL`), on the disk its ephemeral cells' cell directories are on,
+//! holds:
 //!
 //! - `incarnation`: a random number made with the directory, new when its disk is lost: the host's
 //!   ephemeral cells, their references naming it, are lost with it, and decommissioning it
 //!   (`DecommissionHost`) retires those references;
 //! - `cells/<TENANT>.<CELL>`, one for each ephemeral cell it may hold, written, durably, before
-//!   the cell's reference: its parent and origin, its store's path, and the bucket its parent is
+//!   the cell's reference: its parent and origin, its cell's path, and the bucket its parent is
 //!   kept in; and the migration it is being taken by from another host, if it is (TASK-698.4).
 //!   Removed once the reference is;
 //! - `accepted/<MIGRATION>`, one for each migration it accepted, kept for good, so that it answers
 //!   yes to a hand-over it accepted however late it is asked again, the cell gone on since
 //!   (specs/ephemeral, `remembersAccepted`).
 //!
-//! As the daemon starts, before it serves, each journal entry whose store is not there, an
+//! As the daemon starts, before it serves, each journal entry whose cell is not there, an
 //! ephemeral cell's of its cell, has its reference retired and goes: a fork its host crashed in,
 //! or a deletion.
 
@@ -50,7 +51,7 @@ pub(crate) struct Entry {
     pub migration: Option<u64>,
 }
 
-/// Where a migration `migration` to `path` stages the store's files until its hand-over.
+/// Where a migration `migration` to `path` stages the cell's files until its hand-over.
 pub(crate) fn staging(path: &Path, migration: u64) -> PathBuf {
     let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
     path.with_file_name(format!(".{name}.migrating-{migration:x}"))
@@ -168,7 +169,7 @@ impl Host {
     }
 
     /// Retires the references of the ephemeral cells its journal names that it holds no more: its
-    /// store at its path gone, or not an ephemeral cell's of its cell. Returns how many.
+    /// cell at its path gone, or not an ephemeral cell's of its cell. Returns how many.
     pub async fn retire_stale(&self) -> Result<usize, Error> {
         let mut retired = 0;
         for entry in self.entries()? {
@@ -209,7 +210,7 @@ impl Host {
     }
 }
 
-/// Whether the store at `entry`'s path is its ephemeral cell's, whole.
+/// Whether the cell directory at `entry`'s path is its ephemeral cell's, whole.
 fn held(entry: &Entry) -> bool {
     if !host_fs::exists(&entry.path) || local_cell::unmade_host(&entry.path) {
         return false;

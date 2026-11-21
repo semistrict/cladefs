@@ -39,7 +39,7 @@ const CONTEXT_TENANT: &str = "cladefs-tenant";
 /// What the query of an `aws-kms://` URL may name.
 const QUERY: [&str; 3] = ["key", "keys", "endpoint"];
 
-/// How long one attempt of a call to the KMS may take, and the call, its retries all told: a store
+/// How long one attempt of a call to the KMS may take, and the call, its retries all told: a cell
 /// opening waits on it, so that a KMS that does not answer fails it, as [`Error::Io`], rather than
 /// hold it for good. The SDK retries what AWS says is worth retrying (throttling, 5xx, a lost
 /// connection), three attempts, backing off.
@@ -54,9 +54,9 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// (EKS), the container's (ECS) or the instance's (IMDSv2). It never logs them, nor a key.
 ///
 /// A wrap is KMS's `Encrypt` of the key's 32 bytes under the tenant's key, with the encryption
-/// context `{"cladefs-tenant": TENANT}` (the tenant in base 32, as [`KeyNames`] names it): so
-/// that the ciphertext decrypts for no other tenant even under the same key, and a key policy can
-/// let cladefs use a key for its tenant alone. What it wraps is a header, [`MAGIC`], [`FORMAT`] (1),
+/// context `{"cladefs-tenant": TENANT}` (the tenant in base 32, as [`KeyNames`] names it): so that
+/// the ciphertext decrypts for no other tenant even under the same key, and a key policy can let
+/// cladefs use a key for its tenant alone. What it wraps is a header, [`MAGIC`], [`FORMAT`] (1),
 /// the key's name's length (2 bytes, big-endian) and name, then KMS's ciphertext blob, which names
 /// the key's version itself: so a rotated key unwraps what any of its versions wrapped. An unwrap
 /// refuses, as [`Error::Unauthentic`] and asking the KMS nothing, a wrapped key whose header is not
@@ -330,7 +330,8 @@ where
     let why = match err.code() {
         Some(code) => format!("{code}: {}", err.message().unwrap_or_default()),
         None => {
-            // What failed, and why, each cause in turn: no SDK's Debug, which says more than needed.
+            // What failed, and why, each cause in turn: no SDK's Debug, which says more than
+            // needed.
             let mut why = err.to_string();
             let mut source = std::error::Error::source(&err);
             while let Some(cause) = source {

@@ -2,12 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: what cladefs keeps of its own in a store's directory, beside the store's files
+//! cladefs: what cladefs keeps of its own in a cell directory, beside the cell's files
 //! (TASK-160.13): what is attached to it ([`attached`]), what it was forked from ([`ancestry`]),
-//! and the cells marked public ([`public_cells`]). Each record is written one way, durably ([`write`], [`mark`]): whole or not
-//! at all, the file and its directory synced. And each is read by one rule ([`read`]): missing, it
-//! is none; unreadable, or not what it says, the store's opening fails with `EIO`, logged, rather
-//! than going on as if there were none, as a public base opening private would (TASK-160.10).
+//! and the cells marked public ([`public_cells`]). Each record is written one way, durably
+//! ([`write`], [`mark`]): whole or not at all, the file and its directory synced. And each is read
+//! by one rule ([`read`]): missing, it is none; unreadable, or not what it says, the cell's opening
+//! fails with `EIO`, logged, rather than going on as if there were none, as a public base opening
+//! private would (TASK-160.10).
 
 use crate::error::{Errno, Result};
 use base32_id::{Padded, Short};
@@ -16,13 +17,13 @@ use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// The record of what is attached to a store: a line of each's cells, in base 32,
+/// The record of what is attached to a cell: a line of each's cells, in base 32,
 /// comma-separated, and path.
 const ATTACHED: &str = "attached-bases";
 
-/// The record naming the stores a store was forked from, nearest first: a line of each's cell,
+/// The record naming the cells a cell was forked from, nearest first: a line of each's cell,
 /// in base 32, and directory, as of the fork. A fork's directory is its own, its cell alone
-/// in it (TASK-165.7): what it inherited of what cladefs keeps beside a store ([`inherit`]).
+/// in it (TASK-165.7): what it inherited of what cladefs keeps beside a cell ([`inherit`]).
 const ANCESTRY: &str = "ancestry";
 
 /// The prefix of the empty file marking a cell public, its cell in base 32 after it, padded.
@@ -30,7 +31,7 @@ const PUBLIC: &str = "public-";
 
 /// Writes `text` as the record `name` in `dir`, durably: whole or not at all, by a file written
 /// and synced beside it, renamed over it, the directory synced after.
-/// cladefs: through the store's directory, as every change to it is (`Dir::replace`, TASK-539.3).
+/// cladefs: through the cell directory, as every change to it is (`Dir::replace`, TASK-539.3).
 pub(crate) fn write(dir: &Path, name: &str, text: &str) -> io::Result<()> {
     let dir = local_cell::HostDir::new(dir)?;
     dir.replace(name, text.as_bytes())?;
@@ -38,7 +39,7 @@ pub(crate) fn write(dir: &Path, name: &str, text: &str) -> io::Result<()> {
 }
 
 /// Makes the empty records `names` in `dir`, durably: each synced, then the directory; one there
-/// already is left as it is. Through the store's directory, as every change to it is.
+/// already is left as it is. Through the cell directory, as every change to it is.
 fn mark(dir: &Path, names: impl IntoIterator<Item = String>) -> io::Result<()> {
     let dir = local_cell::HostDir::new(dir)?;
     for name in names {
@@ -83,13 +84,13 @@ fn lines<T>(
         .collect()
 }
 
-/// `EIO`, logged, for `err`, doing `what` to the store in `dir`.
+/// `EIO`, logged, for `err`, doing `what` to the cell in `dir`.
 fn failed(dir: &Path, what: &str, err: io::Error) -> Errno {
     log::error!("cladefs: {what} of {}: {err}", dir.display());
     Errno::EIO
 }
 
-/// What is recorded as attached to the store in `dir`: each's cells and path.
+/// What is recorded as attached to the cell in `dir`: each's cells and path.
 pub(crate) fn attached(dir: &Path) -> Result<Vec<(Vec<u64>, PathBuf)>> {
     lines(dir, ATTACHED, "what is attached", |line| {
         let (cells, base) = line.split_once(' ')?;
@@ -98,7 +99,7 @@ pub(crate) fn attached(dir: &Path) -> Result<Vec<(Vec<u64>, PathBuf)>> {
     })
 }
 
-/// Records `base`, of `cells`, as attached to the store in `dir`, durably, unless it is.
+/// Records `base`, of `cells`, as attached to the cell in `dir`, durably, unless it is.
 pub(crate) fn attach(dir: &Path, base: &Path, cells: &[u64]) -> Result<()> {
     let mut attached = attached(dir)?;
     if attached.iter().any(|(_, recorded)| recorded == base) {
@@ -108,7 +109,7 @@ pub(crate) fn attach(dir: &Path, base: &Path, cells: &[u64]) -> Result<()> {
     write_attached(dir, &attached)
 }
 
-/// Replaces what the store in `dir` records as attached with `attached`, durably.
+/// Replaces what the cell in `dir` records as attached with `attached`, durably.
 fn write_attached(dir: &Path, attached: &[(Vec<u64>, PathBuf)]) -> Result<()> {
     let mut text = String::new();
     for (cells, base) in attached {
@@ -118,7 +119,7 @@ fn write_attached(dir: &Path, attached: &[(Vec<u64>, PathBuf)]) -> Result<()> {
     write(dir, ATTACHED, &text).map_err(|err| failed(dir, "recording what is attached", err))
 }
 
-/// The stores the store in `dir` was forked from, nearest first: none, if it is no fork.
+/// The cells the cell in `dir` was forked from, nearest first: none, if it is no fork.
 pub(crate) fn ancestry(dir: &Path) -> Result<Vec<(u64, PathBuf)>> {
     lines(dir, ANCESTRY, "what it was forked from", |line| {
         let (cell, from) = line.split_once(' ')?;
@@ -126,7 +127,7 @@ pub(crate) fn ancestry(dir: &Path) -> Result<Vec<(u64, PathBuf)>> {
     })
 }
 
-/// The cells of the store in `dir` marked public; `EIO`, logged, if its directory can't be
+/// The cells of the cell in `dir` marked public; `EIO`, logged, if its directory can't be
 /// listed, as with as many files open as the process may: read as none, a public base would open
 /// private, its writer's (TASK-160.10).
 pub(crate) fn public_cells(dir: &Path) -> Result<BTreeSet<u64>> {
@@ -147,14 +148,14 @@ pub(crate) fn public_cells(dir: &Path) -> Result<BTreeSet<u64>> {
     listed().map_err(|err| failed(dir, "listing the public cells", err))
 }
 
-/// Marks `cells` public in the store in `dir`, durably.
+/// Marks `cells` public in the cell in `dir`, durably.
 pub(crate) fn mark_public(dir: &Path, cells: &[u64]) -> Result<()> {
     let markers = cells.iter().map(|&cell| format!("{PUBLIC}{}", Padded(cell)));
     mark(dir, markers).map_err(|err| failed(dir, "marking cells public", err))
 }
 
-/// What a fork of the store in `from`, of `cell`, forked from `forked_from` itself, inherits of
-/// what cladefs keeps beside it, into the directory `to`, its child's, before the child's store is
+/// What a fork of the cell in `from`, of `cell`, forked from `forked_from` itself, inherits of
+/// what cladefs keeps beside it, into the directory `to`, its child's, before the child's cell is
 /// made there: what is attached to it, which stays attached to the fork, a restored VM's too; the
 /// cells marked public, its own and those it inherited from, whose pages the fork's are of the
 /// default arena for; and what it was forked from, it nearest (TASK-165.7).
@@ -165,8 +166,8 @@ pub(crate) fn inherit(
     to: &Path,
 ) -> Result<()> {
     inherit_attached(from, to)?;
-    let from =
-        host_fs::canonicalize(&from).map_err(|err| failed(from, "finding the store", err))?;
+    let from = host_fs::canonicalize(&from)
+        .map_err(|err| failed(from, "finding the cell directory", err))?;
     let mut text = format!("{} {}\n", Short(cell), from.display());
     for &(cell, ref dir) in forked_from {
         text += &format!("{} {}\n", Short(cell), dir.display());
@@ -174,7 +175,7 @@ pub(crate) fn inherit(
     write(to, ANCESTRY, &text).map_err(|err| failed(to, "recording what it was forked from", err))
 }
 
-/// What the store in `to` inherits of the store in `from` that its guest reads: what is attached
+/// What the cell in `to` inherits of the cell in `from` that its guest reads: what is attached
 /// to it, and the cells marked public, its own and those it inherited from ([`inherit`]).
 pub(crate) fn inherit_attached(from: &Path, to: &Path) -> Result<()> {
     let attached = attached(from)?;
@@ -200,11 +201,11 @@ mod tests {
         let dir = dir.path();
         assert_eq!(attached(dir), Ok(Vec::new()));
         assert_eq!(ancestry(dir), Ok(Vec::new()));
-        attach(dir, Path::new("/stores/base"), &[0x1a, 0x2b]).unwrap();
-        attach(dir, Path::new("/stores/base"), &[0x1a, 0x2b]).unwrap();
-        attach(dir, Path::new("/stores/other"), &[0x3c]).unwrap();
+        attach(dir, Path::new("/cells/base"), &[0x1a, 0x2b]).unwrap();
+        attach(dir, Path::new("/cells/base"), &[0x1a, 0x2b]).unwrap();
+        attach(dir, Path::new("/cells/other"), &[0x3c]).unwrap();
         let expected =
-            vec![(vec![0x1a, 0x2b], "/stores/base".into()), (vec![0x3c], "/stores/other".into())];
+            vec![(vec![0x1a, 0x2b], "/cells/base".into()), (vec![0x3c], "/cells/other".into())];
         assert_eq!(attached(dir), Ok(expected));
         mark_public(dir, &[7, 9]).unwrap();
         assert_eq!(public_cells(dir), Ok(BTreeSet::from([7, 9])));
@@ -215,24 +216,24 @@ mod tests {
         let expected = ["attached-bases", "public-0000000000007", "public-0000000000009"];
         assert_eq!(names, expected.map(str::to_owned).into());
 
-        host_fs::write(dir.join(ANCESTRY), "1F /stores/base\n").unwrap();
+        host_fs::write(dir.join(ANCESTRY), "1F /cells/base\n").unwrap();
         assert_eq!(ancestry(dir), Err(Errno::EIO));
         host_fs::create_dir(dir.join("unreadable")).unwrap();
         assert_eq!(read(dir, "unreadable", "a directory"), Err(Errno::EIO));
     }
 
-    /// A fork inherits what is attached, what is public and what its store was forked from, its
-    /// store nearest.
+    /// A fork inherits what is attached, what is public and what its cell was forked from, its
+    /// cell nearest.
     #[test]
-    fn forks_inherit_their_stores_records() {
+    fn forks_inherit_their_cells_records() {
         let (from, to) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        attach(from.path(), Path::new("/stores/base"), &[0x1a]).unwrap();
+        attach(from.path(), Path::new("/cells/base"), &[0x1a]).unwrap();
         mark_public(from.path(), &[5]).unwrap();
-        let older = vec![(3, PathBuf::from("/stores/grandparent"))];
+        let older = vec![(3, PathBuf::from("/cells/grandparent"))];
         inherit(from.path(), 4, &older, to.path()).unwrap();
         assert_eq!(attached(to.path()), attached(from.path()));
         assert_eq!(public_cells(to.path()), Ok(BTreeSet::from([5])));
         let parent = host_fs::canonicalize(&from.path()).unwrap();
-        assert_eq!(ancestry(to.path()), Ok(vec![(4, parent), (3, "/stores/grandparent".into())]));
+        assert_eq!(ancestry(to.path()), Ok(vec![(4, parent), (3, "/cells/grandparent".into())]));
     }
 }

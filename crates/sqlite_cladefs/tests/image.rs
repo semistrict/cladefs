@@ -13,15 +13,15 @@ use sqlite_cladefs::{FileSet, Options, Registration, register};
 use std::path::Path;
 use std::sync::Arc;
 
-/// A database on an image survives closing; and, every store encrypted (TASK-411.28), under the
-/// tests' KMS here, no file of the image, its store's nor its bucket's, holds its data in the clear.
+/// A database on an image survives closing; and, every cell encrypted (TASK-411.28), under the
+/// tests' KMS here, no file of the image, its cell's nor its bucket's, holds its data in the clear.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_database_on_an_image_survives_closing() {
     assert_eq!(survives_closing("plain").await, Vec::<String>::new());
 }
 
 /// TASK-411.7 (TASK-411's AC #3): a database on an image of a cell whose tenant's KEK is in the
-/// KMS the host names survives closing, and no file of the image, its store's nor its bucket's,
+/// KMS the host names survives closing, and no file of the image, its cell's nor its bucket's,
 /// holds its data in the clear.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_encrypted_database_on_an_image_survives_closing() {

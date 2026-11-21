@@ -18,17 +18,17 @@ use std::path::Path;
 /// or why it can't; it serves until it drains (`super::drain`), its VM processes on a thread of
 /// its own.
 ///
-/// cladefs: under madsim, a simulated host's (doc-24): no VM socket, the simulation's guests calling
-/// its requests' handling in the process; no FUSE mount nor metrics, outside the simulation; its
-/// control API (`CLADEFSD_GRPC`) and its peers (`CLADEFSD_PEER_ADDRESS`) at addresses of the
-/// simulated network; its memory given, the host's being the simulation's.
+/// cladefs: under madsim, a simulated host's (doc-24): no VM socket, the simulation's guests
+/// calling its requests' handling in the process; no FUSE mount nor metrics, outside the
+/// simulation; its control API (`CLADEFSD_GRPC`) and its peers (`CLADEFSD_PEER_ADDRESS`) at
+/// addresses of the simulated network; its memory given, the host's being the simulation's.
 pub async fn boot(socket: &Path, memory: Option<u64>) -> anyhow::Result<()> {
     let set = |name| node_local::env::var(name).ok().filter(|value| !value.is_empty());
     let set_os = |name| node_local::env::var_os(name).filter(|value| !value.is_empty());
     // A host of the multi-node system: the bucket and this host's placement token named.
     let host = crate::bucket::Host::from_env().map_err(anyhow::Error::msg)?;
-    // cladefs: its KMS, which every store is encrypted under: none chosen, it refuses to start, naming
-    // CLADEFS_KMS and CLADEFS_MASTER_KEY (TASK-411.28).
+    // cladefs: its KMS, which every cell is encrypted under: none chosen, it refuses to start,
+    // naming CLADEFS_KMS and CLADEFS_MASTER_KEY (TASK-411.28).
     crate::bucket::require_kms().map_err(anyhow::Error::msg)?;
     // cladefs: its part cache's directory and budget, if it keeps one (TASK-406.1).
     super::cache_config().map_err(anyhow::Error::msg)?;
@@ -47,7 +47,8 @@ pub async fn boot(socket: &Path, memory: Option<u64>) -> anyhow::Result<()> {
         let retired = ephemeral.retire_stale().await?;
         log::info!("cladefsd: retired {retired} references of ephemeral cells held no more");
     }
-    // cladefs: the hosts sharing its bucket, which it serves parts and asks for theirs (TASK-406.2).
+    // cladefs: the hosts sharing its bucket, which it serves parts and asks for theirs
+    // (TASK-406.2).
     let peers = set("CLADEFSD_PEERS");
     if let Some(address) = set("CLADEFSD_PEER_ADDRESS") {
         let listening = listen(&address).with_context(|| format!("serving peers at {address}"))?;
@@ -110,8 +111,9 @@ pub async fn boot(socket: &Path, memory: Option<u64>) -> anyhow::Result<()> {
         .with_context(|| format!("listening at {}", socket.display()))?;
     #[cfg(madsim)]
     let _ = socket;
-    // Its VM processes, on a thread of their own, until it drains. cladefs: outside the simulation:
-    // the VM socket, the simulation's guests calling the requests' handling in the process (doc-24).
+    // Its VM processes, on a thread of their own, until it drains.
+    // cladefs: outside the simulation: the VM socket, the simulation's guests calling the
+    // requests' handling in the process (doc-24).
     #[cfg(not(madsim))]
     std::thread::Builder::new()
         .name("cladefsd vms".into())

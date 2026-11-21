@@ -85,7 +85,7 @@ func client(t *testing.T, socket string) *cladefsdv1.Client {
 
 func TestCalls(t *testing.T) {
 	client := client(t, serve(t))
-	granted, err := client.Grant(t.Context(), &cladefsdv1.GrantRequest{Tenant: 42, Dir: "/stores/a"})
+	granted, err := client.Grant(t.Context(), &cladefsdv1.GrantRequest{Tenant: 42, Dir: "/cells/a"})
 	if err != nil {
 		t.Fatal(err)
 	}

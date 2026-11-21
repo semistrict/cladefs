@@ -8,7 +8,7 @@
 +++ b/crates/bucket_cell/src/object_bucket.rs
 @@ -1495,11 +1495,6 @@
          async move {
-             // cladefs: as long after its last write of the key as the store needs (TASK-690).
+             // cladefs: as long after its last write of the key as the backend needs (TASK-690).
              self.rewrites.wait(&path).await;
 -            // cladefs: its turn, once a write of its kind failed (TASK-382).
 -            let _turn = match request.takes_turns() {

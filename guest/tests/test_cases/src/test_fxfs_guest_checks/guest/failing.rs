@@ -9,7 +9,7 @@
 
 use super::*;
 
-/// Crashes, as a store past a mapped file's end does (SIGBUS), with one of fxfs's fault
+/// Crashes, as a write past a mapped file's end does (SIGBUS), with one of fxfs's fault
 /// injections set, which no guard sets back: the agent does.
 pub(super) fn test_crashes() {
     const PAGE: usize = 4096;
@@ -34,7 +34,7 @@ pub(super) fn test_crashes() {
     assert_ne!(map, libc::MAP_FAILED, "mmap: {}", std::io::Error::last_os_error());
     let _fail = Param::set("dax_fail_maps", "1000");
     unsafe { map.cast::<u8>().add(PAGE).write_volatile(1) };
-    panic!("a store past the file's end went in");
+    panic!("a write past the file's end went in");
 }
 
 /// Hangs in the kernel: the filesystem frozen (FIFREEZE), a write waits in it to thaw, which no

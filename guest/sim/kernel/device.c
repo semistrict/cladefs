@@ -3,15 +3,15 @@
 /*
  * The extent-store device under fs/cladefs/device.c (doc-4): the driver's interface, with the host's
  * rules for the window (crates/cladefs's map), which copies on write (doc-13). A MAP is of an extent
- * the store holds, ENOENT if not, and maps zeros past its end; the window maps sealed extents and
+ * the extent store holds, ENOENT if not, and maps zeros past its end; the window maps sealed extents and
  * zeros alone: a MAP of an open extent fails EPERM, which tests count, as Fxfs may take an extent
  * a seal forgot for sealed. MAP_ZEROS maps zeros. PRIVATE makes pages mapped read-only, a sealed
  * extent's or zeros, private, the VM's own, holding what they held, at the same address, until a
  * MAP or UNMAP over them frees them; ENOMEM past private_max. A freed extent's pages map zeros.
  *
- * The window is real memory, so that a store the host would refuse faults, and fails the run
- * (kernel/host.c). A store to a page mapped read-only, which the host would copy so, fails it too:
- * the guest makes every page private before a store can reach it (window_store).
+ * The window is real memory, so that a write the host would refuse faults, and fails the run
+ * (kernel/host.c). A write to a page mapped read-only, which the host would copy so, fails it too:
+ * the guest makes every page private before a write can reach it (window_write).
  *
  * Requests complete in place, each a scheduling point: no queues, no interrupts, no async faults,
  * none of the host's own concurrency, and no latency but what the clock is told, or a MAP or
@@ -23,7 +23,7 @@
 #include <linux/dax.h>
 #include <linux/virtio_extent.h>
 
-/* The store's memory, sparse: extents are laid out one after another, and never moved. */
+/* The extent store's memory, sparse: extents are laid out one after another, and never moved. */
 #define STORE_LEN (1ULL << 40)
 /* A device round trip, the most of a millisecond doc-4's MAP takes. */
 #define REQUEST_NS 500000
@@ -89,12 +89,12 @@ static int failing_err;
 static unsigned int failing_odds;
 static int dax_readers;
 
-static const char *window_store(u64 offset);
+static const char *window_write(u64 offset);
 
 void sim_device_init(u64 window_len)
 {
 	host_store_init(STORE_LEN);
-	device.window = host_window_init(window_len, window_store);
+	device.window = host_window_init(window_len, window_write);
 	device.window_len = window_len;
 	device.dax = &dax_device;
 	device.pages = kcalloc(window_len >> PAGE_SHIFT, sizeof(*device.pages), GFP_KERNEL);
@@ -129,7 +129,7 @@ void sim_device_new_extent(u64 sequence, u64 size)
 	extent->store_offset = device.store_used;
 	device.store_used += ALIGN(size, PMD_SIZE);
 	if (device.store_used > STORE_LEN)
-		sim_panic("the store is out of space");
+		sim_panic("the extent store is out of space");
 	list_add(&extent->list, &device.extents);
 }
 
@@ -154,7 +154,7 @@ bool sim_device_sealed(u64 sequence)
 	return find_extent(sequence)->sealed;
 }
 
-/* Whether the store holds extent `sequence`, written as far as its page `page`. */
+/* Whether the extent store holds extent `sequence`, written as far as its page `page`. */
 bool sim_device_holds(u64 sequence, u64 page)
 {
 	struct extent *extent = find_extent(sequence);
@@ -251,21 +251,21 @@ static void free_private(u64 first, u64 pages)
 }
 
 /*
- * A store the window faulted on, at `offset`: why the host refuses it. The host would copy a page
+ * A write the window faulted on, at `offset`: why the host refuses it. The host would copy a page
  * mapped read-only, sealed or zeros, within private_max; but the guest makes each page
  * it dirties private first, by the PRIVATE of the iomap that dirties it (dax.c's
- * cladefs_dax_dirty, TASK-164.9), so that a store never reaches one: a store the host would copy
+ * cladefs_dax_dirty, TASK-164.9), so that a write never reaches one: a write the host would copy
  * at is to a page no iomap made the VM's, whose block a writeback may move, and Fxfs free under it,
- * before the store lands (guest/sim's seed 2802). Refused, as the oracle of that rule: dirty
- * implies private. From the fault, in the store: no scheduling point, and no lock.
+ * before the write lands (guest/sim's seed 2802). Refused, as the oracle of that rule: dirty
+ * implies private. From the fault, in the write: no scheduling point, and no lock.
  */
-static const char *window_store(u64 offset)
+static const char *window_write(u64 offset)
 {
 	const struct window_page *at = &device.pages[offset >> PAGE_SHIFT];
 
 	if (at->state != WINDOW_READ && at->state != WINDOW_ZEROS)
 		return "nothing mapped there";
-	return "a store to a page no PRIVATE made the VM's: dirty without private";
+	return "a write to a page no PRIVATE made the VM's: dirty without private";
 }
 
 void sim_device_describe(u64 page)
@@ -306,7 +306,7 @@ static void watch(const char *what, u64 page, u64 pages, u64 sequence, u64 in_ex
 
 /*
  * Fails the run if a page a MAP or UNMAP replaces has a writable PTE: its private page goes, and
- * the host refuses the store it may yet take, with no fault for the guest to wait in, whether or
+ * the host refuses the write it may yet take, with no fault for the guest to wait in, whether or
  * not one comes.
  */
 static void check_no_writable_mapping(const char *what, u64 first, u64 pages)
@@ -413,8 +413,8 @@ static int do_map(struct vext_request *req)
 }
 
 /*
- * PRIVATE: `len` bytes at `window_offset` private now, as stores would make them, all or none:
- * ENOMEM past private_max. Of pages mapped read-only alone, as a store to another is refused.
+ * PRIVATE: `len` bytes at `window_offset` private now, as writes would make them, all or none:
+ * ENOMEM past private_max. Of pages mapped read-only alone, as a write to another is refused.
  */
 static int do_private(u64 window_offset, u64 len)
 {

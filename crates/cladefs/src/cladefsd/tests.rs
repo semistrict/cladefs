@@ -14,10 +14,10 @@ use std::thread::JoinHandle;
 
 const BLOCK: usize = OpenCell::BLOCK_SIZE as usize;
 
-/// Makes this process a host of the multi-node system, as the daemon's must be: its stores'
-/// cells in a bucket in its memory, as of placement 1; its log on standard error.
-/// The cell of the store at `path`, in its cell, as its description names it (TASK-364): what a
-/// VM process's store, which names its cell's ID alone, is in the bucket.
+/// Makes this process a host of the multi-node system, as the daemon's must be: its cells
+/// in a bucket in its memory, as of placement 1; its log on standard error.
+/// The ID of the cell at `path`, as its description names it (TASK-364): what a VM process's
+/// cell, which names its ID alone, is in the bucket.
 fn cell_at(path: &std::path::Path) -> crate::CellId {
     local_cell::host_cell(path).unwrap()
 }
@@ -32,20 +32,20 @@ fn host() {
     }
 }
 
-/// A daemon serving one connection, on a thread, and its client, of the store at `path`.
+/// A daemon serving one connection, on a thread, and its client, of the cell at `path`.
 fn connect(path: &Path, capacity: u64) -> (CellClient, JoinHandle<()>) {
-    let (client, server) = UnixStream::pair().unwrap();
+    let (stream, server) = UnixStream::pair().unwrap();
     let served = std::thread::spawn(move || serve_connection(server, default_tenant().unwrap()));
-    (CellClient::over(client, path, Opening::Create(capacity, Kind::Fxfs)).unwrap(), served)
+    (CellClient::over(stream, path, Opening::Create(capacity, Kind::Fxfs)).unwrap(), served)
 }
 
-/// cladefs: a daemon serving one connection, on a thread, and its client, a follower of the store
+/// cladefs: a daemon serving one connection, on a thread, and its client, a follower of the cell
 /// at `path` (backlog doc-8).
 fn follow(path: &Path) -> Result<(CellClient, JoinHandle<()>), Option<Errno>> {
-    let (client, server) = UnixStream::pair().unwrap();
+    let (stream, server) = UnixStream::pair().unwrap();
     let served = std::thread::spawn(move || serve_connection(server, default_tenant().unwrap()));
-    match CellClient::over(client, path, Opening::ReadOnly) {
-        Ok(store) => Ok((store, served)),
+    match CellClient::over(stream, path, Opening::ReadOnly) {
+        Ok(client) => Ok((client, served)),
         Err(error) => {
             served.join().unwrap();
             Err(error.errno())
@@ -68,16 +68,16 @@ fn pattern(byte: u8, len: usize) -> Vec<u8> {
     (0..len).map(|i| byte ^ (i % 251) as u8).collect()
 }
 
-fn write(store: &CellClient, extent: ExtentId, offset: u64, data: &[u8]) -> Result<(), Errno> {
+fn write(client: &CellClient, extent: ExtentId, offset: u64, data: &[u8]) -> Result<(), Errno> {
     // In two buffers, as a request's descriptors may hold it.
     let (first, second) = data.split_at(data.len() / 2);
-    store.write(extent, offset, &[VolatileSlice::from(first), VolatileSlice::from(second)])
+    client.write(extent, offset, &[VolatileSlice::from(first), VolatileSlice::from(second)])
 }
 
-fn read(store: &CellClient, extent: ExtentId, offset: u64, len: usize) -> Result<Vec<u8>, Errno> {
+fn read(client: &CellClient, extent: ExtentId, offset: u64, len: usize) -> Result<Vec<u8>, Errno> {
     let mut data = vec![0; len];
     let (first, second) = data.split_at_mut(len / 2);
-    store.read(
+    client.read(
         extent,
         offset,
         &mut [VolatileSliceMut::from(first), VolatileSliceMut::from(second)],
@@ -146,21 +146,21 @@ fn windows_let_go_of_the_daemons_pages_as_their_connection_goes() {
     host();
     let ps = page_size() as usize;
     let dir = tempfile::tempdir().unwrap();
-    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
+    let (client, served) = connect(&dir.path().join("store"), 1 << 24);
     let memory = memory(2);
-    // SAFETY: The memory is the test's, and outlives the store.
-    unsafe { store.create_dax_window_in_host_memory(memory, 2 * ps as u64, None, 1) }.unwrap();
+    // SAFETY: The memory is the test's, and outlives the cell.
+    unsafe { client.create_dax_window_in_host_memory(memory, 2 * ps as u64, None, 1) }.unwrap();
     let base = memory.as_ptr() as usize;
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, extent, 0, &pattern(4, ps)).unwrap();
-    store.commit(None).unwrap();
-    store.map(extent, 0, ps as u64, 0).unwrap();
-    // SAFETY: The window's memory, whose faults the store serves.
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(4, ps)).unwrap();
+    client.commit(None).unwrap();
+    client.map(extent, 0, ps as u64, 0).unwrap();
+    // SAFETY: The window's memory, whose faults the cell serves.
     let page = unsafe { std::slice::from_raw_parts(memory.as_ptr(), ps) };
     assert!(*page == pattern(4, ps)[..], "the window maps other data");
     assert_ne!(mapped_from(base).0, ANONYMOUS, "the window maps no file");
 
-    drop(store);
+    drop(client);
     served.join().unwrap();
     for addr in [base, base + ps] {
         assert_eq!(
@@ -174,38 +174,38 @@ fn windows_let_go_of_the_daemons_pages_as_their_connection_goes() {
     assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 2 * ps) }, 0);
 }
 
-/// cladefs TASK-172: a VM process's window keeps as many runs of pages installed as the mappings the
-/// daemon says the host lets a process make allow, not as what it reads of /proc itself: in its
+/// cladefs TASK-172: a VM process's window keeps as many runs of pages installed as the mappings
+/// the daemon says the host lets a process make allow, not as what it reads of /proc itself: in its
 /// jail, without /proc, it budgeted by Linux's default, 30,717 runs where the GCE hosts' limit,
-/// 1,048,576, allows 522,240. The daemon here says 300,000, which neither /proc nor the default
-/// is: 4,096 of them kept for the process's others, half the rest.
+/// 1,048,576, allows 522,240. The daemon here says 300,000, which neither /proc nor the default is:
+/// 4,096 of them kept for the process's others, half the rest.
 #[test]
 fn windows_budget_by_the_mappings_the_daemon_says_the_host_allows() {
     host();
     super::server::MAX_MAP_COUNT_GIVEN.set(300_000).unwrap();
     let ps = page_size() as usize;
     let dir = tempfile::tempdir().unwrap();
-    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
+    let (client, served) = connect(&dir.path().join("store"), 1 << 24);
     let memory = memory(2);
-    // SAFETY: The memory is the test's, and outlives the store.
-    unsafe { store.create_dax_window_in_host_memory(memory, 2 * ps as u64, None, 1) }.unwrap();
-    assert_eq!(store.window_budget(), Some(147_952));
-    drop(store);
+    // SAFETY: The memory is the test's, and outlives the cell.
+    unsafe { client.create_dax_window_in_host_memory(memory, 2 * ps as u64, None, 1) }.unwrap();
+    assert_eq!(client.window_budget(), Some(147_952));
+    drop(client);
     served.join().unwrap();
     // SAFETY: Unmaps the memory, which nothing uses any more.
     assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 2 * ps) }, 0);
 }
 
-/// cladefs: with `CLADEFSD_BUCKET` naming a bucket, the stores the daemon opens keep their
+/// cladefs: with `CLADEFSD_BUCKET` naming a bucket, the cells the daemon opens keep their
 /// cells there: a durable commit is an uploaded one.
 #[test]
 fn keeps_cells_in_object_storage() {
     host();
     let dir = tempfile::tempdir().unwrap();
-    let (store, served) = connect(&dir.path().join("store"), 1 << 20);
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, extent, 0, &pattern(1, 2 * BLOCK)).unwrap();
-    store.commit(Some(b"root")).unwrap();
+    let (client, served) = connect(&dir.path().join("store"), 1 << 20);
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(1, 2 * BLOCK)).unwrap();
+    client.commit(Some(b"root")).unwrap();
     let bucket = super::cells::daemon_bucket().unwrap();
     futures::executor::block_on(async {
         let cell = cell_at(&dir.path().join("store"));
@@ -215,15 +215,15 @@ fn keeps_cells_in_object_storage() {
             bucket_cell::testing::read(&bucket, extent, &state.extents[&extent]).await.unwrap();
         assert_eq!(data, pattern(1, 2 * BLOCK));
     });
-    drop(store);
+    drop(client);
     served.join().unwrap();
 }
 
-/// cladefs: a store whose description names a bucket other than the daemon's, as an image's names
+/// cladefs: a cell whose description names a bucket other than the daemon's, as an image's names
 /// its own file bucket, keeps its cell there as the daemon serves it, not in the daemon's
 /// (TASK-165.6): the image's other openers, the cladefs CLI's, find it there.
 #[tokio::test(flavor = "multi_thread")]
-async fn keeps_cells_in_the_buckets_their_stores_name() {
+async fn keeps_cells_in_the_buckets_their_descriptions_name() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("image");
@@ -235,10 +235,10 @@ async fn keeps_cells_in_the_buckets_their_stores_name() {
         .unwrap();
     made.made().unwrap();
     drop(made);
-    let (store, served) = connect(&path, 1 << 20);
+    let (client, served) = connect(&path, 1 << 20);
     let extent = ExtentId { cell: cell.id, sequence: 1 };
-    write(&store, extent, 0, &pattern(1, 2 * BLOCK)).unwrap();
-    store.commit(Some(b"root")).unwrap();
+    write(&client, extent, 0, &pattern(1, 2 * BLOCK)).unwrap();
+    client.commit(Some(b"root")).unwrap();
     let image = bucket_cell::object_bucket::ObjectBucket::from_url(&url).unwrap();
     let daemons = super::cells::daemon_bucket().unwrap();
     futures::executor::block_on(async {
@@ -247,12 +247,12 @@ async fn keeps_cells_in_the_buckets_their_stores_name() {
         let record = bucket_cell::head::get(&*daemons, cell).await.unwrap();
         assert_eq!(record, None, "the daemon's bucket has the image's cell");
     });
-    drop(store);
+    drop(client);
     served.join().unwrap();
 }
 
-/// cladefs: the daemon keeps what its bucket did, its requests and bytes, what the stores'
-/// followers are, how many and how far behind, what serving the stores cost, and the requests it
+/// cladefs: the daemon keeps what its bucket did, its requests and bytes, what the cells'
+/// followers are, how many and how far behind, what serving the cells cost, and the requests it
 /// served, in the file `CLADEFSD_STATS` names, soon after each change: the bench reports it
 /// (`scripts/bench-report.py`).
 #[test]
@@ -263,18 +263,18 @@ fn keeps_object_storage_and_follower_stats() {
     // SAFETY: as in host.
     unsafe { std::env::set_var("CLADEFSD_STATS", &file) };
     let path = dir.path().join("store");
-    let (store, served) = connect(&path, 1 << 20);
-    let cell = store.cell();
+    let (client, served) = connect(&path, 1 << 20);
+    let cell = client.cell();
     let extent = move |sequence| ExtentId { cell, sequence };
-    write(&store, extent(1), 0, &pattern(1, 2 * BLOCK)).unwrap();
-    store.commit(Some(b"root")).unwrap();
+    write(&client, extent(1), 0, &pattern(1, 2 * BLOCK)).unwrap();
+    client.commit(Some(b"root")).unwrap();
     let bucket = super::cells::daemon_bucket().unwrap();
     assert!(bucket.stats().uploaded(bucket_cell::object_bucket::Upload::Segments) > 0);
     // A follower two commits behind, keeping what the writer freed.
     let (follower, followed) = follow(&path).unwrap();
-    store.free(extent(1)).unwrap();
-    store.commit(None).unwrap();
-    store.commit(None).unwrap();
+    client.free(extent(1)).unwrap();
+    client.commit(None).unwrap();
+    client.commit(None).unwrap();
     // Within a few polls of the last change.
     let fields = |kept: &str, at: usize, kind: &str| -> Option<Vec<(String, u64)>> {
         let line = kept.lines().nth(at)?.strip_prefix(kind)?.strip_prefix(": ")?;
@@ -306,7 +306,7 @@ fn keeps_object_storage_and_follower_stats() {
     assert_eq!(counts, (1, 1, 2 * BLOCK as u64), "{kept}");
     let daemon = fields(&kept, 2, "daemon").unwrap();
     let names: Vec<_> = daemon.iter().map(|(name, _)| name.to_owned()).collect();
-    // Its counters, then how long its stores' commits waited to be made durable (TASK-165.9).
+    // Its counters, then how long its cells' commits waited to be made durable (TASK-165.9).
     let mut expected: Vec<String> =
         crate::stats::stats().named().map(|(name, _)| name.to_owned()).into();
     let lags = [
@@ -335,7 +335,7 @@ fn keeps_object_storage_and_follower_stats() {
         }
     }
     expected.extend(["durable_segments", "own_sync_max_us", "raw_sync_max_us"].map(str::to_owned));
-    // And the bytes its stores wrote, by kind, and the process, as its kernel counts them
+    // And the bytes its cells wrote, by kind, and the process, as its kernel counts them
     // (TASK-310).
     let kinds = ["raw", "copied", "framed", "own", "log"];
     expected.extend(kinds.map(|kind| format!("written_{kind}_bytes")));
@@ -380,13 +380,13 @@ fn keeps_object_storage_and_follower_stats() {
         ns(&daemon, "commit-ns") >= phases.map(|phase| ns(&daemon, phase)).iter().sum::<u64>(),
         "{kept}"
     );
-    for (store, served) in [(follower, followed), (store, served)] {
-        drop(store);
+    for (client, served) in [(follower, followed), (client, served)] {
+        drop(client);
         served.join().unwrap();
     }
 }
 
-/// Runs `call`, a store operation of the control API's, on a runtime of its own, as the API does:
+/// Runs `call`, a cell operation of the control API's, on a runtime of its own, as the API does:
 /// a sync test's outermost entry. Called from a test's task, on its runtime, the thread handing
 /// its other tasks to another meanwhile.
 #[allow(clippy::disallowed_methods, reason = "a test's thread, waiting for the call alone")]
@@ -401,46 +401,46 @@ fn control<T>(call: impl std::future::Future<Output = T>) -> T {
     }
 }
 
-/// Resizes the store at `path`, as the control API does (`ResizeCell`).
+/// Resizes the cell at `path`, as the control API does (`ResizeCell`).
 fn resize(path: &Path, capacity: u64) -> Result<(), Errno> {
     control(super::cells::resize(path.to_owned(), capacity))
 }
 
-/// Forks the store at `from` to a new cell at `to`, as the control API does (`ForkCell`), and
+/// Forks the cell at `from` to a new cell at `to`, as the control API does (`ForkCell`), and
 /// returns the cell.
 fn fork_cell(from: &Path, to: &Path) -> Result<crate::CellId, crate::Error> {
     let forked = control(super::cells::fork(from.to_owned(), to.to_owned(), None));
     forked.map_err(crate::Error::from)
 }
 
-/// Deletes the store at `path`, as the control API does (`DeleteCell`).
+/// Deletes the cell at `path`, as the control API does (`DeleteCell`).
 fn delete_cell(path: &Path) -> Result<(), crate::Error> {
     Ok(control(super::cells::delete(path.to_owned()))?)
 }
 
-/// Waits for the store at `path` to be uploaded, as the control API does (`SyncCell`).
+/// Waits for the cell at `path` to be uploaded, as the control API does (`SyncCell`).
 fn wait_uploaded(path: &Path) -> Result<(), crate::Error> {
     Ok(control(super::cells::sync(path.to_owned()))?)
 }
 
-/// A store a VM has open grows at once, and its VM process is told the new capacity; it shrinks
+/// A cell a VM has open grows at once, and its VM process is told the new capacity; it shrinks
 /// once its guest, asked, agrees, never below what it holds, and keeps its size if the guest
-/// refuses. Durably: the store reopened has the capacity it was given.
+/// refuses. Durably: the cell reopened has the capacity it was given.
 #[tokio::test(flavor = "multi_thread")]
-async fn resizes_open_stores() {
+async fn resizes_open_cells() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    let (store, served) = connect(&path, 1 << 20);
+    let (client, served) = connect(&path, 1 << 20);
     let (changes, changed) = std::sync::mpsc::channel();
-    store.on_capacity(move |capacity, ask| changes.send((capacity, ask)).unwrap());
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, extent, 0, &pattern(1, 64 * BLOCK)).unwrap();
-    store.commit(None).unwrap();
+    client.on_capacity(move |capacity, ask| changes.send((capacity, ask)).unwrap());
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(1, 64 * BLOCK)).unwrap();
+    client.commit(None).unwrap();
 
     resize(&path, 4 << 20).unwrap();
     assert_eq!(changed.recv().unwrap(), (4 << 20, false));
-    assert_eq!(store.info().unwrap().capacity, 4 << 20);
+    assert_eq!(client.info().unwrap().capacity, 4 << 20);
 
     // Asked, the guest agrees, then refuses.
     for (capacity, took) in [(2 << 20, true), (1 << 20, false)] {
@@ -449,16 +449,16 @@ async fn resizes_open_stores() {
             std::thread::spawn(move || resize(&path, capacity))
         };
         assert_eq!(changed.recv().unwrap(), (capacity, true));
-        store.resized(capacity, took).unwrap();
+        client.resized(capacity, took).unwrap();
         let expected = if took { Ok(()) } else { Err(Errno::ENOSPC) };
         assert_eq!(resizing.join().unwrap(), expected);
     }
-    assert_eq!(store.info().unwrap().capacity, 2 << 20);
-    // Below what the store holds, the guest isn't asked.
+    assert_eq!(client.info().unwrap().capacity, 2 << 20);
+    // Below what the cell holds, the guest isn't asked.
     assert_eq!(resize(&path, 32 * BLOCK as u64), Err(Errno::ENOSPC));
     assert!(changed.try_recv().is_err());
 
-    drop(store);
+    drop(client);
     served.join().unwrap();
     let reopened = OpenCell::open(&path).await.unwrap();
     assert_eq!(reopened.info().unwrap().capacity, 2 << 20);
@@ -472,23 +472,23 @@ fn shrinks_dropped_by_their_callers_stop_waiting() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    let (store, served) = connect(&path, 2 << 20);
+    let (client, served) = connect(&path, 2 << 20);
     let (asks, asked) = std::sync::mpsc::channel();
-    store.on_capacity(move |capacity, ask| asks.send((capacity, ask)).unwrap());
+    client.on_capacity(move |capacity, ask| asks.send((capacity, ask)).unwrap());
     let socket = dir.path().join("control.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     let tenants = dir.path().join("tenants");
     std::fs::create_dir(&tenants).unwrap();
     std::thread::spawn(move || super::control::serve_control(listener, tenants));
-    let connection = super::cells::table().writer(&super::cells::store_key(&path)).unwrap();
+    let connection = super::cells::table().writer(&super::cells::cell_dir_key(&path)).unwrap();
 
     control(async {
-        let mut client = super::control::connect(&socket).await.unwrap();
+        let mut api = super::control::connect(&socket).await.unwrap();
         let request =
             ResizeCellRequest { path: path.to_str().unwrap().to_owned(), capacity: 1 << 20 };
         let asking = tokio::task::spawn_blocking(move || (asked.recv().unwrap(), asked));
         let asked = tokio::select! {
-            shrunk = client.resize_cell(request) => panic!("{shrunk:?}"),
+            shrunk = api.resize_cell(request) => panic!("{shrunk:?}"),
             asked = asking => asked.unwrap(),
         };
         assert_eq!(asked.0, (1 << 20, true));
@@ -498,21 +498,21 @@ fn shrinks_dropped_by_their_callers_stop_waiting() {
             assert!(tokio::time::Instant::now() < deadline, "the shrink still waits");
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        // TASK-79.41: and tells the guest the capacity the store keeps.
+        // TASK-79.41: and tells the guest the capacity the cell keeps.
         let told = tokio::task::spawn_blocking(move || asked.1.recv().unwrap()).await.unwrap();
         assert_eq!(told, (2 << 20, false));
     });
-    store.resized(1 << 20, true).unwrap();
-    assert_eq!(store.info().unwrap().capacity, 2 << 20);
+    client.resized(1 << 20, true).unwrap();
+    assert_eq!(client.info().unwrap().capacity, 2 << 20);
 
-    drop((store, connection));
+    drop((client, connection));
     served.join().unwrap();
 }
 
-/// A store no VM has open grows, through the daemon, which no VM opens it from meanwhile; it does
+/// A cell no VM has open grows, through the daemon, which no VM opens it from meanwhile; it does
 /// not shrink, as its guest is not there to agree.
 #[tokio::test(flavor = "multi_thread")]
-async fn resizes_closed_stores() {
+async fn resizes_closed_cells() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
@@ -520,28 +520,28 @@ async fn resizes_closed_stores() {
     resize(&path, 3 << 20).unwrap();
     assert_eq!(resize(&path, 2 << 20), Err(Errno::EBUSY));
     assert_eq!(resize(&dir.path().join("none"), 2 << 20), Err(Errno::ENOENT));
-    let (store, served) = connect(&path, 1 << 20);
-    assert_eq!(store.info().unwrap().capacity, 3 << 20);
-    drop(store);
+    let (client, served) = connect(&path, 1 << 20);
+    assert_eq!(client.info().unwrap().capacity, 3 << 20);
+    drop(client);
     served.join().unwrap();
 }
 
-/// A store served by the daemon is the store: what it writes it reads, commits, and keeps once
-/// the VM process is gone; it fails as the store does; and no other VM process opens it meanwhile.
+/// A cell served by the daemon is the cell: what it writes it reads, commits, and keeps once
+/// the VM process is gone; it fails as the cell does; and no other VM process opens it meanwhile.
 #[tokio::test(flavor = "multi_thread")]
-async fn serves_a_store() {
+async fn serves_a_cell() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    let (store, served) = connect(&path, 1 << 20);
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, extent, 0, &pattern(1, 2 * BLOCK)).unwrap();
-    assert_eq!(read(&store, extent, 0, 2 * BLOCK), Ok(pattern(1, 2 * BLOCK)));
-    store.commit(Some(b"root")).unwrap();
-    assert_eq!(store.root(), Ok(b"root".to_vec()));
-    let info = store.info().unwrap();
+    let (client, served) = connect(&path, 1 << 20);
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(1, 2 * BLOCK)).unwrap();
+    assert_eq!(read(&client, extent, 0, 2 * BLOCK), Ok(pattern(1, 2 * BLOCK)));
+    client.commit(Some(b"root")).unwrap();
+    assert_eq!(client.root(), Ok(b"root".to_vec()));
+    let info = client.info().unwrap();
     assert_eq!((info.capacity, info.used, info.next_sequence), (1 << 20, 2 * BLOCK as u64, 2));
-    assert_eq!(write(&store, extent, 2 * BLOCK as u64, &[0; BLOCK]), Err(Errno::EPERM));
+    assert_eq!(write(&client, extent, 2 * BLOCK as u64, &[0; BLOCK]), Err(Errno::EPERM));
     let (other, other_server) = UnixStream::pair().unwrap();
     let other_served =
         std::thread::spawn(move || serve_connection(other_server, default_tenant().unwrap()));
@@ -551,7 +551,7 @@ async fn serves_a_store() {
     assert!(format!("{error:#}").contains(&Errno::EBUSY.to_string()), "{error:#}");
     other_served.join().unwrap();
 
-    drop(store);
+    drop(client);
     served.join().unwrap();
     let mut data = vec![0; 2 * BLOCK];
     let local = OpenCell::open(&path).await.unwrap();
@@ -567,33 +567,33 @@ fn reads_and_writes_go_through_the_transfer_area() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    let (store, served) = connect(&path, 1 << 24);
-    let extent = |sequence| ExtentId { cell: store.cell(), sequence };
-    write(&store, extent(1), 0, &pattern(1, 2 * BLOCK)).unwrap();
+    let (client, served) = connect(&path, 1 << 24);
+    let extent = |sequence| ExtentId { cell: client.cell(), sequence };
+    write(&client, extent(1), 0, &pattern(1, 2 * BLOCK)).unwrap();
     assert_eq!(
-        read(&store, extent(1), BLOCK as u64, BLOCK),
+        read(&client, extent(1), BLOCK as u64, BLOCK),
         Ok(pattern(1, 2 * BLOCK)[BLOCK..].to_vec())
     );
-    assert_eq!(store.transfers(), 2);
+    assert_eq!(client.transfers(), 2);
 
     // A slot's worth, and more than a slot's.
-    write(&store, extent(2), 0, &pattern(2, TRANSFER_SLOT)).unwrap();
-    write(&store, extent(3), 0, &pattern(3, 2 * TRANSFER_SLOT)).unwrap();
-    assert_eq!(store.transfers(), 3);
-    assert_eq!(read(&store, extent(3), 0, 2 * TRANSFER_SLOT), Ok(pattern(3, 2 * TRANSFER_SLOT)));
-    assert_eq!(read(&store, extent(2), 0, TRANSFER_SLOT), Ok(pattern(2, TRANSFER_SLOT)));
-    assert_eq!(store.transfers(), 4);
+    write(&client, extent(2), 0, &pattern(2, TRANSFER_SLOT)).unwrap();
+    write(&client, extent(3), 0, &pattern(3, 2 * TRANSFER_SLOT)).unwrap();
+    assert_eq!(client.transfers(), 3);
+    assert_eq!(read(&client, extent(3), 0, 2 * TRANSFER_SLOT), Ok(pattern(3, 2 * TRANSFER_SLOT)));
+    assert_eq!(read(&client, extent(2), 0, TRANSFER_SLOT), Ok(pattern(2, TRANSFER_SLOT)));
+    assert_eq!(client.transfers(), 4);
 
     // No slot free: through the socket.
-    let taken = store.take_transfer_slots();
-    let used = store.transfers();
-    write(&store, extent(4), 0, &pattern(4, BLOCK)).unwrap();
-    assert_eq!(read(&store, extent(4), 0, BLOCK), Ok(pattern(4, BLOCK)));
-    assert_eq!(store.transfers(), used);
+    let taken = client.take_transfer_slots();
+    let used = client.transfers();
+    write(&client, extent(4), 0, &pattern(4, BLOCK)).unwrap();
+    assert_eq!(read(&client, extent(4), 0, BLOCK), Ok(pattern(4, BLOCK)));
+    assert_eq!(client.transfers(), used);
     drop(taken);
-    assert_eq!(read(&store, extent(4), 0, BLOCK), Ok(pattern(4, BLOCK)));
-    assert_eq!(store.transfers(), used + 1);
-    drop(store);
+    assert_eq!(read(&client, extent(4), 0, BLOCK), Ok(pattern(4, BLOCK)));
+    assert_eq!(client.transfers(), used + 1);
+    drop(client);
     served.join().unwrap();
 }
 
@@ -608,9 +608,9 @@ fn a_dropped_read_keeps_its_transfer_slot_until_answered() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    let (store, served) = connect(&path, 1 << 24);
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, extent, 0, &pattern(1, BLOCK)).unwrap();
+    let (client, served) = connect(&path, 1 << 24);
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(1, BLOCK)).unwrap();
 
     // The daemon holds the read, saying it has it, until let go: at its failpoint, named as the
     // daemon names it, as the test waits for it.
@@ -626,21 +626,21 @@ fn a_dropped_read_keeps_its_transfer_slot_until_answered() {
     let mut data = vec![0; BLOCK];
     {
         let mut buffers = [VolatileSliceMut::from(&mut data[..])];
-        let mut reading = std::pin::pin!(store.read_async(extent, 0, &mut buffers));
+        let mut reading = std::pin::pin!(client.read_async(extent, 0, &mut buffers));
         let mut context = std::task::Context::from_waker(std::task::Waker::noop());
         assert!(reading.as_mut().poll(&mut context).is_pending());
         had.recv().unwrap();
     }
-    assert_eq!(store.take_transfer_slots().len(), TRANSFER_SLOTS - 1);
+    assert_eq!(client.take_transfer_slots().len(), TRANSFER_SLOTS - 1);
 
     // Answered, its slot comes back: as the reply comes, on the client's receiving thread.
     fail::remove(point);
     go.send(()).unwrap();
-    while store.take_transfer_slots().len() < TRANSFER_SLOTS {
+    while client.take_transfer_slots().len() < TRANSFER_SLOTS {
         std::thread::yield_now();
     }
-    assert_eq!(read(&store, extent, 0, BLOCK), Ok(pattern(1, BLOCK)));
-    drop(store);
+    assert_eq!(read(&client, extent, 0, BLOCK), Ok(pattern(1, BLOCK)));
+    drop(client);
     served.join().unwrap();
 }
 
@@ -653,7 +653,7 @@ fn transfer_areas_are_checked() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    let (store, served) = connect(&path, 1 << 24);
+    let (client, served) = connect(&path, 1 << 24);
     // SAFETY: The name is a C string.
     let fd = unsafe { libc::memfd_create(c"unsealed".as_ptr(), libc::MFD_CLOEXEC) };
     assert!(fd >= 0);
@@ -663,9 +663,9 @@ fn transfer_areas_are_checked() {
     });
     file.set_len(1 << 20).unwrap();
     let unsealed = Header::new(TRANSFER, 0).with_args(&[1 << 20]);
-    assert_eq!(store.call(unsealed, &[], &[file.as_fd()]).err(), Some(Errno::EINVAL));
+    assert_eq!(client.call(unsealed, &[], &[file.as_fd()]).err(), Some(Errno::EINVAL));
 
-    // The store's own area, given at its opening: once.
+    // The cell's own area, given at its opening: once.
     // SAFETY: As above.
     let fd = unsafe {
         libc::memfd_create(c"sealed".as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING)
@@ -686,74 +686,74 @@ fn transfer_areas_are_checked() {
     };
     assert_eq!(seal, 0);
     let again = Header::new(TRANSFER, 0).with_args(&[1 << 20]);
-    assert_eq!(store.call(again, &[], &[sealed.as_fd()]).err(), Some(Errno::EEXIST));
-    let extent = [store.cell(), 1];
+    assert_eq!(client.call(again, &[], &[sealed.as_fd()]).err(), Some(Errno::EEXIST));
+    let extent = [client.cell(), 1];
     let area = 8 * super::client::TRANSFER_SLOT as u64;
     let past = Header::new(READ, 0)
         .with_args(&[extent[0], extent[1], 0, BLOCK as u64, area - BLOCK as u64 + 1])
         .with_flags(READ_TRANSFER);
-    assert_eq!(store.call(past, &[], &[]).err(), Some(Errno::EINVAL));
+    assert_eq!(client.call(past, &[], &[]).err(), Some(Errno::EINVAL));
     let wrapping = Header::new(WRITE, 0)
         .with_args(&[extent[0], extent[1], 0, u64::MAX, 2])
         .with_flags(WRITE_TRANSFER);
-    assert_eq!(store.call(wrapping, &[], &[]).err(), Some(Errno::EINVAL));
-    drop(store);
+    assert_eq!(client.call(wrapping, &[], &[]).err(), Some(Errno::EINVAL));
+    drop(client);
     served.join().unwrap();
 }
 
 /// TASK-160.9: a request with a flag its kind doesn't know is refused (`EINVAL`), rather than
 /// served as though it had none, as the daemon did: a `WRITE` of any flag a write doesn't know
-/// writes nothing, a `COMMIT` of one commits nothing, and the store is served on.
+/// writes nothing, a `COMMIT` of one commits nothing, and the cell is served on.
 #[test]
 fn requests_with_flags_the_daemon_doesnt_know_are_refused() {
     use super::wire::{COMMIT, COMMIT_ROOT, Header, WRITE};
     host();
     let dir = tempfile::tempdir().unwrap();
-    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
+    let (client, served) = connect(&dir.path().join("store"), 1 << 24);
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
     let args = [extent.cell, extent.sequence, 0, 0, BLOCK as u64];
     // Bit 31 is any request's: REQUEST (TASK-260).
     for bit in 5..31 {
         let unknown = Header::new(WRITE, 0).with_args(&args).with_flags(1 << bit);
-        let written = store.call(unknown, &pattern(1, BLOCK), &[]).map(drop);
+        let written = client.call(unknown, &pattern(1, BLOCK), &[]).map(drop);
         assert_eq!(written, Err(Errno::EINVAL), "flag {bit}");
     }
-    assert_eq!(read(&store, extent, 0, BLOCK), Err(Errno::ENOENT));
-    assert_eq!(write(&store, extent, 0, &pattern(2, BLOCK)), Ok(()));
-    assert_eq!(store.commit(Some(b"before")), Ok(()));
+    assert_eq!(read(&client, extent, 0, BLOCK), Err(Errno::ENOENT));
+    assert_eq!(write(&client, extent, 0, &pattern(2, BLOCK)), Ok(()));
+    assert_eq!(client.commit(Some(b"before")), Ok(()));
     // Bit 2 is COMMIT_LOCAL (TASK-301).
     let unknown = Header::new(COMMIT, 0).with_flags(COMMIT_ROOT | 1 << 3);
-    assert_eq!(store.call(unknown, b"after", &[]).map(drop), Err(Errno::EINVAL));
-    assert_eq!(store.root(), Ok(b"before".to_vec()));
-    assert_eq!(read(&store, extent, 0, BLOCK), Ok(pattern(2, BLOCK)));
-    drop(store);
+    assert_eq!(client.call(unknown, b"after", &[]).map(drop), Err(Errno::EINVAL));
+    assert_eq!(client.root(), Ok(b"before".to_vec()));
+    assert_eq!(read(&client, extent, 0, BLOCK), Ok(pattern(2, BLOCK)));
+    drop(client);
     served.join().unwrap();
 }
 
 /// A write a commit follows is sealed by it, and a write a barrier precedes seals what came
-/// before: each one round trip, as the store has them (`WriteBarriers`).
+/// before: each one round trip, as the cell has them (`WriteBarriers`).
 #[test]
 fn writes_with_barriers() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    let (store, served) = connect(&path, 1 << 20);
+    let (client, served) = connect(&path, 1 << 20);
     let (first, second) = (
-        ExtentId { cell: store.cell(), sequence: 1 },
-        ExtentId { cell: store.cell(), sequence: 2 },
+        ExtentId { cell: client.cell(), sequence: 1 },
+        ExtentId { cell: client.cell(), sequence: 2 },
     );
     let data = pattern(1, BLOCK);
     let committed = WriteBarriers { after: Some(Commit::Uploaded), ..Default::default() };
-    store.write_with_barriers(first, 0, &[VolatileSlice::from(&data[..])], committed).unwrap();
-    assert_eq!(write(&store, first, BLOCK as u64, &data), Err(Errno::EPERM), "first is open");
-    write(&store, second, 0, &data).unwrap();
+    client.write_with_barriers(first, 0, &[VolatileSlice::from(&data[..])], committed).unwrap();
+    assert_eq!(write(&client, first, BLOCK as u64, &data), Err(Errno::EPERM), "first is open");
+    write(&client, second, 0, &data).unwrap();
     let barrier = WriteBarriers { before: true, ..Default::default() };
-    let third = ExtentId { cell: store.cell(), sequence: 3 };
-    store.write_with_barriers(third, 0, &[VolatileSlice::from(&data[..])], barrier).unwrap();
-    assert_eq!(write(&store, second, BLOCK as u64, &data), Err(Errno::EPERM), "second is open");
-    write(&store, third, BLOCK as u64, &data).unwrap();
-    assert_eq!(read(&store, first, 0, BLOCK), Ok(data));
-    drop(store);
+    let third = ExtentId { cell: client.cell(), sequence: 3 };
+    client.write_with_barriers(third, 0, &[VolatileSlice::from(&data[..])], barrier).unwrap();
+    assert_eq!(write(&client, second, BLOCK as u64, &data), Err(Errno::EPERM), "second is open");
+    write(&client, third, BLOCK as u64, &data).unwrap();
+    assert_eq!(read(&client, first, 0, BLOCK), Ok(data));
+    drop(client);
     served.join().unwrap();
 }
 
@@ -765,37 +765,37 @@ fn a_writes_commit_sets_its_root() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    let (store, served) = connect(&path, 1 << 20);
-    let extent = |sequence| ExtentId { cell: store.cell(), sequence };
+    let (client, served) = connect(&path, 1 << 20);
+    let extent = |sequence| ExtentId { cell: client.cell(), sequence };
     let data = pattern(1, BLOCK);
     let write = |sequence, root: Option<&[u8]>, after| {
         let barriers = WriteBarriers { after, root, ..Default::default() };
-        store.write_with_barriers(extent(sequence), 0, &[VolatileSlice::from(&data[..])], barriers)
+        client.write_with_barriers(extent(sequence), 0, &[VolatileSlice::from(&data[..])], barriers)
     };
     let committed = Some(Commit::Ordered);
     write(1, Some(&b"one"[..]), committed).unwrap();
-    assert_eq!(store.transfers(), 1);
-    assert_eq!(store.root(), Ok(b"one".to_vec()));
-    assert_eq!(read(&store, extent(1), 0, BLOCK), Ok(data.clone()));
+    assert_eq!(client.transfers(), 1);
+    assert_eq!(client.root(), Ok(b"one".to_vec()));
+    assert_eq!(read(&client, extent(1), 0, BLOCK), Ok(data.clone()));
 
-    let taken = store.take_transfer_slots();
-    let used = store.transfers();
+    let taken = client.take_transfer_slots();
+    let used = client.transfers();
     write(2, Some(&b"two"[..]), committed).unwrap();
-    assert_eq!(store.transfers(), used);
+    assert_eq!(client.transfers(), used);
     drop(taken);
-    assert_eq!(store.root(), Ok(b"two".to_vec()));
-    assert_eq!(read(&store, extent(2), 0, BLOCK), Ok(data.clone()));
+    assert_eq!(client.root(), Ok(b"two".to_vec()));
+    assert_eq!(read(&client, extent(2), 0, BLOCK), Ok(data.clone()));
 
     assert_eq!(write(3, Some(&b"three"[..]), None), Err(Errno::EINVAL));
-    assert_eq!(read(&store, extent(3), 0, BLOCK), Err(Errno::ENOENT));
-    assert_eq!(store.root(), Ok(b"two".to_vec()));
-    drop(store);
+    assert_eq!(read(&client, extent(3), 0, BLOCK), Err(Errno::ENOENT));
+    assert_eq!(client.root(), Ok(b"two".to_vec()));
+    drop(client);
     served.join().unwrap();
 }
 
 /// cladefs: a future spawned on replies sends its request on the thread spawning it, and goes on,
 /// as the reply comes, on the thread receiving it, which no other thread then waits for (TASK-41);
-/// its next request too. The thread receiving replies is held, in the store's capacity callback,
+/// its next request too. The thread receiving replies is held, in the cell's capacity callback,
 /// until the future waits for its reply: otherwise the reply may come while the spawning thread
 /// still runs it, which then goes on with it.
 #[test]
@@ -803,21 +803,21 @@ fn futures_go_on_where_their_replies_arrive() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    let (store, served) = connect(&path, 1 << 20);
+    let (client, served) = connect(&path, 1 << 20);
     let (holding, held) = std::sync::mpsc::channel();
     let (release, released) = std::sync::mpsc::channel::<()>();
     let released = std::sync::Mutex::new(released);
-    store.on_capacity(move |_, _| {
+    client.on_capacity(move |_, _| {
         holding.send(()).unwrap();
         released.lock().unwrap().recv().unwrap();
     });
     resize(&path, 4 << 20).unwrap();
     held.recv().unwrap();
 
-    let store = std::sync::Arc::new(store);
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
+    let client = std::sync::Arc::new(client);
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
     let (done, finished) = std::sync::mpsc::channel();
-    let serving = store.clone();
+    let serving = client.clone();
     super::spawn_on_replies(async move {
         let data = pattern(7, BLOCK);
         let committed = WriteBarriers { after: Some(Commit::Ordered), ..Default::default() };
@@ -836,29 +836,29 @@ fn futures_go_on_where_their_replies_arrive() {
     assert_eq!((wrote, read, same), (Ok(()), Ok(()), true));
     assert_eq!(after_write.name(), Some("cladefsd client"));
     assert_eq!(after_read.id(), after_write.id());
-    drop(store);
+    drop(client);
     served.join().unwrap();
 }
 
-/// cladefs: a store's blocking call on the thread receiving its replies would wait for itself: it
-/// fails, as from a callback of the store's there, rather than panic the VM process (TASK-56),
-/// and the store goes on.
+/// cladefs: a cell's blocking call on the thread receiving its replies would wait for itself: it
+/// fails, as from a callback of the cell's there, rather than panic the VM process (TASK-56),
+/// and the cell goes on.
 #[test]
 fn blocking_calls_where_replies_arrive_fail() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    let (store, served) = connect(&path, 1 << 20);
-    let store = std::sync::Arc::new(store);
+    let (client, served) = connect(&path, 1 << 20);
+    let client = std::sync::Arc::new(client);
     let (answer, answered) = std::sync::mpsc::channel();
-    let calling = std::sync::Arc::downgrade(&store);
-    store.on_capacity(move |_, _| {
+    let calling = std::sync::Arc::downgrade(&client);
+    client.on_capacity(move |_, _| {
         answer.send(calling.upgrade().unwrap().info().map(drop)).unwrap();
     });
     resize(&path, 4 << 20).unwrap();
     assert_eq!(answered.recv().unwrap(), Err(Errno::EIO));
-    assert_eq!(store.info().map(drop), Ok(()));
-    drop(store);
+    assert_eq!(client.info().map(drop), Ok(()));
+    drop(client);
     served.join().unwrap();
 }
 
@@ -870,17 +870,17 @@ fn maps_a_window_in_the_vm_process() {
     host();
     let ps = page_size() as usize;
     let dir = tempfile::tempdir().unwrap();
-    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
+    let (client, served) = connect(&dir.path().join("store"), 1 << 24);
     let memory = memory(4);
-    // SAFETY: The memory is the test's, and outlives the store.
-    unsafe { store.create_dax_window_in_host_memory(memory, 4 * ps as u64, None, 1) }.unwrap();
+    // SAFETY: The memory is the test's, and outlives the cell.
+    unsafe { client.create_dax_window_in_host_memory(memory, 4 * ps as u64, None, 1) }.unwrap();
     let base = memory.as_ptr() as usize;
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, extent, 0, &pattern(3, ps)).unwrap();
-    store.commit(None).unwrap();
-    store.map(extent, 0, ps as u64, 0).unwrap();
-    store.map(extent, 0, ps as u64, 2 * ps as u64).unwrap();
-    // SAFETY: The window's memory, whose faults the store serves.
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(3, ps)).unwrap();
+    client.commit(None).unwrap();
+    client.map(extent, 0, ps as u64, 0).unwrap();
+    client.map(extent, 0, ps as u64, 2 * ps as u64).unwrap();
+    // SAFETY: The window's memory, whose faults the cell serves.
     let window = unsafe { std::slice::from_raw_parts(memory.as_ptr(), 3 * ps) };
     assert!(window[..ps] == pattern(3, ps)[..], "the sealed extent holds other data");
     assert!(window[2 * ps..] == pattern(3, ps)[..], "its other mapping maps other data");
@@ -893,10 +893,10 @@ fn maps_a_window_in_the_vm_process() {
     assert_ne!(private, mapped_from(base).0, "the window maps the extent where it maps nothing");
     // Unmapped, the extent's page is gone from this process's memory once the daemon replies: the
     // private memory is there in its place, as where the window never mapped anything.
-    store.unmap(2 * ps as u64, ps as u64).unwrap();
+    client.unmap(2 * ps as u64, ps as u64).unwrap();
     assert_eq!(mapped_from(base + 2 * ps), (private, 2 * ps as u64));
 
-    drop(store);
+    drop(client);
     served.join().unwrap();
     // SAFETY: Unmaps the memory, which nothing uses any more.
     assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 4 * ps) }, 0);
@@ -904,7 +904,7 @@ fn maps_a_window_in_the_vm_process() {
 
 /// A byte of a pipe's read into the page at `addr`, as the kernel writes it, faulting for writing
 /// as KVM does for a vCPU: `Err` with the errno it failed with.
-fn kernel_store(addr: usize) -> Result<(), i32> {
+fn kernel_write(addr: usize) -> Result<(), i32> {
     let mut pipe = [0; 2];
     // SAFETY: Makes a pipe, writes a byte to it, and reads one into `addr`, closing it after.
     unsafe {
@@ -920,9 +920,9 @@ fn kernel_store(addr: usize) -> Result<(), i32> {
 
 /// cladefs TASK-164.1 (backlog doc-13): a window that copies on write, in the VM process, maps
 /// sealed extents and zeros alone (a `MAP` of an open extent `EPERM`). The
-/// guest's store to a sealed extent's page makes the page private, the tenant's memory mapped in
-/// its place, the extent as the store's reads have it and another mapping of it; to zeros, a page
-/// of zeros. Past the window's private pages a store is refused (`EFAULT`, as `KVM_RUN` fails,
+/// guest's write to a sealed extent's page makes the page private, the tenant's memory mapped in
+/// its place, the extent as the cell's reads have it and another mapping of it; to zeros, a page
+/// of zeros. Past the window's private pages a write is refused (`EFAULT`, as `KVM_RUN` fails,
 /// which stops the VM); an `UNMAP` frees a private page, and `PRIVATE` makes pages private at once,
 /// within the bound (`ENOMEM` past it, `EINVAL` where nothing is mapped). A snapshot's fork is
 /// refused while the window has private pages (`EBUSY`).
@@ -931,28 +931,28 @@ fn windows_copy_on_write_in_the_vm_process() {
     host();
     let ps = page_size() as usize;
     let dir = tempfile::tempdir().unwrap();
-    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
+    let (client, served) = connect(&dir.path().join("store"), 1 << 24);
     let memory = memory(4);
-    // SAFETY: The memory is the test's, and outlives the store.
-    unsafe { store.create_dax_window_in_host_memory(memory, 4 * ps as u64, None, 2) }.unwrap();
-    assert!(store.copies_on_write());
+    // SAFETY: The memory is the test's, and outlives the cell.
+    unsafe { client.create_dax_window_in_host_memory(memory, 4 * ps as u64, None, 2) }.unwrap();
+    assert!(client.copies_on_write());
     crate::guest_thread_started();
     let base = memory.as_ptr() as usize;
     let (sealed, open) = (
-        ExtentId { cell: store.cell(), sequence: 1 },
-        ExtentId { cell: store.cell(), sequence: 2 },
+        ExtentId { cell: client.cell(), sequence: 1 },
+        ExtentId { cell: client.cell(), sequence: 2 },
     );
-    write(&store, sealed, 0, &pattern(3, ps)).unwrap();
-    store.commit(None).unwrap();
-    write(&store, open, 0, &pattern(4, ps)).unwrap();
-    assert_eq!(store.map(open, 0, ps as u64, 0), Err(Errno::EPERM));
-    store.commit(None).unwrap();
-    store.map(sealed, 0, ps as u64, 0).unwrap();
-    store.map(sealed, 0, ps as u64, ps as u64).unwrap();
-    futures::executor::block_on(store.map_zeros_async(2 * ps as u64, ps as u64)).unwrap();
+    write(&client, sealed, 0, &pattern(3, ps)).unwrap();
+    client.commit(None).unwrap();
+    write(&client, open, 0, &pattern(4, ps)).unwrap();
+    assert_eq!(client.map(open, 0, ps as u64, 0), Err(Errno::EPERM));
+    client.commit(None).unwrap();
+    client.map(sealed, 0, ps as u64, 0).unwrap();
+    client.map(sealed, 0, ps as u64, ps as u64).unwrap();
+    futures::executor::block_on(client.map_zeros_async(2 * ps as u64, ps as u64)).unwrap();
     // The window's bytes from `at` to `end`, as the guest reads them.
     let window = |at: usize, end: usize| -> Vec<u8> {
-        // SAFETY: The window's memory, whose faults the store serves.
+        // SAFETY: The window's memory, whose faults the cell serves.
         (at..end).map(|at| unsafe { memory.as_ptr().add(at).read_volatile() }).collect()
     };
     assert_eq!(window(0, ps), pattern(3, ps), "the sealed extent holds other data");
@@ -960,31 +960,31 @@ fn windows_copy_on_write_in_the_vm_process() {
     assert_eq!(window(ps, 2 * ps), pattern(3, ps), "the sealed extent holds other data");
     assert_eq!(mapped_from(base), mapped_from(base + ps), "the extent's page isn't shared");
 
-    // SAFETY: As above, a store of the guest's.
+    // SAFETY: As above, a write of the guest's.
     unsafe { memory.as_ptr().write_volatile(0xee) };
-    assert_ne!(mapped_from(base), mapped_from(base + ps), "the store reached the shared page");
+    assert_ne!(mapped_from(base), mapped_from(base + ps), "the write reached the shared page");
     assert_eq!(window(0, 1), [0xee]);
     assert_eq!(window(1, ps), pattern(3, ps)[1..], "the private page holds other data");
     assert_eq!(window(ps, 2 * ps), pattern(3, ps), "the other mapping changed");
-    assert_eq!(read(&store, sealed, 0, ps), Ok(pattern(3, ps)));
-    assert_eq!(kernel_store(base + 2 * ps), Ok(()));
+    assert_eq!(read(&client, sealed, 0, ps), Ok(pattern(3, ps)));
+    assert_eq!(kernel_write(base + 2 * ps), Ok(()));
     assert_eq!(window(2 * ps, 2 * ps + 1), [0x77]);
     assert_eq!(window(2 * ps + 1, 3 * ps), vec![0; ps - 1], "zeros copied otherwise");
 
     // Past the window's two private pages.
-    assert_eq!(kernel_store(base + ps), Err(libc::EFAULT));
-    assert_eq!(window(ps, 2 * ps), pattern(3, ps), "a store refused was made");
-    assert_eq!(store.make_version(), Err(Errno::EBUSY));
-    store.unmap(0, ps as u64).unwrap();
-    assert_eq!(store.make_private(ps as u64, ps as u64), Ok(()));
-    assert_eq!(kernel_store(base + ps), Ok(()));
-    assert_eq!(store.make_private(3 * ps as u64, ps as u64), Err(Errno::EINVAL));
-    store.map(sealed, 0, ps as u64, 3 * ps as u64).unwrap();
-    assert_eq!(store.make_private(3 * ps as u64, ps as u64), Err(Errno::ENOMEM));
-    store.unmap(0, 4 * ps as u64).unwrap();
-    assert_eq!(store.make_version().map(drop), Ok(()));
+    assert_eq!(kernel_write(base + ps), Err(libc::EFAULT));
+    assert_eq!(window(ps, 2 * ps), pattern(3, ps), "a write refused was made");
+    assert_eq!(client.make_version(), Err(Errno::EBUSY));
+    client.unmap(0, ps as u64).unwrap();
+    assert_eq!(client.make_private(ps as u64, ps as u64), Ok(()));
+    assert_eq!(kernel_write(base + ps), Ok(()));
+    assert_eq!(client.make_private(3 * ps as u64, ps as u64), Err(Errno::EINVAL));
+    client.map(sealed, 0, ps as u64, 3 * ps as u64).unwrap();
+    assert_eq!(client.make_private(3 * ps as u64, ps as u64), Err(Errno::ENOMEM));
+    client.unmap(0, 4 * ps as u64).unwrap();
+    assert_eq!(client.make_version().map(drop), Ok(()));
 
-    drop(store);
+    drop(client);
     served.join().unwrap();
     // SAFETY: Unmaps the memory, which nothing uses any more.
     assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 4 * ps) }, 0);
@@ -992,7 +992,7 @@ fn windows_copy_on_write_in_the_vm_process() {
 
 /// A byte at `addr` written to a pipe, the kernel reading it, faulting for reading as KVM does for
 /// a vCPU's load: `Err` with the errno it failed with.
-fn kernel_load(addr: usize) -> Result<(), i32> {
+fn kernel_read(addr: usize) -> Result<(), i32> {
     let mut pipe = [0; 2];
     // SAFETY: Makes a pipe, writes the byte at `addr` to it, and closes it.
     unsafe {
@@ -1005,9 +1005,9 @@ fn kernel_load(addr: usize) -> Result<(), i32> {
     }
 }
 
-/// cladefs TASK-187: a guest's stray access, a load or a store at a window offset nothing maps
-/// (cladefs.dax_stray, fxfs-guest-crash-stray-dax), its page faulted first by KVM's asynchronous page
-/// fault's worker, writing, then by the vCPU, stays refused, withheld, however often the vCPU
+/// cladefs TASK-187: a guest's stray access, a read or a write at a window offset nothing maps
+/// (cladefs.dax_stray, fxfs-guest-crash-stray-dax), its page faulted first by KVM's asynchronous
+/// page fault's worker, writing, then by the vCPU, stays refused, withheld, however often the vCPU
 /// retries it as the VMM does ([`AccessFailures`](crate::AccessFailures)), each retry lifting what
 /// the stage restricted for workers' writes; and is given up on, its VM stopped (Firecracker's
 /// 159), after a second of failures 25 µs apart, the clock the test's, though the vCPU exits
@@ -1020,19 +1020,19 @@ fn a_stray_access_stays_refused_and_is_given_up_on() {
     host();
     let ps = page_size() as usize;
     let dir = tempfile::tempdir().unwrap();
-    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
+    let (client, served) = connect(&dir.path().join("store"), 1 << 24);
     let memory = memory(4);
-    // SAFETY: The memory is the test's, and outlives the store.
-    unsafe { store.create_dax_window_in_host_memory(memory, 4 * ps as u64, None, 2) }.unwrap();
-    assert!(store.copies_on_write());
+    // SAFETY: The memory is the test's, and outlives the cell.
+    unsafe { client.create_dax_window_in_host_memory(memory, 4 * ps as u64, None, 2) }.unwrap();
+    assert!(client.copies_on_write());
     let base = memory.as_ptr() as usize;
     // KVM's worker, a thread not the guest's, faulting the page in for writing for a vCPU's load.
-    let worker = std::thread::spawn(move || kernel_store(base + 2 * ps));
+    let worker = std::thread::spawn(move || kernel_write(base + 2 * ps));
     assert_eq!(worker.join().unwrap(), Err(libc::EFAULT), "the worker's write went through");
     crate::guest_thread_started();
     let step = std::time::Duration::from_micros(25);
     let accesses: [(&str, fn(usize) -> Result<(), i32>, usize); 2] =
-        [("load", kernel_load, base + 2 * ps), ("store", kernel_store, base + 3 * ps + ps / 2)];
+        [("load", kernel_read, base + 2 * ps), ("write", kernel_write, base + 3 * ps + ps / 2)];
     for (what, access, addr) in accesses {
         let mut failures = AccessFailures::default();
         let start = std::time::Instant::now();
@@ -1056,66 +1056,67 @@ fn a_stray_access_stays_refused_and_is_given_up_on() {
     let pages = "0 pages installed, 0 left out, 0 private, 2 withheld, 0 restricted";
     assert!(told.contains(pages), "{told}");
 
-    drop(store);
+    drop(client);
     served.join().unwrap();
     // SAFETY: Unmaps the memory, which nothing uses any more.
     assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 4 * ps) }, 0);
 }
 
-/// cladefs TASK-187: what a forked VM's guest pays for each store to a page not yet here, of a large
-/// window that copies on write (GCE r632, pgbench forked at 0.57 of no DAX, its VMMs restricting
-/// pages for KVM's workers' writes 2^18 times and more): KVM's worker writes the page in for the
-/// vCPU's store, which the stage resolves as a load and restricts to reads, so that the worker's
-/// write fails; the vCPU's store then fails, `KVM_RUN` with `EFAULT`, and the VMM retries it once
-/// the stage's fault thread has lifted the restriction (`guest_access_failed`); the store, retried,
-/// makes the page private. A store failed once, then, or twice where the fault thread was slow to
-/// lift: 357 times while the VMM retried at once and a lift walked every page of the window, 140
-/// once a lift walked the pages restricted alone (printed, with the time the stores took).
+/// cladefs TASK-187: what a forked VM's guest pays for each write to a page not yet here, of a
+/// large window that copies on write (GCE r632, pgbench forked at 0.57 of no DAX, its VMMs
+/// restricting pages for KVM's workers' writes 2^18 times and more): KVM's worker writes the page
+/// in for the vCPU's write, which the stage resolves as a load and restricts to reads, so that the
+/// worker's write fails; the vCPU's write then fails, `KVM_RUN` with `EFAULT`, and the VMM retries
+/// it once the stage's fault thread has lifted the restriction (`guest_access_failed`); the write,
+/// retried, makes the page private. A write failed once, then, or twice where the fault thread was
+/// slow to lift: 357 times while the VMM retried at once and a lift walked every page of the
+/// window, 140 once a lift walked the pages restricted alone (printed, with the time the writes
+/// took).
 ///
 /// The pages are a sealed extent's, not in memory, which the window maps without installing them
-/// here, as a forked VM's are: a page here, write-protected, takes a write as a store, whoever's
-/// (`dax::uffd`'s `writes_to_pages_here_are_stores_whoever_makes_them`). They were zeros once,
-/// which the window installs as it maps them: here only past the stage's budget of runs, which
-/// the host's `vm.max_map_count` sets. 262,144 on OrbStack left them out; GCE's 1,048,576 kept
-/// them, and the first worker's write made its page private (GCE r691). A run of failures is by
-/// the test's clock, a microsecond a failure: a loaded host may take a run's 10 ms between two.
+/// here, as a forked VM's are: a page here, write-protected, takes a write as the guest's,
+/// whoever's (`dax::uffd`'s `writes_to_pages_here_are_stores_whoever_makes_them`). They were zeros
+/// once, which the window installs as it maps them: here only past the stage's budget of runs,
+/// which the host's `vm.max_map_count` sets. 262,144 on OrbStack left them out; GCE's 1,048,576
+/// kept them, and the first worker's write made its page private (GCE r691). A run of failures is
+/// by the test's clock, a microsecond a failure: a loaded host may take a run's 10 ms between two.
 #[test]
-fn a_store_after_a_workers_write_waits_for_one_lift() {
+fn a_guest_write_after_a_workers_write_waits_for_one_lift() {
     use crate::{AccessFailures, Failure};
     host();
     let ps = page_size() as usize;
-    // A 1 GiB window, of which the guest stores to `STORES` pages.
+    // A 1 GiB window, of which the guest writes `WRITES` pages.
     const PAGES: usize = 1 << 18;
-    const STORES: usize = 1000;
+    const WRITES: usize = 1000;
     let dir = tempfile::tempdir().unwrap();
-    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
+    let (client, served) = connect(&dir.path().join("store"), 1 << 24);
     let memory = memory(PAGES);
     let size = (PAGES * ps) as u64;
-    // SAFETY: The memory is the test's, and outlives the store.
-    unsafe { store.create_dax_window_in_host_memory(memory, size, None, STORES as u64) }.unwrap();
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, extent, 0, &pattern(5, ps)).unwrap();
-    store.commit(None).unwrap();
+    // SAFETY: The memory is the test's, and outlives the cell.
+    unsafe { client.create_dax_window_in_host_memory(memory, size, None, WRITES as u64) }.unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(5, ps)).unwrap();
+    client.commit(None).unwrap();
     // Whatever of it the write left in memory evicted, so that mapping it installs nothing.
     crate::cache::evict_least_used(None, |_| false);
-    // Every 64th page, as a forked guest's stores are spread over its window.
+    // Every 64th page, as a forked guest's writes are spread over its window.
     let offset = |page: usize| page * 64 * ps;
-    for page in 0..STORES {
-        store.map(extent, 0, ps as u64, offset(page) as u64).unwrap();
+    for page in 0..WRITES {
+        client.map(extent, 0, ps as u64, offset(page) as u64).unwrap();
     }
     let base = memory.as_ptr() as usize;
     let told = crate::describe_windows(Some(base));
     let pages = "0 pages installed, 0 left out, 0 private, 0 withheld, 0 restricted";
-    assert!(told.contains(pages), "the pages stored to are here: {told}");
+    assert!(told.contains(pages), "the pages written to are here: {told}");
     crate::guest_thread_started();
     let (mut failed, start) = (0u64, std::time::Instant::now());
     let mut now = start;
-    for page in 0..STORES {
+    for page in 0..WRITES {
         let addr = base + offset(page);
-        let worker = std::thread::spawn(move || kernel_store(addr));
+        let worker = std::thread::spawn(move || kernel_write(addr));
         assert_eq!(worker.join().unwrap(), Err(libc::EFAULT), "the worker's write went through");
         let mut failures = AccessFailures::default();
-        while let Err(errno) = kernel_store(addr) {
+        while let Err(errno) = kernel_write(addr) {
             assert_eq!(errno, libc::EFAULT);
             failed += 1;
             now += std::time::Duration::from_micros(1);
@@ -1125,22 +1126,22 @@ fn a_store_after_a_workers_write_waits_for_one_lift() {
     }
     let took = start.elapsed();
     eprintln!(
-        "{STORES} stores after workers' writes, of a window of {PAGES} pages: {failed} retries \
-         failed, {:.1} a store, in {took:?}, {:?} a store",
-        failed as f64 / STORES as f64,
-        took / STORES as u32
+        "{WRITES} guest writes after workers' writes, of a window of {PAGES} pages: {failed} \
+         retries failed, {:.1} a write, in {took:?}, {:?} a write",
+        failed as f64 / WRITES as f64,
+        took / WRITES as u32
     );
     let told = crate::describe_windows(Some(base));
-    let pages = format!("{STORES} private, 0 withheld, 0 restricted (0 for workers' writes)");
+    let pages = format!("{WRITES} private, 0 withheld, 0 restricted (0 for workers' writes)");
     assert!(told.contains(&pages), "{told}");
-    assert!(failed <= 2 * STORES as u64, "{failed} retries failed");
-    // SAFETY: The window's last page stored to, private now, which nothing else accesses.
-    let last = unsafe { std::slice::from_raw_parts((base + offset(STORES - 1)) as *const u8, ps) };
+    assert!(failed <= 2 * WRITES as u64, "{failed} retries failed");
+    // SAFETY: The window's last page written to, private now, which nothing else accesses.
+    let last = unsafe { std::slice::from_raw_parts((base + offset(WRITES - 1)) as *const u8, ps) };
     let mut stored = pattern(5, ps);
     stored[0] = 0x77;
     assert!(last == &stored[..], "the private page holds other data");
 
-    drop(store);
+    drop(client);
     served.join().unwrap();
     // SAFETY: Unmaps the memory, which nothing uses any more.
     assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), PAGES * ps) }, 0);
@@ -1169,34 +1170,34 @@ fn metrics_gauge_the_extent_cache_and_the_windows_mappings() {
         })
     };
     let dir = tempfile::tempdir().unwrap();
-    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
+    let (client, served) = connect(&dir.path().join("store"), 1 << 24);
     let memory = memory(4);
-    // SAFETY: The memory is the test's, and outlives the store.
-    unsafe { store.create_dax_window_in_host_memory(memory, 4 * ps as u64, None, 1) }.unwrap();
+    // SAFETY: The memory is the test's, and outlives the cell.
+    unsafe { client.create_dax_window_in_host_memory(memory, 4 * ps as u64, None, 1) }.unwrap();
     assert_eq!(gauges(), [0, 0, 0, 0, 0]);
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, extent, 0, &pattern(3, ps)).unwrap();
-    store.commit(None).unwrap();
-    store.map(extent, 0, ps as u64, 0).unwrap();
-    // SAFETY: The window's memory, whose faults the store serves.
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(3, ps)).unwrap();
+    client.commit(None).unwrap();
+    client.map(extent, 0, ps as u64, 0).unwrap();
+    // SAFETY: The window's memory, whose faults the cell serves.
     let window = unsafe { std::slice::from_raw_parts(memory.as_ptr(), 3 * ps) };
     assert!(window[..ps] == pattern(3, ps)[..], "its mapping maps other data");
     assert_eq!(gauges(), [1, 0, 1, ps as u64, 1]);
 
-    store.map(extent, 0, ps as u64, 2 * ps as u64).unwrap();
+    client.map(extent, 0, ps as u64, 2 * ps as u64).unwrap();
     assert!(window[2 * ps..] == pattern(3, ps)[..], "its other mapping maps other data");
     assert_eq!(gauges(), [1, 0, 2, 2 * ps as u64, 2]);
 
-    store.unmap(0, 4 * ps as u64).unwrap();
+    client.unmap(0, 4 * ps as u64).unwrap();
     assert_eq!(gauges(), [0, 1, 0, 0, 0]);
-    drop(store);
+    drop(client);
     served.join().unwrap();
     // SAFETY: Unmaps the memory, which nothing uses any more.
     assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 4 * ps) }, 0);
 }
 
 /// TASK-111.7: the metrics show the daemon's build, and each VM process's, as it said it opening
-/// its store, by the store's cell, a writer and its follower together, while they are connected.
+/// its cell, by the cell, a writer and its follower together, while they are connected.
 /// A build said again, or not a label's characters, is refused.
 #[test]
 fn metrics_show_the_daemons_and_its_vm_processes_builds() {
@@ -1219,13 +1220,13 @@ fn metrics_show_the_daemons_and_its_vm_processes_builds() {
         )
     };
     let dir = tempfile::tempdir().unwrap();
-    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
-    let cell = store.cell();
+    let (client, served) = connect(&dir.path().join("store"), 1 << 24);
+    let cell = client.cell();
     assert_eq!(builds(), [daemon.clone(), vms(cell, 1)]);
     let (follower, followed) = follow(&dir.path().join("store")).unwrap();
     assert_eq!(builds(), [daemon.clone(), vms(cell, 2)]);
 
-    let said = |payload: &[u8]| store.call(Header::new(BUILD, 0), payload, &[]).map(drop);
+    let said = |payload: &[u8]| client.call(Header::new(BUILD, 0), payload, &[]).map(drop);
     assert_eq!(said(b"again"), Err(Errno::EEXIST));
     let (other, other_served) = connect(&dir.path().join("other"), 1 << 24);
     let said = |payload: &[u8]| other.call(Header::new(BUILD, 0), payload, &[]).map(drop);
@@ -1237,13 +1238,13 @@ fn metrics_show_the_daemons_and_its_vm_processes_builds() {
     followed.join().unwrap();
     other_served.join().unwrap();
     assert_eq!(builds(), [daemon.clone(), vms(cell, 1)]);
-    drop(store);
+    drop(client);
     served.join().unwrap();
     assert_eq!(builds(), [daemon]);
 }
 
 /// cladefs TASK-111.5: the metrics show each VM process's window, its mappings and pages, by its
-/// store's cell and its connection's number, a writer's and its follower's apart, and the runs of
+/// cell and its connection's number, a writer's and its follower's apart, and the runs of
 /// pages its second stage has installed, as it last said, against the most it keeps, as it said
 /// making its window.
 #[test]
@@ -1261,7 +1262,7 @@ fn metrics_gauge_each_vm_processs_window_and_host_mappings() {
             .map(|value| value.parse().unwrap())
     };
     let dir = tempfile::tempdir().unwrap();
-    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
+    let (client, served) = connect(&dir.path().join("store"), 1 << 24);
     let (follower, followed) = follow(&dir.path().join("store")).unwrap();
     let vms = super::stats::vms();
     assert_eq!(vms.iter().map(|vm| vm.follower).collect::<Vec<_>>(), [false, true]);
@@ -1272,19 +1273,19 @@ fn metrics_gauge_each_vm_processs_window_and_host_mappings() {
     assert_eq!(series("vm_host_mapping_budget", writer), None);
 
     let memory = memory(4);
-    // SAFETY: The memory is the test's, and outlives the store.
-    unsafe { store.create_dax_window_in_host_memory(memory, 4 * ps as u64, None, 1) }.unwrap();
-    let budget = store.window_budget().unwrap() as u64;
+    // SAFETY: The memory is the test's, and outlives the cell.
+    unsafe { client.create_dax_window_in_host_memory(memory, 4 * ps as u64, None, 1) }.unwrap();
+    let budget = client.window_budget().unwrap() as u64;
     assert_eq!(series("vm_host_mapping_budget", writer), Some(budget));
     assert_eq!(series("vm_window_mappings", writer), Some(0));
     assert_eq!(series("vm_host_mappings", writer), Some(0));
     assert_eq!(series("vm_window_mappings", following), None);
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, extent, 0, &pattern(3, 2 * ps)).unwrap();
-    store.commit(None).unwrap();
-    store.map(extent, 0, 2 * ps as u64, 0).unwrap();
-    store.map(extent, 0, ps as u64, 3 * ps as u64).unwrap();
-    // SAFETY: The window's memory, whose faults the store serves.
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(3, 2 * ps)).unwrap();
+    client.commit(None).unwrap();
+    client.map(extent, 0, 2 * ps as u64, 0).unwrap();
+    client.map(extent, 0, ps as u64, 3 * ps as u64).unwrap();
+    // SAFETY: The window's memory, whose faults the cell serves.
     let window = unsafe { std::slice::from_raw_parts(memory.as_ptr(), 4 * ps) };
     assert!(window[3 * ps..] == pattern(3, ps)[..], "its mapping maps other data");
     assert_eq!(series("vm_window_mappings", writer), Some(2));
@@ -1295,13 +1296,13 @@ fn metrics_gauge_each_vm_processs_window_and_host_mappings() {
 
     // Its runs installed as it said, unmapping all but the page at 3: as of a taking of stats,
     // which it answers with them.
-    store.unmap(0, 2 * ps as u64).unwrap();
+    client.unmap(0, 2 * ps as u64).unwrap();
     take_stats(WAIT).join().unwrap();
     assert_eq!(series("vm_window_mappings", writer), Some(1));
     assert_eq!(series("vm_window_pages", writer), Some(1));
     assert_eq!(series("vm_host_mappings", writer), Some(1));
 
-    drop((store, follower));
+    drop((client, follower));
     served.join().unwrap();
     followed.join().unwrap();
     assert_eq!(super::stats::vms(), []);
@@ -1320,9 +1321,9 @@ fn stats_hold_the_daemons_vm_processes_and_guests() {
     let ps = page_size() as usize;
     let dir = tempfile::tempdir().unwrap();
     // Whose guest answers, as the test does.
-    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
+    let (client, served) = connect(&dir.path().join("store"), 1 << 24);
     let (asked, asks) = std::sync::mpsc::channel();
-    store.on_stats_asked(move |ask| asked.send(ask).is_ok());
+    client.on_stats_asked(move |ask| asked.send(ask).is_ok());
     // With no guest.
     let (guestless, guestless_served) = connect(&dir.path().join("other"), 1 << 24);
     // Whose guest never answers.
@@ -1330,18 +1331,18 @@ fn stats_hold_the_daemons_vm_processes_and_guests() {
     silent.on_stats_asked(|_| true);
 
     let memory = memory(2);
-    // SAFETY: The memory is the test's, and outlives the store.
-    unsafe { store.create_dax_window_in_host_memory(memory, 2 * ps as u64, None, 1) }.unwrap();
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, extent, 0, &pattern(5, ps)).unwrap();
-    store.commit(None).unwrap();
-    store.map(extent, 0, ps as u64, 0).unwrap();
+    // SAFETY: The memory is the test's, and outlives the cell.
+    unsafe { client.create_dax_window_in_host_memory(memory, 2 * ps as u64, None, 1) }.unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(5, ps)).unwrap();
+    client.commit(None).unwrap();
+    client.map(extent, 0, ps as u64, 0).unwrap();
 
     // The silent one's wait is the test's.
     let taking = take_stats(std::time::Duration::from_secs(2));
     let ask = asks.recv().unwrap();
     let guest = "seals 3\nseals_hist 0,2,1\ncommit abc\n";
-    store.answer_stats(ask, Some(guest)).unwrap();
+    client.answer_stats(ask, Some(guest)).unwrap();
     let taken = taking.join().unwrap();
 
     assert_eq!(taken.build, crate::BUILD_COMMIT);
@@ -1357,13 +1358,13 @@ fn stats_hold_the_daemons_vm_processes_and_guests() {
     assert_eq!(paths, ["store", "other", "silent"].map(|name| canonical.join(name)));
 
     let (answered, without, unanswered) = (&taken.vms[0], &taken.vms[1], &taken.vms[2]);
-    assert_eq!(answered.cell, store.cell());
+    assert_eq!(answered.cell, client.cell());
     assert_eq!(answered.build.as_deref(), Some(crate::BUILD_COMMIT));
     assert!(answered.answered.is_some(), "{answered:?}");
     let window = answered.window.expect("its window's gauges");
     assert_eq!((window.mappings, window.mapped_bytes), (1, ps as u64));
     assert_eq!(answered.stage.installed, window.pages, "its runs installed as of its answer");
-    assert_eq!(answered.budget, Some(store.window_budget().unwrap() as u64));
+    assert_eq!(answered.budget, Some(client.window_budget().unwrap() as u64));
     let guest = answered.guest.as_ref().expect("its guest's stats");
     assert_eq!(guest.build.as_deref(), Some("abc"));
     assert_eq!(guest.counters.get("seals"), Some(&3));
@@ -1379,13 +1380,13 @@ fn stats_hold_the_daemons_vm_processes_and_guests() {
     silent_served.join().unwrap();
     let (first, second) = (take_stats(WAIT), take_stats(WAIT));
     let asked = [asks.recv().unwrap(), asks.recv().unwrap()];
-    store.answer_stats(asked[0].max(asked[1]), None).unwrap();
+    client.answer_stats(asked[0].max(asked[1]), None).unwrap();
     for taking in [first, second] {
         let taken = taking.join().unwrap();
         assert!(taken.vms[0].answered.is_some(), "{:?}", taken.vms[0]);
     }
 
-    drop((store, guestless));
+    drop((client, guestless));
     for served in [served, guestless_served] {
         served.join().unwrap();
     }
@@ -1425,43 +1426,43 @@ fn take_stats(wait: std::time::Duration) -> JoinHandle<super::stats::HostStats> 
 /// The environment a child process of [`two_processes_map_the_same_pages`] is told what to map in;
 /// and, if set, that it runs on once it has, until its input closes.
 const CHILD_SOCKET: &str = "CLADEFSD_TEST_SOCKET";
-const CHILD_STORE: &str = "CLADEFSD_TEST_STORE";
+const CHILD_CELL_DIR: &str = "CLADEFSD_TEST_STORE";
 const CHILD_EXTENT: &str = "CLADEFSD_TEST_EXTENT";
 const CHILD_RUNS_ON: &str = "CLADEFSD_TEST_RUNS_ON";
 const CHILD_CLOSES: &str = "CLADEFSD_TEST_CLOSES";
 
-/// Opens the store at `store` through the daemon at `socket`, once the daemon has seen a connection
-/// that had it open go.
-fn connect_once_free(socket: &Path, store: &Path) -> CellClient {
+/// Opens the cell at `cell_dir` through the daemon at `socket`, once the daemon has seen a
+/// connection that had it open go.
+fn connect_once_free(socket: &Path, cell_dir: &Path) -> CellClient {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        match CellClient::connect(socket, store, 1 << 24) {
-            Ok(store) => return store,
+        match CellClient::connect(socket, cell_dir, 1 << 24) {
+            Ok(client) => return client,
             Err(error)
                 if error.errno() == Some(Errno::EBUSY) && std::time::Instant::now() < deadline =>
             {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
-            Err(error) => panic!("opening {}: {error:#}", store.display()),
+            Err(error) => panic!("opening {}: {error:#}", cell_dir.display()),
         }
     }
 }
 
-/// Maps `extent`'s first page into a new window of the store at `store` the daemon at `socket`
-/// serves, checks it holds the pattern written, and returns the store, mapping it still, and the
+/// Maps `extent`'s first page into a new window of the cell at `cell_dir` the daemon at `socket`
+/// serves, checks it holds the pattern written, and returns the cell, mapping it still, and the
 /// page's address.
-fn map_first_page(socket: &Path, store: &Path, extent: ExtentId) -> (CellClient, usize) {
+fn map_first_page(socket: &Path, cell_dir: &Path, extent: ExtentId) -> (CellClient, usize) {
     let ps = page_size() as usize;
-    let store = connect_once_free(socket, store);
+    let client = connect_once_free(socket, cell_dir);
     let memory = memory(1);
-    // SAFETY: The memory is this function's, and outlives the store.
-    unsafe { store.create_dax_window_in_host_memory(memory, ps as u64, None, 1) }.unwrap();
-    store.map(extent, 0, ps as u64, 0).unwrap();
-    // SAFETY: The window's memory, whose faults the store serves.
+    // SAFETY: The memory is this function's, and outlives the cell.
+    unsafe { client.create_dax_window_in_host_memory(memory, ps as u64, None, 1) }.unwrap();
+    client.map(extent, 0, ps as u64, 0).unwrap();
+    // SAFETY: The window's memory, whose faults the cell serves.
     let page = unsafe { std::slice::from_raw_parts(memory.as_ptr(), ps) };
     assert!(*page == pattern(9, ps)[..], "the window maps other data");
-    // The memory is leaked: the store's window maps it until the process exits.
-    (store, memory.as_ptr() as usize)
+    // The memory is leaked: the cell's window maps it until the process exits.
+    (client, memory.as_ptr() as usize)
 }
 
 /// A VM process, for [`two_processes_map_the_same_pages`] and
@@ -1471,30 +1472,30 @@ fn map_first_page(socket: &Path, store: &Path, extent: ExtentId) -> (CellClient,
 #[test]
 #[ignore = "run by two_processes_map_the_same_pages"]
 fn child_maps_an_extent() {
-    let (Ok(socket), Ok(store), Ok(extent)) =
-        (std::env::var(CHILD_SOCKET), std::env::var(CHILD_STORE), std::env::var(CHILD_EXTENT))
+    let (Ok(socket), Ok(cell_dir), Ok(extent)) =
+        (std::env::var(CHILD_SOCKET), std::env::var(CHILD_CELL_DIR), std::env::var(CHILD_EXTENT))
     else {
         return;
     };
     let (cell, sequence) = extent.split_once(':').unwrap();
     let extent = ExtentId { cell: cell.parse().unwrap(), sequence: sequence.parse().unwrap() };
-    let (store, page) = map_first_page(Path::new(&socket), Path::new(&store), extent);
+    let (client, page) = map_first_page(Path::new(&socket), Path::new(&cell_dir), extent);
     let (file, offset) = mapped_from(page);
     println!("MAPPED {file} {offset}");
-    let mut store = Some(store);
+    let mut client = Some(client);
     if std::env::var_os(CHILD_CLOSES).is_some() {
-        store.take();
+        client.take();
         println!("CLOSED");
     }
     std::io::Write::flush(&mut std::io::stdout()).unwrap();
     if std::env::var_os(CHILD_RUNS_ON).is_some() {
         std::io::copy(&mut std::io::stdin(), &mut std::io::sink()).unwrap();
     }
-    // As a VMM that dies does: with its store and window still open.
+    // As a VMM that dies does: with its cell and window still open.
     std::process::exit(0);
 }
 
-/// Two VM processes, each of a store forked from one, mapping one extent of it at once map the
+/// Two VM processes, each of a cell forked from one, mapping one extent of it at once map the
 /// same pages: the daemon's, which cache it once.
 #[tokio::test(flavor = "multi_thread")]
 async fn two_processes_map_the_same_pages() {
@@ -1503,23 +1504,23 @@ async fn two_processes_map_the_same_pages() {
     let dir = tempfile::tempdir().unwrap();
     let (parent, child) = (dir.path().join("parent"), dir.path().join("child"));
     let extent = {
-        let store = OpenCell::create(&parent, 1 << 24).await.unwrap();
-        let extent = ExtentId { cell: store.cell().id, sequence: 1 };
-        store.write(extent, 0, &[VolatileSlice::from(&pattern(9, ps)[..])]).await.unwrap();
-        store.commit(None).await.unwrap();
-        store.fork_to(&child, crate::host_cell::fork_child(store.cell())).await.unwrap();
+        let open_cell = OpenCell::create(&parent, 1 << 24).await.unwrap();
+        let extent = ExtentId { cell: open_cell.cell().id, sequence: 1 };
+        open_cell.write(extent, 0, &[VolatileSlice::from(&pattern(9, ps)[..])]).await.unwrap();
+        open_cell.commit(None).await.unwrap();
+        open_cell.fork_to(&child, crate::host_cell::fork_child(open_cell.cell())).await.unwrap();
         extent
     };
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
 
-    let (_store, page) = map_first_page(&socket, &parent, extent);
+    let (_cell, page) = map_first_page(&socket, &parent, extent);
     let ours = mapped_from(page);
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "cladefsd::tests::child_maps_an_extent", "--ignored", "--nocapture"])
         .env(CHILD_SOCKET, &socket)
-        .env(CHILD_STORE, &child)
+        .env(CHILD_CELL_DIR, &child)
         .env(CHILD_EXTENT, format!("{}:{}", extent.cell, extent.sequence))
         .output()
         .unwrap();
@@ -1532,7 +1533,7 @@ async fn two_processes_map_the_same_pages() {
     let (file, offset) = theirs.rsplit_once(' ').unwrap();
     assert_eq!((file.to_string(), offset.parse::<u64>().unwrap()), ours);
 
-    // The child's store goes with it, for another VM process to open, once the daemon has seen it
+    // The child's cell goes with it, for another VM process to open, once the daemon has seen it
     // go.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
@@ -1542,7 +1543,7 @@ async fn two_processes_map_the_same_pages() {
                 assert!(format!("{error:#}").contains(&Errno::EBUSY.to_string()), "{error:#}");
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
-            Err(error) => panic!("the child's store is still open: {error:#}"),
+            Err(error) => panic!("the child's cell is still open: {error:#}"),
         }
     }
 }
@@ -1551,12 +1552,13 @@ async fn two_processes_map_the_same_pages() {
 const CHILD_CONNECTION: &str = "CLADEFSD_TEST_CONNECTION";
 
 /// A VM process, for [`vm_processes_tell_the_daemon_what_their_windows_cost`]: changes its window
-/// six times, each a stage operation, a page made private the last, and closes its store; then
+/// six times, each a stage operation, a page made private the last, and closes its cell; then
 /// prints what they cost it.
 #[test]
 #[ignore = "run by vm_processes_tell_the_daemon_what_their_windows_cost"]
 fn child_changes_its_window() {
-    let (Ok(connection), Ok(store)) = (std::env::var(CHILD_CONNECTION), std::env::var(CHILD_STORE))
+    let (Ok(connection), Ok(cell_dir)) =
+        (std::env::var(CHILD_CONNECTION), std::env::var(CHILD_CELL_DIR))
     else {
         return;
     };
@@ -1564,31 +1566,32 @@ fn child_changes_its_window() {
     // SAFETY: The connection the parent left this process, which nothing else here owns.
     let stream =
         unsafe { <UnixStream as std::os::fd::FromRawFd>::from_raw_fd(connection.parse().unwrap()) };
-    let store = CellClient::over(stream, Path::new(&store), Opening::Create(1 << 24, Kind::Fxfs));
-    let store = store.unwrap();
+    let client =
+        CellClient::over(stream, Path::new(&cell_dir), Opening::Create(1 << 24, Kind::Fxfs));
+    let client = client.unwrap();
     let memory = memory(1);
-    // SAFETY: The memory is this function's, and outlives the store.
-    unsafe { store.create_dax_window_in_host_memory(memory, ps, None, 1) }.unwrap();
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, extent, 0, &pattern(3, ps as usize)).unwrap();
-    store.commit(None).unwrap();
+    // SAFETY: The memory is this function's, and outlives the cell.
+    unsafe { client.create_dax_window_in_host_memory(memory, ps, None, 1) }.unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(3, ps as usize)).unwrap();
+    client.commit(None).unwrap();
     // The window maps the extent anew, with none of its pages in memory yet.
-    store.map(extent, 0, ps, 0).unwrap();
+    client.map(extent, 0, ps, 0).unwrap();
     // A load faults its page in, which the window maps.
-    // SAFETY: The window's memory, whose faults the store serves.
+    // SAFETY: The window's memory, whose faults the cell serves.
     assert_eq!(unsafe { memory.as_ptr().read_volatile() }, pattern(3, 1)[0]);
     // Unmapped, which the daemon waits for.
-    store.unmap(0, ps).unwrap();
+    client.unmap(0, ps).unwrap();
     // Mapped anew, with its page in memory, which the window maps at once, and the VM process
     // installs as a load first touches it (TASK-276.6).
-    store.map(extent, 0, ps, 0).unwrap();
-    // SAFETY: The window's memory, whose faults the store serves.
+    client.map(extent, 0, ps, 0).unwrap();
+    // SAFETY: The window's memory, whose faults the cell serves.
     assert_eq!(unsafe { memory.as_ptr().read_volatile() }, pattern(3, 1)[0]);
     // cladefs: made private, a run of a page, over the page installed (TASK-164.10).
-    store.make_private(0, ps).unwrap();
-    let [ops, ns, overwritten, left_out] = store.stage_counts().costs;
-    let [runs, pages, private_ns, requests, waited] = store.private_counts();
-    drop(store);
+    client.make_private(0, ps).unwrap();
+    let [ops, ns, overwritten, left_out] = client.stage_counts().costs;
+    let [runs, pages, private_ns, requests, waited] = client.private_counts();
+    drop(client);
     println!(
         "STAGE {ops} {ns} {overwritten} {left_out} {runs} {pages} {private_ns} {requests} {waited}"
     );
@@ -1596,7 +1599,7 @@ fn child_changes_its_window() {
 
 /// TASK-91.16: what its VM processes' changes to their windows cost them, which they make, the
 /// daemon counts as its own (`Stats::stage_ops`): as they tell it, all of it once they close
-/// their stores. A VM process is another process, whose own counters the daemon never sees.
+/// their cells. A VM process is another process, whose own counters the daemon never sees.
 #[test]
 fn vm_processes_tell_the_daemon_what_their_windows_cost() {
     use std::os::fd::AsRawFd;
@@ -1611,7 +1614,7 @@ fn vm_processes_tell_the_daemon_what_their_windows_cost() {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "cladefsd::tests::child_changes_its_window", "--ignored", "--nocapture"])
         .env(CHILD_CONNECTION, theirs.as_raw_fd().to_string())
-        .env(CHILD_STORE, dir.path().join("store"))
+        .env(CHILD_CELL_DIR, dir.path().join("store"))
         .output()
         .unwrap();
     drop(theirs);
@@ -1758,7 +1761,7 @@ fn page_is_held(arena: crate::pages::ArenaId, offset: u64) -> bool {
 /// it, holds nothing up: the daemon takes its access to the pages it maps away without waiting for
 /// it, as it evicts them, as the kernel's relief does, while another VM process's requests and
 /// faults on them are served; and once it has acknowledged nothing it was sent for a while, the
-/// daemon kills it, and lets its store go. The page it maps, evicted, is no other's until then: not
+/// daemon kills it, and lets its cell go. The page it maps, evicted, is no other's until then: not
 /// free, but the quarantine's, until it has exited; free once it has.
 #[tokio::test(flavor = "multi_thread")]
 async fn frozen_vm_processes_hold_nothing_up() {
@@ -1775,7 +1778,7 @@ async fn frozen_vm_processes_are_killed_without_peer_pidfds() {
     frozen_vm_processes_are_killed().await;
 }
 
-/// A store of a tenant's, whose extent's page a VM process, a child, and this one map, and what
+/// A cell of a tenant's, whose extent's page a VM process, a child, and this one map, and what
 /// the child printed.
 struct TwoVmProcesses {
     dir: tempfile::TempDir,
@@ -1801,11 +1804,11 @@ async fn two_vm_processes(env: &[&str]) -> TwoVmProcesses {
     let (parent, child) = (dir.path().join("parent"), dir.path().join("child"));
     let extent = {
         // A cell of the tenant's (TASK-364).
-        let store = OpenCell::create_in(&parent, 1 << 24, tenant.id()).await.unwrap();
-        let extent = ExtentId { cell: store.cell().id, sequence: 1 };
-        store.write(extent, 0, &[VolatileSlice::from(&pattern(9, ps)[..])]).await.unwrap();
-        store.commit(None).await.unwrap();
-        store.fork_to(&child, crate::host_cell::fork_child(store.cell())).await.unwrap();
+        let open_cell = OpenCell::create_in(&parent, 1 << 24, tenant.id()).await.unwrap();
+        let extent = ExtentId { cell: open_cell.cell().id, sequence: 1 };
+        open_cell.write(extent, 0, &[VolatileSlice::from(&pattern(9, ps)[..])]).await.unwrap();
+        open_cell.commit(None).await.unwrap();
+        open_cell.fork_to(&child, crate::host_cell::fork_child(open_cell.cell())).await.unwrap();
         extent
     };
     let socket = dir.path().join("cladefsd.sock");
@@ -1818,7 +1821,7 @@ async fn two_vm_processes(env: &[&str]) -> TwoVmProcesses {
     theirs
         .args(["--exact", "cladefsd::tests::child_maps_an_extent", "--ignored", "--nocapture"])
         .env(CHILD_SOCKET, &socket)
-        .env(CHILD_STORE, &child)
+        .env(CHILD_CELL_DIR, &child)
         .env(CHILD_EXTENT, format!("{}:{}", extent.cell, extent.sequence))
         .env(CHILD_RUNS_ON, "1")
         .stdin(std::process::Stdio::piped())
@@ -1853,7 +1856,7 @@ async fn frozen_vm_processes_are_killed() {
     let reading = ours.clone();
     let served = within(wait, move || read(&reading, extent, 0, BLOCK));
     assert_eq!(served, Ok(Ok(pattern(9, BLOCK))), "our read waited for the frozen VM process");
-    // SAFETY: The window's memory, whose faults our store serves.
+    // SAFETY: The window's memory, whose faults our cell serves.
     let loaded =
         within(wait, move || unsafe { std::slice::from_raw_parts(page as *const u8, ps) }.to_vec());
     assert_eq!(loaded, Ok(pattern(9, ps)), "our fault waited for the frozen VM process");
@@ -1865,10 +1868,10 @@ async fn frozen_vm_processes_are_killed() {
     });
     let status = killed.expect("the frozen VM process lives on");
     assert_eq!(status.signal(), Some(libc::SIGKILL), "{status}");
-    // Its store goes with it, for another VM process to open once the daemon lets it go, which
+    // Its cell goes with it, for another VM process to open once the daemon lets it go, which
     // the opening waits for (`CLOSING_WAIT`); and its page, free by then.
     let child = dir.path().join("child");
-    let reopened = CellClient::connect(&socket, &child, 1 << 24).map(|store| store.cell());
+    let reopened = CellClient::connect(&socket, &child, 1 << 24).map(|client| client.cell());
     assert_eq!(reopened.map_err(|error| error.errno()), Ok(cell_at(&child).id));
     assert!(
         page_is_free(arena, offset),
@@ -1878,7 +1881,7 @@ async fn frozen_vm_processes_are_killed() {
 
 /// TASK-79.100: a VM process that closes its connection and lives on maps what its window mapped
 /// still, as nothing took it away: the page, evicted, is no other's until it is gone, which the
-/// daemon sees to, killing it, and lets its store go once it has exited.
+/// daemon sees to, killing it, and lets its cell go once it has exited.
 #[tokio::test(flavor = "multi_thread")]
 async fn vm_processes_that_close_their_connections_keep_their_pages_until_gone() {
     use std::os::unix::process::ExitStatusExt as _;
@@ -1913,16 +1916,17 @@ async fn vm_processes_that_close_their_connections_keep_their_pages_until_gone()
     assert!(!page_is_held(arena, offset), "the page isn't free once the VM process is gone");
 }
 
-/// A VM process, for [`vm_processes_that_leave_their_sockets_to_children_are_gone`]: opens the store
-/// [`CHILD_STORE`] names through the daemon at [`CHILD_SOCKET`], forks a child, which holds the
+/// A VM process, for [`vm_processes_that_leave_their_sockets_to_children_are_gone`]: opens the cell
+/// [`CHILD_CELL_DIR`] names through the daemon at [`CHILD_SOCKET`], forks a child, which holds the
 /// socket and runs on until killed, says its pid, and exits.
 #[test]
 #[ignore = "run by vm_processes_that_leave_their_sockets_to_children_are_gone"]
 fn child_leaves_its_socket_to_a_child() {
-    let (Ok(socket), Ok(store)) = (std::env::var(CHILD_SOCKET), std::env::var(CHILD_STORE)) else {
+    let (Ok(socket), Ok(cell_dir)) = (std::env::var(CHILD_SOCKET), std::env::var(CHILD_CELL_DIR))
+    else {
         return;
     };
-    let _store = CellClient::connect(socket, store, 1 << 24).unwrap();
+    let _cell = CellClient::connect(socket, cell_dir, 1 << 24).unwrap();
     // SAFETY: The child calls only what is safe in a child of a process with threads.
     let child = unsafe { libc::fork() };
     assert!(child >= 0, "{}", std::io::Error::last_os_error());
@@ -1934,7 +1938,7 @@ fn child_leaves_its_socket_to_a_child() {
     }
     println!("CHILD {child}");
     std::io::Write::flush(&mut std::io::stdout()).unwrap();
-    // SAFETY: As a VMM that dies does: with its store open.
+    // SAFETY: As a VMM that dies does: with its cell open.
     unsafe { libc::_exit(0) };
 }
 
@@ -1949,7 +1953,7 @@ impl Drop for KilledOnDrop {
 }
 
 /// TASK-79.101: a VM process that exits leaving its socket to a child of its own is gone, though
-/// the socket's other end lives on: its store is another's to open.
+/// the socket's other end lives on: its cell is another's to open.
 #[test]
 fn vm_processes_that_leave_their_sockets_to_children_are_gone() {
     use std::io::BufRead as _;
@@ -1958,12 +1962,12 @@ fn vm_processes_that_leave_their_sockets_to_children_are_gone() {
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
-    let store = dir.path().join("store");
+    let cell_dir = dir.path().join("store");
     let mut process = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "cladefsd::tests::child_leaves_its_socket_to_a_child"])
         .args(["--ignored", "--nocapture"])
         .env(CHILD_SOCKET, &socket)
-        .env(CHILD_STORE, &store)
+        .env(CHILD_CELL_DIR, &cell_dir)
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
@@ -1974,18 +1978,19 @@ fn vm_processes_that_leave_their_sockets_to_children_are_gone() {
         .find_map(|line| line.strip_prefix("CHILD ").map(|pid| KilledOnDrop(pid.parse().unwrap())));
     let _child = child.expect("the VM process left no child");
     assert!(process.wait().unwrap().success());
-    drop(connect_once_free(&socket, &store));
+    drop(connect_once_free(&socket, &cell_dir));
 }
 
-/// A VM process, for [`vm_processes_the_daemon_may_not_kill_are_refused`]: opens the store
-/// [`CHILD_STORE`] names through the daemon at [`CHILD_SOCKET`], and says whether it did.
+/// A VM process, for [`vm_processes_the_daemon_may_not_kill_are_refused`]: opens the cell
+/// [`CHILD_CELL_DIR`] names through the daemon at [`CHILD_SOCKET`], and says whether it did.
 #[test]
 #[ignore = "run by vm_processes_the_daemon_may_not_kill_are_refused"]
-fn child_opens_a_store() {
-    let (Ok(socket), Ok(store)) = (std::env::var(CHILD_SOCKET), std::env::var(CHILD_STORE)) else {
+fn child_opens_a_cell() {
+    let (Ok(socket), Ok(cell_dir)) = (std::env::var(CHILD_SOCKET), std::env::var(CHILD_CELL_DIR))
+    else {
         return;
     };
-    match CellClient::connect(socket, store, 1 << 24) {
+    match CellClient::connect(socket, cell_dir, 1 << 24) {
         Ok(_) => println!("OPENED"),
         Err(error) => println!("REFUSED {:?}", error.errno()),
     }
@@ -2004,9 +2009,9 @@ fn vm_processes_the_daemon_may_not_kill_are_refused() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "cladefsd::tests::child_opens_a_store", "--ignored", "--nocapture"])
+        .args(["--exact", "cladefsd::tests::child_opens_a_cell", "--ignored", "--nocapture"])
         .env(CHILD_SOCKET, &socket)
-        .env(CHILD_STORE, dir.path().join("store"))
+        .env(CHILD_CELL_DIR, dir.path().join("store"))
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2016,12 +2021,12 @@ fn vm_processes_the_daemon_may_not_kill_are_refused() {
     assert_eq!(said, Some("REFUSED Some(Errno(EIO))"), "{stdout}{stderr}");
 }
 
-/// A store the daemon serves forks to a new cell the daemon serves too, whose window maps the
+/// A cell the daemon serves forks to a new cell the daemon serves too, whose window maps the
 /// pages the parent's maps: the daemon's counters count the maps, the faults and the reads. The
 /// extent is paged in once, for both windows and the fork's READ, which reads nothing from the
-/// store (TASK-32).
+/// cell (TASK-32).
 #[test]
-fn the_daemon_forks_stores_it_serves() {
+fn the_daemon_forks_cells_it_serves() {
     host();
     let ps = page_size() as usize;
     let dir = tempfile::tempdir().unwrap();
@@ -2031,14 +2036,14 @@ fn the_daemon_forks_stores_it_serves() {
     std::thread::spawn(move || serve(listener));
 
     let before = crate::stats::stats();
-    let store = CellClient::connect(&socket, &parent, 1 << 24).unwrap();
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, extent, 0, &pattern(9, ps)).unwrap();
-    store.commit(None).unwrap();
-    let cell = store.fork(&child).unwrap();
-    // A fork to a path that is there already fails, as making a store there does (TASK-79.83).
-    assert_eq!(store.fork(&child), Err(Errno::EEXIST));
-    drop(store);
+    let client = CellClient::connect(&socket, &parent, 1 << 24).unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(9, ps)).unwrap();
+    client.commit(None).unwrap();
+    let cell = client.fork(&child).unwrap();
+    // A fork to a path that is there already fails, as making a cell there does (TASK-79.83).
+    assert_eq!(client.fork(&child), Err(Errno::EEXIST));
+    drop(client);
     let (ours, page) = map_first_page(&socket, &parent, extent);
     let ours_from = mapped_from(page);
     drop(ours);
@@ -2052,7 +2057,7 @@ fn the_daemon_forks_stores_it_serves() {
     assert_eq!((counted.read_stored_bytes, counted.page_ins), (0, 1));
 }
 
-/// TASK-39.1: a VM's store forks, for a snapshot, only once nothing is open; the VMs restored from
+/// TASK-39.1: a VM's cell forks, for a snapshot, only once nothing is open; the VMs restored from
 /// the snapshot each open a fork of their own of that version, holding what it held, whose windows
 /// map what the snapshot's recorded, mapped again; and a version a connection has open is busy.
 #[test]
@@ -2064,29 +2069,29 @@ fn snapshots_restore_into_forks_of_their_version() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
 
-    let store = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let client = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
     let ours = memory(4);
-    // SAFETY: The memory is the test's, and outlives the store.
-    unsafe { store.create_dax_window_in_host_memory(ours, 4 * ps as u64, None, 1) }.unwrap();
+    // SAFETY: The memory is the test's, and outlives the cell.
+    unsafe { client.create_dax_window_in_host_memory(ours, 4 * ps as u64, None, 1) }.unwrap();
     let (sealed, open) = (
-        ExtentId { cell: store.cell(), sequence: 1 },
-        ExtentId { cell: store.cell(), sequence: 2 },
+        ExtentId { cell: client.cell(), sequence: 1 },
+        ExtentId { cell: client.cell(), sequence: 2 },
     );
-    write(&store, sealed, 0, &pattern(1, ps)).unwrap();
-    store.commit(Some(b"root")).unwrap();
-    store.map(sealed, 0, ps as u64, 0).unwrap();
+    write(&client, sealed, 0, &pattern(1, ps)).unwrap();
+    client.commit(Some(b"root")).unwrap();
+    client.map(sealed, 0, ps as u64, 0).unwrap();
     let zeros = crate::WindowMapping {
         window_offset: 2 * ps as u64,
         len: ps as u64,
         contents: crate::MappingContents::Zeros,
     };
-    store.map_many(&[zeros]).unwrap();
-    write(&store, open, 0, &pattern(2, ps)).unwrap();
-    assert_eq!(store.make_version(), Err(Errno::EBUSY));
-    store.commit(None).unwrap();
-    store.map(open, 0, ps as u64, 3 * ps as u64).unwrap();
-    let version = store.make_version().unwrap();
-    let mappings = store.window_mappings().unwrap();
+    client.map_many(&[zeros]).unwrap();
+    write(&client, open, 0, &pattern(2, ps)).unwrap();
+    assert_eq!(client.make_version(), Err(Errno::EBUSY));
+    client.commit(None).unwrap();
+    client.map(open, 0, ps as u64, 3 * ps as u64).unwrap();
+    let version = client.make_version().unwrap();
+    let mappings = client.window_mappings().unwrap();
     let extent = |extent, offset| crate::MappingContents::Extent { extent, offset };
     assert_eq!(
         mappings,
@@ -2124,7 +2129,7 @@ fn snapshots_restore_into_forks_of_their_version() {
         })
         .collect();
     let cells: Vec<u64> = restored.iter().map(CellClient::cell).collect();
-    assert!(!cells.contains(&store.cell()) && cells[0] != cells[1], "{cells:x?}");
+    assert!(!cells.contains(&client.cell()) && cells[0] != cells[1], "{cells:x?}");
     // Each writes on its own.
     let theirs = ExtentId { cell: cells[0], sequence: 1 };
     write(&restored[0], theirs, 0, &pattern(3, BLOCK)).unwrap();
@@ -2133,7 +2138,7 @@ fn snapshots_restore_into_forks_of_their_version() {
     assert_eq!(read(&restored[1], open, 0, BLOCK), Ok(pattern(2, BLOCK)));
 
     let forked = CellClient::connect_forked(&socket, dir.path().join("c"), version, 0);
-    let root = forked.map(|store| store.root()).map_err(|error| error.errno());
+    let root = forked.map(|client| client.root()).map_err(|error| error.errno());
     assert_eq!(root, Ok(Ok(b"root".to_vec())));
 }
 
@@ -2153,16 +2158,16 @@ fn snapshots_map_their_windows_again_in_one_request() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
 
-    let store = CellClient::connect(&socket, dir.path().join("store"), 1 << 26).unwrap();
+    let client = CellClient::connect(&socket, dir.path().join("store"), 1 << 26).unwrap();
     let memory = memory(window_pages);
-    // SAFETY: The memory is the test's, and outlives the store.
-    unsafe { store.create_dax_window_in_host_memory(memory, (window_pages * ps) as u64, None, 1) }
+    // SAFETY: The memory is the test's, and outlives the cell.
+    unsafe { client.create_dax_window_in_host_memory(memory, (window_pages * ps) as u64, None, 1) }
         .unwrap();
-    let extent = |page: usize| ExtentId { cell: store.cell(), sequence: 1 + page as u64 };
+    let extent = |page: usize| ExtentId { cell: client.cell(), sequence: 1 + page as u64 };
     for page in 0..PAGES {
-        write(&store, extent(page), 0, &pattern(page as u8, ps)).unwrap();
+        write(&client, extent(page), 0, &pattern(page as u8, ps)).unwrap();
     }
-    store.commit(None).unwrap();
+    client.commit(None).unwrap();
     // Each extent's page at an even page of the window, last first; zeros at every fourth odd one.
     let mut mapped = Vec::new();
     for page in (0..PAGES).rev() {
@@ -2181,9 +2186,9 @@ fn snapshots_map_their_windows_again_in_one_request() {
             });
         }
     }
-    store.map_many(&mapped).unwrap();
-    let version = store.make_version().unwrap();
-    let mappings = store.window_mappings().unwrap();
+    client.map_many(&mapped).unwrap();
+    let version = client.make_version().unwrap();
+    let mappings = client.window_mappings().unwrap();
     assert_eq!(mappings.len(), PAGES + PAGES / 4);
     // The bytes the window's mappings map, in order: the pages between them map nothing, which
     // the window refuses an access to.
@@ -2265,22 +2270,22 @@ fn snapshots_after_private_pages_are_rebound_restore_their_bytes() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
 
-    let store = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let client = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
     let memory = memory(PAGES);
     let size = (PAGES * ps) as u64;
-    // SAFETY: The memory is the test's, and outlives the store.
-    unsafe { store.create_dax_window_in_host_memory(memory, size, None, PAGES as u64) }.unwrap();
-    assert!(store.copies_on_write());
+    // SAFETY: The memory is the test's, and outlives the cell.
+    unsafe { client.create_dax_window_in_host_memory(memory, size, None, PAGES as u64) }.unwrap();
+    assert!(client.copies_on_write());
     crate::guest_thread_started();
-    let extent = |sequence: u64| ExtentId { cell: store.cell(), sequence };
+    let extent = |sequence: u64| ExtentId { cell: client.cell(), sequence };
     let file = extent(1);
-    write(&store, file, 0, &pattern(1, PAGES * ps)).unwrap();
-    store.commit(None).unwrap();
-    store.map(file, 0, size, 0).unwrap();
-    // The guest's stores, to every other page, and its file's page past them zeros.
+    write(&client, file, 0, &pattern(1, PAGES * ps)).unwrap();
+    client.commit(None).unwrap();
+    client.map(file, 0, size, 0).unwrap();
+    // The guest's writes, to every other page, and its file's page past them zeros.
     let stored = |page: usize| pattern(0x80 | page as u8, ps);
     for page in (0..PAGES).step_by(2) {
-        // SAFETY: The window's page, which the store makes private.
+        // SAFETY: The window's page, which the cell makes private.
         unsafe {
             std::ptr::copy_nonoverlapping(stored(page).as_ptr(), memory.as_ptr().add(page * ps), ps)
         };
@@ -2293,8 +2298,8 @@ fn snapshots_after_private_pages_are_rebound_restore_their_bytes() {
             _ => pattern(1, PAGES * ps)[page * ps..][..ps].to_vec(),
         })
         .collect();
-    assert!(window() == expected, "the stores didn't reach the window");
-    assert_eq!(store.make_version(), Err(Errno::EBUSY));
+    assert!(window() == expected, "the writes didn't reach the window");
+    assert_eq!(client.make_version(), Err(Errno::EBUSY));
 
     // The freeze: each page stored to written back, to an extent of its own, sealed, and mapped
     // over the private page, which goes.
@@ -2302,18 +2307,18 @@ fn snapshots_after_private_pages_are_rebound_restore_their_bytes() {
     for page in (0..PAGES).step_by(2) {
         let written = extent(2 + page as u64);
         let bytes = window()[page * ps..][..ps].to_vec();
-        write(&store, written, 0, &bytes).unwrap();
+        write(&client, written, 0, &bytes).unwrap();
         rebound.push(crate::WindowMapping {
             window_offset: (page * ps) as u64,
             len: ps as u64,
             contents: crate::MappingContents::Extent { extent: written, offset: 0 },
         });
     }
-    store.commit(None).unwrap();
-    store.map_many(&rebound).unwrap();
+    client.commit(None).unwrap();
+    client.map_many(&rebound).unwrap();
     assert!(window() == expected, "rebinding changed the window");
-    let version = store.make_version().unwrap();
-    let mappings = store.window_mappings().unwrap();
+    let version = client.make_version().unwrap();
+    let mappings = client.window_mappings().unwrap();
     assert_eq!(mappings.len(), PAGES);
 
     let restored =
@@ -2328,11 +2333,11 @@ fn snapshots_after_private_pages_are_rebound_restore_their_bytes() {
     // SAFETY: As above.
     let restored_window =
         unsafe { std::slice::from_raw_parts(restored_memory.as_ptr(), PAGES * ps).to_vec() };
-    assert!(restored_window == expected, "the restored window lost the guest's stores");
+    assert!(restored_window == expected, "the restored window lost the guest's writes");
 }
 
 /// TASK-39.1: a VM restored where its snapshot's version isn't open, as on another host than the
-/// snapshot's, forks its store from the version, which the daemon opens from its bucket, the cell's
+/// snapshot's, forks its cell from the version, which the daemon opens from its bucket, the cell's
 /// commits uploaded first (TASK-364, doc-20).
 #[test]
 fn snapshot_versions_restore_from_the_bucket() {
@@ -2342,12 +2347,12 @@ fn snapshot_versions_restore_from_the_bucket() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
 
-    let store = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, extent, 0, &pattern(4, BLOCK)).unwrap();
-    store.commit(Some(b"root")).unwrap();
-    let version = store.make_version().unwrap();
-    drop(store);
+    let client = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(4, BLOCK)).unwrap();
+    client.commit(Some(b"root")).unwrap();
+    let version = client.make_version().unwrap();
+    drop(client);
 
     let elsewhere = dir.path().join("elsewhere");
     std::fs::create_dir(&elsewhere).unwrap();
@@ -2358,10 +2363,10 @@ fn snapshot_versions_restore_from_the_bucket() {
     assert_ne!(restored.cell(), version.cell);
 }
 
-/// TASK-39.1: a store whose VM process just went opens at once for another, as a VM restored from
+/// TASK-39.1: a cell whose VM process just went opens at once for another, as a VM restored from
 /// a snapshot of it does: its connection lets it go once its commits are durable.
 #[test]
-fn stores_open_once_their_vm_process_goes() {
+fn cells_open_once_their_vm_process_goes() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
@@ -2369,19 +2374,19 @@ fn stores_open_once_their_vm_process_goes() {
     std::thread::spawn(move || serve(listener));
     let path = dir.path().join("store");
     for round in 0..20 {
-        let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
-        let extent = ExtentId { cell: store.cell(), sequence: round + 1 };
-        write(&store, extent, 0, &pattern(5, BLOCK)).unwrap();
-        store.commit_ordered(None).unwrap();
-        drop(store);
+        let client = CellClient::connect(&socket, &path, 1 << 24).unwrap();
+        let extent = ExtentId { cell: client.cell(), sequence: round + 1 };
+        write(&client, extent, 0, &pattern(5, BLOCK)).unwrap();
+        client.commit_ordered(None).unwrap();
+        drop(client);
     }
-    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
-    assert_eq!(store.info().unwrap().next_sequence, 21);
+    let client = CellClient::connect(&socket, &path, 1 << 24).unwrap();
+    assert_eq!(client.info().unwrap().next_sequence, 21);
 }
 
-/// TASK-39.2: a daemon with roots refuses to open, create or fork stores outside them.
+/// TASK-39.2: a daemon with roots refuses to open, create or fork cells outside them.
 #[test]
-fn daemons_with_roots_serve_no_stores_outside_them() {
+fn daemons_with_roots_serve_no_cells_outside_them() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let (ours, theirs) = (dir.path().join("ours"), dir.path().join("theirs"));
@@ -2395,37 +2400,37 @@ fn daemons_with_roots_serve_no_stores_outside_them() {
 
     let refused = CellClient::connect(&socket, theirs.join("store"), 1 << 24);
     assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::EACCES));
-    let store = CellClient::connect(&socket, ours.join("store"), 1 << 24).unwrap();
-    store.commit(None).unwrap();
-    assert_eq!(store.fork(&theirs.join("fork")), Err(Errno::EACCES));
-    store.fork(&ours.join("fork")).unwrap();
+    let client = CellClient::connect(&socket, ours.join("store"), 1 << 24).unwrap();
+    client.commit(None).unwrap();
+    assert_eq!(client.fork(&theirs.join("fork")), Err(Errno::EACCES));
+    client.fork(&ours.join("fork")).unwrap();
 }
 
-/// TASK-39.3: a store a VM process has open forks live through the daemon, from a connection of
+/// TASK-39.3: a cell a VM process has open forks live through the daemon, from a connection of
 /// its own: refused while an extent is open, as unless its guest's filesystem is frozen; once
-/// committed, the fork holds the store as of then, and the store goes on as it was.
+/// committed, the fork holds the cell as of then, and the cell goes on as it was.
 #[test]
-fn stores_fork_live_once_nothing_is_open() {
+fn cells_fork_live_once_nothing_is_open() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let (path, fork) = (dir.path().join("store"), dir.path().join("fork"));
-    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
-    let extent = |sequence| ExtentId { cell: store.cell(), sequence };
-    write(&store, extent(1), 0, &pattern(1, BLOCK)).unwrap();
-    store.commit(Some(b"before")).unwrap();
-    write(&store, extent(2), 0, &pattern(2, BLOCK)).unwrap();
+    let client = CellClient::connect(&socket, &path, 1 << 24).unwrap();
+    let extent = |sequence| ExtentId { cell: client.cell(), sequence };
+    write(&client, extent(1), 0, &pattern(1, BLOCK)).unwrap();
+    client.commit(Some(b"before")).unwrap();
+    write(&client, extent(2), 0, &pattern(2, BLOCK)).unwrap();
 
     let busy = fork_cell(&path, &fork);
     assert_eq!(busy.err().and_then(|error| error.errno()), Some(Errno::EBUSY));
-    store.commit(Some(b"at the fork")).unwrap();
+    client.commit(Some(b"at the fork")).unwrap();
     let cell = fork_cell(&path, &fork).unwrap();
-    // The store goes on, its writes its own.
-    write(&store, extent(3), 0, &pattern(3, BLOCK)).unwrap();
-    store.commit(Some(b"after")).unwrap();
-    assert_eq!(read(&store, extent(3), 0, BLOCK), Ok(pattern(3, BLOCK)));
+    // The cell goes on, its writes its own.
+    write(&client, extent(3), 0, &pattern(3, BLOCK)).unwrap();
+    client.commit(Some(b"after")).unwrap();
+    assert_eq!(read(&client, extent(3), 0, BLOCK), Ok(pattern(3, BLOCK)));
 
     let forked = CellClient::connect(&socket, &fork, 1 << 24).unwrap();
     assert_eq!(forked.cell(), cell.id);
@@ -2434,30 +2439,30 @@ fn stores_fork_live_once_nothing_is_open() {
     assert!(read(&forked, extent(3), 0, BLOCK).is_err());
 }
 
-/// TASK-39.4: a store is deleted through the daemon while its fork is open, though not while its
+/// TASK-39.4: a cell is deleted through the daemon while its fork is open, though not while its
 /// own VM process has it open: its directory goes, while the fork reads what it inherited and
-/// writes as before, until it is deleted too. Before TASK-165.7, the store's directory stayed,
+/// writes as before, until it is deleted too. Before TASK-165.7, the cell's directory stayed,
 /// holding what the fork shared of it.
 #[test]
-fn stores_are_deleted_while_their_forks_are_open() {
+fn cells_are_deleted_while_their_forks_are_open() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let (path, fork) = (dir.path().join("store"), dir.path().join("fork"));
-    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
-    let base = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, base, 0, &pattern(1, BLOCK)).unwrap();
-    store.commit(Some(b"base")).unwrap();
+    let client = CellClient::connect(&socket, &path, 1 << 24).unwrap();
+    let base = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, base, 0, &pattern(1, BLOCK)).unwrap();
+    client.commit(Some(b"base")).unwrap();
     fork_cell(&path, &fork).unwrap();
     let forked = CellClient::connect(&socket, &fork, 1 << 24).unwrap();
 
     let busy = delete_cell(&path);
     assert_eq!(busy.err().and_then(|error| error.errno()), Some(Errno::EBUSY));
-    drop(store);
+    drop(client);
     delete_cell(&path).unwrap();
-    assert!(!path.exists(), "the store's directory stayed");
+    assert!(!path.exists(), "the cell's directory stayed");
     assert_eq!(read(&forked, base, 0, BLOCK), Ok(pattern(1, BLOCK)));
     let own = ExtentId { cell: forked.cell(), sequence: 1 };
     write(&forked, own, 0, &pattern(2, BLOCK)).unwrap();
@@ -2476,13 +2481,13 @@ fn stores_are_deleted_while_their_forks_are_open() {
     assert_eq!(missing.err().and_then(|error| error.errno()), Some(Errno::ENOENT));
 }
 
-/// TASK-364, doc-20: a store a connection makes is a new cell's: an Fxfs one, or,
+/// TASK-364, doc-20: a cell a connection makes is a new cell's: an Fxfs one, or,
 /// made through `OPEN_SQLITE` as sqlite_cladefs makes its databases, a SQLite one, which a host's
 /// FUSE mount of the cell leaves be; or, through `OPEN_MEMORY`, a VM's memory (TASK-456.2). The
-/// cell's object, under its tenant's prefix in the bucket, says so; and the store's cell's head
+/// cell's object, under its tenant's prefix in the bucket, says so; and the cell's head
 /// was taken with the cell's epoch.
 #[test]
-fn stores_made_are_cells_of_their_kinds() {
+fn cells_made_are_of_their_kinds() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
@@ -2493,12 +2498,12 @@ fn stores_made_are_cells_of_their_kinds() {
     let daemon = crate::DaemonConnection::connect(&socket).unwrap();
     let sqlite = daemon.open_sqlite(&db, 1 << 24).unwrap();
     let memory = dir.path().join("memory");
-    let memory_store = crate::DaemonConnection::connect(&socket).unwrap();
-    let memory_store = memory_store.open_memory(&memory, 1 << 24).unwrap();
+    let memory_client = crate::DaemonConnection::connect(&socket).unwrap();
+    let memory_client = memory_client.open_memory(&memory, 1 << 24).unwrap();
     let (disk_cell, db_cell) = (cell_at(&disk), cell_at(&db));
     let memory_cell = cell_at(&memory);
     assert_eq!((fxfs.cell(), sqlite.cell()), (disk_cell.id, db_cell.id));
-    assert_eq!(memory_store.cell(), memory_cell.id);
+    assert_eq!(memory_client.cell(), memory_cell.id);
     assert_ne!(disk_cell, db_cell, "each made alone, in a cell of its own");
     let bucket = super::cells::daemon_bucket().unwrap();
     futures::executor::block_on(async {
@@ -2606,7 +2611,7 @@ fn a_memory_cell_opens_again_after_a_commit_freeing_many_extents() {
 /// TASK-456.3: a memory cell's window, a VM's memory restored from it, maps nothing until faults
 /// reach it: then the runs of the tree node around each page, data and holes, as the cell's last
 /// commit has them. Two forks' windows map the daemon's one page of each extent's block, shared;
-/// a store of the guest's makes a page private in its window alone, the other's still the shared
+/// a write of the guest's makes a page private in its window alone, the other's still the shared
 /// page; the windows' private pages reserve nothing in the daemon.
 #[test]
 fn memory_windows_map_what_faults_reach_and_share_their_pages() {
@@ -2667,10 +2672,10 @@ fn memory_windows_map_what_faults_reach_and_share_their_pages() {
 
     crate::guest_thread_started();
     let at = a.as_ptr() as usize + (5 * ps) as usize;
-    // SAFETY: As above, a store of the guest's.
+    // SAFETY: As above, a write of the guest's.
     unsafe { (at as *mut u8).write_volatile(0xee) };
     let bt = b.as_ptr() as usize + (5 * ps) as usize;
-    assert_ne!(mapped_from(at), mapped_from(bt), "the store reached the shared page");
+    assert_ne!(mapped_from(at), mapped_from(bt), "the write reached the shared page");
     assert_eq!(read(a, 5 * ps, 5 * ps + 1), [0xee]);
     assert_eq!(read(b, 5 * ps, 6 * ps), pattern(5, ps as usize), "the other window changed");
     assert_eq!(first.private_runs().unwrap(), vec![5 * ps..6 * ps]);
@@ -2702,24 +2707,24 @@ fn memory_noreserve(pages: usize) -> NonNull<u8> {
     NonNull::new(memory.cast()).unwrap()
 }
 
-/// TASK-39.4: with a bucket, deleting a store through the daemon deletes its cell there too,
+/// TASK-39.4: with a bucket, deleting a cell through the daemon deletes its cell there too,
 /// and the collector keeps what its fork needs of it.
 #[test]
-fn deleted_stores_cells_keep_what_their_forks_need() {
+fn deleted_cells_keep_what_their_forks_need() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let (path, fork) = (dir.path().join("store"), dir.path().join("fork"));
-    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
-    let base_cell = store.cell();
+    let client = CellClient::connect(&socket, &path, 1 << 24).unwrap();
+    let base_cell = client.cell();
     let base = ExtentId { cell: base_cell, sequence: 1 };
-    write(&store, base, 0, &pattern(3, 2 * BLOCK)).unwrap();
-    store.commit(Some(b"base")).unwrap();
+    write(&client, base, 0, &pattern(3, 2 * BLOCK)).unwrap();
+    client.commit(Some(b"base")).unwrap();
     let fork_cell = fork_cell(&path, &fork).unwrap();
     let base_cell = cell_at(&path);
-    drop(store);
+    drop(client);
     delete_cell(&path).unwrap();
 
     let bucket = super::cells::daemon_bucket().unwrap();
@@ -2740,10 +2745,10 @@ fn deleted_stores_cells_keep_what_their_forks_need() {
     assert_eq!(read(&forked, base, 0, 2 * BLOCK), Ok(pattern(3, 2 * BLOCK)));
 }
 
-/// TASK-39.7: a store's copy placed at an earlier placement than the one that last took its cell
+/// TASK-39.7: a cell's copy placed at an earlier placement than the one that last took its cell
 /// does not open (`ESTALE`): a placement cut off takes no cell back from the one after it.
 #[tokio::test(flavor = "multi_thread")]
-async fn earlier_placements_open_no_stores() {
+async fn earlier_placements_open_no_cells() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
@@ -2752,10 +2757,10 @@ async fn earlier_placements_open_no_stores() {
     let (path, earlier) = (dir.path().join("store"), dir.path().join("earlier"));
     let cell = OpenCell::create(&path, 1 << 24).await.unwrap().cell();
     OpenCell::place(&path, 5).unwrap();
-    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
-    write(&store, ExtentId { cell: cell.id, sequence: 1 }, 0, &pattern(1, BLOCK)).unwrap();
-    store.commit(Some(b"placed at 5")).unwrap();
-    drop(store);
+    let client = CellClient::connect(&socket, &path, 1 << 24).unwrap();
+    write(&client, ExtentId { cell: cell.id, sequence: 1 }, 0, &pattern(1, BLOCK)).unwrap();
+    client.commit(Some(b"placed at 5")).unwrap();
+    drop(client);
 
     // A copy of the cell's made here, not opened, which would take its head: placed before.
     std::fs::create_dir(&earlier).unwrap();
@@ -2770,11 +2775,11 @@ async fn earlier_placements_open_no_stores() {
     assert_eq!(later.root().unwrap(), b"placed at 5");
 }
 
-/// TASK-550: a store whose cell a later placement took, its uploader fenced, changes nothing more:
+/// TASK-550: a cell whose cell a later placement took, its uploader fenced, changes nothing more:
 /// a `COMMIT` without `COMMIT_UPLOADED`, a guest's fsync, is answered `EROFS`, as `WRITE` and
 /// `FREE` are (doc-4), rather than acknowledged and lost.
 #[tokio::test(flavor = "multi_thread")]
-async fn fenced_stores_answer_ordered_commits_erofs() {
+async fn fenced_cells_answer_ordered_commits_erofs() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
@@ -2891,23 +2896,23 @@ fn vm_processes_drop_the_versions_they_made_alone() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let path = dir.path().join("store");
-    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
-    write(&store, ExtentId { cell: store.cell(), sequence: 1 }, 0, &pattern(1, BLOCK)).unwrap();
-    store.commit(None).unwrap();
+    let client = CellClient::connect(&socket, &path, 1 << 24).unwrap();
+    write(&client, ExtentId { cell: client.cell(), sequence: 1 }, 0, &pattern(1, BLOCK)).unwrap();
+    client.commit(None).unwrap();
     let managers = control(super::cells::make_version(path.clone(), None)).unwrap();
-    let made = store.make_version().unwrap().version;
+    let made = client.make_version().unwrap().version;
     let versions = || -> std::collections::BTreeSet<u64> {
         let versions = control(super::cells::versions(path.clone())).unwrap();
         versions.into_iter().map(|version| version.id).collect()
     };
     assert_eq!(versions(), [managers, made].into());
-    assert_eq!(store.drop_version(managers), Err(Errno::EPERM));
-    assert_eq!(store.drop_version(made), Ok(()));
-    assert_eq!(store.drop_version(made), Err(Errno::EPERM));
+    assert_eq!(client.drop_version(managers), Err(Errno::EPERM));
+    assert_eq!(client.drop_version(made), Ok(()));
+    assert_eq!(client.drop_version(made), Err(Errno::EPERM));
     assert_eq!(versions(), [managers].into());
 }
 
-/// TASK-266: a store the control API makes of a cell, at a placement (`CreateCell`, as
+/// TASK-266: a cell the control API makes of a cell, at a placement (`CreateCell`, as
 /// `cladefsctl take` through the daemon's), takes the cell, and so its head, with that
 /// placement's token as it is made, not the daemon's: a copy placed later than the one that took
 /// the cell last, on another host, takes it over, in a file bucket as in any.
@@ -2944,7 +2949,7 @@ async fn control_takes_cells_at_the_placements_given() {
     assert_eq!(read(&third, extent, 0, BLOCK), Ok(pattern(7, BLOCK)));
 }
 
-/// TASK-39.7: the daemon returns once a store's commits so far are in its bucket: a store a VM
+/// TASK-39.7: the daemon returns once a cell's commits so far are in its bucket: a cell a VM
 /// process has open, and one none has.
 #[test]
 fn the_daemon_waits_for_uploads() {
@@ -2954,10 +2959,10 @@ fn the_daemon_waits_for_uploads() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let path = dir.path().join("store");
-    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, extent, 0, &pattern(2, BLOCK)).unwrap();
-    store.commit_ordered(Some(b"ordered")).unwrap();
+    let client = CellClient::connect(&socket, &path, 1 << 24).unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(2, BLOCK)).unwrap();
+    client.commit_ordered(Some(b"ordered")).unwrap();
     wait_uploaded(&path).unwrap();
     let bucket = super::cells::daemon_bucket().unwrap();
     let uploaded = || {
@@ -2967,32 +2972,32 @@ fn the_daemon_waits_for_uploads() {
             .root
     };
     assert_eq!(uploaded(), Some(b"ordered".to_vec()));
-    store.commit_ordered(Some(b"closed")).unwrap();
-    drop(store);
+    client.commit_ordered(Some(b"closed")).unwrap();
+    drop(client);
     wait_uploaded(&path).unwrap();
     assert_eq!(uploaded(), Some(b"closed".to_vec()));
 }
 
-/// The extents `what_guests_free_the_collector_compacts` writes: 16 of them a store's capacity.
+/// The extents `what_guests_free_the_collector_compacts` writes: 16 of them a cell's capacity.
 const EXTENT: usize = 64 * BLOCK;
 
-/// Writes `store`'s extents `sequences`, of `EXTENT` bytes each, their own data, which does not
+/// Writes `client`'s extents `sequences`, of `EXTENT` bytes each, their own data, which does not
 /// compress: what of it no extent is in takes as much of the host's disk as it is (TASK-79.2).
-fn write_extents(store: &CellClient, sequences: std::ops::RangeInclusive<u64>) {
+fn write_extents(client: &CellClient, sequences: std::ops::RangeInclusive<u64>) {
     for sequence in sequences {
-        let extent = ExtentId { cell: store.cell(), sequence };
-        write(store, extent, 0, &crate::test_data::noise(sequence, EXTENT)).unwrap();
+        let extent = ExtentId { cell: client.cell(), sequence };
+        write(client, extent, 0, &crate::test_data::noise(sequence, EXTENT)).unwrap();
     }
 }
 
-/// Frees `store`'s extents `sequences`.
-fn free_extents(store: &CellClient, sequences: std::ops::RangeInclusive<u64>) {
+/// Frees `client`'s extents `sequences`.
+fn free_extents(client: &CellClient, sequences: std::ops::RangeInclusive<u64>) {
     for sequence in sequences {
-        store.free(ExtentId { cell: store.cell(), sequence }).unwrap();
+        client.free(ExtentId { cell: client.cell(), sequence }).unwrap();
     }
 }
 
-/// Waits for the uploader of the store at `path`, which a connection has open, to have uploaded
+/// Waits for the uploader of the cell at `path`, which a connection has open, to have uploaded
 /// its latest commit as its interval ran out, and let go of what the commits up to it freed: as
 /// the daemon's control API says (`StatCell`), which makes nothing durable, as waiting for the
 /// uploads would (`SyncCell`).
@@ -3010,9 +3015,9 @@ fn wait_for_uploader(path: &Path) {
 
 /// TASK-165.8: what a guest frees of what it committed leaves the host's disk with the segments
 /// its uploader has acknowledged in the bucket, whose collector compacts it there: the daemon
-/// collects no store behind its guest's commits, as it did (TASK-79.2). The store keeps what the
+/// collects no cell behind its guest's commits, as it did (TASK-79.2). The cell keeps what the
 /// guest frees for its uploader until the uploader has uploaded the commit that freed it, and it
-/// takes none of the guest's room. Once the store closes, its uploader checkpointing its cell,
+/// takes none of the guest's room. Once the cell closes, its uploader checkpointing its cell,
 /// the collector deletes the segments no live extent is in, and compacts those the guest's live
 /// extents hold little of; the guest,
 /// connected again, reads them as written, where they moved, and writes on.
@@ -3022,23 +3027,23 @@ fn what_guests_free_the_collector_compacts() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    let (store, served) = connect(&path, 16 * extent_bytes);
-    let cell = store.cell();
+    let (client, served) = connect(&path, 16 * extent_bytes);
+    let cell = client.cell();
     // A segment of the capacity's worth, freed but its first extent; another of all but one of
     // what that left room for, freed but its first too, the last frees ordered.
-    write_extents(&store, 1..=16);
-    store.commit(None).unwrap();
-    free_extents(&store, 2..=16);
-    write_extents(&store, 17..=31);
-    store.commit(None).unwrap();
-    free_extents(&store, 18..=31);
-    store.commit_ordered(None).unwrap();
+    write_extents(&client, 1..=16);
+    client.commit(None).unwrap();
+    free_extents(&client, 2..=16);
+    write_extents(&client, 17..=31);
+    client.commit(None).unwrap();
+    free_extents(&client, 18..=31);
+    client.commit_ordered(None).unwrap();
     // 29 extents' worth no extent holds: the guest's room is what its two extents leave.
     wait_for_uploader(&path);
     let segments = path.join("segments").join(base32_id::Padded(cell).to_string());
-    assert_eq!(std::fs::read_dir(&segments).unwrap().count(), 0, "segments left in the store");
-    assert_eq!(store.info().unwrap().available, 14 * extent_bytes);
-    drop(store);
+    assert_eq!(std::fs::read_dir(&segments).unwrap().count(), 0, "segments left in the cell");
+    assert_eq!(client.info().unwrap().available, 14 * extent_bytes);
+    drop(client);
     served.join().unwrap();
 
     let bucket = super::cells::daemon_bucket().unwrap();
@@ -3048,21 +3053,21 @@ fn what_guests_free_the_collector_compacts() {
     // The writer's fence, which no extent is in, is kept (TASK-371).
     let counted = bucket_cell::collector::Report { deleted: 1, compacted: 2, retired: 0, ..report };
     assert_eq!(report, counted);
-    let (store, served) = connect(&path, 16 * extent_bytes);
+    let (client, served) = connect(&path, 16 * extent_bytes);
     for sequence in [1, 17] {
         let extent = ExtentId { cell, sequence };
-        assert_eq!(read(&store, extent, 0, EXTENT), Ok(crate::test_data::noise(sequence, EXTENT)));
+        assert_eq!(read(&client, extent, 0, EXTENT), Ok(crate::test_data::noise(sequence, EXTENT)));
     }
-    write(&store, ExtentId { cell, sequence: 32 }, 0, &pattern(32, 2 * EXTENT)).unwrap();
-    store.commit(None).unwrap();
-    assert_eq!(store.info().unwrap().available, 12 * extent_bytes);
-    drop(store);
+    write(&client, ExtentId { cell, sequence: 32 }, 0, &pattern(32, 2 * EXTENT)).unwrap();
+    client.commit(None).unwrap();
+    assert_eq!(client.info().unwrap().available, 12 * extent_bytes);
+    drop(client);
     served.join().unwrap();
 }
 
-/// TASK-45: the daemon keeps every store's cell in its bucket, and opens none without one.
+/// TASK-45: the daemon keeps every cell in its bucket, and opens none without one.
 #[test]
-fn stores_open_only_with_a_bucket() {
+fn cells_open_only_with_a_bucket() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
@@ -3080,24 +3085,24 @@ fn tenants_arenas_go_with_them() {
     let dir = tempfile::tempdir().unwrap();
     let tenant = super::Tenant::new(1, dir.path()).unwrap();
     let arena = tenant.arena();
-    let (client, server) = UnixStream::pair().unwrap();
+    let (stream, server) = UnixStream::pair().unwrap();
     let served = std::thread::spawn(move || serve_connection(server, tenant));
-    let store =
-        CellClient::over(client, &dir.path().join("store"), Opening::Create(1 << 24, Kind::Fxfs))
+    let client =
+        CellClient::over(stream, &dir.path().join("store"), Opening::Create(1 << 24, Kind::Fxfs))
             .unwrap();
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    store.write(extent, 0, &[VolatileSlice::from(&pattern(4, ps)[..])]).unwrap();
-    store.commit(None).unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    client.write(extent, 0, &[VolatileSlice::from(&pattern(4, ps)[..])]).unwrap();
+    client.commit(None).unwrap();
     let memory = memory(1);
-    // SAFETY: The memory is this test's, and outlives the store.
-    unsafe { store.create_dax_window_in_host_memory(memory, ps as u64, None, 1) }.unwrap();
-    store.map(extent, 0, ps as u64, 0).unwrap();
-    // SAFETY: The window's memory, whose faults the store serves: the extent cached, in the arena.
+    // SAFETY: The memory is this test's, and outlives the cell.
+    unsafe { client.create_dax_window_in_host_memory(memory, ps as u64, None, 1) }.unwrap();
+    client.map(extent, 0, ps as u64, 0).unwrap();
+    // SAFETY: The window's memory, whose faults the cell serves: the extent cached, in the arena.
     let page = unsafe { std::slice::from_raw_parts(memory.as_ptr(), ps) };
     assert!(*page == pattern(4, ps)[..], "the window maps other data");
     assert!(crate::pages::arena_memory(arena).is_some());
 
-    drop(store);
+    drop(client);
     served.join().unwrap();
     // Gone with the tenant, once the page-in that served the fault, which holds the extent a while
     // after the fault returns, lets it go: the arena retires until then.
@@ -3108,32 +3113,32 @@ fn tenants_arenas_go_with_them() {
     }
 }
 
-/// cladefs: followers read a store as of their view's commit beside its writer's connection, which
+/// cladefs: followers read a cell as of their view's commit beside its writer's connection, which
 /// never waits for them: they hear of its commits, advance to them, hold what the commits between
 /// held until they let go of them, and pin what their guest holds open; what the writer wrote
-/// since they read as ENOENT, what they let go of as EIO, and what would change the store they
+/// since they read as ENOENT, what they let go of as EIO, and what would change the cell they
 /// refuse with EROFS (backlog doc-8).
 #[test]
 fn followers_follow_their_writer_side_by_side() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    let (store, served) = connect(&path, 1 << 20);
-    let cell = store.cell();
+    let (client, served) = connect(&path, 1 << 20);
+    let cell = client.cell();
     let extent = move |sequence| ExtentId { cell, sequence };
-    write(&store, extent(1), 0, &pattern(1, BLOCK)).unwrap();
-    store.commit(Some(b"one")).unwrap();
+    write(&client, extent(1), 0, &pattern(1, BLOCK)).unwrap();
+    client.commit(Some(b"one")).unwrap();
     let (follower, followed) = follow(&path).unwrap();
     let (other, other_followed) = follow(&path).unwrap();
-    assert!(follower.is_read_only() && !store.is_read_only());
-    assert_eq!((follower.cell(), follower.root()), (store.cell(), Ok(b"one".to_vec())));
+    assert!(follower.is_read_only() && !client.is_read_only());
+    assert_eq!((follower.cell(), follower.root()), (client.cell(), Ok(b"one".to_vec())));
     let commits = commits_heard(&follower);
     assert_eq!(read(&follower, extent(1), 0, BLOCK), Ok(pattern(1, BLOCK)));
 
     // The writer goes on, the followers where they are.
-    write(&store, extent(2), 0, &pattern(2, BLOCK)).unwrap();
-    store.free(extent(1)).unwrap();
-    store.commit(Some(b"two")).unwrap();
+    write(&client, extent(2), 0, &pattern(2, BLOCK)).unwrap();
+    client.free(extent(1)).unwrap();
+    client.commit(Some(b"two")).unwrap();
     let commit = commits.recv().unwrap();
     assert_eq!(follower.committed(), commit);
     assert_eq!(read(&follower, extent(2), 0, BLOCK), Err(Errno::ENOENT));
@@ -3147,10 +3152,10 @@ fn followers_follow_their_writer_side_by_side() {
     follower.pin(extent(2)).unwrap();
 
     // The writer commits on, freeing what the followers hold, without waiting for them.
-    store.free(extent(2)).unwrap();
+    client.free(extent(2)).unwrap();
     for sequence in 3..20 {
-        write(&store, extent(sequence), 0, &pattern(sequence as u8, BLOCK)).unwrap();
-        store.commit(None).unwrap();
+        write(&client, extent(sequence), 0, &pattern(sequence as u8, BLOCK)).unwrap();
+        client.commit(None).unwrap();
     }
     assert_eq!(read(&other, extent(1), 0, BLOCK), Ok(pattern(1, BLOCK)));
     let latest = follower.advance().unwrap();
@@ -3165,110 +3170,110 @@ fn followers_follow_their_writer_side_by_side() {
     assert_eq!(follower.free(extent(3)), Err(Errno::EROFS));
     assert_eq!(follower.commit(None), Err(Errno::EROFS));
     assert_eq!(follower.fork(&dir.path().join("fork")), Err(Errno::EROFS));
-    assert_eq!(store.advance(), Err(Errno::EINVAL));
-    for (store, served) in [(follower, followed), (other, other_followed), (store, served)] {
-        drop(store);
+    assert_eq!(client.advance(), Err(Errno::EINVAL));
+    for (client, served) in [(follower, followed), (other, other_followed), (client, served)] {
+        drop(client);
         served.join().unwrap();
     }
 }
 
-/// cladefs: followers of a store no writer has open follow it as of its last commit; a writer
+/// cladefs: followers of a cell no writer has open follow it as of its last commit; a writer
 /// opening it then takes it over, and they hear of its commits.
 #[test]
-fn writers_take_over_stores_their_followers_opened() {
+fn writers_take_over_cells_their_followers_opened() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
     assert_eq!(follow(&path).err(), Some(Some(Errno::ENOENT)));
-    let (store, served) = connect(&path, 1 << 20);
-    let cell = store.cell();
+    let (client, served) = connect(&path, 1 << 20);
+    let cell = client.cell();
     let extent = move |sequence| ExtentId { cell, sequence };
-    write(&store, extent(1), 0, &pattern(1, BLOCK)).unwrap();
-    store.commit(None).unwrap();
-    drop(store);
+    write(&client, extent(1), 0, &pattern(1, BLOCK)).unwrap();
+    client.commit(None).unwrap();
+    drop(client);
     served.join().unwrap();
 
     let (follower, followed) = follow(&path).unwrap();
     let commits = commits_heard(&follower);
     assert_eq!(read(&follower, extent(1), 0, BLOCK), Ok(pattern(1, BLOCK)));
-    let (store, served) = connect(&path, 1 << 20);
-    write(&store, extent(2), 0, &pattern(2, BLOCK)).unwrap();
-    store.commit(None).unwrap();
+    let (client, served) = connect(&path, 1 << 20);
+    write(&client, extent(2), 0, &pattern(2, BLOCK)).unwrap();
+    client.commit(None).unwrap();
     assert_eq!(follower.advance(), Ok(commits.recv().unwrap()));
     assert_eq!(read(&follower, extent(2), 0, BLOCK), Ok(pattern(2, BLOCK)));
 
     // Once its writer goes, nothing open, a writer takes it over again.
-    drop(store);
+    drop(client);
     served.join().unwrap();
-    let (store, served) = connect(&path, 1 << 20);
-    write(&store, extent(3), 0, &pattern(3, BLOCK)).unwrap();
-    store.commit(None).unwrap();
+    let (client, served) = connect(&path, 1 << 20);
+    write(&client, extent(3), 0, &pattern(3, BLOCK)).unwrap();
+    client.commit(None).unwrap();
     assert_eq!(follower.advance(), Ok(commits.recv().unwrap()));
     assert_eq!(read(&follower, extent(3), 0, BLOCK), Ok(pattern(3, BLOCK)));
-    assert_eq!(store.info().unwrap().next_sequence, 4);
-    for (store, served) in [(follower, followed), (store, served)] {
-        drop(store);
+    assert_eq!(client.info().unwrap().next_sequence, 4);
+    for (client, served) in [(follower, followed), (client, served)] {
+        drop(client);
         served.join().unwrap();
     }
 }
 
 /// cladefs: a writer that goes with writes uncommitted cuts its followers off (ESTALE), and no
-/// writer or follower opens its store until they are gone: then it opens as of its last commit.
+/// writer or follower opens its cell until they are gone: then it opens as of its last commit.
 #[test]
 fn writers_that_go_with_writes_uncommitted_cut_their_followers_off() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    let (store, served) = connect(&path, 1 << 20);
-    let cell = store.cell();
+    let (client, served) = connect(&path, 1 << 20);
+    let cell = client.cell();
     let extent = move |sequence| ExtentId { cell, sequence };
-    write(&store, extent(1), 0, &pattern(1, BLOCK)).unwrap();
-    store.commit(None).unwrap();
+    write(&client, extent(1), 0, &pattern(1, BLOCK)).unwrap();
+    client.commit(None).unwrap();
     let (follower, followed) = follow(&path).unwrap();
-    write(&store, extent(2), 0, &pattern(2, BLOCK)).unwrap();
-    drop(store);
+    write(&client, extent(2), 0, &pattern(2, BLOCK)).unwrap();
+    drop(client);
     served.join().unwrap();
 
     assert_eq!(read(&follower, extent(1), 0, BLOCK), Err(Errno::ESTALE));
     assert_eq!(follower.advance(), Err(Errno::ESTALE));
     assert_eq!(follow(&path).err(), Some(Some(Errno::EBUSY)));
-    let (client, server) = UnixStream::pair().unwrap();
+    let (stream, server) = UnixStream::pair().unwrap();
     let busy = std::thread::spawn(move || serve_connection(server, default_tenant().unwrap()));
-    let opened = CellClient::over(client, &path, Opening::Create(1 << 20, Kind::Fxfs));
+    let opened = CellClient::over(stream, &path, Opening::Create(1 << 20, Kind::Fxfs));
     assert_eq!(opened.err().and_then(|error| error.errno()), Some(Errno::EBUSY));
     busy.join().unwrap();
 
     drop(follower);
     followed.join().unwrap();
-    let (store, served) = connect(&path, 1 << 20);
-    assert_eq!(read(&store, extent(1), 0, BLOCK), Ok(pattern(1, BLOCK)));
-    assert_eq!(read(&store, extent(2), 0, BLOCK), Err(Errno::ENOENT));
-    drop(store);
+    let (client, served) = connect(&path, 1 << 20);
+    assert_eq!(read(&client, extent(1), 0, BLOCK), Ok(pattern(1, BLOCK)));
+    assert_eq!(read(&client, extent(2), 0, BLOCK), Err(Errno::ENOENT));
+    drop(client);
     served.join().unwrap();
 }
 
-/// cladefs: a connection opens no store open in an arena not its own (TASK-79.36), whose pages its
+/// cladefs: a connection opens no cell open in an arena not its own (TASK-79.36), whose pages its
 /// VM process's window could not map, or not as it maps them: neither a follower of the default
-/// tenant's a store a granted tenant's writer has open, nor a granted tenant's writer one that
+/// tenant's a cell a granted tenant's writer has open, nor a granted tenant's writer one that
 /// followers of the default tenant's have open (EBUSY), until the other is gone.
 #[test]
-fn stores_open_in_another_arena_are_busy() {
+fn cells_open_in_another_arena_are_busy() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
     let tenant = super::Tenant::new(1, dir.path()).unwrap();
     let open_as_tenant = || {
-        let (client, server) = UnixStream::pair().unwrap();
+        let (stream, server) = UnixStream::pair().unwrap();
         let tenant = tenant.clone();
         let served = std::thread::spawn(move || serve_connection(server, tenant));
-        (CellClient::over(client, &path, Opening::Create(1 << 20, Kind::Fxfs)), served)
+        (CellClient::over(stream, &path, Opening::Create(1 << 20, Kind::Fxfs)), served)
     };
-    let (store, served) = open_as_tenant();
-    let store = store.unwrap();
-    write(&store, ExtentId { cell: store.cell(), sequence: 1 }, 0, &pattern(1, BLOCK)).unwrap();
-    store.commit(None).unwrap();
+    let (client, served) = open_as_tenant();
+    let client = client.unwrap();
+    write(&client, ExtentId { cell: client.cell(), sequence: 1 }, 0, &pattern(1, BLOCK)).unwrap();
+    client.commit(None).unwrap();
     assert_eq!(follow(&path).err(), Some(Some(Errno::EBUSY)));
-    drop(store);
+    drop(client);
     served.join().unwrap();
 
     let (follower, followed) = follow(&path).unwrap();
@@ -3277,23 +3282,23 @@ fn stores_open_in_another_arena_are_busy() {
     busy.join().unwrap();
     drop(follower);
     followed.join().unwrap();
-    let (store, served) = open_as_tenant();
-    drop(store.unwrap());
+    let (client, served) = open_as_tenant();
+    drop(client.unwrap());
     served.join().unwrap();
 }
 
-/// cladefs: the daemon's work on a store followers have open: synced, grown and forked as it is;
+/// cladefs: the daemon's work on a cell followers have open: synced, grown and forked as it is;
 /// deleted, placed or made public, not (EBUSY).
 #[tokio::test(flavor = "multi_thread")]
-async fn stores_followed_are_worked_on_as_they_are() {
+async fn cells_followed_are_worked_on_as_they_are() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    let (store, served) = connect(&path, 1 << 20);
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, extent, 0, &pattern(1, BLOCK)).unwrap();
-    store.commit(None).unwrap();
-    drop(store);
+    let (client, served) = connect(&path, 1 << 20);
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(1, BLOCK)).unwrap();
+    client.commit(None).unwrap();
+    drop(client);
     served.join().unwrap();
     let (follower, followed) = follow(&path).unwrap();
 
@@ -3341,7 +3346,7 @@ impl Held {
 /// The names of this process's threads alive as they are read: one that ends between the listing of
 /// `/proc/self/task` and the read of its name, as an idle blocking thread of the daemon's runtimes
 /// does, is gone, and holds nothing: its name not found, or, as it exits, its process no more
-/// (`ESRCH`), as for the threads a store's flush syncs its files on (`local_cell`'s `AT_ONCE`).
+/// (`ESRCH`), as for the threads a cell's flush syncs its files on (`local_cell`'s `AT_ONCE`).
 fn thread_comms() -> impl Iterator<Item = String> {
     std::fs::read_dir("/proc/self/task").unwrap().filter_map(|task| {
         match std::fs::read_to_string(task.unwrap().path().join("comm")) {
@@ -3362,7 +3367,7 @@ fn thread_names() -> std::collections::BTreeMap<String, usize> {
     names
 }
 
-/// TASK-34: the daemon serves 300 stores, forks of one base, open at once, each reading its base,
+/// TASK-34: the daemon serves 300 cells, forks of one base, open at once, each reading its base,
 /// on threads they share: the daemon's threads do not grow with them, and each holds a few files
 /// open and a little memory, the base's state and its files' handles shared.
 #[test]
@@ -3374,14 +3379,14 @@ fn serves_hundreds_of_forks_of_a_base() {
     super::raise_open_files_limit().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().join("base");
-    let (store, served) = connect(&base, 1 << 30);
-    let cell = store.cell();
+    let (client, served) = connect(&base, 1 << 30);
+    let cell = client.cell();
     for sequence in 0..EXTENTS {
         let extent = ExtentId { cell, sequence };
-        write(&store, extent, 0, &pattern(sequence as u8, 16 * BLOCK)).unwrap();
+        write(&client, extent, 0, &pattern(sequence as u8, 16 * BLOCK)).unwrap();
     }
-    store.commit(None).unwrap();
-    drop(store);
+    client.commit(None).unwrap();
+    drop(client);
     served.join().unwrap();
     let forks: Vec<_> = (0..FORKS)
         .map(|n| {
@@ -3395,12 +3400,12 @@ fn serves_hundreds_of_forks_of_a_base() {
     std::thread::spawn(move || serve(listener));
 
     let before = Held::now();
-    let stores: Vec<_> =
+    let cells: Vec<_> =
         (forks.iter()).map(|fork| CellClient::connect(&socket, fork, 1 << 30).unwrap()).collect();
-    for (n, store) in stores.iter().enumerate() {
+    for (n, client) in cells.iter().enumerate() {
         let sequence = n as u64 % EXTENTS;
         let extent = ExtentId { cell, sequence };
-        assert_eq!(read(store, extent, 0, BLOCK).unwrap(), pattern(sequence as u8, BLOCK));
+        assert_eq!(read(client, extent, 0, BLOCK).unwrap(), pattern(sequence as u8, BLOCK));
     }
     let after = Held::now();
     let files = (after.files - before.files) as f64 / FORKS as f64;
@@ -3410,13 +3415,13 @@ fn serves_hundreds_of_forks_of_a_base() {
     // The daemon's threads: its runtimes', and the requests' running, not a set per connection.
     assert!(after.threads < 64, "{} threads: {:?}", after.threads, thread_names());
     // Each fork's: the connection's two ends here, and the client's, with its kernel's memory, its
-    // arena and the default one, read-only (TASK-79.17); its store's directory, its own since
+    // arena and the default one, read-only (TASK-79.17); its cell's directory, its own since
     // TASK-165.7, its open segment and its commit log (TASK-165.9). And the base's, which it is
     // attached to.
     let opened = after.files - before.files;
     assert!(opened <= 10 * FORKS + 64, "{opened} files for {FORKS} forks");
     assert!(resident < 1 << 20, "{resident} bytes a fork");
-    drop(stores);
+    drop(cells);
 }
 
 /// TASK-92.55: opening a fork through the daemon unpacks and reads nothing more of a larger base:
@@ -3437,7 +3442,7 @@ async fn forks_opening_reads_nothing_more_of_a_larger_base() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     // Forks of a base of `extents` extents, opened: how long their opening took, and what it
-    // unpacked and read from the stores.
+    // unpacked and read from the cells.
     let opened = async |extents: u64| {
         let base =
             OpenCell::create(dir.path().join(format!("base-{extents}")), 1 << 30).await.unwrap();
@@ -3460,12 +3465,12 @@ async fn forks_opening_reads_nothing_more_of_a_larger_base() {
         drop(base);
         let before = crate::stats::stats();
         let start = std::time::Instant::now();
-        let stores: Vec<_> = (forks.iter())
+        let cells: Vec<_> = (forks.iter())
             .map(|fork| CellClient::connect(&socket, fork, 1 << 30).unwrap())
             .collect();
         let took = start.elapsed() / FORKS as u32;
         let after = crate::stats::stats();
-        drop(stores);
+        drop(cells);
         (took, after.unpacks - before.unpacks, after.read_stored_bytes - before.read_stored_bytes)
     };
     let small = opened(1024).await;
@@ -3509,7 +3514,7 @@ async fn counting_followers_walks_no_extents() {
         forks.push(fork);
     }
     drop(base);
-    let stores: Vec<_> =
+    let cells: Vec<_> =
         (forks.iter()).map(|fork| CellClient::connect(&socket, fork, 1 << 30).unwrap()).collect();
     // The quickest of a few counts: what counting itself costs.
     let took = (0..5)
@@ -3522,36 +3527,36 @@ async fn counting_followers_walks_no_extents() {
         .unwrap();
     println!("{FORKS} forks of a base of {EXTENTS} extents: their followers counted in {took:?}");
     assert!(took < std::time::Duration::from_millis(10), "counting them took {took:?}");
-    drop(stores);
+    drop(cells);
 }
 
-/// TASK-92.49: the daemon makes the ordered commits of 300 stores' guests durable on threads they
-/// share, a bounded number, rather than a blocking thread for each store whose flush is due at
+/// TASK-92.49: the daemon makes the ordered commits of 300 cells' guests durable on threads they
+/// share, a bounded number, rather than a blocking thread for each cell whose flush is due at
 /// its turn, which hundreds of guests committing together kept as many of as their syncs' waits
 /// took, each idle 10 s after: here each guest commits, ordered, again and again for a second.
-/// At once, `FLUSHES` stores' flushes run at most, each on a thread of the runtime's for its
+/// At once, `FLUSHES` cells' flushes run at most, each on a thread of the runtime's for its
 /// syncs alone (board 2944), and the 15 they share to sync their files on beside their own
 /// (`local_cell`'s `HELPERS`): the most threads seen at once, looking every millisecond, are a
-/// small part of the stores'. Those 15, and the stores' framers', syncers' and openers', are of
-/// the stores' pool (`local_cell::pool`), which keeps no more than its bound however many stores
+/// small part of the cells'. Those 15, and the cells' framers', syncers' and openers', are of
+/// the cells' pool (`local_cell::pool`), which keeps no more than its bound however many cells
 /// commit (board 2944). Once their commits are durable, the runtime keeps threads for
-/// the requests that ran at once, not for the stores: 2 and a little over 2 for each guest
-/// committing (8 to 9 for 3 guests, 18 to 25 for 9, 58 to 70 for 33, whether 150, 300 or 600 stores
+/// the requests that ran at once, not for the cells: 2 and a little over 2 for each guest
+/// committing (8 to 9 for 3 guests, 18 to 25 for 9, 58 to 70 for 33, whether 150, 300 or 600 cells
 /// were open, in a container of 15 processors), more under load, as a thread just done is not yet
 /// idle when the next request comes for one (40 beside the full workspace's tests); a thread for
-/// each store would be 297. One guest's commits are durable within a few of its
-/// store's turns, of 50 ms each and the flushes' time: told in turns, which the daemon counts
+/// each cell would be 297. One guest's commits are durable within a few of its
+/// cell's turns, of 50 ms each and the flushes' time: told in turns, which the daemon counts
 /// ([`OpenCell::flush_turns`]), as the full workspace's tests beside it stretch each turn's
 /// flushes to hundreds of milliseconds (TASK-110); the most one waited in time, its lag, is
-/// reported. The stores are on
+/// reported. The cells are on
 /// a disk, in `/var/tmp`, as a host's are: `/tmp` may be memory (tmpfs), whose syncs cost nothing.
 #[test]
 fn hundreds_of_writers_flush_on_threads_they_share() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    const STORES: usize = 300;
+    const CELLS: usize = 300;
     const WRITERS: usize = 8;
-    // The runtime's, those flushing among them; and the stores' pool's.
+    // The runtime's, those flushing among them; and the cells' pool's.
     const NAMES: [&str; 2] = ["cladefsd io", local_cell::pool::NAME];
     host();
     super::raise_open_files_limit().unwrap();
@@ -3559,19 +3564,19 @@ fn hundreds_of_writers_flush_on_threads_they_share() {
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
-    let paths: Vec<_> = (0..STORES).map(|n| dir.path().join(format!("store-{n}"))).collect();
-    let stores: Vec<_> = (paths.iter())
+    let paths: Vec<_> = (0..CELLS).map(|n| dir.path().join(format!("store-{n}"))).collect();
+    let cells: Vec<_> = (paths.iter())
         .map(|path| Arc::new(CellClient::connect(&socket, path, 1 << 30).unwrap()))
         .collect();
-    // The daemon's side of each store, which says whether its commits wait to be made durable;
+    // The daemon's side of each cell, which says whether its commits wait to be made durable;
     // and the guest whose commits' lag is measured.
     let theirs: Vec<_> = (paths.iter())
         .map(|path| {
-            let key = super::cells::store_key(path);
-            super::cells::table().writer(&key).unwrap().store().unwrap().clone()
+            let key = super::cells::cell_dir_key(path);
+            super::cells::table().writer(&key).unwrap().cell().unwrap().clone()
         })
         .collect();
-    let ((probe, others), probed) = (stores.split_first().unwrap(), theirs[0].clone());
+    let ((probe, others), probed) = (cells.split_first().unwrap(), theirs[0].clone());
     // The most of them seen at once, and how many of each kind then.
     let sampling = Arc::new(AtomicBool::new(true));
     let sampler = {
@@ -3591,16 +3596,16 @@ fn hundreds_of_writers_flush_on_threads_they_share() {
     };
     let until = std::time::Instant::now() + std::time::Duration::from_secs(1);
     let writers: Vec<_> = (others.chunks(others.len().div_ceil(WRITERS)))
-        .map(|stores| {
-            let stores = stores.to_vec();
+        .map(|cells| {
+            let cells = cells.to_vec();
             std::thread::spawn(move || {
                 let mut sequence = 0;
                 while std::time::Instant::now() < until {
                     sequence += 1;
-                    for store in &stores {
-                        let extent = ExtentId { cell: store.cell(), sequence };
-                        write(store, extent, 0, &pattern(sequence as u8, BLOCK)).unwrap();
-                        store.commit_ordered(None).unwrap();
+                    for client in &cells {
+                        let extent = ExtentId { cell: client.cell(), sequence };
+                        write(client, extent, 0, &pattern(sequence as u8, BLOCK)).unwrap();
+                        client.commit_ordered(None).unwrap();
                     }
                 }
             })
@@ -3631,7 +3636,7 @@ fn hundreds_of_writers_flush_on_threads_they_share() {
     }
     let (lags, turns) = lagging.join().unwrap();
     // Every guest's commits durable, what the flushes took and kept.
-    while theirs.iter().any(|store| store.flush_pending()) {
+    while theirs.iter().any(|client| client.flush_pending()) {
         std::thread::yield_now();
     }
     let names = thread_names();
@@ -3641,23 +3646,23 @@ fn hundreds_of_writers_flush_on_threads_they_share() {
     let threads: usize = kept.iter().sum();
     let (median, lag) = (lags[lags.len() / 2], lags[lags.len() - 1]);
     println!(
-        "{STORES} stores' guests committing: {threads} threads kept, {kept:?} named {NAMES:?}, \
+        "{CELLS} cells' guests committing: {threads} threads kept, {kept:?} named {NAMES:?}, \
          at most {} at once, {most:?}; a guest's {} ordered commits durable within {median:?}, \
-         the median, and {lag:?}, {turns} of its store's turns",
+         the median, and {lag:?}, {turns} of its cell's turns",
         most.iter().sum::<usize>(),
         lags.len()
     );
-    assert!(most[0] < STORES / 4, "{most:?} named {NAMES:?} at once");
-    assert!(kept[0] < STORES / 4, "{threads} threads kept: {kept:?} named {NAMES:?}, of {names:?}");
+    assert!(most[0] < CELLS / 4, "{most:?} named {NAMES:?} at once");
+    assert!(kept[0] < CELLS / 4, "{threads} threads kept: {kept:?} named {NAMES:?}, of {names:?}");
     let pool = local_cell::pool::threads();
     assert!(most[1] <= pool && kept[1] <= pool, "{most:?} at most, {kept:?} kept, of {pool}");
     // Four turns, however long the load made them.
     assert!(turns <= 4, "ordered commits durable {turns} turns after, {lag:?}");
-    drop(stores);
+    drop(cells);
 }
 
 /// TASK-47: the daemon's metrics, scraped over HTTP as Prometheus scrapes them, count each kind of
-/// request as it is served, and say how many VM processes are connected and stores open.
+/// request as it is served, and say how many VM processes are connected and cells open.
 #[test]
 fn metrics_count_requests_as_they_are_served() {
     use std::io::{Read as _, Write as _};
@@ -3684,12 +3689,12 @@ fn metrics_count_requests_as_they_are_served() {
     assert_eq!(metric(&before, "cladefsd_connections"), 0);
 
     let dir = tempfile::tempdir().unwrap();
-    let (store, served) = connect(&dir.path().join("store"), 1 << 20);
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
+    let (client, served) = connect(&dir.path().join("store"), 1 << 20);
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
     for offset in 0..3 {
-        write(&store, extent, offset * BLOCK as u64, &pattern(1, BLOCK)).unwrap();
+        write(&client, extent, offset * BLOCK as u64, &pattern(1, BLOCK)).unwrap();
     }
-    assert_eq!(read(&store, extent, 0, BLOCK), Ok(pattern(1, BLOCK)));
+    assert_eq!(read(&client, extent, 0, BLOCK), Ok(pattern(1, BLOCK)));
     let metrics = get("/metrics");
     let requests =
         |kind: &str| metric(&metrics, &format!("cladefsd_requests_total{{kind=\"{kind}\"}}"));
@@ -3704,7 +3709,7 @@ fn metrics_count_requests_as_they_are_served() {
     assert_eq!(metric(&metrics, "cladefsd_connections"), 1);
     assert_eq!(metric(&metrics, "cladefsd_stores_open"), 1);
     // TASK-91.3: its uploader's lag, nothing once a durable commit is uploaded.
-    store.commit(None).unwrap();
+    client.commit(None).unwrap();
     let metrics = get("/metrics");
     let upload = |name: &str| {
         format!("cladefsd_upload_{name}{{cell=\"{}\"}}", cell_at(&dir.path().join("store")))
@@ -3726,7 +3731,7 @@ fn metrics_count_requests_as_they_are_served() {
     };
     assert_eq!([failures("create"), failures("get-range"), failures("update")], [0, 0, 0]);
     assert!(get("/other").starts_with("HTTP/1.1 404 Not Found\r\n"));
-    drop(store);
+    drop(client);
     served.join().unwrap();
 }
 
@@ -3834,7 +3839,7 @@ fn the_daemon_accepts_on_after_failing_to() {
     assert_eq!(served, Err(std::sync::mpsc::RecvTimeoutError::Timeout), "serving stopped");
     let path = dir.path().join("store");
     let opened = within(std::time::Duration::from_secs(10), move || {
-        CellClient::connect(&socket, path, 1 << 20).map(|store| store.cell())
+        CellClient::connect(&socket, path, 1 << 20).map(|client| client.cell())
     });
     // TASK-687: an opening takes 50 to 120 ms here, alone or loaded; past 10 s, once, in a loaded
     // run, and in none of 300 since: what waited, if it waits again.
@@ -3844,23 +3849,23 @@ fn the_daemon_accepts_on_after_failing_to() {
     assert!(matches!(opened, Ok(Ok(_))), "the daemon accepts no more: {opened:?}");
 }
 
-/// TASK-79.83: a fork of a store, as the control API makes it (`ForkCell`), to a path a store is
-/// at already, fails with `EEXIST`, as making a store there does (`CreateCell`).
+/// TASK-79.83: a fork of a cell, as the control API makes it (`ForkCell`), to a path a cell is
+/// at already, fails with `EEXIST`, as making a cell there does (`CreateCell`).
 #[tokio::test(flavor = "multi_thread")]
-async fn forks_to_stores_there_already_fail_with_eexist() {
+async fn forks_to_cells_there_already_fail_with_eexist() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let (path, fork) = (dir.path().join("store"), dir.path().join("fork"));
-    let store = OpenCell::create(&path, 1 << 20).await.unwrap();
-    store.commit(None).await.unwrap();
-    drop(store);
+    let open_cell = OpenCell::create(&path, 1 << 20).await.unwrap();
+    open_cell.commit(None).await.unwrap();
+    drop(open_cell);
     fork_cell(&path, &fork).unwrap();
     let again = fork_cell(&path, &fork);
     assert_eq!(again.err().and_then(|error| error.errno()), Some(Errno::EEXIST));
 }
 
-/// TASK-136.5: nothing a VM process sends attaches a store to the one it has open: whatever request
-/// it makes, naming the store, what that holds stays unreadable to it.
+/// TASK-136.5: nothing a VM process sends attaches a cell to the one it has open: whatever request
+/// it makes, naming the cell, what that holds stays unreadable to it.
 #[tokio::test(flavor = "multi_thread")]
 async fn requests_attach_nothing() {
     use super::wire::{ACK, Header, REPLY, STAGE_COUNTS, STAGE_PRIVATE_COUNTS};
@@ -3871,11 +3876,11 @@ async fn requests_attach_nothing() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let base = dir.path().join("base");
-    let store = OpenCell::create(&base, 1 << 20).await.unwrap();
-    let extent = ExtentId { cell: store.cell().id, sequence: 1 };
-    store.write(extent, 0, &[VolatileSlice::from(&[7; 4096][..])]).await.unwrap();
-    store.commit(None).await.unwrap();
-    drop(store);
+    let open_cell = OpenCell::create(&base, 1 << 20).await.unwrap();
+    let extent = ExtentId { cell: open_cell.cell().id, sequence: 1 };
+    open_cell.write(extent, 0, &[VolatileSlice::from(&[7; 4096][..])]).await.unwrap();
+    open_cell.commit(None).await.unwrap();
+    drop(open_cell);
     let vm = CellClient::connect(&socket, dir.path().join("vm"), 1 << 20).unwrap();
     // But those nothing replies to.
     for kind in (0..REPLY).filter(|kind| ![ACK, STAGE_COUNTS, STAGE_PRIVATE_COUNTS].contains(kind))
@@ -3892,7 +3897,7 @@ async fn requests_attach_nothing() {
 
 /// TASK-702.1: with `CLADEFSD_READ_TRACES` naming a directory, a VM's reads are traced, and the
 /// trace written as its connection goes: its `MAP`, its `READ`, then its window's faults, a load's
-/// and a store's, each naming the extent, its length, and the range read, in the order made.
+/// and a cell's, each naming the extent, its length, and the range read, in the order made.
 #[test]
 fn a_vms_reads_are_traced() {
     host();
@@ -3903,23 +3908,23 @@ fn a_vms_reads_are_traced() {
     super::reads::configure().unwrap();
     let ps = page_size() as usize;
     let dir = tempfile::tempdir().unwrap();
-    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
+    let (client, served) = connect(&dir.path().join("store"), 1 << 24);
     let memory = memory(2);
-    // SAFETY: The memory is the test's, and outlives the store.
-    unsafe { store.create_dax_window_in_host_memory(memory, 2 * ps as u64, None, 2) }.unwrap();
+    // SAFETY: The memory is the test's, and outlives the cell.
+    unsafe { client.create_dax_window_in_host_memory(memory, 2 * ps as u64, None, 2) }.unwrap();
     crate::guest_thread_started();
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, extent, 0, &pattern(3, 3 * ps)).unwrap();
-    store.commit(None).unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(3, 3 * ps)).unwrap();
+    client.commit(None).unwrap();
     // Its second and third pages, at the window's first and second.
-    store.map(extent, ps as u64, 2 * ps as u64, 0).unwrap();
-    assert_eq!(read(&store, extent, 0, 512), Ok(pattern(3, 512)));
+    client.map(extent, ps as u64, 2 * ps as u64, 0).unwrap();
+    assert_eq!(read(&client, extent, 0, 512), Ok(pattern(3, 512)));
     let base = memory.as_ptr() as usize;
-    // SAFETY: The window's memory, whose faults the store serves.
+    // SAFETY: The window's memory, whose faults the cell serves.
     assert_eq!(unsafe { memory.as_ptr().read_volatile() }, pattern(3, ps + 1)[ps]);
-    assert_eq!(kernel_store(base + ps), Ok(()));
-    let cell = store.cell();
-    drop(store);
+    assert_eq!(kernel_write(base + ps), Ok(()));
+    let cell = client.cell();
+    drop(client);
     served.join().unwrap();
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -3955,7 +3960,7 @@ fn a_vms_reads_are_traced() {
 }
 
 /// TASK-702.2: a VM restoring a version records what its guest reads of the version, by `MAP` and
-/// by `READ` alike, as the version's read evidence of its tenant's, written as its store closes,
+/// by `READ` alike, as the version's read evidence of its tenant's, written as its cell closes,
 /// before another connection opens it again.
 #[test]
 fn a_restored_vms_reads_are_its_versions_evidence() {
@@ -3965,24 +3970,24 @@ fn a_restored_vms_reads_are_its_versions_evidence() {
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
-    let store = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
-    let extent = |sequence| ExtentId { cell: store.cell(), sequence };
+    let client = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let extent = |sequence| ExtentId { cell: client.cell(), sequence };
     for sequence in [1, 2] {
-        write(&store, extent(sequence), 0, &pattern(sequence as u8, ps)).unwrap();
+        write(&client, extent(sequence), 0, &pattern(sequence as u8, ps)).unwrap();
     }
-    store.commit(None).unwrap();
-    let version = store.make_version().unwrap();
+    client.commit(None).unwrap();
+    let version = client.make_version().unwrap();
 
     let path = dir.path().join("restored");
     let restored = CellClient::connect_forked(&socket, &path, version, 0).unwrap();
     let memory = memory(2);
-    // SAFETY: The memory is the test's, and outlives the store.
+    // SAFETY: The memory is the test's, and outlives the cell.
     unsafe { restored.create_dax_window_in_host_memory(memory, 2 * ps as u64, None, 1) }.unwrap();
     restored.map(extent(1), 0, ps as u64, 0).unwrap();
     assert_eq!(read(&restored, extent(2), 0, 512), Ok(pattern(2, 512)));
-    let theirs = super::cells::table().writer(&super::cells::store_key(&path)).unwrap();
-    let forked = theirs.store().unwrap().forked_from().unwrap();
-    let tenant = theirs.store().unwrap().cell().tenant;
+    let theirs = super::cells::table().writer(&super::cells::cell_dir_key(&path)).unwrap();
+    let forked = theirs.cell().unwrap().forked_from().unwrap();
+    let tenant = theirs.cell().unwrap().cell().tenant;
     drop(theirs);
     drop(restored);
     // Opened again once the restore's connection let it go, closed.
@@ -3995,25 +4000,25 @@ fn a_restored_vms_reads_are_its_versions_evidence() {
     let units: Vec<(ExtentId, u64)> =
         read.recordings.concat().iter().map(|unit| (unit.extent, unit.mib)).collect();
     assert_eq!((units, read.refused), (vec![(extent(1), 0), (extent(2), 0)], 0));
-    drop((again, store));
+    drop((again, client));
 }
 
-/// TASK-79.17, TASK-702.3: a store the daemon opens to work on, as no VM process has it open,
+/// TASK-79.17, TASK-702.3: a cell the daemon opens to work on, as no VM process has it open,
 /// boots no guest: its version's read evidence is not read, nor anything fetched ahead for it. Here
 /// a fork of a version is synced; a VM opening it reads the evidence.
 #[test]
-fn stores_worked_on_here_fetch_nothing_ahead() {
+fn cells_worked_on_here_fetch_nothing_ahead() {
     host();
     let ps = page_size() as usize;
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
-    let store = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, extent, 0, &pattern(7, ps)).unwrap();
-    store.commit(None).unwrap();
-    let version = store.make_version().unwrap();
+    let client = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(7, ps)).unwrap();
+    client.commit(None).unwrap();
+    let version = client.make_version().unwrap();
     let path = dir.path().join("fork");
     // Forked by the daemon, not by a VM's connection, which no VM has open, nor had.
     let cell = crate::CellId { tenant: version.tenant, id: version.cell };
@@ -4026,20 +4031,20 @@ fn stores_worked_on_here_fetch_nothing_ahead() {
     assert_eq!(crate::stats::stats().since(&before).prefetches, 0);
     let again = CellClient::connect(&socket, &path, 1 << 24).unwrap();
     assert_eq!(crate::evidence::kept(), 1);
-    drop((again, store));
+    drop((again, client));
 }
 
-/// TASK-79.34: a store the daemon synced, opened here as no connection had it open, is closed
+/// TASK-79.34: a cell the daemon synced, opened here as no connection had it open, is closed
 /// before those waiting to open it may: deleted at once after, it is open no more, each time.
 #[tokio::test(flavor = "multi_thread")]
-async fn stores_synced_here_are_closed_before_they_are_let_go() {
+async fn cells_synced_here_are_closed_before_they_are_let_go() {
     host();
     let dir = tempfile::tempdir().unwrap();
     for round in 0..20 {
         let path = dir.path().join(format!("store-{round}"));
-        let store = OpenCell::create(&path, 1 << 20).await.unwrap();
-        store.commit(None).await.unwrap();
-        drop(store);
+        let open_cell = OpenCell::create(&path, 1 << 20).await.unwrap();
+        open_cell.commit(None).await.unwrap();
+        drop(open_cell);
         wait_uploaded(&path).unwrap();
         let deleted = delete_cell(&path).map_err(|error| error.errno());
         assert_eq!(deleted, Ok(()), "round {round}");
@@ -4061,7 +4066,7 @@ fn memfd(len: u64) -> std::fs::File {
 
 /// TASK-79.43: a window's mappings, a snapshot's, more of them than one message's most bytes of
 /// payload hold, arrive whole: a daemon's reply holds as many as a window of its size can have,
-/// which its VM process takes. Here a daemon of the test's answers the store's opening, its
+/// which its VM process takes. Here a daemon of the test's answers the cell's opening, its
 /// window's, and its mappings', a page each, past `MAX_PAYLOAD`.
 #[test]
 fn window_mappings_past_a_messages_payload_arrive() {
@@ -4070,7 +4075,7 @@ fn window_mappings_past_a_messages_payload_arrive() {
     let ps = page_size();
     // More than a message's payload, and its header's room past it, hold.
     let count = (MAX_PAYLOAD + size_of::<Header>() as u64) / 48 + 1;
-    let (client, daemon) = UnixStream::pair().unwrap();
+    let (stream, daemon) = UnixStream::pair().unwrap();
     let answering = std::thread::spawn(move || {
         let (sender, mut receiver) =
             (Sender::new(daemon.try_clone().unwrap()), Receiver::new(daemon));
@@ -4095,8 +4100,8 @@ fn window_mappings_past_a_messages_payload_arrive() {
             sender.send(reply, &payload, &fds).unwrap();
         }
     });
-    let store = CellClient::over(client, Path::new("store"), Opening::Create(1 << 20, Kind::Fxfs));
-    let store = store.unwrap();
+    let client = CellClient::over(stream, Path::new("store"), Opening::Create(1 << 20, Kind::Fxfs));
+    let client = client.unwrap();
     let size = count * ps;
     // SAFETY: Reserves the window's memory, which the test leaks: the window maps it while the
     // process lives.
@@ -4112,9 +4117,9 @@ fn window_mappings_past_a_messages_payload_arrive() {
     };
     assert_ne!(memory, libc::MAP_FAILED);
     let memory = NonNull::new(memory.cast()).unwrap();
-    // SAFETY: The memory is the test's, and outlives the store.
-    unsafe { store.create_dax_window_in_host_memory(memory, size, None, 1) }.unwrap();
-    let mappings = store.window_mappings().unwrap();
+    // SAFETY: The memory is the test's, and outlives the cell.
+    unsafe { client.create_dax_window_in_host_memory(memory, size, None, 1) }.unwrap();
+    let mappings = client.window_mappings().unwrap();
     assert_eq!(mappings.len() as u64, count);
     let last = crate::WindowMapping {
         window_offset: (count - 1) * ps,
@@ -4122,21 +4127,21 @@ fn window_mappings_past_a_messages_payload_arrive() {
         contents: crate::MappingContents::Zeros,
     };
     assert_eq!(mappings.last(), Some(&last));
-    drop(store);
+    drop(client);
     answering.join().unwrap();
 }
 
-/// cladefs: a request its daemon's going failed finds the daemon gone: the connection is lost before
-/// what waits on it fails, so that what a failure makes of it, as the VM process's faults do, can
-/// tell a daemon gone from a refusal (TASK-231). A VM whose daemon died with a fault in flight
-/// aborted (SIGABRT), the fault's EIO taken for the daemon's refusal, where it exits CladefsdLost
-/// (158): fxfs-guest-soak, GCE r830 round 27.
+/// cladefs: a request its daemon's going failed finds the daemon gone: the connection is lost
+/// before what waits on it fails, so that what a failure makes of it, as the VM process's faults
+/// do, can tell a daemon gone from a refusal (TASK-231). A VM whose daemon died with a fault in
+/// flight aborted (SIGABRT), the fault's EIO taken for the daemon's refusal, where it exits
+/// CladefsdLost (158): fxfs-guest-soak, GCE r830 round 27.
 #[test]
 fn requests_failed_by_the_daemons_going_find_it_gone() {
     use super::wire::*;
     use std::os::fd::AsFd;
     let ps = page_size();
-    let (client, daemon) = UnixStream::pair().unwrap();
+    let (stream, daemon) = UnixStream::pair().unwrap();
     let answering = std::thread::spawn(move || {
         let (sender, mut receiver) =
             (Sender::new(daemon.try_clone().unwrap()), Receiver::new(daemon));
@@ -4156,36 +4161,36 @@ fn requests_failed_by_the_daemons_going_find_it_gone() {
             sender.send(reply, &[], &fds).unwrap();
         }
     });
-    let store = CellClient::over(client, Path::new("store"), Opening::Create(1 << 20, Kind::Fxfs));
-    let store = store.unwrap();
+    let client = CellClient::over(stream, Path::new("store"), Opening::Create(1 << 20, Kind::Fxfs));
+    let client = client.unwrap();
     // What the failed request does comes before the rest of the connection's end.
     let _slow = fail::FailGuard::new("client::requests_failed", "sleep(200)").unwrap();
     let mut data = vec![0; ps as usize];
     let extent = ExtentId { cell: 7, sequence: 1 };
-    let read = store.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]);
+    let read = client.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]);
     assert_eq!(read, Err(crate::Errno::EIO));
-    assert!(store.daemon_lost(), "the read failed, its daemon not yet lost");
+    assert!(client.daemon_lost(), "the read failed, its daemon not yet lost");
     answering.join().unwrap();
 }
 
-/// cladefs: a daemon going as a store opens over its connection is told of, as what was said of the
+/// cladefs: a daemon going as a cell opens over its connection is told of, as what was said of the
 /// connection before the open says ([`DaemonConnection::on_lost`]), before the open fails, which
 /// says why: a VMM stops its VM CladefsdLost (158) then, as for a daemon going later, rather than
-/// for the open's failure. A VM booted again as its daemon was killed exited 1, its store
+/// for the open's failure. A VM booted again as its daemon was killed exited 1, its cell
 /// recovering from a bucket slowed a second a request: fxfs-guest-soak, GCE r831 round 29
 /// (TASK-232). Red with the connection's end told of after the open failed, which the failpoint
 /// holding the end shows.
 #[test]
-fn daemons_going_as_stores_open_are_told_of_first() {
+fn daemons_going_as_cells_open_are_told_of_first() {
     use super::client::DaemonConnection;
     use super::wire::*;
-    let (client, daemon) = UnixStream::pair().unwrap();
+    let (stream, daemon) = UnixStream::pair().unwrap();
     let going = std::thread::spawn(move || {
         let open = Receiver::new(daemon).receive(|| 0).unwrap().unwrap();
-        // The daemon goes as it opens the store, answering nothing.
+        // The daemon goes as it opens the cell, answering nothing.
         assert_eq!(open.header.kind, OPEN);
     });
-    let connection = DaemonConnection::over(client).unwrap();
+    let connection = DaemonConnection::over(stream).unwrap();
     let happened = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let told = happened.clone();
     connection.on_lost(move || told.lock().unwrap().push("daemon lost"));
@@ -4193,7 +4198,7 @@ fn daemons_going_as_stores_open_are_told_of_first() {
     let _slow = fail::FailGuard::new("client::requests_failed", "sleep(200)").unwrap();
     let opened = connection.open(Path::new("store"), 1 << 20);
     happened.lock().unwrap().push("open failed");
-    let err = opened.err().expect("the store opened, its daemon gone");
+    let err = opened.err().expect("the cell opened, its daemon gone");
     assert_eq!(
         format!("{err:#}"),
         "opening the extent store at store: the extent daemon went: EIO (errno 5)"
@@ -4203,7 +4208,7 @@ fn daemons_going_as_stores_open_are_told_of_first() {
 }
 
 /// A VM process's connection to the daemon at `socket`, made by hand, as one that keeps to no
-/// protocol makes it: its store at `path` opened, created with `capacity` bytes, and its cell.
+/// protocol makes it: its cell at `path` opened, created with `capacity` bytes, and its cell.
 fn raw_connection(
     socket: &Path,
     path: &Path,
@@ -4271,8 +4276,8 @@ fn unread(stream: &UnixStream) -> usize {
 }
 
 /// TASK-79.16: a VM process that stops reading what the daemon sends it holds up no other: as the
-/// daemon's reply to it waits for room in its socket, another VM process opening its store is
-/// refused at once (`EBUSY`), and another's store opens.
+/// daemon's reply to it waits for room in its socket, another VM process opening its cell is
+/// refused at once (`EBUSY`), and another's cell opens.
 #[test]
 fn vm_processes_that_stop_reading_hold_up_no_other() {
     use super::wire::*;
@@ -4301,12 +4306,12 @@ fn vm_processes_that_stop_reading_hold_up_no_other() {
     let busy = within(wait, move || {
         CellClient::connect(&busy_socket, &opening, 1 << 24).err().and_then(|e| e.errno())
     });
-    assert_eq!(busy, Ok(Some(Errno::EBUSY)), "opening the store waited for its VM process");
+    assert_eq!(busy, Ok(Some(Errno::EBUSY)), "opening the cell waited for its VM process");
     let other = dir.path().join("other");
     let opened = within(wait, move || {
-        CellClient::connect(&other_socket, &other, 1 << 24).map(|store| store.cell())
+        CellClient::connect(&other_socket, &other, 1 << 24).map(|client| client.cell())
     });
-    assert!(matches!(opened, Ok(Ok(_))), "another store's opening waited: {opened:?}");
+    assert!(matches!(opened, Ok(Ok(_))), "another cell's opening waited: {opened:?}");
     drop((sender, receiver, stream));
 }
 
@@ -4378,46 +4383,46 @@ fn windows_go_up_to_the_most_the_daemon_makes_room_for() {
     }
 }
 
-/// TASK-150.4: a VM process opening a fork of a version that doesn't exist, in its tenant's directory,
-/// names another tenant's cell: it gets nothing of it, and the cell's writer is left as it was.
-/// Its tenant's stores are its directory's: what the bucket holds has no tenant.
+/// TASK-150.4: a VM process opening a fork of a version that doesn't exist, in its tenant's
+/// directory, names another tenant's cell: it gets nothing of it, and the cell's writer is left as
+/// it was. Its tenant's cells are its directory's: what the bucket holds has no tenant.
 #[test]
 fn tenants_take_no_cell_by_naming_it() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let tenant = |name: &str, id: u64| {
-        let stores = dir.path().join(name);
-        std::fs::create_dir(&stores).unwrap();
-        let tenant = super::server::Tenant::new(id, &stores).unwrap();
+        let cells = dir.path().join(name);
+        std::fs::create_dir(&cells).unwrap();
+        let tenant = super::server::Tenant::new(id, &cells).unwrap();
         let socket = dir.path().join(format!("{name}.sock"));
         let listener = UnixListener::bind(&socket).unwrap();
         std::thread::spawn(move || super::server::serve_tenant(listener, tenant));
-        (stores, socket)
+        (cells, socket)
     };
     let (ours, our_socket) = tenant("ours", 1);
     let (theirs, their_socket) = tenant("theirs", 2);
-    let store = CellClient::connect(&their_socket, theirs.join("store"), 1 << 24).unwrap();
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, extent, 0, &pattern(4, BLOCK)).unwrap();
-    store.commit(Some(b"theirs")).unwrap();
+    let client = CellClient::connect(&their_socket, theirs.join("store"), 1 << 24).unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(4, BLOCK)).unwrap();
+    client.commit(Some(b"theirs")).unwrap();
 
-    let version = store.make_version().unwrap();
+    let version = client.make_version().unwrap();
     let restored = ours.join("restored");
     let opened = CellClient::connect_forked(&our_socket, &restored, version, 1 << 24);
     assert_eq!(opened.map(drop).map_err(|error| error.errno()), Err(Some(Errno::EACCES)));
-    assert!(!restored.exists(), "a restore of another tenant's version not shared made a store");
-    let later = ExtentId { cell: store.cell(), sequence: 2 };
-    assert_eq!(write(&store, later, 0, &pattern(5, BLOCK)), Ok(()));
-    assert_eq!(store.commit(None), Ok(()));
-    assert_eq!(read(&store, extent, 0, BLOCK), Ok(pattern(4, BLOCK)));
+    assert!(!restored.exists(), "a restore of another tenant's version not shared made a cell");
+    let later = ExtentId { cell: client.cell(), sequence: 2 };
+    assert_eq!(write(&client, later, 0, &pattern(5, BLOCK)), Ok(()));
+    assert_eq!(client.commit(None), Ok(()));
+    assert_eq!(read(&client, extent, 0, BLOCK), Ok(pattern(4, BLOCK)));
 }
 
-/// TASK-150.5: a connection has one store, however many `OPEN`s its VM process has in flight: the
-/// second, as the first waits for its store's last holder to let it go, is refused, holding
-/// nothing, and both stores open for others once the connection goes.
+/// TASK-150.5: a connection has one cell, however many `OPEN`s its VM process has in flight: the
+/// second, as the first waits for its cell's last holder to let it go, is refused, holding
+/// nothing, and both cells open for others once the connection goes.
 #[test]
-fn connections_open_one_store_at_a_time() {
-    use super::cells::{store_key, table};
+fn connections_open_one_cell_at_a_time() {
+    use super::cells::{cell_dir_key, table};
     use super::wire::*;
     use std::os::unix::ffi::OsStrExt as _;
     host();
@@ -4426,7 +4431,7 @@ fn connections_open_one_store_at_a_time() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let (first, second) = (dir.path().join("first"), dir.path().join("second"));
-    let key = store_key(&first);
+    let key = cell_dir_key(&first);
     let held = table().hold(&key, None).unwrap();
 
     let stream = UnixStream::connect(&socket).unwrap();
@@ -4452,7 +4457,7 @@ fn connections_open_one_store_at_a_time() {
         reopened(&opening, &reopened_first);
         reopened(&opening, &reopened_second);
     });
-    assert_eq!(opened, Ok(()), "a store stayed held once its connection went");
+    assert_eq!(opened, Ok(()), "a cell stayed held once its connection went");
     assert_eq!(statuses, (1, 0, -Errno::EBUSY.raw()));
 }
 
@@ -4468,7 +4473,7 @@ fn tenants_connections_are_bounded() {
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
-    // Served once its store is open.
+    // Served once its cell is open.
     let (ours, theirs) = UnixStream::pair().unwrap();
     let serving = std::thread::spawn(move || serve_connection(theirs, default_tenant().unwrap()));
     let first =
@@ -4490,8 +4495,8 @@ fn tenants_connections_are_bounded() {
     drop(connected);
 }
 
-/// TASK-79.84: a VM restored from a snapshot to where a fork of its version was left unmade, its host
-/// crashing as it made the child's store, gets a fork made anew, of a cell of its own, holding
+/// TASK-79.84: a VM restored from a snapshot to where a fork of its version was left unmade, its
+/// host crashing as it made the child's cell, gets a fork made anew, of a cell of its own, holding
 /// what the version holds: what was left goes (`host_cell::unmade`, TASK-165.7).
 #[test]
 fn restores_fork_anew_over_forks_left_unmade() {
@@ -4500,74 +4505,77 @@ fn restores_fork_anew_over_forks_left_unmade() {
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
-    let store = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, extent, 0, &pattern(8, BLOCK)).unwrap();
-    store.commit(Some(b"root")).unwrap();
-    let version = store.make_version().unwrap();
-    drop(store);
+    let client = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(8, BLOCK)).unwrap();
+    client.commit(Some(b"root")).unwrap();
+    let version = client.make_version().unwrap();
+    drop(client);
 
-    // What a fork of the version there leaves, its host crashing before its store's description.
+    // What a fork of the version there leaves, its host crashing before its cell's description.
     let restored = dir.path().join("restored");
     std::fs::create_dir_all(restored.join("segments")).unwrap();
     std::fs::write(restored.join("ancestry"), "1 /elsewhere\n").unwrap();
     let ours = CellClient::connect_forked(&socket, &restored, version, 0).unwrap();
     assert_eq!(ours.root(), Ok(b"root".to_vec()));
     assert_eq!(read(&ours, extent, 0, BLOCK), Ok(pattern(8, BLOCK)));
-    assert!(!crate::host_cell::unmade(&restored), "the new fork is no store");
+    assert!(!crate::host_cell::unmade(&restored), "the new fork is no cell");
 }
 
-/// TASK-194: a restore into a store written since its snapshot's version, as the snapshotted VM's
-/// own store is once it resumed and wrote on, is refused: opened, its guest, of the snapshot's
+/// TASK-194: a restore into a cell written since its snapshot's version, as the snapshotted VM's
+/// own cell is once it resumed and wrote on, is refused: opened, its guest, of the snapshot's
 /// memory, would read extents freed since, and commit over what was written since.
 #[test]
-fn restores_refuse_a_store_written_since_its_version() {
+fn restores_refuse_a_cell_written_since_its_version() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let path = dir.path().join("store");
-    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, extent, 0, &pattern(8, BLOCK)).unwrap();
-    store.commit(Some(b"root")).unwrap();
-    let version = store.make_version().unwrap();
+    let client = CellClient::connect(&socket, &path, 1 << 24).unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(8, BLOCK)).unwrap();
+    client.commit(Some(b"root")).unwrap();
+    let version = client.make_version().unwrap();
     // The VM resumes, and goes on: what its snapshot holds it frees, and it commits anew.
-    store.free(extent).unwrap();
-    store.commit(Some(b"later")).unwrap();
-    drop(store);
+    client.free(extent).unwrap();
+    client.commit(Some(b"later")).unwrap();
+    drop(client);
 
     let restored = CellClient::connect_forked(&socket, &path, version, 0);
     assert_eq!(restored.err().and_then(|err| err.errno()), Some(Errno::EEXIST));
     // Nothing of it changed: opened, it is as the VM left it.
-    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
-    assert_eq!((store.root(), read(&store, extent, 0, BLOCK).ok()), (Ok(b"later".to_vec()), None));
+    let client = CellClient::connect(&socket, &path, 1 << 24).unwrap();
+    assert_eq!(
+        (client.root(), read(&client, extent, 0, BLOCK).ok()),
+        (Ok(b"later".to_vec()), None)
+    );
 }
 
-/// TASK-194: what a restore may open, a store there already holding what its version does: the store
+/// TASK-194: what a restore may open, a cell there already holding what its version does: the cell
 /// its snapshot was taken of, written nothing since, as a VM stopped without resuming leaves it;
 /// and a fork of the version an earlier restore made, its VM having written nothing, retried. Once
 /// that fork is written, a restore into it is refused too.
 #[test]
-fn restores_open_stores_still_at_their_version() {
+fn restores_open_cells_still_at_their_version() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let path = dir.path().join("store");
-    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, extent, 0, &pattern(8, BLOCK)).unwrap();
-    store.commit(Some(b"root")).unwrap();
-    let version = store.make_version().unwrap();
-    drop(store);
+    let client = CellClient::connect(&socket, &path, 1 << 24).unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(8, BLOCK)).unwrap();
+    client.commit(Some(b"root")).unwrap();
+    let version = client.make_version().unwrap();
+    drop(client);
     let restore = |into: &Path| CellClient::connect_forked(&socket, into, version, 0);
-    let at_point = |store: &CellClient| (store.root().ok(), read(store, extent, 0, BLOCK).ok());
+    let at_point = |client: &CellClient| (client.root().ok(), read(client, extent, 0, BLOCK).ok());
     let state = (Some(b"root".to_vec()), Some(pattern(8, BLOCK)));
 
-    // The snapshotted VM's own store, written nothing since its version.
+    // The snapshotted VM's own cell, written nothing since its version.
     let restored = restore(&path).unwrap();
     assert_eq!(at_point(&restored), state);
     drop(restored);
@@ -4586,15 +4594,15 @@ fn restores_open_stores_still_at_their_version() {
     assert_eq!(restore(&fork).err().and_then(|err| err.errno()), Some(Errno::EEXIST));
 }
 
-/// What a store of the daemon's at `path` mints next, as its guest mints: from its writer's floor,
+/// What a cell of the daemon's at `path` mints next, as its guest mints: from its writer's floor,
 /// or past what it minted.
-fn minted(store: &CellClient) -> ExtentId {
-    let info = store.info().unwrap();
+fn minted(client: &CellClient) -> ExtentId {
+    let info = client.info().unwrap();
     assert!(info.sequence_floor >= 1 << bucket_cell::EPOCH_SHIFT, "{info:?}");
-    ExtentId { cell: store.cell(), sequence: info.next_sequence.max(info.sequence_floor) }
+    ExtentId { cell: client.cell(), sequence: info.next_sequence.max(info.sequence_floor) }
 }
 
-/// The store at `path`, once the connection that had it open let it go.
+/// The cell at `path`, once the connection that had it open let it go.
 fn reopened(socket: &Path, path: &Path) -> CellClient {
     loop {
         match CellClient::connect(socket, path, 1 << 24) {
@@ -4604,10 +4612,10 @@ fn reopened(socket: &Path, path: &Path) -> CellClient {
     }
 }
 
-/// Waits for the daemon to have let go of the store at `path`, whose connection went: closed, its
+/// Waits for the daemon to have let go of the cell at `path`, whose connection went: closed, its
 /// uploader done with what closing uploads, as another connection may open it then.
 fn let_go(path: &Path) {
-    let (table, key) = (super::cells::table(), super::cells::store_key(path));
+    let (table, key) = (super::cells::table(), super::cells::cell_dir_key(path));
     // `EBUSY` until the daemon sees the connection going; then the wait is for it to let go.
     let hold = loop {
         match table.hold(&key, None) {
@@ -4615,20 +4623,20 @@ fn let_go(path: &Path) {
             held => break held.unwrap(),
         }
     };
-    // Then for its store, closing, to go: the table has it while anything does.
+    // Then for its cell, closing, to go: the table has it while anything does.
     while hold.instance().is_some() {
         std::thread::yield_now();
     }
 }
 
 /// TASK-44.10: a guest's fork failing at each of its steps ([`crate::faults::FORK_STEPS`]) fails
-/// with `EIO`, leaving nothing at its path; the store opens again, holds what it held, and forks; and
-/// another's store is served on. `bucket::fork_faults` goes further, on stores alone: this is the
+/// with `EIO`, leaving nothing at its path; the cell opens again, holds what it held, and forks;
+/// and another's cell is served on. `bucket::fork_faults` goes further, on cells alone: this is the
 /// daemon's side, its requests, connections, and errnos.
 ///
 /// A step fails once, for whichever uploader passes it first, failpoints being the process's: so
-/// each fails with no other store's uploader at work, theirs uploading only when asked, and the
-/// stores of the step before closed (TASK-157). `other`'s waking on its interval took
+/// each fails with no other cell's uploader at work, theirs uploading only when asked, and the
+/// cells of the step before closed (TASK-157). `other`'s waking on its interval took
 /// `upload::gather`'s failure, under load, its fork's own gather a while after it was set.
 #[test]
 fn guests_forks_failing_at_each_step_harm_nothing() {
@@ -4645,39 +4653,40 @@ fn guests_forks_failing_at_each_step_harm_nothing() {
 
     for (case, step) in crate::faults::FORK_STEPS.into_iter().enumerate() {
         let path = dir.path().join(format!("store-{case}"));
-        let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
-        let extent = minted(&store);
-        write(&store, extent, 0, &pattern(1, BLOCK)).unwrap();
-        store.commit(Some(b"root")).unwrap();
+        let client = CellClient::connect(&socket, &path, 1 << 24).unwrap();
+        let extent = minted(&client);
+        write(&client, extent, 0, &pattern(1, BLOCK)).unwrap();
+        client.commit(Some(b"root")).unwrap();
         let child = dir.path().join(format!("child-{case}"));
         let failing = fail::FailGuard::new(step, "1*return").unwrap();
-        let forked = store.fork(&child);
+        let forked = client.fork(&child);
         drop(failing);
         // Failing, but at its version's drop, past its child made, which fails it no more
         // (TASK-609).
         let failed = (step != "upload::drop_versions").then_some(Errno::EIO);
         assert_eq!((forked.err(), child.exists()), (failed, failed.is_none()), "{step}");
-        drop(store);
+        drop(client);
 
-        let store = reopened(&socket, &path);
-        assert_eq!(store.root(), Ok(b"root".to_vec()), "{step}");
-        assert_eq!(read(&store, extent, 0, BLOCK), Ok(pattern(1, BLOCK)), "{step}");
+        let client = reopened(&socket, &path);
+        assert_eq!(client.root(), Ok(b"root".to_vec()), "{step}");
+        assert_eq!(read(&client, extent, 0, BLOCK), Ok(pattern(1, BLOCK)), "{step}");
         let retried = dir.path().join(format!("retried-{case}"));
-        assert_eq!(store.fork(&retried).map(drop), Ok(()), "{step}");
+        assert_eq!(client.fork(&retried).map(drop), Ok(()), "{step}");
         let forked = CellClient::connect(&socket, &retried, 1 << 24).unwrap();
         assert_eq!(read(&forked, extent, 0, BLOCK), Ok(pattern(1, BLOCK)), "{step}");
         forked.commit(Some(b"fork")).unwrap();
 
         assert_eq!(read(&other, kept, 0, BLOCK), Ok(pattern(9, BLOCK)), "{step}");
         assert_eq!(other.commit(None), Ok(()), "{step}");
-        drop((forked, store));
+        drop((forked, client));
         let_go(&retried);
         let_go(&path);
     }
 }
 
-/// TASK-44.10: a fork made whose answer its guest never got, which took it to have failed: the
-/// fork stands, a retry to its path fails with `EEXIST`, and it is deleted as any store is. A guest's request refused before it began makes nothing, and a retry forks.
+/// TASK-44.10: a fork made whose answer its guest never got, which took it to have failed: the fork
+/// stands, a retry to its path fails with `EEXIST`, and it is deleted as any cell is. A guest's
+/// request refused before it began makes nothing, and a retry forks.
 #[test]
 fn forks_whose_answers_are_lost_stand() {
     host();
@@ -4686,25 +4695,25 @@ fn forks_whose_answers_are_lost_stand() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let path = dir.path().join("store");
-    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
-    let extent = minted(&store);
-    write(&store, extent, 0, &pattern(2, BLOCK)).unwrap();
-    store.commit(Some(b"root")).unwrap();
+    let client = CellClient::connect(&socket, &path, 1 << 24).unwrap();
+    let extent = minted(&client);
+    write(&client, extent, 0, &pattern(2, BLOCK)).unwrap();
+    client.commit(Some(b"root")).unwrap();
 
     let refused = dir.path().join("refused");
     let failing = fail::FailGuard::new("cladefsd::fork", "1*return").unwrap();
-    assert_eq!(store.fork(&refused), Err(Errno::EIO));
+    assert_eq!(client.fork(&refused), Err(Errno::EIO));
     drop(failing);
     assert!(!refused.exists(), "a request refused made a fork");
-    assert_eq!(store.fork(&refused).map(drop), Ok(()));
+    assert_eq!(client.fork(&refused).map(drop), Ok(()));
 
     let child = dir.path().join("child");
     let failing = fail::FailGuard::new("cladefsd::forked", "1*return").unwrap();
-    assert_eq!(store.fork(&child), Err(Errno::EIO));
+    assert_eq!(client.fork(&child), Err(Errno::EIO));
     drop(failing);
-    assert_eq!(store.fork(&child), Err(Errno::EEXIST));
-    assert_eq!(store.fork(&dir.path().join("again")).map(drop), Ok(()));
-    assert_eq!(store.commit(Some(b"later")), Ok(()));
+    assert_eq!(client.fork(&child), Err(Errno::EEXIST));
+    assert_eq!(client.fork(&dir.path().join("again")).map(drop), Ok(()));
+    assert_eq!(client.commit(Some(b"later")), Ok(()));
     let forked = CellClient::connect(&socket, &child, 1 << 24).unwrap();
     assert_eq!(forked.root(), Ok(b"root".to_vec()));
     assert_eq!(read(&forked, extent, 0, BLOCK), Ok(pattern(2, BLOCK)));
@@ -4716,10 +4725,10 @@ fn forks_whose_answers_are_lost_stand() {
         }
     };
     assert_eq!(deleted.map_err(|err| err.to_string()), Ok(()));
-    assert!(!child.exists(), "its store is left");
+    assert!(!child.exists(), "its cell is left");
 }
 
-/// TASK-44.10: a fork of the control API's failing once its store's commits were uploaded makes
+/// TASK-44.10: a fork of the control API's failing once its cell's commits were uploaded makes
 /// nothing; a retry forks. One of a new cell, of a version kept open, whose fork fails once it is
 /// made, is made anew, of another cell, what the first left gone.
 #[tokio::test(flavor = "multi_thread")]
@@ -4728,11 +4737,11 @@ async fn control_forks_failing_fork_again() {
     let dir = tempfile::tempdir().unwrap();
     let (base, fork, again) =
         (dir.path().join("base"), dir.path().join("fork"), dir.path().join("again"));
-    let (store, served) = connect(&base, 1 << 24);
-    let extent = minted(&store);
-    write(&store, extent, 0, &pattern(3, BLOCK)).unwrap();
-    store.commit(Some(b"root")).unwrap();
-    drop(store);
+    let (client, served) = connect(&base, 1 << 24);
+    let extent = minted(&client);
+    write(&client, extent, 0, &pattern(3, BLOCK)).unwrap();
+    client.commit(Some(b"root")).unwrap();
+    drop(client);
     served.join().unwrap();
 
     let failing = fail::FailGuard::new("cladefsd::fork_uploaded", "1*return").unwrap();
@@ -4744,34 +4753,34 @@ async fn control_forks_failing_fork_again() {
     let failing = fail::FailGuard::new("upload::forked", "1*return").unwrap();
     let cell = control(super::cells::fork(base.clone(), again.clone(), None)).unwrap();
     drop(failing);
-    assert_eq!(OpenCell::open(&again).await.map(|store| store.cell()).map_err(drop), Ok(cell));
+    assert_eq!(OpenCell::open(&again).await.map(|client| client.cell()).map_err(drop), Ok(cell));
     let (forked, served) = connect(&again, 1 << 24);
     assert_eq!(read(&forked, extent, 0, BLOCK), Ok(pattern(3, BLOCK)));
     drop(forked);
     served.join().unwrap();
 }
 
-/// TASK-648: a fork of a version made right after its writer's connection went, the store still
-/// open in this process, syncs that store as it is, never opening it again beside it. Here the
-/// store lingers by a reference the test keeps, as a fork's read of it would. A store already
+/// TASK-648: a fork of a version made right after its writer's connection went, the cell still
+/// open in this process, syncs that cell as it is, never opening it again beside it. Here the
+/// cell lingers by a reference the test keeps, as a fork's read of it would. A cell already
 /// closing, its last reference dropped, an opening waits for (local_cell's
-/// `openings_wait_for_a_store_closing`): the window the failing runs met.
+/// `openings_wait_for_a_cell_closing`): the window the failing runs met.
 #[test]
-fn forks_of_a_version_right_after_its_writer_went_sync_the_store_still_closing() {
+fn forks_of_a_version_right_after_its_writer_went_sync_the_cell_still_closing() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
-    let (store, restored) = (dir.path().join("store"), dir.path().join("restored"));
-    let made = CellClient::connect(&socket, &store, 1 << 24).unwrap();
+    let (cell_dir, restored) = (dir.path().join("store"), dir.path().join("restored"));
+    let made = CellClient::connect(&socket, &cell_dir, 1 << 24).unwrap();
     let extent = minted(&made);
     write(&made, extent, 0, &pattern(5, BLOCK)).unwrap();
     made.commit(Some(b"root")).unwrap();
     let version = made.make_version().unwrap();
-    let key = super::cells::store_key(&store);
-    let lingering = super::cells::table().instance(&key).map(|(store, _)| store);
-    assert!(lingering.is_some(), "the store is not open");
+    let key = super::cells::cell_dir_key(&cell_dir);
+    let lingering = super::cells::table().instance(&key).map(|(open_cell, _)| open_cell);
+    assert!(lingering.is_some(), "the cell is not open");
     drop(made);
     let forked = control(super::cells::fork_of_version(
         version_cell(version),
@@ -4785,21 +4794,21 @@ fn forks_of_a_version_right_after_its_writer_went_sync_the_store_still_closing()
     assert_eq!(read(&ours, extent, 0, BLOCK), Ok(pattern(5, BLOCK)));
 }
 
-/// TASK-644: a fork of a version made right after its writer's connection went, its store closing
+/// TASK-644: a fork of a version made right after its writer's connection went, its cell closing
 /// on a blocking thread, its uploader uploading its last commits, the version's among them, waits
-/// for the close before it reads the bucket for the version. Before, it found no store of the cell
-/// open to sync, read the bucket at once, and failed `ENOENT` where the upload was still to come
+/// for the close before it reads the bucket for the version. Before, it found no open cell
+/// to sync, read the bucket at once, and failed `ENOENT` where the upload was still to come
 /// (CI's `page_ins_in_flight_are_bounded`). The close held where it says it is closing, before its
 /// uploads; the fork held where it waits; then the close let go on.
 #[test]
-fn forks_of_a_version_wait_for_the_close_of_the_store_that_made_it() {
+fn forks_of_a_version_wait_for_the_close_of_the_cell_that_made_it() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
-    let (store, restored) = (dir.path().join("store"), dir.path().join("restored"));
-    let made = CellClient::connect(&socket, &store, 1 << 24).unwrap();
+    let (cell_dir, restored) = (dir.path().join("store"), dir.path().join("restored"));
+    let made = CellClient::connect(&socket, &cell_dir, 1 << 24).unwrap();
     let extent = minted(&made);
     write(&made, extent, 0, &pattern(6, BLOCK)).unwrap();
     made.commit(Some(b"root")).unwrap();
@@ -4808,7 +4817,7 @@ fn forks_of_a_version_wait_for_the_close_of_the_store_that_made_it() {
     let (closing, closing_seen) = std::sync::mpsc::channel();
     let (go, gone_on) = std::sync::mpsc::channel::<()>();
     let gone_on = std::sync::Mutex::new(gone_on);
-    // The writer's close alone held: the version's store, opened for the fork, closes unheld.
+    // The writer's close alone held: the version's cell, opened for the fork, closes unheld.
     let first = std::sync::atomic::AtomicBool::new(true);
     fail::cfg_callback("open_cell::closing", move || {
         if first.swap(false, std::sync::atomic::Ordering::SeqCst) {
@@ -4825,7 +4834,7 @@ fn forks_of_a_version_wait_for_the_close_of_the_store_that_made_it() {
     .unwrap();
     drop(made);
     let wait = std::time::Duration::from_secs(30);
-    closing_seen.recv_timeout(wait).expect("the store never said it was closing");
+    closing_seen.recv_timeout(wait).expect("the cell never said it was closing");
     let forking = std::thread::spawn({
         let restored = restored.clone();
         move || {
@@ -4848,31 +4857,31 @@ fn forks_of_a_version_wait_for_the_close_of_the_store_that_made_it() {
     assert_eq!(read(&ours, extent, 0, BLOCK), Ok(pattern(6, BLOCK)));
 }
 
-/// board 2922: a version shared right after its writer's connection went, the store still open in
-/// this process as its last reference is dropped, is shared through that store as it is, as a
+/// board 2922: a version shared right after its writer's connection went, the cell still open in
+/// this process as its last reference is dropped, is shared through that cell as it is, as a
 /// fork's sync does (board 2730): before, the control's work opened it again beside it. Here the
-/// store lingers by a reference the test keeps, as a close on a blocking thread, or a busy host,
+/// cell lingers by a reference the test keeps, as a close on a blocking thread, or a busy host,
 /// would.
 #[test]
-fn versions_shared_right_after_their_writer_went_use_the_store_still_closing() {
+fn versions_shared_right_after_their_writer_went_use_the_cell_still_closing() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
-    let store = dir.path().join("store");
-    let made = CellClient::connect(&socket, &store, 1 << 24).unwrap();
+    let cell_dir = dir.path().join("store");
+    let made = CellClient::connect(&socket, &cell_dir, 1 << 24).unwrap();
     let extent = minted(&made);
     write(&made, extent, 0, &pattern(5, BLOCK)).unwrap();
     made.commit(Some(b"root")).unwrap();
     let version = made.make_version().unwrap();
-    let key = super::cells::store_key(&store);
-    let lingering = super::cells::table().instance(&key).map(|(store, _)| store);
-    assert!(lingering.is_some(), "the store is not open");
+    let key = super::cells::cell_dir_key(&cell_dir);
+    let lingering = super::cells::table().instance(&key).map(|(open_cell, _)| open_cell);
+    assert!(lingering.is_some(), "the cell is not open");
     drop(made);
-    let shared = control(super::cells::share_version(store.clone(), version.version, true));
+    let shared = control(super::cells::share_version(cell_dir.clone(), version.version, true));
     assert_eq!(shared, Ok(()));
-    let versions = control(super::cells::versions(store.clone())).unwrap();
+    let versions = control(super::cells::versions(cell_dir.clone())).unwrap();
     drop(lingering);
     assert_eq!(
         versions.iter().map(|each| (each.id, each.shared)).collect::<Vec<_>>(),
@@ -4880,10 +4889,10 @@ fn versions_shared_right_after_their_writer_went_use_the_store_still_closing() {
     );
 }
 
-/// TASK-44.10: a restore, a fork of a version, which commits nothing, failing once its child's record
-/// is made, its cleanup failing with it, leaves nothing at the restore's path, and in the bucket an
-/// orphan, the child's record live (doc-14): a restore there forks anew. Before, it left a handle
-/// naming no cell, which opened as no store until deleted.
+/// TASK-44.10: a restore, a fork of a version, which commits nothing, failing once its child's
+/// record is made, its cleanup failing with it, leaves nothing at the restore's path, and in the
+/// bucket an orphan, the child's record live (doc-14): a restore there forks anew. Before, it left
+/// a handle naming no cell, which opened as no cell until deleted.
 #[test]
 fn restores_over_what_a_failed_cleanup_left_fork_anew() {
     host();
@@ -4891,8 +4900,8 @@ fn restores_over_what_a_failed_cleanup_left_fork_anew() {
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
-    let (store, restored) = (dir.path().join("store"), dir.path().join("restored"));
-    let made = CellClient::connect(&socket, &store, 1 << 24).unwrap();
+    let (cell_dir, restored) = (dir.path().join("store"), dir.path().join("restored"));
+    let made = CellClient::connect(&socket, &cell_dir, 1 << 24).unwrap();
     let extent = minted(&made);
     write(&made, extent, 0, &pattern(4, BLOCK)).unwrap();
     made.commit(Some(b"root")).unwrap();
@@ -4929,36 +4938,36 @@ fn served(kind: &str) -> u64 {
 fn extents_freed_together_are_freed_in_one_request() {
     host();
     let dir = tempfile::tempdir().unwrap();
-    let (store, serving) = connect(&dir.path().join("store"), 1 << 24);
-    let cell = store.cell();
+    let (client, serving) = connect(&dir.path().join("store"), 1 << 24);
+    let cell = client.cell();
     let extents: Vec<_> = (1..=257).map(|sequence| ExtentId { cell, sequence }).collect();
     for extent in &extents {
-        write(&store, *extent, 0, &pattern(extent.sequence as u8, BLOCK)).unwrap();
+        write(&client, *extent, 0, &pattern(extent.sequence as u8, BLOCK)).unwrap();
     }
-    store.commit(None).unwrap();
+    client.commit(None).unwrap();
     let before = (served("free"), served("free_many"));
-    store.free_many(&extents).unwrap();
+    client.free_many(&extents).unwrap();
     assert_eq!((served("free") - before.0, served("free_many") - before.1), (0, 1));
     for extent in [extents[0], extents[128], extents[256]] {
-        assert_eq!(read(&store, extent, 0, BLOCK), Err(Errno::ENOENT), "{extent:?}");
+        assert_eq!(read(&client, extent, 0, BLOCK), Err(Errno::ENOENT), "{extent:?}");
     }
-    drop(store);
+    drop(client);
     serving.join().unwrap();
 }
 
 /// TASK-92.13, TASK-141.3: a VM process's frees of many extents in one request never reach a daemon
 /// older than that request, which knows `FREE` alone, and would free the first, ignoring the flags
 /// and payload it doesn't know, the rest leaked, success said: a daemon of another wire version,
-/// an older one saying none, the VM process refuses as it opens its store, closing the connection
+/// an older one saying none, the VM process refuses as it opens its cell, closing the connection
 /// on it, naming both versions. The daemon here is one by hand, as a daemon before TASK-92.13
-/// served. Before TASK-141.3, the VM process opened its store, and its `FREE_MANY` failed with
+/// served. Before TASK-141.3, the VM process opened its cell, and its `FREE_MANY` failed with
 /// the daemon's `EINVAL`.
 #[test]
 fn daemons_of_other_wire_versions_are_refused() {
     use super::wire::*;
     use std::os::fd::AsFd;
     let ps = page_size();
-    let (client, daemon) = UnixStream::pair().unwrap();
+    let (stream, daemon) = UnixStream::pair().unwrap();
     let answering = std::thread::spawn(move || {
         let (sender, mut receiver) =
             (Sender::new(daemon.try_clone().unwrap()), Receiver::new(daemon));
@@ -4981,7 +4990,7 @@ fn daemons_of_other_wire_versions_are_refused() {
         served
     });
     let refused =
-        CellClient::over(client, Path::new("store"), Opening::Create(1 << 20, Kind::Fxfs));
+        CellClient::over(stream, Path::new("store"), Opening::Create(1 << 20, Kind::Fxfs));
     let refused = refused.err().expect("a daemon of another wire version refused");
     assert_eq!(refused.errno(), Some(Errno::EPROTONOSUPPORT));
     assert_eq!(
@@ -4995,7 +5004,7 @@ fn daemons_of_other_wire_versions_are_refused() {
     assert_eq!(answering.join().unwrap(), [OPEN]);
 }
 
-/// TASK-141.3: a daemon refuses a VM process of another wire version as it opens its store, with
+/// TASK-141.3: a daemon refuses a VM process of another wire version as it opens its cell, with
 /// `EPROTONOSUPPORT` and its own version, whatever else its `OPEN` holds, and opens nothing for it;
 /// a VM process of its own version, after, it serves. Before, nothing said a version: a VM process
 /// of another build was served, its requests read as this one has them.
@@ -5005,10 +5014,10 @@ fn vm_processes_of_other_wire_versions_are_refused() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    let (client, server) = UnixStream::pair().unwrap();
+    let (stream, server) = UnixStream::pair().unwrap();
     let served = std::thread::spawn(move || serve_connection(server, default_tenant().unwrap()));
     let (sender, mut receiver) =
-        (Sender::new(client.try_clone().unwrap()), Receiver::new(client.try_clone().unwrap()));
+        (Sender::new(stream.try_clone().unwrap()), Receiver::new(stream.try_clone().unwrap()));
     let named = std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str());
     for (id, other) in [(1, 0), (2, VERSION + 1), (3, u64::MAX)] {
         // Flags this version doesn't know, as another's OPEN may have.
@@ -5022,25 +5031,25 @@ fn vm_processes_of_other_wire_versions_are_refused() {
             assert!(reply.fds.is_empty());
         }
     }
-    assert!(!path.exists(), "a store was made for a VM process of another version");
-    drop((sender, receiver, client));
+    assert!(!path.exists(), "a cell was made for a VM process of another version");
+    drop((sender, receiver, stream));
     served.join().unwrap();
-    let (store, served) = connect(&path, 1 << 24);
-    assert_eq!(store.info().map(|info| info.capacity), Ok(1 << 24));
-    drop(store);
+    let (client, served) = connect(&path, 1 << 24);
+    assert_eq!(client.info().map(|info| info.capacity), Ok(1 << 24));
+    drop(client);
     served.join().unwrap();
 }
 
 /// TASK-141.3: what opening asks of a daemon of the VM process's own version, its build and its
 /// transfer area, is required, not let be as an older daemon's refusal was: refused, opening fails,
-/// and the connection is closed on, which lets the store go for another to open.
+/// and the connection is closed on, which lets the cell go for another to open.
 #[test]
 fn openings_fail_on_refusals_of_what_they_ask() {
     use super::wire::*;
     use std::os::fd::AsFd;
     let ps = page_size();
     for refusing in [BUILD, TRANSFER] {
-        let (client, daemon) = UnixStream::pair().unwrap();
+        let (stream, daemon) = UnixStream::pair().unwrap();
         let answering = std::thread::spawn(move || {
             let (sender, mut receiver) =
                 (Sender::new(daemon.try_clone().unwrap()), Receiver::new(daemon));
@@ -5064,7 +5073,7 @@ fn openings_fail_on_refusals_of_what_they_ask() {
             served
         });
         let opened =
-            CellClient::over(client, Path::new("store"), Opening::Create(1 << 20, Kind::Fxfs));
+            CellClient::over(stream, Path::new("store"), Opening::Create(1 << 20, Kind::Fxfs));
         let refused = opened.err().expect("opening failed");
         assert_eq!(refused.errno(), Some(Errno::EINVAL), "{refused:#}");
         let asked = match refusing {
@@ -5075,22 +5084,22 @@ fn openings_fail_on_refusals_of_what_they_ask() {
     }
 }
 
-/// What a daemon by hand replies to an `OPEN`, of its store of `cell`: the default arena's memory
+/// What a daemon by hand replies to an `OPEN`, of its cell of `cell`: the default arena's memory
 /// its own, as of the default tenant, and its wire version this one.
 fn opened_args(cell: u64) -> [u64; 5] {
     let arena = crate::pages::ArenaId(1);
     super::codec::Opened { cell, arena, commit: 0, max_map_count: None }.args()
 }
 
-/// TASK-216: a VM booted again on the store its VM crashed out of opens it at once, while what
-/// that store's uploader had in flight waits on the bucket: the uploader of a store whose
+/// TASK-216: a VM booted again on the cell its VM crashed out of opens it at once, while what
+/// that cell's uploader had in flight waits on the bucket: the uploader of a cell whose
 /// connection went stops as the new writer waits for it, without uploading the rest, which the
-/// store's write-ahead log keeps and the new opening uploads. Before, the going connection's store
-/// was closed as any store is, its uploader uploading all it held first, and the new opening,
+/// cell's write-ahead log keeps and the new opening uploads. Before, the going connection's cell
+/// was closed as any cell is, its uploader uploading all it held first, and the new opening,
 /// waiting at most `CLOSING_WAIT` for that, failed `EBUSY` (fxfs-guest-soak on GCS, GCE r758
 /// round 14, every bucket request 1000 ms late).
 #[test]
-fn stores_whose_vm_went_open_again_while_their_uploads_wait() {
+fn cells_whose_vm_went_open_again_while_their_uploads_wait() {
     use std::sync::Arc;
     host();
     let ps = page_size() as usize;
@@ -5101,26 +5110,26 @@ fn stores_whose_vm_went_open_again_while_their_uploads_wait() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let path = dir.path().join("store");
-    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
-    let cell = store.cell();
-    let write = |store: &CellClient, sequence: u64| {
+    let client = CellClient::connect(&socket, &path, 1 << 24).unwrap();
+    let cell = client.cell();
+    let write = |client: &CellClient, sequence: u64| {
         let extent = ExtentId { cell, sequence };
         let data = pattern(sequence as u8, ps);
-        store.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
+        client.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
     };
-    write(&store, 1);
-    store.commit(None).unwrap();
+    write(&client, 1);
+    client.commit(None).unwrap();
     wait_uploaded(&path).unwrap();
-    // The next segment's upload, held: the bucket out of reach for what the store has in flight.
+    // The next segment's upload, held: the bucket out of reach for what the cell has in flight.
     let segments = format!("cells/{}", bucket_cell::layout::segments(cell_at(&path)));
     gated.hold_next_write(&segments);
-    write(&store, 2);
-    store.commit_ordered(None).unwrap();
-    // The VM goes, its connection with it, its store's uploader uploading what it held.
-    drop(store);
+    write(&client, 2);
+    client.commit_ordered(None).unwrap();
+    // The VM goes, its connection with it, its cell's uploader uploading what it held.
+    drop(client);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while gated.writes_waiting() == 0 {
-        assert!(std::time::Instant::now() < deadline, "the going store's upload was never held");
+        assert!(std::time::Instant::now() < deadline, "the going cell's upload was never held");
         std::thread::yield_now();
     }
     // A VM booted again opens it, at once, and reads what the first committed.
@@ -5132,19 +5141,19 @@ fn stores_whose_vm_went_open_again_while_their_uploads_wait() {
     let mut data = vec![0; ps];
     let extent = ExtentId { cell, sequence: 2 };
     again.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).unwrap();
-    assert!(data == pattern(2, ps), "the store opened again reads other data");
+    assert!(data == pattern(2, ps), "the cell opened again reads other data");
     // What it opened with lands in the bucket, with the commit the first left in its log.
     again.commit(None).unwrap();
     gated.let_held_write_go();
     drop(again);
 }
 
-/// An object store in memory whose reads wait while they are held ([`GatedReads::hold`]): what
+/// A memory bucket whose reads wait while they are held ([`GatedReads::hold`]): what
 /// makes a page-in's fetch from object storage wait as long as a test needs. And whose next write
 /// under a prefix waits until let go ([`GatedReads::hold_next_write`]).
 #[derive(Debug)]
 struct GatedReads {
-    store: object_store::memory::InMemory,
+    memory: object_store::memory::InMemory,
     held: tokio::sync::watch::Sender<bool>,
     /// The reads waiting.
     waiting: std::sync::atomic::AtomicUsize,
@@ -5165,7 +5174,7 @@ impl std::fmt::Display for GatedReads {
 impl GatedReads {
     fn new() -> Self {
         Self {
-            store: object_store::memory::InMemory::new(),
+            memory: object_store::memory::InMemory::new(),
             held: tokio::sync::watch::channel(false).0,
             waiting: Default::default(),
             writes_waiting: Default::default(),
@@ -5223,7 +5232,7 @@ impl object_store::ObjectStore for GatedReads {
             let _ = going.wait_for(|going| *going).await;
             self.writes_waiting.fetch_sub(1, Ordering::Relaxed);
         }
-        self.store.put_opts(location, payload, opts).await
+        self.memory.put_opts(location, payload, opts).await
     }
 
     async fn put_multipart_opts(
@@ -5231,7 +5240,7 @@ impl object_store::ObjectStore for GatedReads {
         location: &object_store::path::Path,
         opts: object_store::PutMultipartOptions,
     ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
-        self.store.put_multipart_opts(location, opts).await
+        self.memory.put_multipart_opts(location, opts).await
     }
 
     async fn get_opts(
@@ -5246,7 +5255,7 @@ impl object_store::ObjectStore for GatedReads {
             let _ = held.wait_for(|held| !*held).await;
             self.waiting.fetch_sub(1, Ordering::Relaxed);
         }
-        self.store.get_opts(location, options).await
+        self.memory.get_opts(location, options).await
     }
 
     fn delete_stream(
@@ -5256,21 +5265,21 @@ impl object_store::ObjectStore for GatedReads {
             object_store::Result<object_store::path::Path>,
         >,
     ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::path::Path>> {
-        self.store.delete_stream(locations)
+        self.memory.delete_stream(locations)
     }
 
     fn list(
         &self,
         prefix: Option<&object_store::path::Path>,
     ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>> {
-        self.store.list(prefix)
+        self.memory.list(prefix)
     }
 
     async fn list_with_delimiter(
         &self,
         prefix: Option<&object_store::path::Path>,
     ) -> object_store::Result<object_store::ListResult> {
-        self.store.list_with_delimiter(prefix).await
+        self.memory.list_with_delimiter(prefix).await
     }
 
     async fn copy_opts(
@@ -5279,7 +5288,7 @@ impl object_store::ObjectStore for GatedReads {
         to: &object_store::path::Path,
         options: object_store::CopyOptions,
     ) -> object_store::Result<()> {
-        self.store.copy_opts(from, to, options).await
+        self.memory.copy_opts(from, to, options).await
     }
 }
 
@@ -5300,33 +5309,33 @@ async fn faults_waiting_for_object_storage_hold_up_no_request() {
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
-    // A store of an extent a page for each fault, written here, whose pages are of an arena no
+    // A cell of an extent a page for each fault, written here, whose pages are of an arena no
     // VM process's connection has, made a snapshot's version through the daemon, which keeps its
     // cell in the bucket.
     let path = dir.path().join("store");
     let cell = {
-        let store = OpenCell::create(&path, 1 << 24).await.unwrap();
-        let cell = store.cell();
+        let open_cell = OpenCell::create(&path, 1 << 24).await.unwrap();
+        let cell = open_cell.cell();
         for sequence in 1..=FAULTS as u64 {
             let data = pattern(sequence as u8, ps);
-            store
+            open_cell
                 .write(ExtentId { cell: cell.id, sequence }, 0, &[VolatileSlice::from(&data[..])])
                 .await
                 .unwrap();
         }
-        store.commit(None).await.unwrap();
+        open_cell.commit(None).await.unwrap();
         cell
     };
-    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
-    let version = store.make_version().unwrap();
-    drop(store);
+    let client = CellClient::connect(&socket, &path, 1 << 24).unwrap();
+    let version = client.make_version().unwrap();
+    drop(client);
     // Its VM restored on another host, which has the version's extents in the bucket alone.
     let elsewhere = dir.path().join("elsewhere");
     std::fs::create_dir(&elsewhere).unwrap();
     let restored = elsewhere.join("store");
     let ours = CellClient::connect_forked(&socket, &restored, version, 1 << 24).unwrap();
     let memory = memory(FAULTS);
-    // SAFETY: The memory is the test's, and outlives the store.
+    // SAFETY: The memory is the test's, and outlives the cell.
     unsafe { ours.create_dax_window_in_host_memory(memory, (FAULTS * ps) as u64, None, 1) }
         .unwrap();
     for n in 0..FAULTS {
@@ -5337,14 +5346,14 @@ async fn faults_waiting_for_object_storage_hold_up_no_request() {
     let base = memory.as_ptr() as usize;
     let faulting: Vec<_> = (0..FAULTS)
         .map(|n| {
-            // SAFETY: The window's memory, whose faults the store serves.
+            // SAFETY: The window's memory, whose faults the cell serves.
             std::thread::spawn(move || unsafe {
                 std::slice::from_raw_parts((base + n * ps) as *const u8, ps).to_vec()
             })
         })
         .collect();
     // Every fault received, each waiting for a fetch.
-    let connection = super::cells::table().writer(&super::cells::store_key(&restored)).unwrap();
+    let connection = super::cells::table().writer(&super::cells::cell_dir_key(&restored)).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while connection.unanswered() < FAULTS || gated.waiting() == 0 {
         assert!(std::time::Instant::now() < deadline, "{} faults", connection.unanswered());
@@ -5365,7 +5374,7 @@ async fn faults_waiting_for_object_storage_hold_up_no_request() {
 
 /// TASK-443.6: restores of a version, all at once, wait for the one opening it however long its
 /// opening takes, here from object storage 600 ms away, some 11 s, and for each other: none
-/// fails. Each waited `CLOSING_WAIT` (10 s) at most before, its turn at the version's store
+/// fails. Each waited `CLOSING_WAIT` (10 s) at most before, its turn at the version's cell
 /// coming after the opening and the turns of those that took it first, and failed `EBUSY`, 11 of
 /// 20 so (3 restores at once wait less: none failed).
 #[test]
@@ -5378,21 +5387,21 @@ fn restores_wait_for_a_version_however_long_its_opening_takes() {
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
-    let store = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, extent, 0, &pattern(6, BLOCK)).unwrap();
-    store.commit(Some(b"snapshot")).unwrap();
-    let version = store.make_version().unwrap();
-    drop(store);
+    let client = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(6, BLOCK)).unwrap();
+    client.commit(Some(b"snapshot")).unwrap();
+    let version = client.make_version().unwrap();
+    drop(client);
     let restoring: Vec<_> = (0..RESTORES)
         .map(|n| {
             let (socket, to) = (socket.clone(), dir.path().join(format!("restore-{n}")));
             std::thread::spawn(move || {
                 let start = std::time::Instant::now();
                 let restored = CellClient::connect_forked(&socket, to, version, 0);
-                let root = restored.map_err(|error| error.errno()).and_then(|store| {
-                    assert_eq!(read(&store, extent, 0, BLOCK), Ok(pattern(6, BLOCK)));
-                    store.root().map_err(Some)
+                let root = restored.map_err(|error| error.errno()).and_then(|client| {
+                    assert_eq!(read(&client, extent, 0, BLOCK), Ok(pattern(6, BLOCK)));
+                    client.root().map_err(Some)
                 });
                 (root, start.elapsed())
             })
@@ -5426,12 +5435,12 @@ fn a_zygotes_restores_open_its_copy_once() {
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
-    let store = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, extent, 0, &pattern(6, BLOCK)).unwrap();
-    store.commit(Some(b"zygote")).unwrap();
-    let version = store.make_version().unwrap();
-    drop(store);
+    let client = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(6, BLOCK)).unwrap();
+    client.commit(Some(b"zygote")).unwrap();
+    let version = client.make_version().unwrap();
+    drop(client);
     // How many writers took the version's cell: its head's epoch.
     let bucket = super::cells::daemon_bucket().unwrap();
     let cell = version_cell(version);
@@ -5446,9 +5455,9 @@ fn a_zygotes_restores_open_its_copy_once() {
             std::thread::spawn(move || {
                 let start = std::time::Instant::now();
                 let restored = CellClient::connect_forked(&socket, to, version, 0);
-                let root = restored.map_err(|error| error.errno()).and_then(|store| {
-                    assert_eq!(read(&store, extent, 0, BLOCK), Ok(pattern(6, BLOCK)));
-                    store.root().map_err(Some)
+                let root = restored.map_err(|error| error.errno()).and_then(|client| {
+                    assert_eq!(read(&client, extent, 0, BLOCK), Ok(pattern(6, BLOCK)));
+                    client.root().map_err(Some)
                 });
                 (root, start.elapsed())
             })
@@ -5502,9 +5511,9 @@ fn followers_that_stop_reading_are_told_of_the_latest_commit() {
         let queued = super::server::most_queued();
         assert!(queued <= size_of::<Header>() as u64, "{queued} bytes queued for VM processes");
     }
-    let key = super::cells::store_key(&path);
+    let key = super::cells::cell_dir_key(&path);
     let holder = super::cells::table().writer(&key).unwrap();
-    let latest = holder.store().unwrap().committed().unwrap();
+    let latest = holder.cell().unwrap().committed().unwrap();
     // Each commit it is told of after the last, the latest last.
     let told = within(std::time::Duration::from_secs(10), move || {
         while commit < latest {
@@ -5657,7 +5666,7 @@ async fn the_governor_shares_memory_by_weight() {
 }
 
 /// TASK-400: the governor, the host's memory running low, lets go of the parts of segments the
-/// daemon's stores hold packed, newest first, before any tenant's pages: they are derived, their
+/// daemon's cells hold packed, newest first, before any tenant's pages: they are derived, their
 /// framings reading them back; then, none left, it evicts tenants' pages as before.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_governor_lets_parts_held_go_before_tenants_pages() {
@@ -5678,7 +5687,7 @@ async fn the_governor_lets_parts_held_go_before_tenants_pages() {
         assert_eq!(reply.header.status, 0, "request {}", header.kind);
         reply
     };
-    // Noise, which its store's looks ahead hold none of, its segment looking framed in place.
+    // Noise, which its cell's looks ahead hold none of, its segment looking framed in place.
     let noise = |seed: u64| -> Vec<u8> {
         let mut state = 0x9e37_79b9_7f4a_7c15_u64 ^ seed;
         let words = (0..CHUNK / 8).map(|_| {
@@ -5757,32 +5766,32 @@ async fn vm_processes_of_any_tenant_write_no_public_base() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let (base, fork) = (dir.path().join("base"), dir.path().join("fork"));
-    let store = OpenCell::create(&base, 1 << 24).await.unwrap();
-    store.commit(None).await.unwrap();
-    store.make_public().unwrap();
-    let forked = crate::host_cell::fork_child(store.cell());
-    drop(store);
+    let open_cell = OpenCell::create(&base, 1 << 24).await.unwrap();
+    open_cell.commit(None).await.unwrap();
+    open_cell.make_public().unwrap();
+    let forked = crate::host_cell::fork_child(open_cell.cell());
+    drop(open_cell);
     let opened = OpenCell::open(&base).await.unwrap();
     opened.fork_to(&fork, forked).await.unwrap();
     drop(opened);
     let refused = CellClient::connect(&socket, &base, 1 << 24);
     assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::EPERM));
-    let opened = CellClient::connect(&socket, &fork, 1 << 24).map(|store| store.cell());
+    let opened = CellClient::connect(&socket, &fork, 1 << 24).map(|open_cell| open_cell.cell());
     assert_eq!(opened.map_err(|error| error.errno()), Ok(forked.id));
 }
 
-/// TASK-79.34: a store whose VM process goes while the daemon's work through its connection holds
+/// TASK-79.34: a cell whose VM process goes while the daemon's work through its connection holds
 /// the connection, here a shrink waiting for its guest's answer, is let go once that work is done,
 /// which its VM process's going ends, not before: deleted once its connection is done, it is open
 /// no more.
 #[test]
-fn stores_held_through_their_connections_are_let_go_once_they_are() {
+fn cells_held_through_their_connections_are_let_go_once_they_are() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    let (store, served) = connect(&path, 2 << 20);
+    let (client, served) = connect(&path, 2 << 20);
     let (asks, asked) = std::sync::mpsc::channel();
-    store.on_capacity(move |capacity, ask| {
+    client.on_capacity(move |capacity, ask| {
         // Unheard once the test has its answer.
         let _ = asks.send((capacity, ask));
     });
@@ -5792,20 +5801,20 @@ fn stores_held_through_their_connections_are_let_go_once_they_are() {
     };
     assert_eq!(asked.recv().unwrap(), (1 << 20, true));
     // Its VM process goes, answering nothing.
-    drop(store);
+    drop(client);
     served.join().unwrap();
     assert_eq!(delete_cell(&path).map_err(|error| error.errno()), Ok(()));
     assert_eq!(resizing.join().unwrap(), Err(Errno::ETIMEDOUT));
 }
 
-/// TASK-160.8: `OPEN`s of a store, to write it and to follow it, all at once as the VM process
-/// writing it exits, each tried again on `EBUSY` until it opens the store, or, to write it, another
+/// TASK-160.8: `OPEN`s of a cell, to write it and to follow it, all at once as the VM process
+/// writing it exits, each tried again on `EBUSY` until it opens the cell, or, to write it, another
 /// connection writes it: one writes it, as the first lets it go, holding it until all are done, the
 /// others refused (`EBUSY`); each follower follows it, the first's, a follower's or the next
-/// writer's; all read what the first committed. Once all are gone, nothing holds the store, nor
+/// writer's; all read what the first committed. Once all are gone, nothing holds the cell, nor
 /// has it open, and it opens again.
 #[test]
-fn opens_race_the_exit_of_the_vm_process_writing_their_store() {
+fn opens_race_the_exit_of_the_vm_process_writing_their_cell() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Barrier, RwLock, mpsc};
     const WRITERS: usize = 4;
@@ -5821,7 +5830,7 @@ fn opens_race_the_exit_of_the_vm_process_writing_their_store() {
     let tried = move |errno: Option<Errno>| {
         errno != Some(Errno::EBUSY) || std::time::Instant::now() >= deadline
     };
-    // All at once; those that open the store keep it until all are done: until the test lets go
+    // All at once; those that open the cell keep it until all are done: until the test lets go
     // of `done`.
     let start = Arc::new(Barrier::new(WRITERS + FOLLOWERS + 1));
     let done = Arc::new(RwLock::new(()));
@@ -5835,13 +5844,13 @@ fn opens_race_the_exit_of_the_vm_process_writing_their_store() {
             std::thread::spawn(move || {
                 start.wait();
                 let opened = loop {
-                    let (client, server) = UnixStream::pair().unwrap();
+                    let (stream, server) = UnixStream::pair().unwrap();
                     let tenant = default_tenant().unwrap();
                     let served = std::thread::spawn(move || serve_connection(server, tenant));
-                    match CellClient::over(client, &path, Opening::Create(1 << 24, Kind::Fxfs)) {
-                        Ok(store) => {
+                    match CellClient::over(stream, &path, Opening::Create(1 << 24, Kind::Fxfs)) {
+                        Ok(client) => {
                             won.store(true, Ordering::SeqCst);
-                            break Ok((store, served));
+                            break Ok((client, served));
                         }
                         Err(error) => {
                             served.join().unwrap();
@@ -5852,10 +5861,10 @@ fn opens_race_the_exit_of_the_vm_process_writing_their_store() {
                     }
                 };
                 match opened {
-                    Ok((store, served)) => {
-                        wrote.send(Ok(read(&store, extent, 0, BLOCK))).unwrap();
+                    Ok((client, served)) => {
+                        wrote.send(Ok(read(&client, extent, 0, BLOCK))).unwrap();
                         drop(done.read().unwrap());
-                        drop(store);
+                        drop(client);
                         served.join().unwrap();
                     }
                     Err(errno) => wrote.send(Err(errno)).unwrap(),
@@ -5893,7 +5902,7 @@ fn opens_race_the_exit_of_the_vm_process_writing_their_store() {
     start.wait();
     drop(first);
     served.join().unwrap();
-    // Each says once, the store open or not.
+    // Each says once, the cell open or not.
     let wait = std::time::Duration::from_secs(60);
     let writes: Vec<_> =
         (0..WRITERS).map(|_| writes.recv_timeout(wait).expect("a writer said nothing")).collect();
@@ -5908,7 +5917,7 @@ fn opens_race_the_exit_of_the_vm_process_writing_their_store() {
     assert_eq!(opened, vec![Ok(Ok(pattern(1, BLOCK)))]);
     assert_eq!(refused, vec![Err(Some(Errno::EBUSY)); WRITERS - 1]);
     assert_eq!(follows, vec![Ok(Ok(pattern(1, BLOCK))); FOLLOWERS]);
-    assert!(super::cells::table().is_empty(), "the store is held or open once all are gone");
+    assert!(super::cells::table().is_empty(), "the cell is held or open once all are gone");
     let (again, served) = connect(&path, 1 << 24);
     assert_eq!(read(&again, extent, 0, BLOCK), Ok(pattern(1, BLOCK)));
     drop(again);
@@ -5926,22 +5935,22 @@ fn vm_processes_within_the_bounds_are_served_on() {
     const ROUNDS: u64 = 8;
     host();
     let dir = tempfile::tempdir().unwrap();
-    let (store, served) = connect(&dir.path().join("store"), 1 << 30);
-    let store = std::sync::Arc::new(store);
+    let (client, served) = connect(&dir.path().join("store"), 1 << 30);
+    let client = std::sync::Arc::new(client);
     let extent = pattern(3, super::wire::MAX_PAYLOAD as usize);
     let extent = std::sync::Arc::new(extent);
     let writers: Vec<_> = (1..=WRITERS)
         .map(|sequence| {
-            let (store, extent) = (store.clone(), extent.clone());
+            let (client, extent) = (client.clone(), extent.clone());
             std::thread::spawn(move || {
-                let id = ExtentId { cell: store.cell(), sequence };
-                (0..ROUNDS).map(|_| write(&store, id, 0, &extent)).collect::<Vec<_>>()
+                let id = ExtentId { cell: client.cell(), sequence };
+                (0..ROUNDS).map(|_| write(&client, id, 0, &extent)).collect::<Vec<_>>()
             })
         })
         .collect();
     let written: Vec<_> = writers.into_iter().map(|writer| writer.join().unwrap()).collect();
     assert_eq!(written, vec![vec![Ok(()); ROUNDS as usize]; WRITERS as usize]);
-    drop(store);
+    drop(client);
     served.join().unwrap();
 }
 
@@ -6011,7 +6020,7 @@ fn window_mappings_are_answered_beside_the_stream_data_in_flight() {
         sender.send(read, &[], &[]).unwrap();
     }
     sender.send(Header::new(MAPPINGS, id + reads + 1), &[], &[]).unwrap();
-    let holder = super::cells::table().writer(&super::cells::store_key(&path)).unwrap();
+    let holder = super::cells::table().writer(&super::cells::cell_dir_key(&path)).unwrap();
     // All of them queued, but what the socket holds, a mebibyte at most.
     let replies = reads * MAX_PAYLOAD + count * MAPPING_BYTES - (1 << 20);
     while holder.queued() < replies {
@@ -6053,10 +6062,10 @@ enum LastWords {
 /// TASK-77: a VM process is as trustworthy as its guest, once the guest has broken out into it: a
 /// tenant's VM process saying anything, of any kind, with any flags and arguments, IDs and paths
 /// that name another tenant's among them, through its window and transfer area, then breaking off
-/// however it likes, panics nothing, leaves another tenant's store as it was and served, and lets
+/// however it likes, panics nothing, leaves another tenant's cell as it was and served, and lets
 /// its own go. TASK-154: and it gets of the bucket what its VM manager put in its directory alone,
 /// a version it restores, and nothing of the cell it names. TASK-164.1: through a window that
-/// copies on write too, its stores' faults copying pages into its own memory, and its `PRIVATE`s.
+/// copies on write too, its writes' faults copying pages into its own memory, and its `PRIVATE`s.
 /// Seeded by proptest, which says the sequence if one fails.
 #[test]
 fn whatever_a_vm_process_says_harms_no_other() {
@@ -6068,7 +6077,7 @@ fn whatever_a_vm_process_says_harms_no_other() {
     use std::sync::atomic::{AtomicU64, Ordering};
     use zerocopy::IntoBytes as _;
 
-    /// A word that says the VM process's store's cell, the other tenant's, and the one its VM
+    /// A word that says the VM process's cell, the other tenant's, and the one its VM
     /// manager took for it.
     const OWN_CELL: u64 = 0xb0b0_0001;
     const OTHER_CELL: u64 = 0xb0b0_0002;
@@ -6190,7 +6199,7 @@ fn whatever_a_vm_process_says_harms_no_other() {
         [word.clone(), word.clone(), word.clone(), word.clone(), word],
         payload,
     );
-    // Requests a store would serve, as far as their extents and pages go: of those the VM
+    // Requests a cell would serve, as far as their extents and pages go: of those the VM
     // process wrote, or wrote and freed, and of the window it has, in any order.
     let page = move || (0u64..32).prop_map(move |page| page * ps);
     let length = move || (1u64..8).prop_map(move |pages| pages * ps);
@@ -6232,19 +6241,19 @@ fn whatever_a_vm_process_says_harms_no_other() {
         Just((MAPPINGS, 0, 0, [0; 5], Vec::new())),
         Just((INFO, 0, 0, [0; 5], Vec::new())),
     ];
-    // What the other tenant wrote, as a store of its cell would read it.
+    // What the other tenant wrote, as its cell would read it.
     let reading_theirs = Just((READ, 0, 0, [OTHER_CELL, 1, 0, BLOCK as u64, 0], Vec::new()));
-    // On a connection that opened nothing yet, stores any which way: restores of a version of none,
+    // On a connection that opened nothing yet, cells any which way: restores of a version of none,
     // or of the other tenant's, naming either of its cells.
     let opening = prop_oneof![
-        (0u64..4, any::<bool>()).prop_map(|(store, creating)| {
+        (0u64..4, any::<bool>()).prop_map(|(client, creating)| {
             let flags = if creating { OPEN_CREATE } else { 0 };
-            (OPEN, flags, 0, [1 << 24, 0, 0, 0, VERSION], format!("open-{store}").into_bytes())
+            (OPEN, flags, 0, [1 << 24, 0, 0, 0, VERSION], format!("open-{client}").into_bytes())
         }),
         (0u64..4, any::<bool>(), prop_oneof![Just(OTHER_CELL), Just(GIVEN_CELL)]).prop_map(
-            move |(store, absent, cell)| {
+            move |(client, absent, cell)| {
                 let version = if absent { 7 } else { GIVEN_VERSION };
-                let named = format!("open-{store}").into_bytes();
+                let named = format!("open-{client}").into_bytes();
                 (OPEN, OPEN_FORK, RESTORE, [1 << 24, cell, version, 0, VERSION], named)
             }
         ),
@@ -6301,10 +6310,10 @@ fn whatever_a_vm_process_says_harms_no_other() {
                 let sending = Sender::new(stream.try_clone().unwrap());
                 (sending, Receiver::new(stream.try_clone().unwrap()), stream, 0)
             };
-            // The stores it may hold once done: those it opened, had it none.
+            // The cells it may hold once done: those it opened, had it none.
             let held: Vec<_> = (0..4)
                 .filter(|_| !opened)
-                .map(|store| vms.join(format!("{case}-open-{store}")))
+                .map(|client| vms.join(format!("{case}-open-{client}")))
                 .chain([path].into_iter().filter(|_| opened))
                 .collect();
             let sender = std::sync::Arc::new(sender);
@@ -6383,7 +6392,7 @@ fn whatever_a_vm_process_says_harms_no_other() {
                 let payload = in_vms(payload);
                 // The daemon may have let it go by now.
                 let _ = sender.send(message, &payload, &[]);
-                // What comes after a restore is said of the store it opened, as the daemon may
+                // What comes after a restore is said of the cell it opened, as the daemon may
                 // take longer over it than over all that comes after: answered, or the daemon
                 // let it go, which ends the answers.
                 if id == RESTORE {
@@ -6410,7 +6419,7 @@ fn whatever_a_vm_process_says_harms_no_other() {
             stream.shutdown(std::net::Shutdown::Write).unwrap();
             prop_assert!(within(wait, move || answering.join().unwrap()).is_ok());
 
-            // Its store is let go of, and opens.
+            // Its cell is let go of, and opens.
             for path in held {
                 let (opening, reopened) = (socket.clone(), path);
                 let opened = within(wait, move || {
@@ -6451,13 +6460,13 @@ fn whatever_a_vm_process_says_harms_no_other() {
     drop(other);
 }
 
-/// TASK-153.16: a panic holding a store's lock, serving a VM process's request, halts the store,
+/// TASK-153.16: a panic holding a cell's lock, serving a VM process's request, halts the cell,
 /// alone: the request fails with `EIO`, and so does each after it, which panics no more, as each
 /// did at the lock's poison in TASK-104, TASK-105 and TASK-150.20, those that take no lock of the
-/// store's too. Another VM process's store serves on. Its VM process gone, the store opens anew,
+/// cell's too. Another VM process's cell serves on. Its VM process gone, the cell opens anew,
 /// as of its last commit, and serves.
 #[test]
-fn a_panic_holding_a_stores_lock_halts_it_alone() {
+fn a_panic_holding_a_cells_lock_halts_it_alone() {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static PANICS: AtomicU64 = AtomicU64::new(0);
@@ -6470,21 +6479,21 @@ fn a_panic_holding_a_stores_lock_halts_it_alone() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    let (store, served) = connect(&path, 1 << 24);
+    let (client, served) = connect(&path, 1 << 24);
     let (other, other_served) = connect(&dir.path().join("other"), 1 << 24);
-    let ours = |sequence| ExtentId { cell: store.cell(), sequence };
+    let ours = |sequence| ExtentId { cell: client.cell(), sequence };
     let (kept, written) = (ours(1), ours(2));
-    write(&store, kept, 0, &pattern(1, BLOCK)).unwrap();
-    store.commit(None).unwrap();
+    write(&client, kept, 0, &pattern(1, BLOCK)).unwrap();
+    client.commit(None).unwrap();
 
     crate::halt::tests::panic_holding("opening");
-    assert_eq!(write(&store, written, 0, &pattern(2, BLOCK)), Err(Errno::EIO));
+    assert_eq!(write(&client, written, 0, &pattern(2, BLOCK)), Err(Errno::EIO));
     assert_eq!(PANICS.load(Ordering::Relaxed), 1);
-    assert_eq!(read(&store, kept, 0, BLOCK), Err(Errno::EIO));
-    assert_eq!(write(&store, ours(3), 0, &pattern(3, BLOCK)), Err(Errno::EIO));
-    assert_eq!(store.commit(None), Err(Errno::EIO));
-    // Which takes no lock of the store's.
-    assert_eq!(store.info().map(|info| info.capacity), Err(Errno::EIO));
+    assert_eq!(read(&client, kept, 0, BLOCK), Err(Errno::EIO));
+    assert_eq!(write(&client, ours(3), 0, &pattern(3, BLOCK)), Err(Errno::EIO));
+    assert_eq!(client.commit(None), Err(Errno::EIO));
+    // Which takes no lock of the cell's.
+    assert_eq!(client.info().map(|info| info.capacity), Err(Errno::EIO));
     assert_eq!(PANICS.load(Ordering::Relaxed), 1);
 
     let theirs = ExtentId { cell: other.cell(), sequence: 1 };
@@ -6492,23 +6501,23 @@ fn a_panic_holding_a_stores_lock_halts_it_alone() {
     assert_eq!(other.commit(None), Ok(()));
     assert_eq!(read(&other, theirs, 0, BLOCK), Ok(pattern(4, BLOCK)));
 
-    drop(store);
+    drop(client);
     served.join().unwrap();
-    let (store, served) = connect(&path, 1 << 24);
-    assert_eq!(read(&store, kept, 0, BLOCK), Ok(pattern(1, BLOCK)));
-    assert_eq!(write(&store, written, 0, &pattern(5, BLOCK)), Ok(()));
-    assert_eq!(store.commit(None), Ok(()));
-    assert_eq!(read(&store, written, 0, BLOCK), Ok(pattern(5, BLOCK)));
+    let (client, served) = connect(&path, 1 << 24);
+    assert_eq!(read(&client, kept, 0, BLOCK), Ok(pattern(1, BLOCK)));
+    assert_eq!(write(&client, written, 0, &pattern(5, BLOCK)), Ok(()));
+    assert_eq!(client.commit(None), Ok(()));
+    assert_eq!(read(&client, written, 0, BLOCK), Ok(pattern(5, BLOCK)));
     assert_eq!(PANICS.load(Ordering::Relaxed), 1);
-    for (store, served) in [(store, served), (other, other_served)] {
-        drop(store);
+    for (client, served) in [(client, served), (other, other_served)] {
+        drop(client);
         served.join().unwrap();
     }
 }
 
-/// The locks shared beyond one store a VM process's requests take ([`child_panics_holding`]): the
+/// The locks shared beyond one cell a VM process's requests take ([`child_panics_holding`]): the
 /// extent cache's and its extents', a window's and its change's, its connection's, and those of
-/// `local_cell`'s store, which its followers share with its writer (TASK-149.24).
+/// `local_cell`'s cell, which its followers share with its writer (TASK-149.24).
 const SHARED_LOCKS: &[&str] = &[
     "extent cache",
     "cached extent holders",
@@ -6528,7 +6537,7 @@ const SHARED_LOCKS: &[&str] = &[
 const PANIC_HOLDING: &str = "CLADEFSD_TEST_PANIC_HOLDING";
 
 /// Run by [`a_panic_holding_a_shared_lock_stops_the_daemon`], in a process of its own: a daemon,
-/// aborting on panics as `cladefsd` does, serves a VM process's window and store, which
+/// aborting on panics as `cladefsd` does, serves a VM process's window and cell, which
 /// write, commit, map and fault a page in, and close, a panic holding the lock [`PANIC_HOLDING`]
 /// names as it is next taken. It says if it got to the end.
 #[test]
@@ -6545,25 +6554,25 @@ fn child_panics_holding() {
     host();
     let ps = page_size() as usize;
     let dir = tempfile::tempdir().unwrap();
-    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
+    let (client, served) = connect(&dir.path().join("store"), 1 << 24);
     let memory = memory(1);
-    // SAFETY: The memory is the test's, and outlives the store.
-    unsafe { store.create_dax_window_in_host_memory(memory, ps as u64, None, 1) }.unwrap();
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
+    // SAFETY: The memory is the test's, and outlives the cell.
+    unsafe { client.create_dax_window_in_host_memory(memory, ps as u64, None, 1) }.unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
     local_cell::shared::testing::panic_holding(lock.leak());
-    let written = write(&store, extent, 0, &pattern(3, ps));
-    let committed = store.commit(None);
-    let mapped = store.map(extent, 0, ps as u64, 0);
-    // SAFETY: The window's memory, whose faults the store serves.
+    let written = write(&client, extent, 0, &pattern(3, ps));
+    let committed = client.commit(None);
+    let mapped = client.map(extent, 0, ps as u64, 0);
+    // SAFETY: The window's memory, whose faults the cell serves.
     let loaded = unsafe { memory.as_ptr().read_volatile() };
-    drop(store);
+    drop(client);
     let closed = served.join();
     println!("THE END: {written:?} {committed:?} {mapped:?} {loaded} {closed:?}");
 }
 
-/// TASK-149.24: a panic holding a lock shared beyond one store stops the daemon at once, saying
+/// TASK-149.24: a panic holding a lock shared beyond one cell stops the daemon at once, saying
 /// which: an abort, from its panic hook, before anything unwinds; not a halt, which contains only
-/// its store, while the lock's poison, or what it guards half changed, reaches every user after,
+/// its cell, while the lock's poison, or what it guards half changed, reaches every user after,
 /// nor an abort from a drop panicking as it unwinds.
 #[test]
 fn a_panic_holding_a_shared_lock_stops_the_daemon() {
@@ -6583,12 +6592,12 @@ fn a_panic_holding_a_shared_lock_stops_the_daemon() {
     }
 }
 
-/// TASK-153.16: a panic serving a VM process's request past the store's locks, which poisons
+/// TASK-153.16: a panic serving a VM process's request past the cell's locks, which poisons
 /// none of them, as one in `local_cell` beneath them may (TASK-79.1, TASK-79.80), halts the
-/// store as well: a read after it, which would find nothing amiss, fails with `EIO`. Its VM
-/// process gone, the store opens anew as of its last commit.
+/// cell as well: a read after it, which would find nothing amiss, fails with `EIO`. Its VM
+/// process gone, the cell opens anew as of its last commit.
 #[test]
-fn a_panic_past_a_stores_locks_halts_it() {
+fn a_panic_past_a_cells_locks_halts_it() {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static PANICS: AtomicU64 = AtomicU64::new(0);
@@ -6601,26 +6610,26 @@ fn a_panic_past_a_stores_locks_halts_it() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    let (store, served) = connect(&path, 1 << 24);
-    let ours = |sequence| ExtentId { cell: store.cell(), sequence };
+    let (client, served) = connect(&path, 1 << 24);
+    let ours = |sequence| ExtentId { cell: client.cell(), sequence };
     let (kept, written) = (ours(1), ours(2));
-    write(&store, kept, 0, &pattern(1, BLOCK)).unwrap();
-    store.commit(None).unwrap();
-    write(&store, written, 0, &pattern(2, BLOCK)).unwrap();
+    write(&client, kept, 0, &pattern(1, BLOCK)).unwrap();
+    client.commit(None).unwrap();
+    write(&client, written, 0, &pattern(2, BLOCK)).unwrap();
 
     fail::cfg("cladefsd::commit", "panic").unwrap();
-    assert_eq!(store.commit(None), Err(Errno::EIO));
+    assert_eq!(client.commit(None), Err(Errno::EIO));
     fail::remove("cladefsd::commit");
-    assert_eq!(read(&store, kept, 0, BLOCK), Err(Errno::EIO));
+    assert_eq!(read(&client, kept, 0, BLOCK), Err(Errno::EIO));
     assert_eq!(PANICS.load(Ordering::Relaxed), 1);
 
-    drop(store);
+    drop(client);
     served.join().unwrap();
-    let (store, served) = connect(&path, 1 << 24);
-    assert_eq!(read(&store, kept, 0, BLOCK), Ok(pattern(1, BLOCK)));
-    assert_eq!(read(&store, written, 0, BLOCK), Err(Errno::ENOENT));
+    let (client, served) = connect(&path, 1 << 24);
+    assert_eq!(read(&client, kept, 0, BLOCK), Ok(pattern(1, BLOCK)));
+    assert_eq!(read(&client, written, 0, BLOCK), Err(Errno::ENOENT));
     assert_eq!(PANICS.load(Ordering::Relaxed), 1);
-    drop(store);
+    drop(client);
     served.join().unwrap();
 }
 
@@ -6632,8 +6641,8 @@ fn tenants_sockets_are_of_their_mode_from_the_first() {
     use std::os::unix::fs::PermissionsExt as _;
     host();
     let dir = tempfile::tempdir().unwrap();
-    let (stores, sockets) = (dir.path().join("acme"), dir.path().join("tenants"));
-    std::fs::create_dir(&stores).unwrap();
+    let (cells, sockets) = (dir.path().join("acme"), dir.path().join("tenants"));
+    std::fs::create_dir(&cells).unwrap();
     std::fs::create_dir(&sockets).unwrap();
     let socket = sockets.join("1.sock");
     let (seen, modes) = std::sync::mpsc::channel();
@@ -6646,7 +6655,7 @@ fn tenants_sockets_are_of_their_mode_from_the_first() {
     // SAFETY: Plain system calls. Nothing else of this test's process, its own, makes a file
     // meanwhile.
     let umask = unsafe { libc::umask(0) };
-    let granted = super::grants::Grants::new(sockets.clone()).grant(1, &stores, (None, None));
+    let granted = super::grants::Grants::new(sockets.clone()).grant(1, &cells, (None, None));
     // SAFETY: As above.
     unsafe { libc::umask(umask) };
     fail::remove("cladefsd::bound");
@@ -6670,7 +6679,7 @@ fn sockets_are_not_bound_over_another() {
 }
 
 /// TASK-141.4: a drain closes every VM process's connection, its VM told its daemon went, and its
-/// store, closed, opens elsewhere; the daemon's VM socket and its tenants' take no more
+/// cell, closed, opens elsewhere; the daemon's VM socket and its tenants' take no more
 /// connections, refused, their threads serving them returning; and the control API takes no more
 /// calls. Before, nothing drained: the daemon exited with all of them as they were.
 #[tokio::test(flavor = "multi_thread")]
@@ -6688,22 +6697,22 @@ async fn drains_close_every_connection_and_take_no_more() {
     let serving_tenant = std::thread::spawn(move || super::server::serve_tenant(listener, tenant));
 
     let (path, tenant_path) = (dir.path().join("store"), vms.join("store"));
-    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
+    let client = CellClient::connect(&socket, &path, 1 << 24).unwrap();
     let tenants = CellClient::connect(&tenant_socket, &tenant_path, 1 << 24).unwrap();
     let (told, lost) = std::sync::mpsc::channel();
-    for (name, store) in [("store", &store), ("tenant's", &tenants)] {
+    for (name, client) in [("store", &client), ("tenant's", &tenants)] {
         let told = told.clone();
-        store.on_daemon_lost(move || told.send(name).unwrap());
+        client.on_daemon_lost(move || told.send(name).unwrap());
     }
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
-    write(&store, extent, 0, &pattern(1, BLOCK)).unwrap();
-    store.commit_ordered(Some(b"drained")).unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(1, BLOCK)).unwrap();
+    client.commit_ordered(Some(b"drained")).unwrap();
 
     assert_eq!(super::drain::drain(std::time::Duration::from_secs(60)).await, Ok(()));
     let mut told: Vec<_> = lost.try_iter().collect();
     told.sort();
     assert_eq!(told, ["store", "tenant's"]);
-    assert_eq!(write(&store, extent, 0, &pattern(2, BLOCK)), Err(Errno::EIO));
+    assert_eq!(write(&client, extent, 0, &pattern(2, BLOCK)), Err(Errno::EIO));
     serving.join().unwrap();
     serving_tenant.join().unwrap();
     for socket in [&socket, &tenant_socket] {
@@ -6711,7 +6720,7 @@ async fn drains_close_every_connection_and_take_no_more() {
         assert_eq!(refused, Some(std::io::ErrorKind::ConnectionRefused), "{}", socket.display());
     }
     assert!(super::control::CALLS.begin().is_none(), "a control call began, drained");
-    drop((store, tenants));
+    drop((client, tenants));
     // Closed, durable, as of its last commit, though only ordered.
     let closed = OpenCell::open(&path).await.unwrap();
     assert_eq!(closed.root(), Ok(b"drained".to_vec()));
@@ -6728,16 +6737,16 @@ async fn drains_give_up_past_their_bound() {
     assert_eq!(left, super::drain::Left { connections: 1, calls: 0, uploaders: 0, mount: false });
     assert_eq!(
         left.to_string(),
-        "1 VM processes' connections, 0 control calls and 0 stores' uploaders left"
+        "1 VM processes' connections, 0 control calls and 0 cells' uploaders left"
     );
     drop(connection);
 }
 /// TASK-237: an image imported through the daemon (`ImportImage`) keeps what the bucket
-/// acknowledged of it in the host's part cache, as the daemon's other stores do, and the import's
+/// acknowledged of it in the host's part cache, as the daemon's other cells do, and the import's
 /// check of the filesystem it made reads it there: no ranged GET of the bucket's at all, the
-/// recoveries as the import's store is made and as the daemon opens it after reading what the
+/// recoveries as the import's cell is made and as the daemon opens it after reading what the
 /// cell's head names, nothing, then the import's checkpoint, whole (TASK-407). Its
-/// store was an image's, whose uploader and fetcher had no cache: its acknowledged segments were
+/// cell was an image's, whose uploader and fetcher had no cache: its acknowledged segments were
 /// deleted, and the check read the image back from the bucket, 6,183 ranged GETs here (GCE r970:
 /// 6.8 GB downloaded for 11 GB uploaded).
 #[test]
@@ -6765,7 +6774,7 @@ fn imports_read_what_they_made_from_the_hosts_cache() {
     let before = ranged();
     let path = dir.path().join("store");
     control(super::cells::import(path.clone(), 256 << 20, image, None, 0)).unwrap();
-    // Before TASK-407, three: a footer as the store's writer took its cell, made, its fence's;
+    // Before TASK-407, three: a footer as the cell's writer took its cell, made, its fence's;
     // two as the daemon opened it after, its recovery's and its writer's, past the checkpoint.
     assert_eq!(ranged() - before, 0, "ranged GETs of the bucket as the import ran");
 }
@@ -6780,7 +6789,7 @@ mod otel;
 mod soak;
 
 /// TASK-260: the daemon's log records about a VM process's call for a guest request name the
-/// request, by the guest's number of it, and the store the call is of: refused at once, as a
+/// request, by the guest's number of it, and the cell the call is of: refused at once, as a
 /// `WRITE` of a flag no write knows, or deferred, as a `PRIVATE` the window refuses; and a call for
 /// none names none.
 #[test]
@@ -6792,13 +6801,13 @@ fn calls_for_guest_requests_are_logged_with_them() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    let (store, served) = connect(&path, 1 << 24);
+    let (client, served) = connect(&path, 1 << 24);
     let named = std::fs::canonicalize(&path).unwrap();
     let named = named.to_str().unwrap();
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
     let args = [extent.cell, extent.sequence, 0, 0, BLOCK as u64];
     let unknown = Header::new(WRITE, 0).with_args(&args).with_flags(1 << 20);
-    let guest = |guest| Some(RequestId { guest: NonZeroU64::new(guest).unwrap(), store: None });
+    let guest = |guest| Some(RequestId { guest: NonZeroU64::new(guest).unwrap(), open_cell: None });
     let refused = || {
         let logged = std::mem::take(&mut *lines.lock().unwrap());
         logged.into_iter().filter(|line| line.contains("refused with EINVAL")).collect::<Vec<_>>()
@@ -6812,7 +6821,7 @@ fn calls_for_guest_requests_are_logged_with_them() {
         )
     };
     refused();
-    let written = within_now(guest(42), || store.call(unknown, &pattern(1, BLOCK), &[]).map(drop));
+    let written = within_now(guest(42), || client.call(unknown, &pattern(1, BLOCK), &[]).map(drop));
     assert_eq!(written, Err(Errno::EINVAL));
     let saying = write_refused(1 << 31 | 1 << 20);
     assert_eq!(refused(), [format!("{saying} request_id=42 store={named}")]);
@@ -6820,10 +6829,10 @@ fn calls_for_guest_requests_are_logged_with_them() {
     // maps nothing. Asked as the VMM does, a future polled with the guest's number current.
     let ps = page_size() as u64;
     let memory = memory(4);
-    // SAFETY: The memory is the test's, and outlives the store.
-    unsafe { store.create_dax_window_in_host_memory(memory, 4 * ps, None, 2) }.unwrap();
+    // SAFETY: The memory is the test's, and outlives the cell.
+    unsafe { client.create_dax_window_in_host_memory(memory, 4 * ps, None, 2) }.unwrap();
     refused();
-    let private = crate::request::guest_request(43, store.make_private_async(0, ps));
+    let private = crate::request::guest_request(43, client.make_private_async(0, ps));
     assert_eq!(futures::executor::block_on(private), Err(Errno::EINVAL));
     assert_eq!(
         refused(),
@@ -6834,9 +6843,9 @@ fn calls_for_guest_requests_are_logged_with_them() {
         )]
     );
     // A call for no guest request: none.
-    assert_eq!(store.call(unknown, &pattern(1, BLOCK), &[]).map(drop), Err(Errno::EINVAL));
+    assert_eq!(client.call(unknown, &pattern(1, BLOCK), &[]).map(drop), Err(Errno::EINVAL));
     assert_eq!(refused(), [write_refused(1 << 20)]);
-    drop(store);
+    drop(client);
     served.join().unwrap();
     // SAFETY: Unmaps the memory, which nothing uses any more.
     assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 4 * ps as usize) }, 0);
@@ -6860,16 +6869,16 @@ fn durable_commits_through_the_daemon() {
         std::env::set_var("CLADEFSD_TOKEN", "1");
     }
     let dir = tempfile::tempdir().unwrap();
-    let (store, _served) = connect(&dir.path().join("store"), 1 << 30);
+    let (client, _served) = connect(&dir.path().join("store"), 1 << 30);
     let mut took = Vec::new();
     for sequence in 1..=40u64 {
         let started = std::time::Instant::now();
-        let data = ExtentId { cell: store.cell(), sequence: 2 * sequence };
-        write(&store, data, 0, &pattern(sequence as u8, BLOCK)).unwrap();
-        store.commit_ordered(None).unwrap();
-        let journal = ExtentId { cell: store.cell(), sequence: 2 * sequence + 1 };
-        write(&store, journal, 0, &pattern(sequence as u8, BLOCK)).unwrap();
-        store.commit(None).unwrap();
+        let data = ExtentId { cell: client.cell(), sequence: 2 * sequence };
+        write(&client, data, 0, &pattern(sequence as u8, BLOCK)).unwrap();
+        client.commit_ordered(None).unwrap();
+        let journal = ExtentId { cell: client.cell(), sequence: 2 * sequence + 1 };
+        write(&client, journal, 0, &pattern(sequence as u8, BLOCK)).unwrap();
+        client.commit(None).unwrap();
         let ms = started.elapsed().as_secs_f64() * 1000.0;
         println!("ROUND {sequence} ms={ms:.1}");
         took.push(ms);
@@ -6884,11 +6893,11 @@ fn durable_commits_through_the_daemon() {
     );
 }
 
-/// TASK-433.8: the governor sizes the stores' page cache to what it leaves it, as Linux sizes its
+/// TASK-433.8: the governor sizes the cells' page cache to what it leaves it, as Linux sizes its
 /// page cache to the memory free: a tenth of it dirty before the flusher writes back, a fifth
 /// before writers wait, all of it held.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_stores_page_cache_is_sized_to_what_the_governor_leaves() {
+async fn the_cells_page_cache_is_sized_to_what_the_governor_leaves() {
     let allowance = 8 << 30;
     super::memory::govern(allowance).await;
     let sized = local_cell::pages::shared().options();
@@ -6927,12 +6936,12 @@ fn failed_writeback_preserves_disk_admission() {
     let root = tempfile::tempdir().unwrap();
     let tenant = 0x520;
     let disk = super::disk::Disk::new(tenant, root.path()).unwrap();
-    let store = root.path().join("store");
-    std::fs::create_dir(&store).unwrap();
-    let dir = local_cell::HostDir::new(&store).unwrap();
+    let cell_dir = root.path().join("store");
+    std::fs::create_dir(&cell_dir).unwrap();
+    let dir = local_cell::HostDir::new(&cell_dir).unwrap();
     let file = dir.create("data", true).unwrap();
     let page = local_cell::pages::PAGE;
-    // Room for one page admitted: it, and what its store's own work may add for it (doc-22).
+    // Room for one page admitted: it, and what its cell's own work may add for it (doc-22).
     let admitted = (1 + bucket_cell::host_disk::RESERVE_FACTOR) * page;
     let footprint = dir.footprint();
     let limit = disk.used() + footprint.reserved() + admitted;
@@ -6994,8 +7003,8 @@ fn measure_disk_recounts_with_resident_pages() {
             std::fs::create_dir(&path).unwrap();
             disks.push(super::disk::Disk::new(id, &path).unwrap());
         }
-        let store = local_cell::HostDir::new(&root.path().join("tenant-1")).unwrap();
-        let file = store.create("resident", true).unwrap();
+        let cell_dir = local_cell::HostDir::new(&root.path().join("tenant-1")).unwrap();
+        let file = cell_dir.create("resident", true).unwrap();
         for pages in [0, 2048] {
             if pages > 0 {
                 file.write_at(&vec![1; pages * local_cell::pages::PAGE as usize], 0).unwrap();
@@ -7011,7 +7020,7 @@ fn measure_disk_recounts_with_resident_pages() {
             );
         }
         drop(file);
-        store.remove("resident").unwrap();
+        cell_dir.remove("resident").unwrap();
     }
 }
 
@@ -7156,28 +7165,28 @@ fn ephemeral_cells_fork_from_versions_and_retire_their_references() {
     assert_eq!(references(), vec![child]);
     assert_eq!(fork("child"), Err(Errno::EEXIST));
 
-    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
-    assert_eq!((store.cell(), store.root().unwrap()), (child.id, b"root".to_vec()));
-    assert_eq!(read(&store, inherited, 0, ps).unwrap(), pattern(1, ps));
+    let client = CellClient::connect(&socket, &path, 1 << 24).unwrap();
+    assert_eq!((client.cell(), client.root().unwrap()), (child.id, b"root".to_vec()));
+    assert_eq!(read(&client, inherited, 0, ps).unwrap(), pattern(1, ps));
     let own = ExtentId { cell: child.id, sequence: 1 };
-    write(&store, own, 0, &pattern(2, ps)).unwrap();
-    store.commit(None).unwrap();
-    drop(store);
-    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
-    assert_eq!(read(&store, own, 0, ps).unwrap(), pattern(2, ps));
-    assert_eq!(read(&store, inherited, 0, ps).unwrap(), pattern(1, ps));
-    drop(store);
+    write(&client, own, 0, &pattern(2, ps)).unwrap();
+    client.commit(None).unwrap();
+    drop(client);
+    let client = CellClient::connect(&socket, &path, 1 << 24).unwrap();
+    assert_eq!(read(&client, own, 0, ps).unwrap(), pattern(2, ps));
+    assert_eq!(read(&client, inherited, 0, ps).unwrap(), pattern(1, ps));
+    drop(client);
     let keys = control(bucket_cell::Bucket::list(&*bucket, "")).unwrap();
     let theirs = keys.iter().filter(|meta| bucket_cell::layout::owner(&meta.key) == Some(child));
     assert_eq!(theirs.count(), 0, "nothing of the ephemeral cell's is in the bucket");
 
-    // Deleted, its reference goes; a cell whose store went without its host retires it as the
+    // Deleted, its reference goes; a cell whose cell went without its host retires it as the
     // host starts again; a host decommissioned retires every one of its.
     delete_cell(&path).unwrap();
     assert_eq!(references(), vec![]);
     let gone = fork("gone").unwrap();
     let kept = fork("kept").unwrap();
-    local_cell::remove_store_dir(&dir.path().join("gone")).unwrap();
+    local_cell::remove_cell_dir(&dir.path().join("gone")).unwrap();
     assert_eq!(control(ephemeral.retire_stale()).unwrap(), 1);
     assert_eq!(references(), vec![kept]);
     assert!(ephemeral.entry(gone).is_none());
@@ -7186,7 +7195,7 @@ fn ephemeral_cells_fork_from_versions_and_retire_their_references() {
     assert_eq!(references(), vec![]);
 }
 
-/// TASK-704: an open ephemeral cell's store is halted as its host forgets its cell's keys, or its
+/// TASK-704: an open ephemeral cell is halted as its host forgets its keys, or its
 /// tenant's, as a bucket cell's is: its reads, of its own extents and of what it inherits, and its
 /// writes and commits fail with `EACCES`; another ephemeral cell of the version's reads on until
 /// its tenant's are forgotten.
@@ -7214,11 +7223,11 @@ fn forgetting_keys_halts_open_ephemeral_cells() {
             None,
         );
         let child = control(forked).unwrap();
-        let store = CellClient::connect(&socket, &at, 1 << 24).unwrap();
+        let client = CellClient::connect(&socket, &at, 1 << 24).unwrap();
         let own = ExtentId { cell: child.id, sequence: 1 };
-        write(&store, own, 0, &pattern(byte, ps)).unwrap();
-        store.commit(None).unwrap();
-        (child, store, own)
+        write(&client, own, 0, &pattern(byte, ps)).unwrap();
+        client.commit(None).unwrap();
+        (child, client, own)
     };
     let (first, ours, our_own) = open("first", 2);
     let (second, theirs, their_own) = open("second", 3);

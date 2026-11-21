@@ -21,6 +21,10 @@ the worktrees stay as they are, nothing in them is lost, and TASK-444.4–.11 wa
 
 # Decisions
 
+## "store" retired for a cell on a host: cell directory and open cell (board 5622, 2026-11-21)
+
+The user asked for "store" to go. Picked **cell directory** (`cell_dir`) for the directory on a host's disk and **open cell** (`OpenCell`, already the type) for the cell opened in the daemon, else just **cell**, over **host copy**, which misleads for an ephemeral cell, whose only copy it is. A CPU's store is a **write**; the object-storage backend's calls `object_*`, its `ObjectStore` implementations `...Backend`. Kept for a later task: the cell directory's file names (`store`, `store.deleted`: renaming them is a format change, and a directory with no description is deleted as never made), metric names, proto and JSON fields, CLI flags, environment variables, the guest scripts' language. Undoing: rename back, CONTEXT.md first.
+
 ## Control calls run to their end whoever gives up; waits that change nothing end with their caller (board 5599, 2026-11-21)
 
 `Drained` runs every call of the control API and the mount's service in a task of its own

@@ -331,11 +331,11 @@ pub async fn ephemeral_references(bucket: &impl Bucket, incarnation: u64) -> Vec
         .collect()
 }
 
-/// cladefs: decommissions the host of incarnation `incarnation`, gone for good, its disk lost (doc-25,
-/// TASK-698.3; specs/ephemeral): the references of its ephemeral cells, which no host holds any
-/// more, deleted, each with its index entry. Returns how many. Its operator's to call, for an
-/// incarnation no host has: a host of it still holding its cells would read what it no longer
-/// keeps.
+/// cladefs: decommissions the host of incarnation `incarnation`, gone for good, its disk lost
+/// (doc-25, TASK-698.3; specs/ephemeral): the references of its ephemeral cells, which no host
+/// holds any more, deleted, each with its index entry. Returns how many. Its operator's to call,
+/// for an incarnation no host has: a host of it still holding its cells would read what it no
+/// longer keeps.
 pub async fn decommission(bucket: &impl Bucket, incarnation: u64) -> usize {
     let references = ephemeral_references(bucket, incarnation).await;
     for &(origin, child) in &references {
@@ -368,7 +368,7 @@ pub async fn fork_version(
 /// cladefs: [`fork_version`], the child's head made with `given`, if any: a KEK for the child's
 /// cell, its first DEK and those it inherits, rewrapped under that KEK ([`crate::keys::giving`],
 /// TASK-411.4), so that its first taking gives it none. Returns the child's head as it left it, if
-/// this made the fork: what the child's store's first opening here goes on from (TASK-449).
+/// this made the fork: what the child's cell's first opening here goes on from (TASK-449).
 pub async fn fork_version_keyed(
     bucket: &impl Bucket,
     child: CellId,
@@ -443,7 +443,7 @@ pub async fn fork_version_keyed(
 }
 
 /// cladefs: resumes the fork of a version to `child` that another began ([`fork_version`]), its
-/// head saying it is being made: a store opening `child`, its host dead or slow, makes it, so that
+/// head saying it is being made: a cell opening `child`, its host dead or slow, makes it, so that
 /// it takes no state of a fork not made (TASK-455's review). The head is said resumed first
 /// ([`Head::resumed`]), with a condition, so that the clone made says so, whose reference's
 /// retirement is then marked: the host that began it, slow, may write the reference after the

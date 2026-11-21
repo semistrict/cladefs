@@ -2,20 +2,20 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: the interpreter of the scripts `script` makes, which does their operations on files, each
-//! with a mapping of it kept across all of them, and checks them against the model (TASK-149.2).
-//! Nothing here is of Fxfs: the tests below run it on the host's filesystems.
+//! cladefs: the interpreter of the scripts `script` makes, which does their operations on files,
+//! each with a mapping of it kept across all of them, and checks them against the model
+//! (TASK-149.2). Nothing here is of Fxfs: the tests below run it on the host's filesystems.
 //!
 //! Each step comes to an outcome, which must be the model's, and changes the files' times as it
 //! does, which a run notes for `differential` to compare across filesystems (TASK-44.15).
 //!
 //! On a filesystem that may be `full` no operation needs to succeed, as long as it fails with
-//! ENOSPC, and leaves the files as the model says, which a refused write, store, truncation or
-//! fsync leaves as they were. A clone or a punch, of many steps, stands as far as it got: the model
-//! takes that from what the files read, within what it could have come to
-//! ([`Model::stopped_short`]). A store that finds no room is a SIGBUS, which would end the guest's
-//! init: there every store is a child's. Under fault injection ([`Faults`]) the same holds of
-//! ENOMEM, the operations' own calls failing their allocations.
+//! ENOSPC, and leaves the files as the model says, which a refused write, mapped write, truncation
+//! or fsync leaves as they were. A clone or a punch, of many steps, stands as far as it got: the
+//! model takes that from what the files read, within what it could have come to
+//! ([`Model::stopped_short`]). A mapped write that finds no room is a SIGBUS, which would end the
+//! guest's init: there every mapped write is a child's. Under fault injection ([`Faults`]) the same
+//! holds of ENOMEM, the operations' own calls failing their allocations.
 
 use crate::script::{self, Failure, Limit, MOST, Mix, Model, Op, Outcome, PAGE, Reach, Step, kind};
 use nix::libc;
@@ -142,8 +142,8 @@ impl Mapping {
         unsafe { std::slice::from_raw_parts(self.bytes.add(at as usize), len) }
     }
 
-    /// cladefs: the mapping remapped `len` bytes long (mremap), and moved, to where a reservation of
-    /// that many bytes was.
+    /// cladefs: the mapping remapped `len` bytes long (mremap), and moved, to where a reservation
+    /// of that many bytes was.
     fn moved(self, len: usize) -> io::Result<Self> {
         let to = Self::of(-1, 0, len, libc::MAP_PRIVATE)?;
         let flags = libc::MREMAP_MAYMOVE | libc::MREMAP_FIXED;
@@ -281,12 +281,12 @@ impl Default for Options {
     }
 }
 
-/// cladefs: the kernel's fault injection (failslab and fail_page_alloc, a debug kernel's: TASK-44.10)
-/// for the calls a run makes on its files alone, as a seed says: of a script of `seed`, which of
-/// each operation's calls fails which of its allocations, so that a replay of the script, or of a
-/// part of it, fails the same (TASK-44.15). Not by the attributes' probability, which the kernel's
-/// own random numbers decide, nor their interval, counted across all a task's calls since boot,
-/// but by `fail-nth`, the task's own: the Nth allocation the call makes that may fail, fails
+/// cladefs: the kernel's fault injection (failslab and fail_page_alloc, a debug kernel's:
+/// TASK-44.10) for the calls a run makes on its files alone, as a seed says: of a script of `seed`,
+/// which of each operation's calls fails which of its allocations, so that a replay of the script,
+/// or of a part of it, fails the same (TASK-44.15). Not by the attributes' probability, which the
+/// kernel's own random numbers decide, nor their interval, counted across all a task's calls since
+/// boot, but by `fail-nth`, the task's own: the Nth allocation the call makes that may fail, fails
 /// (lib/fault-inject.c's `should_fail_ex`; Documentation/fault-injection/fault-injection.rst).
 #[derive(Clone, Copy)]
 pub struct Faults {
@@ -670,9 +670,9 @@ impl Run {
             Step::Write { file, at, data } => {
                 self.pwrite(step, *file, *at, data.as_ptr(), data, data.len())
             }
-            Step::Store { file, at, data, child } => {
+            Step::MappedWrite { file, at, data, child } => {
                 let mapped = unsafe { self.maps[*file].bytes.add(*at as usize) };
-                let stored = self.store_through(mapped, data, *child)?;
+                let stored = self.write_through(mapped, data, *child)?;
                 self.model.write(*file, *at, &data[..stored]);
                 Ok(Ok(stored as u64))
             }
@@ -727,8 +727,8 @@ impl Run {
                 self.clone_range(step, *from, *src, *to, *dst, *len, expected)
             }
             Step::Copy { from, src, to, dst, len } => self.copy(step, *from, *src, *to, *dst, *len),
-            Step::MapStore { file, at, data, private } => {
-                self.map_store(*file, *at, data, *private)
+            Step::MapWrite { file, at, data, private } => {
+                self.map_write(*file, *at, data, *private)
             }
             Step::DirectWrite { file, at, data } => {
                 let direct = self.open_direct(*file)?;
@@ -870,24 +870,24 @@ impl Run {
         Ok(Ok(written as u64))
     }
 
-    /// Stores `data` at `mapped`, of a file's mapping: from a child, if `child`, or on a filesystem
-    /// that may have no room for them ([`Run::store_in_child`]). How many it stored.
-    fn store_through(
+    /// Writes `data` at `mapped`, of a file's mapping: from a child, if `child`, or on a filesystem
+    /// that may have no room for them ([`Run::write_in_child`]). How many it wrote.
+    fn write_through(
         &mut self,
         mapped: *mut u8,
         data: &[u8],
         child: bool,
     ) -> Result<usize, Failed> {
         if child || self.options.full {
-            return self.store_in_child(mapped, data, 1, None);
+            return self.write_in_child(mapped, data, 1, None);
         }
-        store(mapped, data);
+        write_mapped(mapped, data);
         Ok(data.len())
     }
 
-    /// cladefs: a call with arguments no well-behaved caller passes, `call` of `len` bytes at `at` of
-    /// `file`, as the model has `step`: whose outcome, a clone's on a filesystem without reflinks, is
-    /// the model's, `expected`.
+    /// cladefs: a call with arguments no well-behaved caller passes, `call` of `len` bytes at `at`
+    /// of `file`, as the model has `step`: whose outcome, a clone's on a filesystem without
+    /// reflinks, is the model's, `expected`.
     fn limit(
         &mut self,
         step: &Step,
@@ -947,8 +947,8 @@ impl Run {
         }
     }
 
-    /// cladefs: the run's far file, which far steps write, made empty at the first, evicted and read
-    /// in again, so that on a DAX mount it is DAX.
+    /// cladefs: the run's far file, which far steps write, made empty at the first, evicted and
+    /// read in again, so that on a DAX mount it is DAX.
     fn far_file(&mut self) -> io::Result<libc::c_int> {
         if self.far.is_none() {
             let name = format!("{}-far", self.names[0]);
@@ -1041,8 +1041,8 @@ impl Run {
         Ok(())
     }
 
-    /// cladefs: mmap of `len` bytes at `at` of `file`, as the model has `step`: its bytes within the
-    /// file's last page, the file's, then zeros, checked.
+    /// cladefs: mmap of `len` bytes at `at` of `file`, as the model has `step`: its bytes within
+    /// the file's last page, the file's, then zeros, checked.
     fn map_odd(&mut self, step: &Step, file: usize, at: u64, len: u64) -> Result<Outcome, Failed> {
         let fd = self.files[file].as_raw_fd();
         let mapping = match self.call(|| Mapping::of(fd, at, len as usize, libc::MAP_SHARED)) {
@@ -1062,8 +1062,8 @@ impl Run {
         Ok(Ok(0))
     }
 
-    /// cladefs: stores `data` at `at` of `file` through a mapping of its pages MAP_FIXED over the same
-    /// pages of the mapping kept of `over`, whose own are then mapped back, if it's another's.
+    /// cladefs: writes `data` at `at` of `file` through a mapping of its pages MAP_FIXED over the
+    /// same pages of the mapping kept of `over`, whose own are then mapped back, if it's another's.
     fn map_fixed(
         &mut self,
         file: usize,
@@ -1080,7 +1080,7 @@ impl Run {
         let fd = self.files[file].as_raw_fd();
         map_fixed(place, fd, first, len).map_err(|err| errno("mmap with MAP_FIXED", &err))?;
         let stored =
-            self.store_through(unsafe { place.add((at - first) as usize) }, data, false)?;
+            self.write_through(unsafe { place.add((at - first) as usize) }, data, false)?;
         if over != file {
             let fd = self.files[over].as_raw_fd();
             map_fixed(place, fd, first, len).map_err(|err| errno("mmap back", &err))?;
@@ -1089,9 +1089,9 @@ impl Run {
         Ok(Ok(stored as u64))
     }
 
-    /// cladefs: stores `data` at `at` of `file` through a mapping made for them, half of them before
-    /// it is remapped twice as large, and moved (mremap), half after; then reads them back through
-    /// it.
+    /// cladefs: writes `data` at `at` of `file` through a mapping made for them, half of them
+    /// before it is remapped twice as large, and moved (mremap), half after; then reads them back
+    /// through it.
     fn mremap(&mut self, file: usize, at: u64, data: &[u8]) -> Result<Outcome, Failed> {
         if data.is_empty() {
             return Ok(Ok(0));
@@ -1104,11 +1104,11 @@ impl Run {
             Mapping::of(fd, first, small, libc::MAP_SHARED).map_err(|err| errno("mmap", &err))?;
         let before = (small - off).min(data.len());
         let mut stored =
-            self.store_through(unsafe { mapping.bytes.add(off) }, &data[..before], false)?;
+            self.write_through(unsafe { mapping.bytes.add(off) }, &data[..before], false)?;
         let mapping = mapping.moved(2 * small).map_err(|err| errno("mremap", &err))?;
         if stored == before {
             let after = unsafe { mapping.bytes.add(off + before) };
-            stored += self.store_through(after, &data[before..], false)?;
+            stored += self.write_through(after, &data[before..], false)?;
         }
         self.model.write(file, at, &data[..stored]);
         if let Some(i) =
@@ -1124,9 +1124,9 @@ impl Run {
     /// cladefs: reads all `file` holds through the kept mapping, so that each of its pages is
     /// mapped, checked against the model; then makes the mapping read-only and writable again
     /// (mprotect), or moves it (mremap), as `step` says, the kernel changing its PTEs in batches;
-    /// then stores `data` at `at` through it, maybe to a page only read, whose store must fault and
+    /// then writes `data` at `at` through it, maybe to a page only read, whose write must fault and
     /// make it private (TASK-149.42). The mprotects and the move not under fault injection: a
-    /// mapping left read-only would kill the next store's process, and the PTEs they change are
+    /// mapping left read-only would kill the next write's process, and the PTEs they change are
     /// the version, not the calls' refusals.
     fn remap_kept(
         &mut self,
@@ -1154,14 +1154,14 @@ impl Run {
             }
         }
         let mapped = unsafe { self.maps[file].bytes.add(at as usize) };
-        let stored = self.store_through(mapped, data, false)?;
+        let stored = self.write_through(mapped, data, false)?;
         self.model.write(file, at, &data[..stored]);
         Ok(Ok(stored as u64))
     }
 
-    /// cladefs: truncates `file` down to `size` and back, again and again, while a child stores
+    /// cladefs: truncates `file` down to `size` and back, again and again, while a child writes
     /// `data` at `at`, below both, through the mapping kept, again and again; then checks the file
-    /// around the store and the size it went down to.
+    /// around the write and the size it went down to.
     fn truncate_racing(
         &mut self,
         file: usize,
@@ -1185,10 +1185,10 @@ impl Run {
             0
         } else {
             let mapped = unsafe { self.maps[file].bytes.add(at as usize) };
-            self.store_in_child(mapped, data, PASSES, Some(&mut race))?
+            self.write_in_child(mapped, data, PASSES, Some(&mut race))?
         };
         if let Some(err) = failed.take() {
-            return Err(errno("ftruncate racing a store", &err));
+            return Err(errno("ftruncate racing a mapped write", &err));
         }
         let data = data[..stored].to_vec();
         self.model.apply(&Step::TruncateRacing { file, size, at, data });
@@ -1216,11 +1216,11 @@ impl Run {
         }
     }
 
-    /// Stores `data` at `mapped`, of a file's mapping, from a child, which inherits it: all of it,
-    /// or on a filesystem with no room left, as much as the child got to store before it died.
-    /// cladefs: the child stores it `passes` times over, while this process calls `race` until the
+    /// Writes `data` at `mapped`, of a file's mapping, from a child, which inherits it: all of it,
+    /// or on a filesystem with no room left, as much as the child got to write before it died.
+    /// cladefs: the child writes it `passes` times over, while this process calls `race` until the
     /// child is done, if it's given, and once at least.
-    fn store_in_child(
+    fn write_in_child(
         &mut self,
         mapped: *mut u8,
         data: &[u8],
@@ -1268,11 +1268,11 @@ impl Run {
             return Ok(stored);
         }
         let what = format!("{stored:#x} bytes of {:#x} stored, the child {status:#x}", data.len());
-        Err((kind::STORE_KILLED.to_owned(), what))
+        Err((kind::WRITE_KILLED.to_owned(), what))
     }
 
-    /// FICLONERANGE of `len` bytes, to the source's end if 0, at `src` of `from` onto `dst` of `to`,
-    /// FICLONE of all of it if `step` is a whole file's clone: whose outcome, on a filesystem
+    /// FICLONERANGE of `len` bytes, to the source's end if 0, at `src` of `from` onto `dst` of
+    /// `to`, FICLONE of all of it if `step` is a whole file's clone: whose outcome, on a filesystem
     /// without reflinks, is the model's, `expected`, the bytes it says copied.
     #[allow(clippy::too_many_arguments)]
     fn clone_range(
@@ -1316,8 +1316,8 @@ impl Run {
         }
     }
 
-    /// cladefs: copy_file_range of `len` bytes at `src` of `from` to `dst` of `to`, as many calls as
-    /// it takes, each going on where the one before stopped: what they copied.
+    /// cladefs: copy_file_range of `len` bytes at `src` of `from` to `dst` of `to`, as many calls
+    /// as it takes, each going on where the one before stopped: what they copied.
     fn copy(
         &mut self,
         step: &Step,
@@ -1384,10 +1384,10 @@ impl Run {
         self.model.write(to, dst - copied, &bytes);
     }
 
-    /// cladefs: stores `data` at `at` of `file` through a mapping of its pages made for them, gone
+    /// cladefs: writes `data` at `at` of `file` through a mapping of its pages made for them, gone
     /// after: shared, and the file holds them, or private, and only the mapping does, which reads
     /// as the file with them.
-    fn map_store(
+    fn map_write(
         &mut self,
         file: usize,
         at: u64,
@@ -1404,9 +1404,9 @@ impl Run {
         let mapping = Mapping::of(fd, first, len, flags).map_err(|err| errno("mmap", &err))?;
         let mapped = unsafe { mapping.bytes.add((at - first) as usize) };
         let stored = if self.options.full && !private {
-            self.store_in_child(mapped, data, 1, None)?
+            self.write_in_child(mapped, data, 1, None)?
         } else {
-            store(mapped, data);
+            write_mapped(mapped, data);
             data.len()
         };
         if private {
@@ -1541,8 +1541,8 @@ impl Run {
         self.check(file, 0, size + PAGE).map(drop)
     }
 
-    /// cladefs: checks `file`'s size, and its bytes around `len` at `at`, a page either side, against
-    /// the model: at once after a step that may leave them as it shouldn't.
+    /// cladefs: checks `file`'s size, and its bytes around `len` at `at`, a page either side,
+    /// against the model: at once after a step that may leave them as it shouldn't.
     fn check_around(&self, file: usize, at: u64, len: u64) -> Result<(), Failed> {
         let (size, want) = (self.length(file)?, self.model.files[file].len() as u64);
         if size != want {
@@ -1631,11 +1631,11 @@ fn unexpected(step: &Step, outcome: Outcome, expected: Outcome) -> Failed {
     }
 }
 
-/// cladefs: unlinks the files `names`, those there are, for a run to make anew, inodes of their own,
-/// as a boot's run of a script does. A run makes a file there is empty, which keeps its inode, and
-/// with it what the filesystem made of it: on a DAX mount, a file read in again is DAX, where one
-/// made in a run isn't till it is (`Step::Reopen`). A shrink's run of a script, in the guest that
-/// ran it, took an earlier run's DAX inode, and failed where a replay from a boot didn't (GCE
+/// cladefs: unlinks the files `names`, those there are, for a run to make anew, inodes of their
+/// own, as a boot's run of a script does. A run makes a file there is empty, which keeps its inode,
+/// and with it what the filesystem made of it: on a DAX mount, a file read in again is DAX, where
+/// one made in a run isn't till it is (`Step::Reopen`). A shrink's run of a script, in the guest
+/// that ran it, took an earlier run's DAX inode, and failed where a replay from a boot didn't (GCE
 /// r930). Not every run's: a full filesystem may have no room for a new inode.
 pub fn made_anew(names: &[String]) {
     for name in names {
@@ -1653,9 +1653,9 @@ fn open(name: &str, empty: bool) -> fs::File {
     options.open(name).unwrap_or_else(|err| panic!("open {name}: {err}"))
 }
 
-/// cladefs: faults in the `len` bytes at `bytes`, a call's buffer, before the call: the kernel's copy
-/// to a page of it not there faults it in, and a fault whose allocation fault injection failed is
-/// the call's EFAULT, which is no filesystem's (GCE r783).
+/// cladefs: faults in the `len` bytes at `bytes`, a call's buffer, before the call: the kernel's
+/// copy to a page of it not there faults it in, and a fault whose allocation fault injection failed
+/// is the call's EFAULT, which is no filesystem's (GCE r783).
 fn touch(bytes: *mut u8, len: usize) {
     for at in pages(len) {
         unsafe { bytes.add(at).write_volatile(0) };
@@ -1675,8 +1675,8 @@ fn pages(len: usize) -> impl Iterator<Item = usize> {
     (0..len).step_by(PAGE as usize).chain(len.checked_sub(1))
 }
 
-/// Stores `data` at `mapped`.
-fn store(mapped: *mut u8, data: &[u8]) {
+/// Writes `data` at `mapped`.
+fn write_mapped(mapped: *mut u8, data: &[u8]) {
     for (i, &byte) in data.iter().enumerate() {
         unsafe { mapped.add(i).write_volatile(byte) };
     }
@@ -1765,8 +1765,8 @@ pub(crate) mod tests {
     }
 
     /// cladefs: the wide mix's scripts on XFS, whose reflinks hold the model's rules of a range's
-    /// clone (`Model::clone_range`) to the VFS's: each refusal the model says, the kernel makes, and
-    /// no other. Through every operation's outcome and the bytes after it.
+    /// clone (`Model::clone_range`) to the VFS's: each refusal the model says, the kernel makes,
+    /// and no other. Through every operation's outcome and the bytes after it.
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
     fn wide_scripts_pass_on_a_filesystem_with_reflinks() {
@@ -2060,20 +2060,20 @@ pub(crate) mod tests {
         assert_hold(&names, &run.model);
     }
 
-    /// cladefs: a private mapping's stores are its own, the file's as they were; a file reopened is
+    /// cladefs: a private mapping's writes are its own, the file's as they were; a file reopened is
     /// as it was, and its times too.
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
-    fn private_stores_and_reopens_leave_the_file() {
+    fn private_writes_and_reopens_leave_the_file() {
         let dir = TempDir::new("script").unwrap();
         let ext4 = Loop::new(dir.path(), 300 << 20, "mkfs.ext4", &["-q", "-F"]);
         let names = names(&ext4.mountpoint, WIDE);
         let mut run = Run::new(&names, Options::default());
         let ops = [
             Op::Write { file: 0, place: Place::At(0), len: 2 * PAGE, data: 1 },
-            Op::MapStore { file: 0, place: Place::At(PAGE + 5), len: 10, data: 2, private: true },
+            Op::MapWrite { file: 0, place: Place::At(PAGE + 5), len: 10, data: 2, private: true },
             Op::Reopen { file: 0 },
-            Op::MapStore { file: 0, place: Place::At(5), len: 10, data: 3, private: false },
+            Op::MapWrite { file: 0, place: Place::At(5), len: 10, data: 3, private: false },
             Op::Reopen { file: 0 },
             Op::Check,
         ];
@@ -2177,8 +2177,8 @@ pub(crate) mod tests {
             Op::Check,
             // Writes after a clone are each file's own, through a mapping too.
             Op::Clone { from: 1, to: 0 },
-            Op::Store { file: 0, place: Place::At(100), len: 100, data: 3, child: false },
-            Op::Store { file: 1, place: Place::At(block), len: 100, data: 4, child: true },
+            Op::MappedWrite { file: 0, place: Place::At(100), len: 100, data: 3, child: false },
+            Op::MappedWrite { file: 1, place: Place::At(block), len: 100, data: 4, child: true },
             Op::Check,
         ];
         for (index, op) in script.iter().enumerate() {
@@ -2192,8 +2192,8 @@ pub(crate) mod tests {
     /// cladefs: root's alone, which mount(8) needs for a loop device: no unprivileged way gives a
     /// test a kernel's ext4 or XFS of its own (a user namespace mounts neither, and FUSE's, as
     /// fuse2fs, are not the kernel's, which the tests hold the model to). So every test that makes
-    /// one is ignored, its reason saying so, and runs as root alone, with nextest's `--run-ignored all`,
-    /// as scripts/test.sh's guest part and scripts/test-e2e.sh run them as root (TASK-307).
+    /// one is ignored, its reason saying so, and runs as root alone, with nextest's `--run-ignored
+    /// all`, as scripts/test.sh's guest part and scripts/test-e2e.sh run them as root (TASK-307).
     pub(crate) struct Loop {
         pub(crate) mountpoint: std::path::PathBuf,
     }
@@ -2279,11 +2279,11 @@ pub(crate) mod tests {
         assert!(refused > 0, "no operation refused");
     }
 
-    /// A script's files, up to 12 MiB, don't fit, and each refusal, a store's SIGBUS among them,
-    /// leaves them as the model says. Not on a tmpfs, which allocates a page for a load from a
-    /// hole, and a full one fails that with a SIGBUS, as Fxfs doesn't. The tests on a [`Loop`] need
-    /// root, to mount, and mkfs.ext4 or mkfs.xfs: nothing else checks what refusals leave off a
-    /// guest.
+    /// A script's files, up to 12 MiB, don't fit, and each refusal, a mapped write's SIGBUS among
+    /// them, leaves them as the model says. Not on a tmpfs, which allocates a page for a load from
+    /// a hole, and a full one fails that with a SIGBUS, as Fxfs doesn't. The tests on a [`Loop`]
+    /// need root, to mount, and mkfs.ext4 or mkfs.xfs: nothing else checks what refusals leave off
+    /// a guest.
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
     fn a_filesystem_with_no_room_refuses_and_leaves_the_files_as_the_model_says() {
@@ -2294,7 +2294,7 @@ pub(crate) mod tests {
         refuses_on(&ext4.mountpoint, mix);
     }
 
-    /// Clones, on a filesystem with reflinks, where a store to a block a clone shares takes room.
+    /// Clones, on a filesystem with reflinks, where a write to a block a clone shares takes room.
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
     fn a_filesystem_with_reflinks_and_no_room_refuses_and_leaves_the_files_as_the_model_says() {
@@ -2319,16 +2319,16 @@ pub(crate) mod tests {
         assert!(left <= LEFT, "{left} bytes left, of {LEFT} asked");
     }
 
-    /// On a filesystem that has room, no store dies and is taken for a refusal.
+    /// On a filesystem that has room, no write dies and is taken for a refusal.
     #[test]
-    fn a_store_killed_with_room_left_fails() {
+    fn a_write_killed_with_room_left_fails() {
         let dir = TempDir::new("script").unwrap();
         let names = names(dir.path(), ONE_FILE);
         let mut run = Run::new(&names, Options::default());
-        // A child's store past the mapping of an empty file dies of it.
+        // A child's write past the mapping of an empty file dies of it.
         let mapped = run.maps[0].bytes;
-        let failed = run.store_in_child(mapped, &[1], 1, None).unwrap_err();
-        assert_eq!(failed.0, kind::STORE_KILLED);
+        let failed = run.write_in_child(mapped, &[1], 1, None).unwrap_err();
+        assert_eq!(failed.0, kind::WRITE_KILLED);
         assert_eq!(failed.1, format!("0x0 bytes of 0x1 stored, the child {:#x}", libc::SIGBUS));
     }
 

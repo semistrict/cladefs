@@ -3,14 +3,14 @@
 // found in the LICENSE file.
 
 //! The host's extent daemon killed under load (TASK-50.2, doc-4 "When the host's daemon goes"):
-//! two VMs, on stores a daemon of the test's own serves, write files and fault their pages in
+//! two VMs, on cells a daemon of the test's own serves, write files and fault their pages in
 //! through the DAX window; each tells the host once it is at it, and the host kills the daemon.
 //! Each VM's Firecracker exits, within `BOUND`, with status 158 (`CladefsdLost`), which its host
 //! process sees: no vCPU waits for ever on a DAX fault the daemon would have served. And a third
-//! VM's daemon goes as the VM is created, opening its store: a daemon of the test's own, which
+//! VM's daemon goes as the VM is created, opening its cell: a daemon of the test's own, which
 //! takes the VM process's connection and its `OPEN`, and closes it, answering nothing, as one
-//! killed while the store recovers from its bucket does. Its Firecracker exits 158 too, not 1, as
-//! a VM whose store failed to open does (TASK-232, fxfs-guest-soak's GCE r831 repeat 29).
+//! killed while the cell recovers from its bucket does. Its Firecracker exits 158 too, not 1, as
+//! a VM whose cell failed to open does (TASK-232, fxfs-guest-soak's GCE r831 repeat 29).
 
 use macros::{guest, host};
 
@@ -45,7 +45,7 @@ mod host {
         std::env::temp_dir().join(format!("cladefs-lost-{}-{name}", std::process::id()))
     }
 
-    /// A VM, `name`, on its store, which `cladefsd` serves, with a DAX window, and its vsock at
+    /// A VM, `name`, on its cell, which `cladefsd` serves, with a DAX window, and its vsock at
     /// `uds`.
     fn boot(
         test_setup: &TestSetup,
@@ -58,10 +58,10 @@ mod host {
         vm.guest_kernel()?;
         // Both run at once: each boots from an image of its own, which making it remakes.
         vm.root_image(&format!("{name}.rootfs.ext4"));
-        let store = test_setup.tmp_dir.join(format!("store-{name}"));
+        let cell_dir = test_setup.tmp_dir.join(format!("store-{name}"));
         vm.cell_served(
             "extents",
-            &store,
+            &cell_dir,
             CAPACITY,
             crate::common::dax_window(crate::common::Window::Large)?,
             cladefsd,
@@ -120,7 +120,7 @@ mod host {
             Ok(())
         }
 
-        /// A VM whose daemon, the test's own, goes as the VM opens its store, as it is created:
+        /// A VM whose daemon, the test's own, goes as the VM opens its cell, as it is created:
         /// it takes the VM process's connection, waits for its `OPEN`, and closes it.
         fn lost_opening(&self, test_setup: &TestSetup, root: &Path) -> anyhow::Result<()> {
             let cladefsd = socket("opening.sock");

@@ -11,10 +11,11 @@
 //! `specs/buckets` checks:
 //!
 //! 1. In B, its **pin** ([`layout::pin`]), a reference of its own under the parent's prefix, which
-//!    keeps what it copies from B's collector while it copies ([`crate::collector::Collector::collect_copy`]).
-//!    One mirror of a version holds it at a time, its bytes its own: another's standing, the
-//!    mirror is under way, and this one does nothing ([`Mirrored::UnderWay`]). A pin unrefreshed
-//!    for [`PIN_STALE`] is its mirror's no longer, its host dead: the next mirror takes it over.
+//!    keeps what it copies from B's collector while it copies
+//!    ([`crate::collector::Collector::collect_copy`]). One mirror of a version holds it at a time,
+//!    its bytes its own: another's standing, the mirror is under way, and this one does nothing
+//!    ([`Mirrored::UnderWay`]). A pin unrefreshed for [`PIN_STALE`] is its mirror's no longer, its
+//!    host dead: the next mirror takes it over.
 //! 2. Its **marker read in B**: there already, marked by a mirror begun before, on to step 7
 //!    (`mirrorResumesMarked`), with no hold: the marking mirror's stands until B's collector
 //!    deletes it, with the marker, and one written again after that would stand for good
@@ -74,11 +75,11 @@ pub enum Mirrored {
 
 /// cladefs: how long, by its bucket's clock, a mirror's pin stands unrefreshed before it is held
 /// stale: its mirror's host dead, or stopped as long. A stale pin keeps nothing from B's collector
-/// ([`crate::collector::Collector::collect_copy`]), and the next mirror of its version takes it over.
-/// A mirror refreshes its pin a tenth of that apart while it copies, and right before its marker:
-/// a host stopped longer than this between the two, its pin deemed stale and the copy collected
-/// meanwhile, the version dropped, would mark a copy not whole, as a lease's holder stopped as
-/// long would write past its lease.
+/// ([`crate::collector::Collector::collect_copy`]), and the next mirror of its version takes it
+/// over. A mirror refreshes its pin a tenth of that apart while it copies, and right before its
+/// marker: a host stopped longer than this between the two, its pin deemed stale and the copy
+/// collected meanwhile, the version dropped, would mark a copy not whole, as a lease's holder
+/// stopped as long would write past its lease.
 pub const PIN_STALE: u64 = 10 * 60 * 1000;
 
 /// How long a mirror goes from one refresh of its pin to the next while it copies.
@@ -273,8 +274,8 @@ impl Drop for Turn {
     }
 }
 
-/// The mirror into this bucket, numbered `number`, whose own store is `own`, of the version
-/// `child` was forked from, `origin`, which the child's fork, or its store's opening, asks for
+/// The mirror into this bucket, numbered `number`, whose own bucket is `own`, of the version
+/// `child` was forked from, `origin`, which the child's fork, or its cell's opening, asks for
 /// (doc-23: the first fork of a version into a bucket starts its mirror there): none unless `child`
 /// is of this bucket and `origin`'s parent of another, as a host of a third bucket opening `child`
 /// copies nothing its own bucket's children read; none if `bucket` routes nothing, or the version
@@ -296,9 +297,9 @@ pub async fn wanted(
     mirror(bucket, own, number, parent, at).await.map(Some)
 }
 
-/// Mirrors `parent`'s version at `at` into this bucket, whose own store is `own` and number
-/// `number`, through `bucket`, routed, which reads the parent's bucket (see the module). Begun again
-/// after a crash, it goes on from where it was, once its pin is stale.
+/// Mirrors `parent`'s version at `at` into this bucket, whose own bucket is `own` and number
+/// `number`, through `bucket`, routed, which reads the parent's bucket (see the module). Begun
+/// again after a crash, it goes on from where it was, once its pin is stale.
 pub async fn mirror(
     bucket: &impl Bucket,
     own: &impl Bucket,

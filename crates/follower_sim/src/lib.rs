@@ -4,10 +4,10 @@
 
 //! cladefs's own: the deterministic simulation of live read-only followers (backlog doc-8, testing
 //! 3; TASK-42.1). The real Fxfs writes a filesystem to an extent store, and followers mount it
-//! read-only through the store's views, while readers read it, all under Shuttle's scheduler
+//! read-only through the cell's views, while readers read it, all under Shuttle's scheduler
 //! (awslabs/shuttle), which chooses every interleaving of their tasks and replays a failing one.
 //! Its tests need the `shuttle` feature, which puts Fxfs's executor, tasks, timers and locks, and
-//! the store's, on Shuttle's.
+//! the extent store's, on Shuttle's.
 
 // Every unsafe block says why it is sound, other threads included (TASK-444.4).
 #![deny(clippy::undocumented_unsafe_blocks)]
@@ -16,7 +16,7 @@ pub mod device;
 #[cfg(feature = "shuttle")]
 pub mod history;
 
-/// The cell of the simulations' stores: of a cell of the default tenant's (TASK-364).
+/// The simulations' cell: a cell of the default tenant's (TASK-364).
 #[cfg(feature = "shuttle")]
 pub const CELL: local_cell::CellId = local_cell::CellId { tenant: 0, id: 1 };
 #[cfg(feature = "shuttle")]

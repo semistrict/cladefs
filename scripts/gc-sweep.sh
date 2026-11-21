@@ -32,7 +32,7 @@
 # skipped and the objects the bucket holds after it to RESULTS/gc-sweep-requests.md; and the
 # passes over CLADEFS_GC_CELL to RESULTS/cell-SIDE-COUNT-rROUND-{unchanged,full}.{prom,log}, the
 # cell's objects by kind as they found it to RESULTS/cell-SIDE-COUNT-rROUND-objects.txt, and a
-# table of them to RESULTS/gc-sweep-cell.md: the cell's objects, the pages a store of 1,000 keys a
+# table of them to RESULTS/gc-sweep-cell.md: the cell's objects, the pages a cell of 1,000 keys a
 # page lists them in (which cladefs-gc counts as requests, a page each, since TASK-455), the requests,
 # the seconds and the most memory of each. On the test host, scripts/gc-sweep-host.sh runs it, as a
 # measurement.

@@ -220,7 +220,7 @@ mod tests {
         writer.acknowledge().await.unwrap();
     }
 
-    /// Puts `wal` after the end of the cell `writer` just took, as opening a store does, and
+    /// Puts `wal` after the end of the cell `writer` just took, as opening a cell does, and
     /// lands what it stamped again: the commits of the segments it found the cell held.
     async fn rebase(writer: &Writer<ObjectBucket>, wal: &mut Wal<Data>) -> Result<Vec<u64>, Error> {
         let Rebased { landed } = wal.rebase(writer.taken())?;
@@ -288,7 +288,7 @@ mod tests {
         });
     }
 
-    /// A log stamped again by a writer taking the cell, in memory alone, as a store keeps it
+    /// A log stamped again by a writer taking the cell, in memory alone, as a cell keeps it
     /// (TASK-165.9), which then landed it, under its own epoch, and acknowledged it, the host
     /// crashing before its log let go of it: the next writer finds it stamped as before, at keys
     /// none of what landed is at, and finds it the cell's by its commits (found by local_cell's

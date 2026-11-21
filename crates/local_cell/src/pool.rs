@@ -2,24 +2,24 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: the threads every store of the process does its background work on (board 2944): one
+//! cladefs: the threads every cell of the process does its background work on (board 2944): one
 //! pool for the process, however many cells it holds, of [`threads`] at most, each started as work
 //! first finds none free and kept for the process's life, taking jobs from one queue.
 //!
-//! Before it, each store started a thread of its own for each piece of its work, its framer's, its
+//! Before it, each cell started a thread of its own for each piece of its work, its framer's, its
 //! syncer's, its opener's, and threads of their own for a framing's parts and a flush's syncs:
-//! thousands of cells' stores started and ended threads at every commit, and nothing bounded how
+//! thousands of open cells started and ended threads at every commit, and nothing bounded how
 //! many ran. tokio's blocking pool bounds them no better: its threads idle 10 s before they go, and
 //! hundreds of guests committing at once kept 112 of them
 //! (`hundreds_of_writers_flush_on_threads_they_share`, board 744).
 //!
 //! What the pool runs never waits for a job queued behind it, so that a pool all of whose threads
-//! are busy only delays work, never deadlocks: a store's jobs ([`spawn_or_return`]) wait for no
-//! other job, only for the store's lock, which none holds across a wait; and what a job does on
+//! are busy only delays work, never deadlocks: a cell's jobs ([`spawn_or_return`]) wait for no
+//! other job, only for the cell's lock, which none holds across a wait; and what a job does on
 //! threads beside its own ([`help`]) it does on its own thread too, on as many others as are free
 //! then, never waiting for one to be.
 //!
-//! Under madsim, which runs one thread, none: a store's job is a simulated task, and the caller
+//! Under madsim, which runs one thread, none: a cell's job is a simulated task, and the caller
 //! does what it would have had help with (doc-24). Under Shuttle, the pool's threads are Shuttle's,
 //! each execution's pool its own, and a thread with nothing queued ends rather than waits, as one
 //! waiting at an execution's end would be left behind it.
@@ -35,7 +35,7 @@ use std::sync::Arc;
 
 /// How many threads the pool has at most: as many as every flush's syncs share
 /// ([`crate::durability::HELPERS`]), which wait on the disk, and one for each of the host's CPUs,
-/// for the framings' packing, which wants them. A store's job queued past them waits for one to be
+/// for the framings' packing, which wants them. A cell's job queued past them waits for one to be
 /// done. Not measured yet against a bound of another size (board 2944's benches).
 pub fn threads() -> usize {
     static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
@@ -49,15 +49,15 @@ pub fn threads() -> usize {
 /// queued their jobs (TASK-369).
 pub const NAME: &str = "store pool";
 
-/// Runs `run` of `work` on one of the pool's threads, once one is free; or gives `work` back, if the
-/// pool has none and the host refuses it one, as a thread of its own was refused before: for work
-/// that must be done, which the caller then does itself (TASK-79.80).
+/// Runs `run` of `work` on one of the pool's threads, once one is free; or gives `work` back, if
+/// the pool has none and the host refuses it one, as a thread of its own was refused before: for
+/// work that must be done, which the caller then does itself (TASK-79.80).
 pub(crate) fn spawn_or_return<T: Send + 'static>(
     work: T,
     run: impl FnOnce(T) + Send + 'static,
 ) -> Option<T> {
     // Under madsim, a task of the simulated host's, which the simulation runs at a later turn, as
-    // it chooses: so the store's waits for this work find it pending, and await it, as they do for
+    // it chooses: so the cell's waits for this work find it pending, and await it, as they do for
     // the pool's built normally, rather than finding it done, as when it ran on the caller's
     // thread (doc-24).
     #[cfg(madsim)]
@@ -99,7 +99,8 @@ pub(crate) fn help<M, R: Send + 'static>(
         let call = Arc::new(Call { slots: Mutex::new(Vec::new()), done: Condvar::new() });
         let work: *const (dyn Fn() -> R + Sync + '_) = work;
         // SAFETY: a helper runs `work` only while its slot says it runs, and this returns, or
-        // unwinds, only once no slot does (`Helping`'s `finish` and drop): `work` outlives each use.
+        // unwinds, only once no slot does (`Helping`'s `finish` and drop): `work` outlives each
+        // use.
         let work = Work(unsafe {
             std::mem::transmute::<
                 *const (dyn Fn() -> R + Sync + '_),
@@ -215,7 +216,7 @@ impl Pool {
     }
 }
 
-/// A thread of the pool's ending as a store's job of its panicked, as a thread of the store's own
+/// A thread of the pool's ending as a cell's job of its panicked, as a thread of the cell's own
 /// did: one fewer, and another started for the jobs queued, if any, so that they don't wait for
 /// good.
 #[cfg(not(madsim))]

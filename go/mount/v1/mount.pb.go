@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// The control API of a host FUSE mount of many stores (TASK-302), of tenants' cells (TASK-364):
+// The control API of a host FUSE mount of many cells (TASK-302), of tenants' cells (TASK-364):
 // cladefsd, with CLADEFSD_MOUNT naming a MOUNTPOINT and CLADEFSD_MOUNT_STORES a DIR, serves one FUSE
-// mount, however many stores: one OS mount, not one per store (TASK-475.2). A cell has one kind
-// (doc-20). Attach takes a cell of the daemon's bucket, as its holder, into a store at
+// mount, however many cells: one OS mount, not one per cell (TASK-475.2). A cell has one kind
+// (doc-20). Attach takes a cell of the daemon's bucket, as its holder, into a cell directory at
 // DIR/TENANT/CELL, its lease with it, and shows an Fxfs cell's filesystem at
 // MOUNTPOINT/TENANT/CELL, TENANT and CELL in base 32, 13 digits (Crockford's, lower case,
 // zero-padded), as the bucket's keys have them; Detach writes it back, so that another host may
@@ -24,8 +24,8 @@
 // RESOURCE_EXHAUSTED, ETIMEDOUT DEADLINE_EXCEEDED, EBUSY, ESTALE, ENOTSUP and EROFS
 // FAILED_PRECONDITION, EIO and others INTERNAL.
 //
-// Calls block for as long as their work takes: an attach while its stores recover, a detach until
-// the kernel lets the stores go. A caller bounds them with deadlines; one that gives up does not
+// Calls block for as long as their work takes: an attach while its cells recover, a detach until
+// the kernel lets the cells go. A caller bounds them with deadlines; one that gives up does not
 // stop the work, which completes, or fails, on its own.
 //
 // Compatibility: cells changed v1 outright (TASK-364: formats break, no caller is kept), and again
@@ -64,7 +64,7 @@ type AttachRequest struct {
 	Cell uint64 `protobuf:"varint,2,opt,name=cell,proto3" json:"cell,omitempty"`
 	// The fencing token of the placement to take the cell at, if any: as CreateCell's.
 	Token *uint64 `protobuf:"varint,3,opt,name=token,proto3,oneof" json:"token,omitempty"`
-	// A new cell's: the most bytes its store holds, as VMs' disks hold. Ignored for a cell named.
+	// A new cell's: the most bytes it holds, as VMs' disks hold. Ignored for a cell named.
 	Capacity      uint64 `protobuf:"varint,4,opt,name=capacity,proto3" json:"capacity,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -190,7 +190,7 @@ type DetachRequest struct {
 	Tenant uint64 `protobuf:"varint,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
 	// Its cell, attached.
 	Cell uint64 `protobuf:"varint,2,opt,name=cell,proto3" json:"cell,omitempty"`
-	// Unmount its store at once, without waiting for the kernel to let go of it: files and
+	// Unmount its cell at once, without waiting for the kernel to let go of it: files and
 	// directories of it still open fail with ENOTCONN from then on.
 	Force         bool `protobuf:"varint,3,opt,name=force,proto3" json:"force,omitempty"`
 	unknownFields protoimpl.UnknownFields

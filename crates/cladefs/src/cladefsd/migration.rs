@@ -3,10 +3,10 @@
 // found in the LICENSE file.
 
 //! cladefs: live migration of an ephemeral cell from this host, the source, to another, the target
-//! (backlog doc-25, TASK-698.4; specs/ephemeral). An ephemeral cell's store is files: its local checkpoint,
-//! its kept segments, which never change once kept but for holes given back, and the rest, its
-//! raw segments after the local checkpoint, their logs, its description and its write-ahead log's start. A
-//! migration moves them, its rules as the spec names them:
+//! (backlog doc-25, TASK-698.4; specs/ephemeral). An ephemeral cell is files: its local checkpoint,
+//! its kept segments, which never change once kept but for holes given back, and the rest, its raw
+//! segments after the local checkpoint, their logs, its description and its write-ahead log's
+//! start. A migration moves them, its rules as the spec names them:
 //!
 //! 1. **Prepare** (`MigrateCell`): the target notes the cell in its journal and writes its own
 //!    reference to the cell's origin before it takes anything (`targetRefersFirst`), and answers
@@ -14,19 +14,19 @@
 //!    first (`supersedes`): the cell's writer, preparing this one, pursues it no more. A source
 //!    whose prepare went unanswered aborts that migration by its ID (`SourceLoses`).
 //! 2. **Rounds**, while the guest runs: the kept segments not sent yet, each whole, sparse.
-//! 3. **Hand-over** (`HandOverCell`), once nothing has the store open here, its VM process gone:
-//!    the source gives the cell up first, durably, a marker in its store refusing every opening
-//!    from then on (`sourceGivesUpFirst`); then it sends the rest, the holes its kept segments
-//!    gave back since they were sent among it; then it asks the target to take the cell over,
-//!    naming every file and its length, and the CRC of each but the kept segments'. The target
-//!    takes it only holding them all so (`openAtNamed`), remembering the migration accepted for
-//!    good (`remembersAccepted`); refusing, it drops what it took and its reference, and never takes
+//! 3. **Hand-over** (`HandOverCell`), once nothing has the cell open here, its VM process gone: the
+//!    source gives the cell up first, durably, a marker in its cell refusing every opening from
+//!    then on (`sourceGivesUpFirst`); then it sends the rest, the holes its kept segments gave back
+//!    since they were sent among it; then it asks the target to take the cell over, naming every
+//!    file and its length, and the CRC of each but the kept segments'. The target takes it only
+//!    holding them all so (`openAtNamed`), remembering the migration accepted for good
+//!    (`remembersAccepted`); refusing, it drops what it took and its reference, and never takes
 //!    that migration after (`refuseFinal`).
-//! 4. Accepted, the source removes its store, then retires its own reference (`sourceRetiresLast`),
-//!    a note beside the store saying it handed the cell over until both are done, so that asking
-//!    again after either failed finishes them (board 5665); refused, it removes its marker,
+//! 4. Accepted, the source removes its cell, then retires its own reference (`sourceRetiresLast`),
+//!    a note beside the cell directory saying it handed the cell over until both are done, so that
+//!    asking again after either failed finishes them (board 5665); refused, it removes its marker,
 //!    durably, and serves the cell again. Not answered, the marker
-//!    stays, the store unopened here, and asking again, after a restart too, sends again what the
+//!    stays, the cell unopened here, and asking again, after a restart too, sends again what the
 //!    target lacks and asks it again, naming every file as before; the target answers as it did.
 
 use super::peers::proto::peer_client::PeerClient;
@@ -46,7 +46,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tonic::Status;
 
-/// The marker of a store given up to a migration, in its directory ([`Marker`]).
+/// The marker of a cell given up to a migration, in its directory ([`Marker`]).
 pub(crate) const MARKER: &str = "migrating";
 
 /// How much of a file a request carries at most.
@@ -55,7 +55,7 @@ const PIECE: usize = 4 << 20;
 /// How long a round of the source waits for the next.
 const ROUND: Duration = Duration::from_millis(500);
 
-/// What a store given up to a migration says of it, in its marker: what asking the target again
+/// What a cell given up to a migration says of it, in its marker: what asking the target again
 /// takes, after a restart too.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Marker {
@@ -64,15 +64,15 @@ struct Marker {
     incarnation: u64,
 }
 
-/// What a source notes beside a store it handed over until the store and its reference are gone
-/// ([`handed_over`]): the cell's journal entry, if it has one, whose reference goes.
+/// What a source notes beside a cell directory it handed over until the directory and its reference
+/// are gone ([`handed_over`]): the cell's journal entry, if it has one, whose reference goes.
 #[derive(Debug, Serialize, Deserialize)]
 struct HandedOver {
     migration: u64,
     entry: Option<Entry>,
 }
 
-/// Where a source notes it handed the store at `path` over ([`HandedOver`]): beside it, as a
+/// Where a source notes it handed the cell at `path` over ([`HandedOver`]): beside it, as a
 /// target stages a migration's files ([`staging`]).
 fn handed_over(path: &Path) -> PathBuf {
     let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
@@ -102,7 +102,7 @@ impl Outgoing {
         Outgoing { migration, peer, incarnation, client, sent, stopped }
     }
 
-    /// The migration a store's marker names, asked again with nothing known sent, as after a
+    /// The migration a cell's marker names, asked again with nothing known sent, as after a
     /// restart.
     fn resumed(marker: Marker) -> Result<Self, Errno> {
         let client = client(&marker.peer)?;
@@ -117,7 +117,7 @@ impl Outgoing {
 }
 
 node_local::node_local! {
-    /// The migrations from this host under way, by their stores' paths.
+    /// The migrations from this host under way, by their cells' paths.
     static OUTGOING: Mutex<BTreeMap<PathBuf, Arc<Outgoing>>> = Mutex::new(BTreeMap::new());
 }
 
@@ -135,8 +135,8 @@ fn client(address: &str) -> Result<PeerClient<tonic::transport::Channel>, Errno>
     })
 }
 
-/// Begins the migration of the ephemeral cell of the store at `path` to the daemon whose peer
-/// address is `peer`, its store going at `to` there (`MigrateCell`): prepared there, then rounds
+/// Begins the migration of the ephemeral cell at `path` to the daemon whose peer
+/// address is `peer`, its cell going at `to` there (`MigrateCell`): prepared there, then rounds
 /// sending its kept segments as they come, until its hand-over. Returns the migration's ID.
 pub(super) async fn migrate(path: PathBuf, peer: String, to: String) -> Result<u64, Errno> {
     let host = ephemeral_host::host()?;
@@ -196,7 +196,7 @@ pub(super) async fn migrate(path: PathBuf, peer: String, to: String) -> Result<u
     Ok(migration)
 }
 
-/// A round of `outgoing`: the kept segments of the store at `path` not sent yet, each whole.
+/// A round of `outgoing`: the kept segments of the cell at `path` not sent yet, each whole.
 async fn round(outgoing: &Outgoing, path: &Path) -> Result<(), Status> {
     let mut sent = outgoing.sent.lock().await;
     for (relative, len) in files(path).map_err(|err| status("listing", err))? {
@@ -212,7 +212,7 @@ async fn round(outgoing: &Outgoing, path: &Path) -> Result<(), Status> {
     Ok(())
 }
 
-/// The directories of the store at `path`, by their paths in it: those its files are in, and those
+/// The directories of the cell at `path`, by their paths in it: those its files are in, and those
 /// it keeps empty, which its opening lists.
 fn dirs(path: &Path) -> std::io::Result<Vec<String>> {
     let mut found = Vec::new();
@@ -232,7 +232,7 @@ fn dirs(path: &Path) -> std::io::Result<Vec<String>> {
     Ok(found)
 }
 
-/// The files of the store at `path`, by their paths in it, with their lengths: all but its marker
+/// The files of the cell at `path`, by their paths in it, with their lengths: all but its marker
 /// and what deleting or replicating leaves.
 fn files(path: &Path) -> std::io::Result<Vec<(String, u64)>> {
     let mut found = Vec::new();
@@ -256,7 +256,7 @@ fn files(path: &Path) -> std::io::Result<Vec<(String, u64)>> {
     Ok(found)
 }
 
-/// Sends the file at `relative` in the store at `path`, `len` bytes long, whole, its data and its
+/// Sends the file at `relative` in the cell at `path`, `len` bytes long, whole, its data and its
 /// holes, the last piece carrying the holes, so that it lands as it is here over any copy sent
 /// before: returns the bytes it takes of the disk.
 async fn send(outgoing: &Outgoing, path: &Path, relative: &str, len: u64) -> Result<u64, Status> {
@@ -324,14 +324,14 @@ fn crc_of(path: &Path) -> std::io::Result<u32> {
     Ok(extent_frame::crc(&bytes))
 }
 
-/// Hands the ephemeral cell of the store at `path` over to the target of its migration
+/// Hands the ephemeral cell at `path` over to the target of its migration
 /// (`HandOverCell`), once nothing has it open here (`EBUSY` otherwise): see the module's docs.
-/// `EAGAIN` if the target refused, the store served here again; `ENOTCONN` if it did not answer,
-/// the store given up still, to be asked again; `EIO` if letting the store go failed once the target
+/// `EAGAIN` if the target refused, the cell served here again; `ENOTCONN` if it did not answer,
+/// the cell given up still, to be asked again; `EIO` if letting the cell go failed once the target
 /// took it, which asking again finishes.
 pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
     let host = ephemeral_host::host()?;
-    let _held = super::cells::hold_store_alone(&path).await?;
+    let _held = super::cells::hold_cell_alone(&path).await?;
     // Handed over before, and asked again: what is left of letting it go.
     let handed = handed_over(&path);
     if let Ok(bytes) = host_fs::read(&handed) {
@@ -346,7 +346,7 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
     let marked: Option<Marker> =
         host_fs::read(&marker_path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok());
     let under_way = OUTGOING.get().lock().unwrap().get(&path).cloned();
-    // Held alone, the store changes no more: rounds are over.
+    // Held alone, the cell changes no more: rounds are over.
     if let Some(under_way) = &under_way {
         under_way.stopped.store(true, std::sync::atomic::Ordering::Release);
     }
@@ -377,7 +377,7 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
             return Err(Errno::ENOTCONN);
         }
     }
-    // The hand-over names every file of the store, so that the target takes it only whole
+    // The hand-over names every file of the cell, so that the target takes it only whole
     // (`openAtNamed`).
     let files = named(&path).map_err(|err| {
         log::warn!("cladefsd: naming {}'s files: {err}", path.display());
@@ -412,16 +412,16 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
     let_go(&host, &path, &handed, &noted).await
 }
 
-/// Lets go of the store at `path`, handed over as `noted` says, noted at `handed`: the store goes,
-/// then this host's reference (`sourceRetiresLast`), then the note. `EIO` if the store or the note
-/// does not go, the note left, from which asking again goes on.
+/// Lets go of the cell at `path`, handed over as `noted` says, noted at `handed`: its cell
+/// directory goes, then this host's reference (`sourceRetiresLast`), then the note. `EIO` if the
+/// directory or the note does not go, the note left, from which asking again goes on.
 async fn let_go(
     host: &ephemeral_host::Host,
     path: &Path,
     handed: &Path,
     noted: &HandedOver,
 ) -> Result<(), Errno> {
-    local_cell::remove_store_dir(path).map_err(|err| {
+    local_cell::remove_cell_dir(path).map_err(|err| {
         log::warn!("cladefsd: removing {}, handed over: {err:#}", path.display());
         Errno::EIO
     })?;
@@ -436,7 +436,7 @@ async fn let_go(
     })
 }
 
-/// Sends what `outgoing` has not sent of the store at `path`, given up: its directories; the kept
+/// Sends what `outgoing` has not sent of the cell at `path`, given up: its directories; the kept
 /// segments not sent, and the holes of those sent that gave back more since; and every other file,
 /// whole.
 async fn finish(outgoing: &Outgoing, path: &Path) -> Result<(), Status> {
@@ -481,7 +481,7 @@ async fn finish(outgoing: &Outgoing, path: &Path) -> Result<(), Status> {
     Ok(())
 }
 
-/// Every file of the store at `path`, given up, as its hand-over names them: its length, and the
+/// Every file of the cell at `path`, given up, as its hand-over names them: its length, and the
 /// CRC of each but the kept segments'.
 fn named(path: &Path) -> std::io::Result<Vec<FileDigest>> {
     let mut named = Vec::new();
@@ -610,12 +610,12 @@ pub(super) mod target {
         // A directory, empty or not, its path ending with `/`.
         if let Some(dir) = path.strip_suffix('/') {
             if dir.split('/').any(|part| part == ".." || part.is_empty()) {
-                return Err(Status::invalid_argument(format!("{path:?} leaves the store")));
+                return Err(Status::invalid_argument(format!("{path:?} leaves the cell")));
             }
             return host_fs::create_dir_all(staged.join(dir)).map_err(|err| status(&path, err));
         }
         if path.split('/').any(|part| part == ".." || part.is_empty()) {
-            return Err(Status::invalid_argument(format!("{path:?} leaves the store")));
+            return Err(Status::invalid_argument(format!("{path:?} leaves the cell")));
         }
         let file_path = staged.join(&path);
         if let Some(dir) = file_path.parent() {
@@ -666,7 +666,7 @@ pub(super) mod target {
             host_fs::rename(&staged, &entry.path)?;
             host_fs::File::open(entry.path.parent().unwrap_or(Path::new(".")))?.sync_all()
         };
-        moved().map_err(|err| status("taking the store", err))?;
+        moved().map_err(|err| status("taking the cell", err))?;
         host.accept(migration).map_err(|err| status("remembering it accepted", err))?;
         let taken = Entry { migration: None, ..entry };
         host.note(&taken).map_err(|err| status("noting the cell", err))?;
@@ -694,7 +694,7 @@ pub(super) mod target {
     }
 
     /// What `staged` lacks of `files`, each of its length, of its CRC if named: the first file it
-    /// lacks so, if any. A store has files: a hand-over naming none names no store.
+    /// lacks so, if any. A cell has files: a hand-over naming none names no cell.
     fn lacking(staged: &Path, files: &[FileDigest]) -> Option<String> {
         if files.is_empty() {
             return Some("the hand-over names no file".to_owned());

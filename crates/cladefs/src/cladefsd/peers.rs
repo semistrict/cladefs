@@ -4,7 +4,7 @@
 
 //! cladefs: the daemon's part in the hosts sharing its bucket (TASK-406.2, `crate::bucket::peers`):
 //! it serves them parts of the bucket's objects over gRPC, at `CLADEFSD_PEER_ADDRESS`
-//! (`proto/cladefs/peer/v1/peer.proto`), and its stores' fetchers ask them for the parts they own,
+//! (`proto/cladefs/peer/v1/peer.proto`), and its cells' fetchers ask them for the parts they own,
 //! `CLADEFSD_PEERS` naming them at its start and the control API's `SetPeers` at any time.
 //! What it serves comes from the host's memory and part cache, which it needs, or from the bucket
 //! once, however many hosts ask at once ([`crate::bucket::serving_peers`]).
@@ -65,8 +65,8 @@ static SERVED_MISSING: AtomicU64 = AtomicU64::new(0);
 
 /// Has the daemon serve the hosts sharing its bucket, at `address` (`CLADEFSD_PEER_ADDRESS`),
 /// on `listening`, bound there (or, under madsim, its address on the simulated network), and its
-/// stores' fetchers ask them, `peers` at first (`CLADEFSD_PEERS`), for the parts they own: before
-/// any store opens. It needs the host's part cache, which keeps what it serves.
+/// cells' fetchers ask them, `peers` at first (`CLADEFSD_PEERS`), for the parts they own: before
+/// any cell opens. It needs the host's part cache, which keeps what it serves.
 pub async fn start(
     address: &str,
     listening: Listening,
@@ -161,7 +161,7 @@ fn check_address(address: &str) -> Result<(), String> {
     }
 }
 
-/// What the daemon's stores' fetchers asked its peers, and the parts it served them and had not as
+/// What the daemon's cells' fetchers asked its peers, and the parts it served them and had not as
 /// they asked, if it serves peers.
 pub(super) fn counts() -> Option<(crate::bucket::peers::Counts, u64, u64)> {
     let counts = crate::bucket::peers()?.counts();

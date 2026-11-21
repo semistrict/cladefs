@@ -7,8 +7,8 @@
 //! A batch that fails, as the kernel's `cladefs.follow_fail_batch` has it, ends the follower: what
 //! reads the trees fails with ESTALE. It unmounts and mounts again, and sees all its writer
 //! committed. Then its writer dies with writes uncommitted, which cuts the follower off: an extent
-//! it never read reads ESTALE, and no new writer opens the store while the follower's connection
-//! does. It unmounts, which closes the connection: a new writer opens the store, as of its last
+//! it never read reads ESTALE, and no new writer opens the cell while the follower's connection
+//! does. It unmounts, which closes the connection: a new writer opens the cell, as of its last
 //! commit, and writes on; and the follower mounts again, on a connection of its own, and follows
 //! that writer. Last, the host kills the daemon: the follower's VM, on that new connection, exits
 //! with status 158 (`CladefsdLost`), as the VM of one that never reopened does.
@@ -55,7 +55,7 @@ mod host {
     const CLADEFSD_LOST: i32 = 158;
     /// How long a VM takes at most to exit once its daemon is gone.
     const BOUND: Duration = Duration::from_secs(10);
-    /// How long the daemon takes at most to let go of a store its last connection closed.
+    /// How long the daemon takes at most to let go of a cell its last connection closed.
     const LETS_GO_WITHIN: Duration = Duration::from_secs(30);
 
     /// In the temporary directory, as a socket's path is short (SUN_LEN).
@@ -68,7 +68,7 @@ mod host {
         test: &'a TestFxfsGuestFollowRemount,
         setup: &'a TestSetup,
         root: &'a Path,
-        store: &'a Path,
+        cell_dir: &'a Path,
         cladefsd: &'a Path,
     }
 
@@ -91,9 +91,9 @@ mod host {
                 0
             };
             if read_only {
-                vm.cell_following_served("extents", self.store, window, self.cladefsd);
+                vm.cell_following_served("extents", self.cell_dir, window, self.cladefsd);
             } else {
-                vm.cell_served("extents", self.store, CAPACITY, window, self.cladefsd);
+                vm.cell_served("extents", self.cell_dir, CAPACITY, window, self.cladefsd);
             }
             vm.env(&CString::new(format!("CLADEFS_FOLLOW={role}"))?);
             vm.vsock(&uds);
@@ -151,14 +151,14 @@ mod host {
     impl TestFxfsGuestFollowRemount {
         fn run(&self, test_setup: &TestSetup) -> anyhow::Result<()> {
             let root = setup_rootfs(test_setup)?;
-            let store = test_setup.tmp_dir.join("store");
+            let cell_dir = test_setup.tmp_dir.join("store");
             let cladefsd = socket("cladefsd.sock");
             let mut daemon = spawn_daemon(test_setup, &cladefsd, "cladefsd", &[], None)?;
             let place = Place {
                 test: self,
                 setup: test_setup,
                 root: &root,
-                store: &store,
+                cell_dir: &cell_dir,
                 cladefsd: &cladefsd,
             };
 
@@ -184,11 +184,11 @@ mod host {
             f.tell("cut off")?;
             f.expect("cut off")?;
 
-            // No writer opens the store while the follower's connection does.
+            // No writer opens the cell while the follower's connection does.
             let (mut refused, listener) = place.boot("refused", "next-writer", false)?;
             anyhow::ensure!(
                 Guest::accept(&mut refused, &listener).is_err(),
-                "a writer opened a store its follower's connection kept cut off"
+                "a writer opened a cell its follower's connection kept cut off"
             );
             refused.wait()?;
 
@@ -394,7 +394,7 @@ mod guest {
         assert_eq!(fs::read(path("two")).unwrap(), TWO);
         writeln!(tell, "remounted").unwrap();
 
-        // Cut off: what it has to read from its store, it can't.
+        // Cut off: what it has to read from its cell, it can't.
         expect(&mut host, "cut off");
         stale(|attempt| cold(attempt % COLD));
         writeln!(tell, "cut off").unwrap();

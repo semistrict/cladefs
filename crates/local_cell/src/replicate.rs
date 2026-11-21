@@ -12,26 +12,26 @@
 //! ([`own_frame`]). A taker writes them back as the segment's log and own extents' files beside an
 //! empty raw file, and recovers the segment as an opening recovers its own.
 //!
-//! A replicator starts as its store opens after a taking, whose opening closed every segment
+//! A replicator starts as its cell opens after a taking, whose opening closed every segment
 //! before (`wal::recover`), so that each segment it streams it streams from its log's header. The
 //! commits before it started are on no member: none is told replicated before the bucket holds
 //! them ([`Replicator::base`]), so that what a guest is told replicated is a prefix of the cell's
 //! commits, each in the bucket or on f+1 copies.
 //!
-//! Each member is sent what it lacks, by a task of its own, through a [`MemberLink`], in pieces
-//! of [`PIECE`] at most (or, in the simulation, one turn at a time as its scheduler says,
-//! [`Replicator::idle`] and [`Replicator::drive`]), and answers the end of the log it holds, synced; one answering less than
-//! it was sent (an append past its end, as a member that lost what it had) is sent again from its
-//! end. A member out of reach is tried again, from 50 ms apart, doubling, to 5 s; one that refuses
-//! the writer (another incarnation, no replica directory) is sent nothing more, until a
-//! replacement (TASK-537.3.5); one that says a later epoch fenced the cell fences the writer: no
-//! commit of it is told replicated after.
+//! Each member is sent what it lacks, by a task of its own, through a [`MemberLink`], in pieces of
+//! [`PIECE`] at most (or, in the simulation, one turn at a time as its scheduler says,
+//! [`Replicator::idle`] and [`Replicator::drive`]), and answers the end of the log it holds,
+//! synced; one answering less than it was sent (an append past its end, as a member that lost what
+//! it had) is sent again from its end. A member out of reach is tried again, from 50 ms apart,
+//! doubling, to 5 s; one that refuses the writer (another incarnation, no replica directory) is
+//! sent nothing more, until a replacement (TASK-537.3.5); one that says a later epoch fenced the
+//! cell fences the writer: no commit of it is told replicated after.
 //!
-//! What it sends is spooled ([`Spool`]), not held in memory: a store's spool is a directory of its
-//! own, its files bypassing the host's page cache as every store file does, appended to as each
+//! What it sends is spooled ([`Spool`]), not held in memory: a cell's spool is a directory of its
+//! own, its files bypassing the host's page cache as every cell file does, appended to as each
 //! flush is sent and read back as each member is sent what it lacks, each log's files removed as
 //! the head names its segment. The replicator holds each log's length alone. The spool is no
-//! durable state, the store's own log being: it is synced never, and emptied as a replicator
+//! durable state, the cell's own log being: it is synced never, and emptied as a replicator
 //! starts. Its failing breaks the replicator, whose commits then wait for the bucket.
 
 use event_listener::Event;
@@ -182,10 +182,10 @@ pub fn last_commit(cell: extent_frame::segment::CellId, logs: &[(u64, Vec<u8>)])
     last
 }
 
-/// Whether what members hold, ending at the commit `members`, goes past a store's own write-ahead
+/// Whether what members hold, ending at the commit `members`, goes past a cell's own write-ahead
 /// log, ending at `own` (TASK-537.3.4's review): a later writer's commits, or the same writer's
 /// beyond what its own log holds (sent before its own sync, which a crash cut). Then the members'
-/// logs, not its own, are what the store recovers: they hold every commit a guest was told
+/// logs, not its own, are what the cell recovers: they hold every commit a guest was told
 /// replicated, and a member holding a flush holds every flush before it. Else its own log holds
 /// all they do, and Local commits besides.
 pub fn members_ahead(own: Option<u64>, members: Option<u64>) -> bool {
@@ -202,7 +202,7 @@ pub fn members_ahead(own: Option<u64>, members: Option<u64>) -> bool {
 }
 
 /// Writes what a member holds of a replicated cell's writer's logs, `logs` by their numbers in its
-/// directory, into `dir`, a store's directory of `cell`, made and holding no write-ahead log, as
+/// directory, into `dir`, a cell directory of `cell`, made and holding no write-ahead log, as
 /// its write-ahead log after the commit `last`, the last the cell's head names (TASK-537.3.4's
 /// take): what of them goes on from it ([`trimmed`]), each segment's replica log as the segment's
 /// log beside an empty raw file, each extent stored on its own as its file, and the log's start,

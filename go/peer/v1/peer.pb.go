@@ -51,7 +51,7 @@ type MigratePrepareRequest struct {
 	At uint64 `protobuf:"varint,6,opt,name=at,proto3" json:"at,omitempty"`
 	// The URL of the bucket its parent is kept in.
 	Bucket string `protobuf:"bytes,7,opt,name=bucket,proto3" json:"bucket,omitempty"`
-	// Where its store goes on this host.
+	// Where it goes on this host.
 	To            string `protobuf:"bytes,8,opt,name=to,proto3" json:"to,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -244,12 +244,12 @@ func (x *Range) GetLen() uint64 {
 	return 0
 }
 
-// A piece of a file of the store being migrated.
+// A piece of a file of the cell being migrated.
 type MigrateFileRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The migration.
 	Migration uint64 `protobuf:"varint,1,opt,name=migration,proto3" json:"migration,omitempty"`
-	// The file's path in the store; a directory's, made if it is not there, ends with `/`.
+	// The file's path in the cell; a directory's, made if it is not there, ends with `/`.
 	Path string `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
 	// Where `bytes` go in it.
 	Offset uint64 `protobuf:"varint,3,opt,name=offset,proto3" json:"offset,omitempty"`
@@ -372,10 +372,10 @@ func (*MigrateFileResponse) Descriptor() ([]byte, []int) {
 	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{4}
 }
 
-// A file of the store a hand-over names.
+// A file of the cell a hand-over names.
 type FileDigest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Its path in the store.
+	// Its path in the cell.
 	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
 	// Its length.
 	Len uint64 `protobuf:"varint,2,opt,name=len,proto3" json:"len,omitempty"`
@@ -443,7 +443,7 @@ type MigrateHandOverRequest struct {
 	Migration uint64 `protobuf:"varint,1,opt,name=migration,proto3" json:"migration,omitempty"`
 	// The incarnation of this host's its preparation answered.
 	Incarnation uint64 `protobuf:"varint,2,opt,name=incarnation,proto3" json:"incarnation,omitempty"`
-	// Every file of the store.
+	// Every file of the cell.
 	Files         []*FileDigest `protobuf:"bytes,3,rep,name=files,proto3" json:"files,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

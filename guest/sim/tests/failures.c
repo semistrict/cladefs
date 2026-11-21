@@ -3,7 +3,7 @@
 /*
  * What tests/interleave leaves out: things that fail. Tasks write, map, truncate and clone their
  * files, from memory that ends part way through, and from the files' own mappings, as allocations
- * and the device's MAPs, UNMAPs and PRIVATEs fail, one in so many, the seed's. Stores copy on
+ * and the device's MAPs, UNMAPs and PRIVATEs fail, one in so many, the seed's. Writes copy on
  * write (doc-13).
  *
  *   failures SEED [OPERATIONS] [-v] [-W INO PAGE] [-a ADDRESS] [-w WINDOW_PAGE]
@@ -317,8 +317,8 @@ static void op_load(struct worker *worker, struct tracked *file)
 	kfree(buf);
 }
 
-/* A store past the file's end, in its last page, which no read of the file is to find. */
-static void op_store_past_end(struct worker *worker, struct tracked *file)
+/* A write past the file's end, in its last page, which no read of the file is to find. */
+static void op_mapped_write_past_end(struct worker *worker, struct tracked *file)
 {
 	size_t room = -file->size & (PAGE_SIZE - 1), len;
 	char *buf;
@@ -326,14 +326,14 @@ static void op_store_past_end(struct worker *worker, struct tracked *file)
 	if (!room)
 		return;
 	len = between(1, room);
-	operation(worker, "store %lld+%zu, past the end\n", file->size, len);
+	operation(worker, "write %lld+%zu, past the end\n", file->size, len);
 	buf = kmalloc(len, GFP_KERNEL);
 	new_bytes(buf, len);
-	sim_user_store(file->addr + file->size, buf, len);
+	sim_user_write(file->addr + file->size, buf, len);
 	kfree(buf);
 }
 
-static void op_store(struct worker *worker, struct tracked *file)
+static void op_mapped_write(struct worker *worker, struct tracked *file)
 {
 	size_t len;
 	loff_t at;
@@ -343,10 +343,10 @@ static void op_store(struct worker *worker, struct tracked *file)
 		return;
 	at = between(0, file->size - 1);
 	len = between(1, min_t(u64, file->size - at, 64));
-	operation(worker, "store %lld+%zu, size %lld\n", at, len, file->size);
+	operation(worker, "write %lld+%zu, size %lld\n", at, len, file->size);
 	buf = kmalloc(len, GFP_KERNEL);
 	new_bytes(buf, len);
-	if (!sim_user_store(file->addr + at, buf, len)) {
+	if (!sim_user_write(file->addr + at, buf, len)) {
 		memcpy(file->bytes + at, buf, len);
 		know(file, at, len);
 	} else {
@@ -481,7 +481,7 @@ static void worker_task(void *arg)
 			op_killed_write(worker, file);
 			break;
 		case 14:
-			op_store_past_end(worker, file);
+			op_mapped_write_past_end(worker, file);
 			break;
 		case 3 ... 4:
 			op_short_write(worker, file);
@@ -496,7 +496,7 @@ static void worker_task(void *arg)
 			op_load(worker, file);
 			break;
 		case 9:
-			op_store(worker, file);
+			op_mapped_write(worker, file);
 			break;
 		case 10:
 			op_truncate(worker, file);

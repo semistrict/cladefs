@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Container images as base stores (cladefs's TASK-39.5): the host builds a store from an OCI image
-//! of two layers, as `cladefsctl import` does, and forks it; a guest boots on the fork, and finds the
-//! image's files, with their contents, owners, permissions, times, hard links, symlinks, device
+//! Container images as base cells (cladefs's TASK-39.5): the host builds a cell from an OCI image
+//! of two layers, as `cladefsctl import` does, and forks it; a guest boots on the fork, and finds
+//! the image's files, with their contents, owners, permissions, times, hard links, symlinks, device
 //! nodes and extended attributes, and the upper layer's whiteouts applied. It writes to the fork,
 //! which the base doesn't see.
 //!
@@ -91,7 +91,7 @@ mod host {
         Ok(vec![gzip(&lower)?, upper])
     }
 
-    /// Whether the store at `path` has the file the guest writes.
+    /// Whether the cell at `path` has the file the guest writes.
     fn has_written(path: &Path) -> anyhow::Result<bool> {
         block_on(async {
             let fs = Filesystem::mount(Storage::open(path)?).await?;
@@ -115,7 +115,7 @@ mod host {
             let layout = dir.join("image");
             oci_layout(&layout, "cladefs/test:import", &layers()?)?;
             let base = dir.join("base");
-            block_on(cladefs::import::store(
+            block_on(cladefs::import::make_base(
                 &base,
                 CAPACITY,
                 &layout,

@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Live forks (cladefs's TASK-39.3): a running VM's store forks at a version its guest's Fxfs agrees
+//! Live forks (cladefs's TASK-39.3): a running VM's cell forks at a version its guest's Fxfs agrees
 //! to, frozen, while the VM goes on. The guest writes a file, freezes, and tells the host over
-//! vsock; the host forks the store through the extent daemon, live, and tells the guest, which
+//! vsock; the host forks the cell through the extent daemon, live, and tells the guest, which
 //! thaws, writes another, and remounts, finding both. A second VM boots on the fork and finds the
 //! filesystem as of the fork: the first file, not the second; and writes its own.
 
@@ -35,20 +35,20 @@ mod host {
 
     const CAPACITY: u64 = 256 << 20;
 
-    /// A VM of the guest's `role`, on the store at `store`, run to its end in Firecracker; its
+    /// A VM of the guest's `role`, on the cell at `cell_dir`, run to its end in Firecracker; its
     /// vsock's socket `uds`, if any.
     fn run(
         test_setup: &TestSetup,
         root: &Path,
         role: &str,
-        store: &Path,
+        cell_dir: &Path,
         uds: Option<&Path>,
     ) -> anyhow::Result<Firecracker> {
         let mut vm = Vm::new(2, 512)?;
         vm.guest_kernel()?;
         vm.cell(
             "extents",
-            store,
+            cell_dir,
             CAPACITY,
             crate::common::dax_window(crate::common::Window::Large)?,
         )?;
@@ -73,19 +73,19 @@ mod host {
             let root = setup_rootfs(test_setup)?;
             let cladefsd: PathBuf =
                 std::env::var_os("CLADEFSD").context("CLADEFSD not set")?.into();
-            let (store, fork) = (dir.join("store"), dir.join("fork"));
+            let (cell_dir, fork) = (dir.join("store"), dir.join("fork"));
             // Short, as Unix sockets' paths must be.
             let uds =
                 std::env::temp_dir().join(format!("cladefs-fork-{}.vsock", std::process::id()));
             let listener = UnixListener::bind(format!("{}_{PORT}", uds.display()))?;
 
-            let mut source = run(test_setup, &root, "source", &store, Some(&uds))?;
+            let mut source = run(test_setup, &root, "source", &cell_dir, Some(&uds))?;
             let stream = source.accept(&listener)?;
             let mut said = String::new();
             let mut answers = stream.try_clone()?;
             BufReader::new(stream).read_line(&mut said)?;
             anyhow::ensure!(said == "frozen\n", "the guest said {said:?}");
-            crate::common::control(&cladefsd)?.fork_cell(&store, &fork)?;
+            crate::common::control(&cladefsd)?.fork_cell(&cell_dir, &fork)?;
             writeln!(answers, "forked")?;
             // One after the other: they boot from the same root filesystem's image.
             wait(source)?;

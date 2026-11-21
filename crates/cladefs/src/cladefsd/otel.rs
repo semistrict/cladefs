@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: the daemon's spans, exported over OTLP (TASK-258, `docs/tracing.md`): of each request it
-//! serves, and of what serving it costs its store, its commits and their phases, its opens and
+//! cladefs: the daemon's spans, exported over OTLP (TASK-258, `docs/tracing.md`): of each request
+//! it serves, and of what serving it costs its cell, its commits and their phases, its opens and
 //! forks, its page-ins, its uploads and their bucket requests, and its relief of memory
 //! (`bucket_cell::trace`, which makes them).
 //!
@@ -136,8 +136,8 @@ fn sampler() -> Result<Box<dyn ShouldSample>, String> {
 }
 
 /// The sampler of the traces made, unless `OTEL_TRACES_SAMPLER` names one: of the traces requests,
-/// commits and uploads start, one in `OTEL_TRACES_SAMPLER_ARG` (or [`DEFAULT_RATIO`]), and the spans
-/// of each with it.
+/// commits and uploads start, one in `OTEL_TRACES_SAMPLER_ARG` (or [`DEFAULT_RATIO`]), and the
+/// spans of each with it.
 fn default_sampler() -> Result<Option<Sampler>, String> {
     if std::env::var_os("OTEL_TRACES_SAMPLER").is_some_and(|sampler| !sampler.is_empty()) {
         return Ok(None);
@@ -153,7 +153,7 @@ fn default_sampler() -> Result<Option<Sampler>, String> {
     Ok(Some(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(ratio)))))
 }
 
-/// The span of the request `header` heads, a trace's root, served by a connection to the store
+/// The span of the request `header` heads, a trace's root, served by a connection to the cell
 /// of `cell`, if it has one open, a call for the guest request `guest`, if any: `cladefsd.KIND`
 /// (`metrics::span_name`); nothing while spans are off, at the cost of a load.
 pub(super) fn request_span(

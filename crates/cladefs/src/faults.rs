@@ -25,7 +25,7 @@ macro_rules! failpoint {
 }
 pub(crate) use failpoint;
 
-/// The steps of a fork of a store with a writer, in the order it takes them, those that fail: a
+/// The steps of a fork of a cell with a writer, in the order it takes them, those that fail: a
 /// version of its last commit made, then, on the uploader's side, its segment's upload and
 /// acknowledgement, which names the version in the head; then the fork of the version, as a
 /// restore's steps (TASK-508.3); then the version dropped, its child made, which fails the fork no
@@ -52,10 +52,10 @@ pub const FORK_STEPS: [&str; 18] = [
 ];
 
 /// The steps of a restore: a fork of a version, in the order it takes them, on any host holding a
-/// copy of it (doc-7, Versions): its child's record, its reference under the version's origin's cell
-/// (TASK-395.3, after the record since TASK-395.10), a read of the version's, and the record made;
-/// then the child's store. No upload, as it commits nothing; and no look for its child's ID first,
-/// its record's create refusing one taken alike (TASK-449).
+/// copy of it (doc-7, Versions): its child's record, its reference under the version's origin's
+/// cell (TASK-395.3, after the record since TASK-395.10), a read of the version's, and the record
+/// made; then the child's cell. No upload, as it commits nothing; and no look for its child's ID
+/// first, its record's create refusing one taken alike (TASK-449).
 pub const RESTORE_STEPS: [&str; 8] = [
     "upload::forked",
     "version::record",
@@ -68,7 +68,7 @@ pub const RESTORE_STEPS: [&str; 8] = [
 ];
 
 /// The steps of the daemon's around a fork: a guest's request, and a fork the control API asked
-/// for once its store's commits are uploaded; and the fork made, the answer to its guest lost.
+/// for once its cell's commits are uploaded; and the fork made, the answer to its guest lost.
 pub const DAEMON_STEPS: [&str; 3] =
     ["cladefsd::fork", "cladefsd::fork_uploaded", "cladefsd::forked"];
 
@@ -90,8 +90,8 @@ pub fn plan(seed: u64) -> Vec<(&'static str, String)> {
     chosen.into_iter().map(failing).collect()
 }
 
-/// Sets the failpoints the seed `CLADEFS_FAULT_SEED` names ([`plan`]), if it names one, saying which:
-/// so a run that failed says how to fail again.
+/// Sets the failpoints the seed `CLADEFS_FAULT_SEED` names ([`plan`]), if it names one, saying
+/// which: so a run that failed says how to fail again.
 pub fn from_seed() -> Result<(), String> {
     let Ok(seed) = std::env::var("CLADEFS_FAULT_SEED") else { return Ok(()) };
     let seed = seed.parse().map_err(|err| format!("CLADEFS_FAULT_SEED={seed}: {err}"))?;

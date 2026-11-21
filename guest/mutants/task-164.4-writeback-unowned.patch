@@ -2,15 +2,15 @@
 # Copyright 2026 The cladefs Authors.
 #
 # Kernel: sim
-# Killer: scenarios cow_rebind_against_stores
+# Killer: scenarios cow_rebind_against_mapped_writes
 #
 # TASK-164.4, doc-13: writeback takes pages the host hasn't made private, an iomap having dirtied
-# them before their stores: their window pages map the old blocks, which die as the writeback moves
-# them, and read zeros once Fxfs frees them, which the store copies. cow_writeback_before_store;
+# them before their writes: their window pages map the old blocks, which die as the writeback moves
+# them, and read zeros once Fxfs frees them, which the write copies. cow_writeback_before_write;
 # interleave's seed 2802 at 1,000 operations. Since TASK-164.9 the iomap that dirties a page makes
 # it private (cladefs_dax_dirty), and writeback has nothing of it to forget: this has the iomap
-# leave it to the store, as the host would copy at it, which guest/sim's host refuses, the oracle of
-# dirty implies private, at the first store of any cow_ scenario.
+# leave it to the write, as the host would copy at it, which guest/sim's host refuses, the oracle of
+# dirty implies private, at the first write of any cow_ scenario.
 
 --- a/guest/linux/fs/cladefs/dax.c
 +++ b/guest/linux/fs/cladefs/dax.c

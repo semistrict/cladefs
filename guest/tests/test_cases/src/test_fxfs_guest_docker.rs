@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxfs-guest-docker-dax (TASK-50.6): a guest boots on an Fxfs root, a store the host imports from
+//! fxfs-guest-docker-dax (TASK-50.6): a guest boots on an Fxfs root, a cell the host imports from
 //! an image holding Docker's static binaries (CLADEFS_DOCKER_STATIC names their directory) and an
 //! image of a container, a static BusyBox (CLADEFS_BUSYBOX), as an OCI archive; its files map from
 //! the DAX window. containerd imports the image and runs a container of it, its snapshots overlayfs
@@ -12,13 +12,13 @@
 //! fxfs-guest-docker-build-dax (TASK-311) builds, as LangSmith's CI builders do: on 8 vCPUs, with
 //! BuildKit (Docker's buildx plugin, CLADEFS_DOCKER_BUILDX names it), stages in parallel writing
 //! CLADEFS_DOCKER_BUILD_MIB MiB of files between them (default 256), more than the guest's memory
-//! keeps as it builds and exports: the image loaded into Docker's store, saved, and exported as
-//! a tar of its files, CLADEFS_DOCKER_BUILDS times (default 3), each round's stages anew. Two of 17 such
-//! builds oopsed there, then locked up. CLADEFS_DOCKER_BUILD_CPUS, a host CPU list such as `0-3`,
-//! runs the VM on those CPUs alone: its vCPUs then preempt each other, as on a host with no CPU
-//! to spare. Its uploads are some ten times its builds' data (44 GB for ~3.8 GB built, on the test
-//! host): past the default, put the bucket on disk (CLADEFSD_BUCKET=file://DIR/), as the default
-//! bucket, on /dev/shm, fills at 1024 MiB a build (TASK-314).
+//! keeps as it builds and exports: the image loaded into Docker's store, saved, and exported as a
+//! tar of its files, CLADEFS_DOCKER_BUILDS times (default 3), each round's stages anew. Two of 17
+//! such builds oopsed there, then locked up. CLADEFS_DOCKER_BUILD_CPUS, a host CPU list such as
+//! `0-3`, runs the VM on those CPUs alone: its vCPUs then preempt each other, as on a host with no
+//! CPU to spare. Its uploads are some ten times its builds' data (44 GB for ~3.8 GB built, on the
+//! test host): past the default, put the bucket on disk (CLADEFSD_BUCKET=file://DIR/), as the
+//! default bucket, on /dev/shm, fills at 1024 MiB a build (TASK-314).
 
 use macros::{guest, host};
 
@@ -189,7 +189,7 @@ pub(crate) mod host {
         Ok(layer(&entries)?)
     }
 
-    /// The build's store: room for its rounds' files, layers and archives.
+    /// The build's cell: room for its rounds' files, layers and archives.
     const BUILD_CAPACITY: u64 = 16 << 30;
 
     /// The CPUs of a CPU list as the kernel writes one: `0-3,8,10-11`.
@@ -220,14 +220,14 @@ pub(crate) mod host {
             oci_layout(&layout, "cladefs/root:docker", &[root_layer(dir, buildx)?])?;
             // By the daemon, built for release, as cladefsctl imports: this harness's debug build
             // takes minutes over Docker's binaries.
-            let store = dir.join("root");
+            let cell_dir = dir.join("root");
             let capacity = if self.build { BUILD_CAPACITY } else { CAPACITY };
             let cladefsd = std::env::var_os("CLADEFSD").context("CLADEFSD not set")?;
-            control(Path::new(&cladefsd))?.import_image(&store, capacity, &layout, None)?;
+            control(Path::new(&cladefsd))?.import_image(&cell_dir, capacity, &layout, None)?;
 
             let mut vm = if self.build { Vm::new(BUILD_VCPUS, 2048)? } else { Vm::new(2, 2048)? };
             vm.guest_kernel()?;
-            vm.cell("root", &store, capacity, crate::common::dax_window(WINDOW)?)?;
+            vm.cell("root", &cell_dir, capacity, crate::common::dax_window(WINDOW)?)?;
             vm.fxfs_root("root");
             if self.build {
                 for name in [BUILDS, BUILD_MIB] {
@@ -344,8 +344,8 @@ mod guest {
         dockerfile
     }
 
-    /// Builds the image CLADEFS_DOCKER_BUILDS times, through dockerd's BuildKit, and exports it each
-    /// time: loaded into Docker's store, saved, and as a tar of its files; then runs it, which
+    /// Builds the image CLADEFS_DOCKER_BUILDS times, through dockerd's BuildKit, and exports it
+    /// each time: loaded into Docker's store, saved, and as a tar of its files; then runs it, which
     /// says the round it was built in, and lets go of the round's images, archives and cache.
     fn build(logs: &[&str]) {
         let stages = u64::from(BUILD_VCPUS);

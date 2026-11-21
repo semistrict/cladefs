@@ -16,7 +16,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// The alignment of I/O that bypasses the host's page cache: the largest block size a store has.
+/// The alignment of I/O that bypasses the host's page cache: the largest block size a cell has.
 pub(crate) const ALIGNMENT: usize = 4096;
 
 /// A buffer aligned for I/O that bypasses the host's page cache: what reads of extents' files
@@ -83,7 +83,7 @@ pub fn read_whole<F: File>(file: &F) -> io::Result<Vec<u8>> {
 
 /// cladefs: the whole of the framed file `file`, checked: its frame, and each part's stored bytes
 /// against its CRC ([`extent_frame::check`]). What a host sends on as it is, as its uploader does
-/// the segments its store closed, goes so, or not at all (TASK-153.11). Read through the host's
+/// the segments its cell closed, goes so, or not at all (TASK-153.11). Read through the host's
 /// page cache ([`File::read_cached`]), which holds what a framing wrote, its writing back left to
 /// the making durable after (`segments::make_durable`): a read around the cache waited for the
 /// host's disk to write it first, behind a disk VMs share, and read back from the disk what the
@@ -104,7 +104,7 @@ fn parts_of(suffix: &[u8], keys: &dyn Keys) -> Result<Option<Parts>, Error> {
 
 /// The parts of the framed file `file`, and its footer, if it is whole: its trailer, table and
 /// footer pass their checks. Its parts are checked as they are read. cladefs: by a reader holding
-/// `keys`, the store's cell's (TASK-411.3).
+/// `keys`, the cell's (TASK-411.3).
 pub(crate) fn read_frame<F: File>(
     file: &F,
     keys: &dyn Keys,
@@ -129,7 +129,7 @@ pub(crate) fn read_frame<F: File>(
 /// cladefs: the parts of the framed file `file`, if its trailer and table pass their checks: read
 /// from the blocks they are in alone, the last, but for a table that begins before them, and not
 /// its footer, which reading its data needs not (TASK-92.2). Its parts are checked as they are
-/// read. cladefs: by a reader holding `keys`, the store's cell's (TASK-411.3).
+/// read. cladefs: by a reader holding `keys`, the cell's (TASK-411.3).
 pub(crate) fn read_parts<F: File>(file: &F, keys: &dyn Keys) -> Result<Option<Parts>, Error> {
     let size = file.size()?;
     let Some(trailer) = size.checked_sub(TRAILER) else { return Ok(None) };
@@ -162,7 +162,7 @@ impl<F: File> Framed<F> {
     }
 
     /// The framed file `file`, which must be whole, as far as its trailer and table say; `path`
-    /// names it. cladefs: read holding `keys`, the store's cell's (TASK-411.3).
+    /// names it. cladefs: read holding `keys`, the cell's (TASK-411.3).
     pub(crate) fn open(file: F, path: &str, keys: &dyn Keys) -> Result<Self, Error> {
         match read_parts(&file, keys).with_context(|| path.to_owned())? {
             Some(parts) => Ok(Self::new(Arc::new(file), parts)),
@@ -189,9 +189,9 @@ impl<F> Drop for Framed<F> {
     }
 }
 
-/// cladefs: framed files kept open, by their keys: at most `limit` of them, but for those reads use,
-/// the least lately read of the others closing as more open; not all of them, which reads would
-/// open again, each opening anew a file whose parts unpacked no read finds then (TASK-92.2).
+/// cladefs: framed files kept open, by their keys: at most `limit` of them, but for those reads
+/// use, the least lately read of the others closing as more open; not all of them, which reads
+/// would open again, each opening anew a file whose parts unpacked no read finds then (TASK-92.2).
 pub(crate) struct Files<K, F> {
     /// Each file, and when it was last read.
     files: HashMap<K, (Arc<Framed<F>>, u64)>,
@@ -262,7 +262,7 @@ impl<K: Copy + Eq + Hash, F: File> Files<K, F> {
 /// A file of extents' data, open.
 pub(crate) enum Source<F> {
     /// Raw, as written: an open segment's, or an open extent's own. cladefs: encrypted, if the
-    /// store is, which reads decrypt (TASK-411.5).
+    /// cell is, which reads decrypt (TASK-411.5).
     Raw(Arc<RawFile<F>>),
     /// Framed: a closed segment's, or a sealed extent's own.
     Framed(Arc<Framed<F>>),
@@ -334,14 +334,14 @@ fn push_data<F>(parts: &mut Vec<Located<F>>, file: &Arc<RawFile<F>>, offset: u64
     parts.push(Located::Data { file: file.clone(), offset, len });
 }
 
-/// A piece of a range of an extent, located ([`crate::LocalCell::locate`]): bytes of a raw file; bytes
-/// of a part of a framed file, which [`crate::LocalCell::unpack`] checks and unpacks from its stored
-/// bytes; bytes of a part unpacked lately; or zeros, where nothing was written.
+/// A piece of a range of an extent, located ([`crate::LocalCell::locate`]): bytes of a raw file;
+/// bytes of a part of a framed file, which [`crate::LocalCell::unpack`] checks and unpacks from its
+/// stored bytes; bytes of a part unpacked lately; or zeros, where nothing was written.
 pub enum Located<F> {
-    /// cladefs: bytes of a raw file, which the store wrote lately and has not framed: an open
+    /// cladefs: bytes of a raw file, which the cell wrote lately and has not framed: an open
     /// segment's, or an open extent's own. No CRC covers them (TASK-153.11). Reads of them go
     /// through the host's page cache ([`File::read_cached`](crate::File::read_cached)). cladefs: an
-    /// encrypted store's are encrypted, a sector at a time: a reader of the file's stored bytes
+    /// encrypted cell's are encrypted, a sector at a time: a reader of the file's stored bytes
     /// reads [`RawFile::read_range`] and decrypts it ([`RawFile::decrypt`]), as reading the
     /// [`RawFile`] itself does (TASK-411.5).
     Data {
@@ -438,8 +438,8 @@ impl<F> Packed<F> {
 /// How many parts stored compressed this process unpacked.
 static UNPACKS: AtomicU64 = AtomicU64::new(0);
 
-/// cladefs: why a part of a framed file was not read, as the store's reads fail: a part corrupt by
-/// [`Corrupt`] alone, as before parts were encrypted; one encrypted under a key the store doesn't
+/// cladefs: why a part of a framed file was not read, as the cell's reads fail: a part corrupt by
+/// [`Corrupt`] alone, as before parts were encrypted; one encrypted under a key the cell doesn't
 /// hold by `extent_frame::Error::NoKey` (TASK-411.2).
 fn unread(error: extent_frame::Error) -> Error {
     match error {
@@ -456,9 +456,9 @@ pub fn unpacks() -> u64 {
 
 /// The parts of framed files unpacked lately, by their files' openings and their numbers: most
 /// reads of extents are of neighbouring blocks, which a part holds. cladefs: the process's, every
-/// store's reads sharing it ([`unpacked`]), its bytes counted, [`UNPACKED_BYTES`] at most, which a
+/// cell's reads sharing it ([`unpacked`]), its bytes counted, [`UNPACKED_BYTES`] at most, which a
 /// host's governor counts and evicts as it does every cache on a data path; and a file's parts
-/// gone with the file, which no read finds after (TASK-603). Each store kept its own before, 32
+/// gone with the file, which no read finds after (TASK-603). Each cell kept its own before, 32
 /// parts, 32 MiB, for its life, outside any budget, of files long gone.
 ///
 /// Its lock is std's under Shuttle too: no thread waits holding it, nor yields, so no schedule is
@@ -599,7 +599,7 @@ mod tests {
     }
 
     /// cladefs: bytes past a framed file's data are located nowhere in it: an index naming them, as
-    /// one of a file gone and made anew would, is corrupt, which reads fail on, and the store's
+    /// one of a file gone and made anew would, is corrupt, which reads fail on, and the cell's
     /// state is not poisoned by a panic (TASK-79.38).
     #[test]
     fn bytes_past_the_data_are_located_nowhere() {

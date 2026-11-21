@@ -14,14 +14,14 @@ does: a claim no test shows is a design statement, not a result.
 
 *Revised 2026-11-04 (doc-13, TASK-164):* with DAX as without it, writeback is the write path. A DAX
 file's written pages are private pages in host memory, as the page cache's are folios in guest RAM,
-and reach the store only as writeback `WRITE`s them, then commits. The window plays no part in
+and reach the cell only as writeback `WRITE`s them, then commits. The window plays no part in
 recovery.
 
 ## The levels a commit reaches
 
 | Level | What it means | When |
 |---|---|---|
-| Ordered | `COMMIT` returned: cladefsd has it, in order: its data in the store's files, its commit record in cladefsd's memory (`Pending`, `Store::commit_locked`) | as `fsync` returns |
+| Ordered | `COMMIT` returned: cladefsd has it, in order: its data in the cell directory's files, its commit record in cladefsd's memory (`Pending`, `Store::commit_locked`) | as `fsync` returns |
 | Local | the data synced, then the record written and synced (`Store::make_durable`) | within 50 ms at the median (32 ms on main); the crash bound, 1 s, at most (below) |
 | Replicated | of a replicated cell (doc-21): on the disks of f+1 of its configuration's 2f+1 members, the writer's own Local copy one, each synced; or Uploaded | a member's round trip and sync, overlapping the writer's own (TASK-537.3.3) |
 | Uploaded | in the bucket, a contiguous prefix, acknowledged by the head's swap while the writer holds it | the lag (below) |
@@ -43,11 +43,11 @@ So an acknowledged fsync is not yet local: it is ordered, and survives what leav
 *Added 2026-11-12 (TASK-384):* *uploaded* needs *local* of the commits, not of the
 segment's framed file. A segment's upload waits for its commits' records synced in its log (the
 flush), and for its framed file written, not synced: the framed file's sync, and its directory's,
-go on at once with the upload, and the store hears of the acknowledgement only once they are done,
+go on at once with the upload, and the open cell hears of the acknowledgement only once they are done,
 its files leaving then as before. A crash meanwhile keeps every commit: the segment's raw file and
 log, which hold them, stay until its framed file is synced; once the bucket acknowledged it,
 recovery takes its commits as the bucket's (`wal::recover`: a log's commits the start acknowledged
-are the bucket's), and, the store not told yet, the bucket's state, which the store opens on, holds
+are the bucket's), and, the cell not told yet, the bucket's state, which the cell opens on, holds
 them. And the next segment's raw file and log are made ahead of it, under their names, their
 entries synced off the commits: a raw file and log holding no record, past the last segment,
 hold nothing, and an opening removes them (`ending`, TASK-334). An uploaded commit, closing a segment
@@ -55,15 +55,15 @@ and opening the next for its upload, waited for those syncs one after another, e
 commits, some 8 ms over the bucket's round trip on ubu1; 2 ms after
 (`durable_commits_through_the_daemon`, crash test `segments_upload_before_their_framed_files_are_durable`).
 
-*Noted 2026-11-15 (TASK-397):* none of the figures above ran with the store on ubu1's home, which
+*Noted 2026-11-15 (TASK-397):* none of the figures above ran with the cell directory on ubu1's home, which
 is ZFS. The median, the p99 and the crash bound are GCE's (TASK-221), and TASK-384's 8 ms and 2 ms
-are of a store on ubu1's ext4 scratch disk (/mnt/fxdax-scratch) with the bucket on tmpfs. What did
+are of a cell directory on ubu1's ext4 scratch disk (/mnt/fxdax-scratch) with the bucket on tmpfs. What did
 run on ZFS is every measurement scripts/bench-rounds.sh made before 2026-11-15: its results'
-directory, in the home, held each run's stores and its file bucket. Their local commits' sync rates
+directory, in the home, held each run's cell directories and its file bucket. Their local commits' sync rates
 (TASK-371's 3.2/s, 6.1/s, 10.8/s and 15.9/s; docs/measurements' ubu1-loop-baseline-2026-11-11, its
 -governed run and ubu1-unsafe-2026-11-11) are ZFS's syncs' as much as cladefs's, 91 ms a sync there
-against 32.5 ms with the store on ext4 and the bucket in memory, and say nothing of this
-contract's *local*. bench-rounds.sh now keeps a run's stores on ext4 and its bucket on
+against 32.5 ms with the cell directory on ext4 and the bucket in memory, and say nothing of this
+contract's *local*. bench-rounds.sh now keeps a run's cell directories on ext4 and its bucket on
 tmpfs, and refuses another filesystem (scripts/test-e2e-job.sh).
 
 The lag is bounded by commits and bytes (`upload::Options`: 4096 commits, 1 GiB, by default) and in
@@ -79,12 +79,12 @@ it stays within the bound.
 | cladefsd killed | what was ordered within the crash bound (1 s) may go, its records unwritten; a prefix stays, a file whose fsync returned in that time found short or empty at worst. The VM exits 158 | kept | fxfs-guest-crash-dax-daemon-killed (1 of 296 files told of went, GCE r342), fxfs-guest-daemon-lost |
 | Host reboot or kernel crash, disk kept | what was ordered within the crash bound may go; a prefix stays | kept | **nothing: no test loses a host's page cache (TASK-67)** |
 | Host lost, disk with it, with a bucket | the unuploaded lag goes; a prefix stays | kept | the simulation (doc-7, `crashes_anywhere`); **no guest test (TASK-67)** |
-| Host lost, without a bucket | everything goes | everything goes | not a recovery case: a store with no bucket, or whose bucket is a file bucket beside it (an image's, `<image>.bucket`), lives on one disk; cladefsd refuses to start without a bucket (`CLADEFSD_REMOTE`, TASK-45) |
+| Host lost, without a bucket | everything goes | everything goes | not a recovery case: a cell with no bucket, or whose bucket is a file bucket beside it (an image's, `<image>.bucket`), lives on one disk; cladefsd refuses to start without a bucket (`CLADEFSD_REMOTE`, TASK-45) |
 | The bucket failing for good: out of reach, full, refusing its credentials | kept: waits at the lag bound, then fails nothing (below) | kept: waits | extent_bucket's `writes_failing_say_why_until_they_land` (a full disk's `ENOSPC`, logged); cladefs's `commits_wait_at_the_lag_bound_while_the_bucket_is_full`, `commits_wait_at_the_lag_bound` (TASK-314); for minutes, slow, full, then out of service, then answering, VM processes writing all the while: cladefs's `cladefsd::tests::soak` (5 min in CI, 30 each night), `fxfs-guest-bucket-soak` with guests (TASK-330.3) |
 
 Every row keeps ordering: what survives is a prefix of the commits, never a later commit without an
 earlier one. Filesystems recover by replaying their journal to that prefix. Open-but-unnamed files
-are freed as the store is next mounted.
+are freed as the cell is next mounted.
 
 ### A replicated cell's (doc-21, TASK-537.3.6)
 
@@ -128,14 +128,14 @@ as asked. Every row keeps ordering, as above.
 
 ## What a guest sees meanwhile
 
-- **A store through a mapping, or a `write(2)`,** is in the page, not in a commit: a private page of
+- **A write through a mapping, or a `write(2)`,** is in the page, not in a commit: a private page of
   the VM's on DAX, a folio of the guest's page cache without. It is covered by the next `msync` or
-  `fsync` of the file, and may reach the store before that only by writeback (`sync`, the flusher
+  `fsync` of the file, and may reach the cell before that only by writeback (`sync`, the flusher
   at ~30 s, the guest keeping its private pages under `private_max`), each page as writeback copied
   it. Every crash, of the guest, the VMM or cladefsd, loses what wasn't written back: private pages
   go with the device.
 - **A `write(2)` cut short** leaves the bytes it copied, as on ext4: nothing it writes moves.
-- **The device's store failing** fails the store: a commit that failed part way leaves it refusing
+- **The device's cell failing** fails it: a commit that failed part way leaves it refusing
   what follows (`State::failing`), and the guest's writes and fsyncs return errors.
 - **The bucket failing**, for a while or for good, fails nothing (TASK-314; doc-7, decision 3: as
   a hard NFS mount hangs). Every request it fails is retried, from 50 ms apart, doubling, to 5 s,
@@ -155,7 +155,7 @@ as asked. Every row keeps ordering, as above.
   S3's `AccessDenied`), then every 30 s with how many failed, and as it answers again
   (`extent_bucket::object_bucket`, `FAILING_EVERY`); counts them by kind (the stats line's `failed-NAME`,
   GetCounters' `ObjectStorageStats.failures`, the metric `cladefsd_object_storage_failures_total`),
-  beside how long each store's oldest commit has waited for its upload
+  beside how long each open cell's oldest commit has waited for its upload
   (`cladefsd_upload_oldest_pending_seconds`), what an operator alerts on; and warns as a
   commit first waits at the bound. *Added 2026-11-10 (TASK-317):* meanwhile cladefsd's memory does
   not grow with what waits, which is on the host's disk: what it holds of it is what it uploads at

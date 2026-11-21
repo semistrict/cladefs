@@ -3,12 +3,12 @@
 // found in the LICENSE file.
 
 //! Where a SQLite transaction of one row's time goes on a file set (TASK-301): the device's
-//! requests and the window's, each timed as the file set makes them; the store's flushes, phase by
+//! requests and the window's, each timed as the file set makes them; the cell's flushes, phase by
 //! phase (`local_cell::timings`); and, for scale, what an fsync of a block appended to a file
 //! takes on the same disk, and a commit of SQLite's own WAL with `synchronous=FULL`.
 //!
 //! Configurations: `image`, the file set on an in-process image (`cladefs::Storage`); on Linux,
-//! `daemon`, on a store an extent daemon on a thread of this process serves, its files mapped
+//! `daemon`, on a cell an extent daemon on a thread of this process serves, its files mapped
 //! into its window.
 //!
 //! Usage: sqlite-commit-profile [COMMITS], 1,000 by default.
@@ -181,7 +181,7 @@ fn report_requests(commits: usize) {
     }
 }
 
-/// The store's flushes since `before`, phase by phase, a commit's share.
+/// The cell's flushes since `before`, phase by phase, a commit's share.
 fn report_flushes(before: local_cell::Timed<6>, commits: usize) {
     let after = local_cell::timings().flushes;
     let count = after.count - before.count;
@@ -192,7 +192,7 @@ fn report_flushes(before: local_cell::Timed<6>, commits: usize) {
         })
         .collect();
     println!(
-        "  store flushes {:.2} a commit; µs a commit: {}",
+        "  cell flushes {:.2} a commit; µs a commit: {}",
         count as f64 / commits as f64,
         phases.join(", ")
     );
@@ -298,12 +298,11 @@ fn main() {
         let socket = root.join("cladefsd.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
         std::thread::spawn(move || cladefs::cladefsd::serve(listener));
-        let store = cladefs::CellClient::connect(&socket, root.join("daemon"), 64 << 30).unwrap();
-        let store = Arc::new(store);
-        let window = sqlite_cladefs::daemon::DaemonWindow::new(store.clone(), 1 << 30).unwrap();
-        let device = DeviceHolder::new(Timing(DeviceHolder::new(
-            cladefs::DaemonDevice::new(store).unwrap(),
-        )));
+        let cell = cladefs::CellClient::connect(&socket, root.join("daemon"), 64 << 30).unwrap();
+        let cell = Arc::new(cell);
+        let window = sqlite_cladefs::daemon::DaemonWindow::new(cell.clone(), 1 << 30).unwrap();
+        let device =
+            DeviceHolder::new(Timing(DeviceHolder::new(cladefs::DaemonDevice::new(cell).unwrap())));
         let file_set =
             FileSet::open_mapped(device, Box::new(TimingWindow(window)), Options::default())
                 .unwrap();

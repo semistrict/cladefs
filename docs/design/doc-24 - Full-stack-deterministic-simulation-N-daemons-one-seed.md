@@ -9,10 +9,10 @@ updated_date: '2026-11-21 02:17'
 
 FoundationDB runs its whole cluster, every role, in one process under one seed: the network, the
 disks and time are simulated, faults are injected, and a seed replays exactly. cladefs has that
-for its storage layer alone (`local_cell::sim`, TASK-88, TASK-680): the stores, their uploaders,
+for its storage layer alone (`local_cell::sim`, TASK-88, TASK-680): the open cells, their uploaders,
 the bucket protocol and, since TASK-680, replicated cells and their members, but not cladefsd. The
 daemon's own logic (its control API, its cell table and placements, its peers over gRPC, its page
-cache, its pools and governors, the restarts that reopen its stores) runs only in hand-written
+cache, its pools and governors, the restarts that reopen its cells) runs only in hand-written
 tests and on ubu1's end-to-end runs, which find what they look for and nothing else. TASK-678, a
 commit told Replicated lost on a retake, was found by reading the code against the spec; the
 replicated simulation then found two more defects in a night (TASK-680's base gap, TASK-683) and
@@ -102,11 +102,11 @@ that a simulated host's `/z/` pages are its own.
 
 ## The guest and the checker
 
-A simulated guest per open store: writes extents, commits at each level (Ordered, Local, and its
+A simulated guest per open cell: writes extents, commits at each level (Ordered, Local, and its
 cell's fsync level: Replicated or Uploaded), frees, cuts versions, forks; as `local_cell::sim`'s
 guests do, but through the daemon's request handling, so that its pools, its per-connection limits
 and its cell table run. The checker is `local_cell::sim::World`'s, lifted to the daemon: what each
-guest was told per level against the bucket and against the store of the writer that serves after
+guest was told per level against the bucket and against the cell of the writer that serves after
 every take; and doc-12's rows: a daemon killed with its disk keeps what was Local; a host lost,
 what was Replicated; every host lost, what was Uploaded.
 
@@ -128,7 +128,7 @@ what was Replicated; every host lost, what was Uploaded.
 
 ## The disk as built (TASK-685.4, 2026-11-20)
 
-Not `Dir` threaded through every caller, which would have made the store roots, replica roots, the
+Not `Dir` threaded through every caller, which would have made the cell directory roots, replica roots, the
 ephemeral journal, version directories and the part cache take a root `Dir` each, and given `Dir`
 `exists`, `remove_dir`, identities and holes: a seam beneath, path-based, `host_fs`.
 
@@ -139,7 +139,7 @@ ephemeral journal, version directories and the part cache take a root `Dir` each
   pays nothing.
 - **Under madsim, each simulated host's disk is in memory**, of the same calls: a tree of inodes;
   files' bytes durable as of their last sync, directories' entries of files as of theirs, and
-  directories once made (`local_cell::MemDir`'s model, which the stores' own crash tests are
+  directories once made (`local_cell::MemDir`'s model, which the cells' own crash tests are
   written to, and ext4's with the next fsync); what changed since kept in order. A host started
   again finds its disk crashed at its first call: what was durable, each change since kept or not
   as the seed says, in order, each block of each write whole, not at all, garbage, or torn. A host's
@@ -177,7 +177,7 @@ ephemeral journal, version directories and the part cache take a root `Dir` each
 - **What stops cladefsd booting as a node is at run time, not at build time**: its `main` reads
   its configuration from the environment and the process's statics, spawns threads, parks the
   main thread, binds Unix sockets (madsim's are `todo!()`); about 100 thread spawns, about 140
-  statics; its page store (memfds, userfaultfd) is Linux's. So a daemon core that boots from a
+  statics; its page memory (memfds, userfaultfd) is Linux's. So a daemon core that boots from a
   configuration value, as an async task, comes first.
 - Its dependencies are MIT, Apache-2.0, or both (madsim, madsim-macros, madsim-tokio,
   madsim-tonic: Apache-2.0).
@@ -218,7 +218,7 @@ There are also about 105 `block_on` calls outside tests:
 madsim runs one thread. A task that blocks on a condvar stops the whole simulation, because the
 task that would wake it never runs. And madsim has no `block_on` at all. So turning threads into
 tasks is not enough: every wait on these paths has to become an `.await`, which means the request
-path becomes async from the pool down to the store's durability and upload waits. That is a
+path becomes async from the pool down to the cell's durability and upload waits. That is a
 larger change than step 4 assumed. The ways forward:
 
 1. **Make the daemon async down to its waits** (madsim as planned). This is the biggest change.
@@ -245,7 +245,7 @@ paths. They group by the primitive they share, so one change moves a group:
 
 - uploader progress waits, all through `upload::Shared::wait`;
 - bucket calls through `upload::block_on`, about 12 functions;
-- the store's open and close handshake with its uploader task (`start.recv()`, and
+- the cell's open and close handshake with its uploader task (`start.recv()`, and
   `Uploader::drop`'s `stopped.recv()`), which has no async form today;
 - the cell table's blocking holds;
 - the read path (the pager's `bring_in`, the fetcher);
@@ -286,11 +286,11 @@ converts a path end to end, smallest first:
    serving without a thread wake.
 5. The read path async: the fetch and `bring_in` awaited, READ and MAP as futures, the boot
    profile's replay and writer as tasks.
-6. The store's open and close with its uploader: `upload::open_async`, `Uploader::stop`, and
+6. The cell's open and close with its uploader: `upload::open_async`, `Uploader::stop`, and
    `OpenCell`'s and `host_cell`'s open, create, take and close in async forms.
 7. The control handlers on the async forms: `blocking()` keeps only disk work.
 8. VM OPEN (writer and follower), bases, VERSION, DROP_VERSION and FORK as futures.
-9. An explicit async close for every store the daemon owns, and under madsim an assert in
+9. An explicit async close for every cell the daemon has open, and under madsim an assert in
    `Drop` that it was closed. The ordering rules of TASK-54, TASK-79.34 and TASK-129 rest on
    today's close in `Drop`.
 10. Replication async: `Members` and `MemberLink` returning futures, members served by tasks,
@@ -299,7 +299,7 @@ converts a path end to end, smallest first:
     and `cells::blocking` as tasks, or inline.
 12. The peers server, sweep, drain and control as tasks.
 
-The hardest are 9 (a store's close can't be awaited in `Drop`, and its last reference goes
+The hardest are 9 (a cell's close can't be awaited in `Drop`, and its last reference goes
 wherever the daemon drops it), 5 (`OpenCell::read` nests the pager, the fetcher and the bases'
 open under a synchronous call that DAX faults share) and 10.
 
@@ -326,7 +326,7 @@ Before the decision, the steps that served any of the three went on:
    `main` did.
 3. **Per-node statics** (`node_local!`), crate by crate.
 4. **Threads and runtimes** through one seam (tasks under madsim), `blocking()` inline.
-5. **Disk through `host_fs`** everywhere cladefsd writes (its stores, replica directories, the part
+5. **Disk through `host_fs`** everywhere cladefsd writes (its cell directories, replica directories, the part
    cache, its state files): see "The disk as built" below.
 6. **The in-process bucket** with faults, and the control API on TCP under madsim.
 7. **The simulated guest and the checker**, one profile (attrition alone), seed replay checked.

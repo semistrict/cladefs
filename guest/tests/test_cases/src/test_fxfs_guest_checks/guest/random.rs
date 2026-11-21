@@ -14,17 +14,17 @@ pub(crate) fn seed() -> u64 {
 }
 
 /// cladefs: a file's random operations, as fsx makes them (TASK-44.15): write(2)s, appends,
-/// stores through a mapping, reads, truncations, holes punched and fsyncs, at random offsets
+/// writes through a mapping, reads, truncations, holes punched and fsyncs, at random offsets
 /// and lengths, a script made from a seed (CLADEFS_RANDOM_OPS_SEED, which the host picks anew
 /// each run, or 1) and run by `script_run` (TASK-149.2), each read, and every 256th operation
 /// and the last the whole file, through read(2) and the mapping, checked against what a model
 /// of its bytes says it holds. A mismatch names the seed, the operation and those before it,
 /// and the host shrinks the script. The file stays, and the model beside it, which the host
-/// compares it with, as its Fxfs reads them from the store (TASK-119.2), and the operations
+/// compares it with, as its Fxfs reads them from the cell (TASK-119.2), and the operations
 /// made, its history (TASK-119.15). cladefs: the file reaches across two 2 MiB chunks, the
 /// offsets drawn near a chunk's end, a page's, and the file's as often as anywhere, and one
 /// mapping of it is kept across every operation, seals and truncations among them, which its
-/// stores and reads go through (TASK-119.15).
+/// writes and reads go through (TASK-119.15).
 pub(super) fn test_random_ops() {
     let seed = seed();
     let name = path(RANDOM_OPS);
@@ -48,16 +48,16 @@ pub(super) fn test_random_ops() {
 }
 
 /// cladefs: several threads' random operations on several small files at once (TASK-119.5):
-/// write(2)s, stores through mappings kept across them, reads, fdatasyncs and fsyncs, msyncs,
+/// write(2)s, writes through mappings kept across them, reads, fdatasyncs and fsyncs, msyncs,
 /// while another thread fsyncs another file and syncs the filesystem, writing back and sealing
-/// again and again under one another's stores.
+/// again and again under one another's writes.
 /// The threads share every page, each byte owned by one, which checks it as
 /// its own model says after each of its writes, and now and then, through read(2) and its
 /// mapping: whatever the others do to the page, a byte holds what its owner left there. Between
 /// phases, the threads gone, a file is truncated and extended again, has a hole punched, or is
 /// evicted, and every file checked whole. A mismatch names the seed, the phase, the thread, the
 /// operation and those before it. The files stay, with their models, which the host compares
-/// them with, as its Fxfs reads them from the store.
+/// them with, as its Fxfs reads them from the cell.
 pub(super) fn test_torture() {
     use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
     const PAGE: usize = 4096;
@@ -211,7 +211,7 @@ pub(super) fn test_torture() {
 }
 
 /// cladefs: a phase of test_torture's thread `thread`: `ops` random operations on the bytes it
-/// owns (`owned`) of the files `names`, as `models` has them, through write(2), and stores
+/// owns (`owned`) of the files `names`, as `models` has them, through write(2), and writes
 /// through mappings of the files it keeps for the phase, checked through both; and fdatasyncs,
 /// fsyncs and msyncs. `log` keeps what it did, for a mismatch to say.
 #[allow(clippy::too_many_arguments)]
@@ -290,10 +290,10 @@ fn torture_phase(
                 (0..len).for_each(|i| models[n][at + i].store(data[i], Ordering::Relaxed));
                 check(log, n, at, len);
             }
-            // Stores through the mapping.
+            // Writes through the mapping.
             5..=8 => {
                 let data = rng.bytes(len);
-                log.push(format!("store {len:#x} at {at:#x} of file {n}"));
+                log.push(format!("mapped write {len:#x} at {at:#x} of file {n}"));
                 for (i, &byte) in data.iter().enumerate() {
                     unsafe { ((maps[n] + at + i) as *mut u8).write_volatile(byte) };
                     models[n][at + i].store(byte, Ordering::Relaxed);

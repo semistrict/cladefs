@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: a store's directory whose every change is counted in its footprint as it is made
-//! ([`crate::footprint`], backlog doc-22, TASK-539.4): what every directory a store opens is
-//! outermost, over its page cache ([`crate::CachedDir`]), the host's ([`crate::HostDir`]) and one in
-//! memory ([`crate::MemDir`]) alike, so that no store, a test's no more than a host's, runs around
-//! it. A write is counted as the page cache takes it; what changes a directory, as it is changed,
-//! once the directory under it has changed it.
+//! cladefs: a cell directory whose every change is counted in its footprint as it is made
+//! ([`crate::footprint`], backlog doc-22, TASK-539.4): what every directory a cell opens is
+//! outermost, over its page cache ([`crate::CachedDir`]), the host's ([`crate::HostDir`]) and one
+//! in memory ([`crate::MemDir`]) alike, so that no cell, a test's no more than a host's, runs
+//! around it. A write is counted as the page cache takes it; what changes a directory, as it is
+//! changed, once the directory under it has changed it.
 
 use crate::cached::{CachedDir, CachedFile};
 use crate::dir::{Dir, DirFile, File};
@@ -30,7 +30,7 @@ struct Shared<D: Dir> {
     footprint: Arc<Footprint>,
 }
 
-/// Its clones are the same opening of its store.
+/// Its clones are the same opening of its cell.
 impl<D: Dir> Clone for Metered<D> {
     fn clone(&self) -> Self {
         Self { shared: self.shared.clone() }
@@ -44,7 +44,7 @@ impl<D: Dir> Drop for Shared<D> {
 }
 
 impl<D: Dir> Metered<D> {
-    /// `dir`, its changes counted in `footprint`, its store's: listed, if no other opening of it
+    /// `dir`, its changes counted in `footprint`, its cell's: listed, if no other opening of it
     /// is alive, and counted as listed ([`Footprint::attach`]).
     pub fn over(dir: D, footprint: Arc<Footprint>) -> io::Result<Self> {
         footprint.attach(&dir)?;
@@ -56,7 +56,7 @@ impl<D: Dir> Metered<D> {
         &self.shared.dir
     }
 
-    /// Its store's footprint.
+    /// Its cell's footprint.
     pub fn footprint(&self) -> &Arc<Footprint> {
         &self.shared.footprint
     }
@@ -157,7 +157,7 @@ impl<D: Dir> Dir for Metered<D> {
         self.shared.dir.unclaim()
     }
 
-    /// Taken, it goes from the store, as a removal takes it.
+    /// Taken, it goes from the cell, as a removal takes it.
     fn give(&self, path: &str, to: &mut dyn FnMut(&Path) -> io::Result<bool>) -> io::Result<bool> {
         let given = self.shared.dir.give(path, to)?;
         if given {

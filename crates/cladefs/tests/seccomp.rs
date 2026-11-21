@@ -194,8 +194,8 @@ fn supervise(thread: Arc<str>, listener: OwnedFd) {
 /// A thread to start: its name, what it runs, and where its start is told of.
 type Start = (String, Box<dyn FnOnce() + Send>, std::sync::mpsc::SyncSender<std::io::Result<()>>);
 
-/// cladefs's thread spawner, as Firecracker's starts every thread cladefs starts in its process under
-/// its VMM thread's filter (`confine_extent_threads`): from a thread of its own, as a thread
+/// cladefs's thread spawner, as Firecracker's starts every thread cladefs starts in its process
+/// under its VMM thread's filter (`confine_extent_threads`): from a thread of its own, as a thread
 /// confined would start them, whose filter they would inherit, and its supervisor's listener, which
 /// a thread's filters have one of; each confined with the program as it starts.
 struct Confining(Mutex<std::sync::mpsc::Sender<Start>>);
@@ -282,8 +282,9 @@ fn allows_any(kind: &str, syscall: &str) -> bool {
     (rules.iter()).any(|rule| rule["syscall"] == syscall && rule.get("args").is_none())
 }
 
-/// What was refused that Firecracker's filters would refuse Firecracker ([`in_production`]), by thread, call and arguments, each with how many
-/// times: refused of the thread kind its name says (`fc_vcpu` for the vCPUs', `vmm` for the rest).
+/// What was refused that Firecracker's filters would refuse Firecracker ([`in_production`]), by
+/// thread, call and arguments, each with how many times: refused of the thread kind its name says
+/// (`fc_vcpu` for the vCPUs', `vmm` for the rest).
 fn refusals() -> Vec<String> {
     let refused = REFUSED.lock().unwrap();
     let mut told = std::collections::BTreeMap::<String, usize>::new();
@@ -312,7 +313,7 @@ fn refusals() -> Vec<String> {
 
 /// A byte of a pipe's read into the page at `addr`, as the kernel writes it, faulting for writing
 /// as KVM does for a vCPU: `Err` with the errno it failed with.
-fn kernel_store(addr: usize) -> Result<(), i32> {
+fn kernel_write(addr: usize) -> Result<(), i32> {
     let mut pipe = [0; 2];
     // SAFETY: Makes a pipe, writes a byte to it, and reads one into `addr`, closing it after.
     unsafe {
@@ -326,8 +327,8 @@ fn kernel_store(addr: usize) -> Result<(), i32> {
     }
 }
 
-/// Runs `work` on a thread cladefs starts, under the VMM thread's filter, as Firecracker's device and
-/// its workers make their requests of the store.
+/// Runs `work` on a thread cladefs starts, under the VMM thread's filter, as Firecracker's device
+/// and its workers make their requests of their cell.
 fn on_vmm<T: Send + 'static>(name: &str, work: impl FnOnce() -> T + Send) -> T {
     cladefs::thread::run(name, work).unwrap()
 }
@@ -335,11 +336,11 @@ fn on_vmm<T: Send + 'static>(name: &str, work: impl FnOnce() -> T + Send) -> T {
 /// The VM process's side of a copy-on-write window, every thread of it under Firecracker's
 /// filters: its client's, receiving the daemon's changes of the window, and its fault thread, as
 /// cladefs starts them; the device's, making the window and its requests; a vCPU's, its calls into
-/// cladefs. The window is made, sealed extents and zeros mapped, and faulted in; the guest's stores
+/// cladefs. The window is made, sealed extents and zeros mapped, and faulted in; the guest's writes
 /// make pages private, of a sealed extent's page, its bytes read from the daemon's memory, and of
 /// zeros; a worker's write of a page is resolved as a load and the page made read-only, until a
 /// vCPU's access fails; a `PRIVATE` makes a page private at once, an `UNMAP` frees one, and the
-/// window lets go of its memory as the store goes. The filters refuse none of their calls.
+/// window lets go of its memory as its client goes. The filters refuse none of their calls.
 #[test]
 fn copy_on_write_windows_run_under_firecrackers_seccomp_filters() {
     common::host();
@@ -353,44 +354,44 @@ fn copy_on_write_windows_run_under_firecrackers_seccomp_filters() {
     cladefs::thread::set_spawner(Confining::new(filter("vmm")));
     // As Firecracker makes its device, before its VMM thread is confined, the client's thread
     // confined as it starts.
-    let store = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let client = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
     let memory = common::memory(4);
     let base = memory.as_ptr() as usize;
     on_vmm("fc_extent_activate", || {
         let memory = std::ptr::NonNull::new(base as *mut u8).unwrap();
-        // SAFETY: The memory is the test's, and outlives the store.
-        unsafe { store.create_dax_window_in_host_memory(memory, 4 * ps as u64, None, 3) }
+        // SAFETY: The memory is the test's, and outlives the client.
+        unsafe { client.create_dax_window_in_host_memory(memory, 4 * ps as u64, None, 3) }
     })
     .unwrap();
-    assert!(store.copies_on_write());
-    let extent = ExtentId { cell: store.cell(), sequence: 1 };
+    assert!(client.copies_on_write());
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
     let bytes = common::pattern(1);
     on_vmm("fc_extent_q0", || {
-        store.write(extent, 0, &[VolatileSlice::from(&bytes[..ps])]).unwrap();
-        store.commit(None).unwrap();
+        client.write(extent, 0, &[VolatileSlice::from(&bytes[..ps])]).unwrap();
+        client.commit(None).unwrap();
         for page in [0, 1, 3] {
-            store.map(extent, 0, ps as u64, (page * ps) as u64).unwrap();
+            client.map(extent, 0, ps as u64, (page * ps) as u64).unwrap();
         }
-        futures::executor::block_on(store.map_zeros_async(2 * ps as u64, ps as u64)).unwrap();
+        futures::executor::block_on(client.map_zeros_async(2 * ps as u64, ps as u64)).unwrap();
     });
     // The window's bytes from `at` to `end`, as the guest reads them.
     let window = |at: usize, end: usize| -> Vec<u8> {
-        // SAFETY: The window's memory, whose faults the store serves.
+        // SAFETY: The window's memory, whose faults its cell serves.
         (at..end).map(|at| unsafe { ((base + at) as *const u8).read_volatile() }).collect()
     };
 
     // This thread is the guest's, a vCPU's.
     cladefs::guest_thread_started();
     assert_eq!(window(0, 2 * ps), [&bytes[..ps], &bytes[..ps]].concat());
-    // A store to a sealed extent's page, which the window maps, copies it; to zeros, copies none.
-    // SAFETY: The window's memory, as above, a store of the guest's.
+    // A write to a sealed extent's page, which the window maps, copies it; to zeros, copies none.
+    // SAFETY: The window's memory, as above, a write of the guest's.
     unsafe { (base as *mut u8).write_volatile(0xee) };
     // SAFETY: As above.
     unsafe { ((base + 2 * ps) as *mut u8).write_volatile(0xdd) };
     assert_eq!(window(0, ps), [&[0xee], &bytes[1..ps]].concat());
     assert_eq!(window(2 * ps, 3 * ps), [&[0xdd][..], &vec![0; ps - 1]].concat());
     // A worker's write of a page not mapped here, KVM's, is resolved as a load, and fails.
-    let worker = std::thread::spawn(move || kernel_store(base + 3 * ps));
+    let worker = std::thread::spawn(move || kernel_write(base + 3 * ps));
     assert_eq!(worker.join().unwrap(), Err(libc::EFAULT));
     // The vCPU's access fails: it says so, under its own filter, which lifts the worker's
     // restriction, and tells of the windows.
@@ -402,20 +403,20 @@ fn copy_on_write_windows_run_under_firecrackers_seccomp_filters() {
     });
     assert!(!vcpu.unwrap().join().unwrap().is_empty());
     // Retried, as Firecracker retries the vCPU, until the restriction is lifted.
-    while let Err(errno) = kernel_store(base + 3 * ps) {
+    while let Err(errno) = kernel_write(base + 3 * ps) {
         assert_eq!(errno, libc::EFAULT);
         std::thread::yield_now();
     }
     assert_eq!(window(3 * ps, 3 * ps + 2), [0x77, bytes[1]]);
 
     on_vmm("fc_extent_q0", || {
-        store.unmap(0, ps as u64).unwrap();
-        store.make_private(ps as u64, ps as u64).unwrap();
+        client.unmap(0, ps as u64).unwrap();
+        client.make_private(ps as u64, ps as u64).unwrap();
     });
     assert_eq!(window(ps, 2 * ps), bytes[..ps]);
-    on_vmm("fc_extent_q0", || store.unmap(0, 4 * ps as u64).unwrap());
+    on_vmm("fc_extent_q0", || client.unmap(0, 4 * ps as u64).unwrap());
     // The device goes, and the window lets go of its memory.
-    on_vmm("fc_extent_reset", move || drop(store));
+    on_vmm("fc_extent_reset", move || drop(client));
 
     // Once every thread confined is gone, so that each call it made is recorded.
     let supervisors = std::mem::take(&mut *SUPERVISORS.lock().unwrap());

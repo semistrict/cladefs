@@ -1,5 +1,5 @@
-# A panic holding a lock shared beyond one store aborts nothing: it unwinds, the store whose request
-# it served halted alone, and the lock, the process's cache of extents, a window's, a store's state,
+# A panic holding a lock shared beyond one cell aborts nothing: it unwinds, the cell whose request
+# it served halted alone, and the lock, the process's cache of extents, a window's, a cell's state,
 # is found poisoned by every user after, or what it guards half changed (TASK-149.24).
 # Kind: shared lock poisoned
 # Killer: cladefsd::tests::a_panic_holding_a_shared_lock_stops_the_daemon
@@ -13,4 +13,4 @@
 +            if false && !held.is_empty() {
                  let locks = held.join(", ");
                  log::error!(
-                     "cladefs: {ABORTING} ({locks}), shared beyond one store: aborting, as no halt \
+                     "cladefs: {ABORTING} ({locks}), shared beyond one cell: aborting, as no halt \

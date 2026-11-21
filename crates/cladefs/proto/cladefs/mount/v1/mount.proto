@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// The control API of a host FUSE mount of many stores (TASK-302), of tenants' cells (TASK-364):
+// The control API of a host FUSE mount of many cells (TASK-302), of tenants' cells (TASK-364):
 // cladefsd, with CLADEFSD_MOUNT naming a MOUNTPOINT and CLADEFSD_MOUNT_STORES a DIR, serves one FUSE
-// mount, however many stores: one OS mount, not one per store (TASK-475.2). A cell has one kind
-// (doc-20). Attach takes a cell of the daemon's bucket, as its holder, into a store at
+// mount, however many cells: one OS mount, not one per cell (TASK-475.2). A cell has one kind
+// (doc-20). Attach takes a cell of the daemon's bucket, as its holder, into a cell directory at
 // DIR/TENANT/CELL, its lease with it, and shows an Fxfs cell's filesystem at
 // MOUNTPOINT/TENANT/CELL, TENANT and CELL in base 32, 13 digits (Crockford's, lower case,
 // zero-padded), as the bucket's keys have them; Detach writes it back, so that another host may
@@ -24,8 +24,8 @@
 // RESOURCE_EXHAUSTED, ETIMEDOUT DEADLINE_EXCEEDED, EBUSY, ESTALE, ENOTSUP and EROFS
 // FAILED_PRECONDITION, EIO and others INTERNAL.
 //
-// Calls block for as long as their work takes: an attach while its stores recover, a detach until
-// the kernel lets the stores go. A caller bounds them with deadlines; one that gives up does not
+// Calls block for as long as their work takes: an attach while its cells recover, a detach until
+// the kernel lets the cells go. A caller bounds them with deadlines; one that gives up does not
 // stop the work, which completes, or fails, on its own.
 //
 // Compatibility: cells changed v1 outright (TASK-364: formats break, no caller is kept), and again
@@ -38,9 +38,9 @@ package cladefs.mount.v1;
 // Its Go package, go/mount/v1, generated from this file (go/generate.sh).
 option go_package = "github.com/semistrict/cladefs/go/mount/v1;mountv1";
 
-// The control API of a FUSE mount of many stores.
+// The control API of a FUSE mount of many cells.
 service Mount {
-  // Attaches a cell of the mount's bucket: takes it, as its holder, into a store at
+  // Attaches a cell of the mount's bucket: takes it, as its holder, into a cell directory at
   // DIR/TENANT/CELL, opened again where one is, its lease with it, an Fxfs cell's filesystem shown
   // at MOUNTPOINT/TENANT/CELL. A cell of 0 is a new Fxfs one, its filesystem made empty, of
   // `capacity` bytes, its root directory the mounting user's (INVALID_ARGUMENT without
@@ -48,7 +48,7 @@ service Mount {
   // NOT_FOUND if the bucket has no such cell; ESTALE if a later placement holds it. A cell attached
   // part way is detached at once, and the call fails.
   rpc Attach(AttachRequest) returns (AttachResponse);
-  // Detaches a cell: it goes from the mount at once; its store is unmounted, what is
+  // Detaches a cell: it goes from the mount at once; its cell is unmounted, what is
   // dirty written back, once the kernel has let go of every file and directory of it, as once
   // whatever has one open, or as its current directory, lets it go: the call returns then.
   // NOT_FOUND if the cell is not attached; EBUSY if it is being attached or detached. DIR stays,
@@ -67,7 +67,7 @@ message AttachRequest {
   uint64 cell = 2;
   // The fencing token of the placement to take the cell at, if any: as CreateCell's.
   optional uint64 token = 3;
-  // A new cell's: the most bytes its store holds, as VMs' disks hold. Ignored for a cell named.
+  // A new cell's: the most bytes it holds, as VMs' disks hold. Ignored for a cell named.
   uint64 capacity = 4;
 }
 
@@ -86,7 +86,7 @@ message DetachRequest {
   uint64 tenant = 1;
   // Its cell, attached.
   uint64 cell = 2;
-  // Unmount its store at once, without waiting for the kernel to let go of it: files and
+  // Unmount its cell at once, without waiting for the kernel to let go of it: files and
   // directories of it still open fail with ENOTCONN from then on.
   bool force = 3;
 }

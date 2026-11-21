@@ -42,7 +42,7 @@ pub struct Storage {
 #[derive(Clone)]
 pub(crate) enum Kind {
     /// An image: its directory, the device's writes and frees, which forking the image pauses,
-    /// and its store, kept in its bucket, which forking the image forks. Its device's I/O bypasses
+    /// and its cell, kept in its bucket, which forking the image forks. Its device's I/O bypasses
     /// the host's page cache, or the image opens not at all (TASK-433.6).
     Image {
         dir: PathBuf,
@@ -65,7 +65,7 @@ impl Storage {
     /// The size of the blocks storage is read and written in. Storage sizes are multiples of it.
     pub const BLOCK_SIZE: u32 = host_cell::BLOCK_SIZE;
 
-    /// The image at `path`: a directory holding an extent store (see `image`), a fork's or not,
+    /// The image at `path`: a cell directory (see `image`), a fork's or not,
     /// its cell kept in the bucket its description names (see `kept`).
     ///
     /// Its I/O bypasses the host's page cache where the host filesystem allows, as the in-process
@@ -118,11 +118,11 @@ impl Storage {
         token: Option<u64>,
     ) -> Result<Self, Error> {
         let (path, bucket) = (path.as_path(), bucket.as_str());
-        // What a making that died part way left is no store: its directory goes, not the cell,
-        // which may be another's, as the extent daemon's `CreateCell` has it (TASK-196).
+        // What a making that died part way left is no cell: its directory goes, not the bucket's
+        // cell, which may be another's, as the extent daemon's `CreateCell` has it (TASK-196).
         if host_cell::unmade(path) {
-            local_cell::remove_store_dir(path)
-                .with_context(|| format!("removing {}, a store unmade", path.display()))
+            local_cell::remove_cell_dir(path)
+                .with_context(|| format!("removing {}, a cell directory unmade", path.display()))
                 .map_err(Error::new)?;
         }
         if !path.exists() {
@@ -133,7 +133,7 @@ impl Storage {
             let making = host_cell::create_unmade(path, capacity, of, kept.0, kept.1, kept.2);
             let opened = making.await?;
             opened.made().map_err(Error::new)?;
-            // Closed before it is placed, as `CreateCell` places a store, and opened again.
+            // Closed before it is placed, as `CreateCell` places a cell, and opened again.
             opened.close().await;
             if let Some(token) = token {
                 local_cell::place_host(path, token, false).map_err(Error::new)?;
@@ -155,14 +155,14 @@ impl Storage {
 
     /// cladefs: a new image at `path`, as [`Storage::create`] makes it, unmade until its maker says
     /// it is whole ([`Storage::made`]): what opens it before, or after its maker died part way,
-    /// finds no store (TASK-196). As an import makes one, filling it first.
+    /// finds no cell (TASK-196). As an import makes one, filling it first.
     pub async fn create_unmade(path: impl AsRef<Path>, size: u64) -> Result<Self, Error> {
         Self::make(path.as_ref(), (size, host_cell::DEFAULT_TENANT), false, Self::keeping()?).await
     }
 
     /// cladefs: a new image at `path`, as [`Storage::create_unmade`] makes it, the one cell of a
     /// new cell of `tenant`'s (TASK-364), its cell kept as `keeping` says: as the extent daemon's
-    /// stores keep theirs, with the host's cache of the bucket's objects, for an import the daemon
+    /// cells keep theirs, with the host's cache of the bucket's objects, for an import the daemon
     /// makes (TASK-237).
     pub(crate) async fn create_unmade_keeping(
         path: impl AsRef<Path>,
@@ -183,8 +183,8 @@ impl Storage {
         local_cell::made_host(path.as_ref()).map_err(Error::new)
     }
 
-    /// cladefs: whether `path` is what a making of an image, or of a store, left unmade, its maker
-    /// dying part way: no store, which deleting finishes (TASK-196).
+    /// cladefs: whether `path` is what a making of an image, or of a cell, left unmade, its maker
+    /// dying part way: no cell, which deleting finishes (TASK-196).
     pub fn is_unmade(path: impl AsRef<Path>) -> bool {
         host_cell::unmade(path.as_ref())
     }
@@ -243,8 +243,8 @@ impl Storage {
     /// extents rather than copies, read from the bucket (TASK-165.7). `path` is the fork's own
     /// directory. Memory cannot be forked.
     ///
-    /// The storage must not be mounted, which it is not while it is the caller's. To fork a
-    /// mounted filesystem's, see [`Filesystem::fork_storage_to`](crate::Filesystem::fork_storage_to).
+    /// The storage must not be mounted, which it is not while it is the caller's. To fork a mounted
+    /// filesystem's, see [`Filesystem::fork_storage_to`](crate::Filesystem::fork_storage_to).
     pub async fn fork_to(&self, path: impl AsRef<Path>) -> Result<Storage, Error> {
         let Kind::Image { image, writes, .. } = &self.kind else {
             return Err(Error::msg("memory cannot be forked to an image"));
@@ -263,7 +263,7 @@ impl Storage {
     }
 
     /// cladefs: lets go of the storage, which nothing mounts: an image's uploader stopped first,
-    /// its store's open segment closed and what it made durable uploaded, holding no thread
+    /// its cell's open segment closed and what it made durable uploaded, holding no thread
     /// meanwhile, where dropping it waits on the dropping thread (board 5614).
     pub async fn close(self) {
         if let Kind::Image { image, .. } = &self.kind {
@@ -340,10 +340,11 @@ impl fmt::Debug for Storage {
     }
 }
 
-/// Forks `image` to a new image at `path`, a fork of its store, and of its cell in its bucket,
-/// with a cell of its own ([`KeptImage::fork`]), on a thread of its own, as forking commits the
-/// store durably and waits for the fork's upload. The fork pauses `writes`, the device's writes
-/// and frees, until the fork's commit is made, so that it is the image as it was at one time.
+/// Forks `image` to a new image at `path`, a fork of its cell directory, and of its cell in its
+/// bucket, with a cell of its own ([`KeptImage::fork`]), on a thread of its own, as forking commits
+/// the cell directory durably and waits for the fork's upload. The fork pauses `writes`, the
+/// device's writes and frees, until the fork's commit is made, so that it is the image as it was at
+/// one time.
 pub(crate) async fn fork_image(
     image: Arc<KeptImage>,
     writes: Arc<WriteGate>,
@@ -360,7 +361,7 @@ pub(crate) async fn fork_image(
 }
 
 /// cladefs: `work`, a task of the bucket runtime's ([`local_cell::upload::bucket_runtime`]): what
-/// makes, opens, forks and deletes images awaits the store's timers and the bucket's
+/// makes, opens, forks and deletes images awaits the cell's timers and the bucket's
 /// connections, which that runtime drives, whatever executor awaits it, FUSE's or a test's; as
 /// sync calls of theirs did, waiting on it (board 5614).
 async fn on_bucket_runtime<T: Send + 'static>(

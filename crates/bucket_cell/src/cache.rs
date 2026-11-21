@@ -9,7 +9,7 @@
 //! not, at their offsets, the rest holes. Those read least recently are evicted, by punching holes,
 //! an object's tail with its last part, so that they take no more than its limit: its budget, if it
 //! has one, and what the disk governor leaves it of its filesystem ([`Cache::set_limit`], backlog
-//! doc-22), which it gives back as the stores, or the host, need it. They are copies of what is in
+//! doc-22), which it gives back as the cells, or the host, need it. They are copies of what is in
 //! the bucket, so none is data the bucket lacks. What it keeps, it counts on its filesystem's disk
 //! ([`HostDisk::cache`]), its fills in flight too.
 //!
@@ -35,14 +35,14 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 /// The number an object's tail is kept by, among its parts, which count from 0: its footer, table
-/// and trailer, after its parts, which a fetcher of another of the host's stores reads here rather
+/// and trailer, after its parts, which a fetcher of another of the host's cells reads here rather
 /// than from the bucket (TASK-92.22), and without which none of its parts can be read.
 const TAIL: u64 = u64::MAX;
 
-/// The cache's lock is held only to change what it keeps, not across its files' I/O: a part's write,
-/// or its eviction, is done outside it, the part busy meanwhile, and an object's file removed, or
-/// replaced by one adopted, so too, the object's key removing; neither is kept or read until done
-/// (TASK-92.21).
+/// The cache's lock is held only to change what it keeps, not across its files' I/O: a part's
+/// write, or its eviction, is done outside it, the part busy meanwhile, and an object's file
+/// removed, or replaced by one adopted, so too, the object's key removing; neither is kept or read
+/// until done (TASK-92.21).
 #[derive(Debug)]
 pub struct Cache {
     files: Files,
@@ -192,10 +192,10 @@ impl Index {
         }
     }
 
-    /// Evicts what was read least recently, but tails whose objects keep or write other parts, until
-    /// `len` bytes more fit in `limit`; or nothing, if they can't be made to. Returns whether they
-    /// fit, and what the evictions leave to do. Chosen first, evicted only if enough: a fill that
-    /// can't fit evicted all it could, emptying the cache for nothing (TASK-443.8).
+    /// Evicts what was read least recently, but tails whose objects keep or write other parts,
+    /// until `len` bytes more fit in `limit`; or nothing, if they can't be made to. Returns whether
+    /// they fit, and what the evictions leave to do. Chosen first, evicted only if enough: a fill
+    /// that can't fit evicted all it could, emptying the cache for nothing (TASK-443.8).
     fn make_room(&mut self, limit: u64, len: u64) -> (bool, Vec<Evicted>) {
         let (mut chosen, mut freed) = (Vec::new(), 0);
         // What each object keeps, as the evictions chosen leave it.
@@ -319,8 +319,8 @@ impl Cache {
         Ok(cache)
     }
 
-    /// cladefs: keeps no more than `bytes` of objects, nor its budget, from now on, evicting what was
-    /// read least recently down to that at once: what the disk governor leaves it of its
+    /// cladefs: keeps no more than `bytes` of objects, nor its budget, from now on, evicting what
+    /// was read least recently down to that at once: what the disk governor leaves it of its
     /// filesystem (doc-22). Returns what it keeps then.
     pub fn set_limit(&self, bytes: u64) -> io::Result<u64> {
         self.governed.store(bytes, Ordering::Relaxed);
@@ -409,10 +409,11 @@ impl Cache {
         }
     }
 
-    /// Keeps `tail`, the tail of the object at `key`, as read, evicting what was read least recently
-    /// to make room: unless no room can be made, or its object is being removed, forgotten, or kept
-    /// or written already. One kept at its key of other parts, which a key written once never has
-    /// (TASK-407), but a file the cache found corrupt, goes first, unless parts of it are busy.
+    /// Keeps `tail`, the tail of the object at `key`, as read, evicting what was read least
+    /// recently to make room: unless no room can be made, or its object is being removed,
+    /// forgotten, or kept or written already. One kept at its key of other parts, which a key
+    /// written once never has (TASK-407), but a file the cache found corrupt, goes first, unless
+    /// parts of it are busy.
     pub fn keep_tail(&self, key: &str, tail: &object::Tail) -> io::Result<()> {
         let len = tail.bytes.len() as u64;
         if len > self.capacity() {
@@ -515,12 +516,12 @@ impl Cache {
         written
     }
 
-    /// Takes the object framed whole in the file at `from`, on the cache's filesystem, as the one at
-    /// `key`, by renaming it, evicting what was read least recently to make room: then it is kept as
-    /// any is, its parts evicted as fetched ones are. Returns whether it took it: not if no room can
-    /// be made, or the object it keeps at `key` is busy, and then the file is left where it is. One
-    /// it keeps at `key` already, it replaces. cladefs: its file's blocks, the store's, are the cache's
-    /// once it takes it, the disk holding as much as before (doc-22).
+    /// Takes the object framed whole in the file at `from`, on the cache's filesystem, as the one
+    /// at `key`, by renaming it, evicting what was read least recently to make room: then it is
+    /// kept as any is, its parts evicted as fetched ones are. Returns whether it took it: not if no
+    /// room can be made, or the object it keeps at `key` is busy, and then the file is left where
+    /// it is. One it keeps at `key` already, it replaces. cladefs: its file's blocks, the cell's,
+    /// are the cache's once it takes it, the disk holding as much as before (doc-22).
     pub fn adopt(&self, key: &str, from: &Path) -> io::Result<bool> {
         let found = found(from, key, self.files.holes)?.ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, format!("{}: no object", from.display()))
@@ -1072,7 +1073,7 @@ mod tests {
             parts.collect()
         }
 
-        /// Writes it whole to a file in `dir`, as a store's WAL would: its path.
+        /// Writes it whole to a file in `dir`, as a cell's WAL would: its path.
         fn write_to(&self, dir: &Path) -> PathBuf {
             let path = dir.join(self.key.replace('/', "-"));
             host_fs::write(&path, &self.bytes).unwrap();
@@ -1427,7 +1428,8 @@ mod tests {
 
     /// TASK-92.21: keeps, reads and drops of a few objects' tails and parts, in threads at once,
     /// evicting one another's, keep the cache whole: none fails, and, once they are done, what the
-    /// cache counts it keeps, each part kept read whole; and a cache opened after it finds the same.
+    /// cache counts it keeps, each part kept read whole; and a cache opened after it finds the
+    /// same.
     #[test]
     fn parts_kept_read_and_dropped_at_once_keep_the_cache_whole() {
         const OBJECTS: u64 = 3;
@@ -1881,9 +1883,9 @@ mod tests {
         let _ = cache.part(&e.key, 1);
     }
 
-    /// Checks the cache in `dir` opened after a crash: its index whole, within its capacity; no file
-    /// but its objects'; and everything it keeps read back as kept, or dropped. Then a reader of
-    /// all keeps all anew, as in a cache never crashed, which one opened after it finds.
+    /// Checks the cache in `dir` opened after a crash: its index whole, within its capacity; no
+    /// file but its objects'; and everything it keeps read back as kept, or dropped. Then a reader
+    /// of all keeps all anew, as in a cache never crashed, which one opened after it finds.
     fn check_after_crash(dir: &Path, crashed: &str) {
         let objects = crash_objects();
         let cache = Cache::open(dir, CRASH_CAPACITY).unwrap();

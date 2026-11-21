@@ -2,18 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: whether a run's stores are encrypted (TASK-411.15, doc-16), as the guest tests run
+//! cladefs: whether a run's cells are encrypted (TASK-411.15, doc-16), as the guest tests run
 //! encrypted only: scripts/test-e2e.sh gives every process of the run a KMS holding a KEK for every
-//! tenant the cases use (`CLADEFS_KMS`, `CLADEFS_E2E_ENCRYPTED`), and this checks, holding no key, what
-//! their stores left:
+//! tenant the cases use (`CLADEFS_KMS`, `CLADEFS_E2E_ENCRYPTED`), and this checks, holding no key,
+//! what their cells left:
 //!
 //! - **The buckets**: every cell has a wrapped KEK (or was shredded); every live cell
 //!   that wrote objects has a DEK; every framed object (segments,
 //!   own extents, checkpoints, moves) says in its trailer it is encrypted or authenticated, none in
 //!   the clear.
-//! - **The stores' directories**: no framed file in the clear, no segment's log headed so
+//! - **The cells' directories**: no framed file in the clear, no segment's log headed so
 //!   (`local_cell::on_disk`).
-//! - **Known plaintext**: no file of the directories checked, stores, buckets, part caches and all,
+//! - **Known plaintext**: no file of the directories checked, cells, buckets, part caches and all,
 //!   nor object of the buckets, holds a run of [`crate::canary`]'s bytes, which the cases write
 //!   into their guests' filesystems.
 //!
@@ -28,24 +28,25 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-/// The variable scripts/test-e2e.sh sets when the run's stores are to be encrypted, which the runner
+/// The variable scripts/test-e2e.sh sets when the run's cells are to be encrypted, which the runner
 /// checks each case's are.
 pub const ENCRYPTED: &str = "CLADEFS_E2E_ENCRYPTED";
 
-/// The tenants a run's KMS holds a KEK for ([`kms`]): the default tenant, 0, whose stores are the
+/// The tenants a run's KMS holds a KEK for ([`kms`]): the default tenant, 0, whose cells are the
 /// daemon's own socket's and those the cases make in processes of their own (cladefs's `Storage`,
 /// cladefsctl's `create`), and granted ones, of IDs up to 15 (fxfs-guest-migrate-tenant-dax's 1-4).
 pub const TENANTS: std::ops::RangeInclusive<u64> = 0..=15;
 
-/// Whether this process has a KMS to encrypt and open stores under (`CLADEFS_KMS`, `CLADEFS_MASTER_KEY`):
-/// what the runner asks before it runs any case, refusing to start with none, naming both, as
-/// every process that opens stores does (TASK-411.28; `cladefs::bucket::require_kms`).
+/// Whether this process has a KMS to encrypt and open cells under (`CLADEFS_KMS`,
+/// `CLADEFS_MASTER_KEY`): what the runner asks before it runs any case, refusing to start with
+/// none, naming both, as every process that opens cells does (TASK-411.28;
+/// `cladefs::bucket::require_kms`).
 pub fn require_kms() -> anyhow::Result<()> {
     cladefs::bucket::require_kms().map_err(anyhow::Error::msg)
 }
 
-/// Makes a local KMS in `dir` (`CLADEFS_KMS=local://DIR`, extent_keys' `LocalKms`), holding a KEK for
-/// each of [`TENANTS`]: those it holds already are kept.
+/// Makes a local KMS in `dir` (`CLADEFS_KMS=local://DIR`, extent_keys' `LocalKms`), holding a KEK
+/// for each of [`TENANTS`]: those it holds already are kept.
 pub fn kms(dir: &Path) -> anyhow::Result<()> {
     let kms = extent_keys::kms::LocalKms::open(dir).with_context(|| dir.display().to_string())?;
     for tenant in TENANTS {
@@ -60,12 +61,12 @@ pub fn kms(dir: &Path) -> anyhow::Result<()> {
 /// What a check found: what it looked at, and what of it is in the clear.
 #[derive(Debug, Default)]
 pub struct Report {
-    pub stores: usize,
+    pub cell_dirs: usize,
     pub cells: usize,
     pub objects: usize,
     pub files: usize,
     pub bytes: u64,
-    /// The buckets its stores named that it can't read: in a daemon's memory (`memory:///`).
+    /// The buckets its cells named that it can't read: in a daemon's memory (`memory:///`).
     pub unread: BTreeSet<String>,
     /// What it found in the clear, a line each.
     pub clear: Vec<String>,
@@ -74,9 +75,9 @@ pub struct Report {
 impl Report {
     /// What it looked at, on a line.
     pub fn summary(&self) -> String {
-        let Self { stores, cells, objects, files, bytes, unread, clear } = self;
+        let Self { cell_dirs, cells, objects, files, bytes, unread, clear } = self;
         let mut said = format!(
-            "{stores} stores, {cells} cells, {objects} objects, {files} files \
+            "{cell_dirs} cell directories, {cells} cells, {objects} objects, {files} files \
              ({} MiB) read: {} in the clear",
             bytes >> 20,
             clear.len()
@@ -105,14 +106,14 @@ impl Report {
     }
 }
 
-/// Checks a case's directory `dir`: every store in it, every bucket in it, and the cells of other
-/// buckets its stores are of (the run's own, whose other cells are other cases'), and every file
+/// Checks a case's directory `dir`: every cell in it, every bucket in it, and the cells of other
+/// buckets its cells are of (the run's own, whose other cells are other cases'), and every file
 /// under it for known plaintext.
 pub fn case(dir: &Path) -> anyhow::Result<Report> {
     run(&[], &[dir.to_owned()])
 }
 
-/// Checks the buckets `buckets` (URLs) whole, and every store and file under `dirs`, and the
+/// Checks the buckets `buckets` (URLs) whole, and every cell and file under `dirs`, and the
 /// buckets and cells they name, as [`case`] does: the run's own bucket and part cache.
 pub fn run(buckets: &[String], dirs: &[PathBuf]) -> anyhow::Result<Report> {
     let mut report = Report::default();
@@ -135,7 +136,7 @@ struct Scope {
     cells: BTreeMap<String, BTreeSet<CellId>>,
 }
 
-/// Walks `dir`: every regular file searched for known plaintext; each store's directory checked
+/// Walks `dir`: every regular file searched for known plaintext; each cell's directory checked
 /// (`local_cell::on_disk`), its cell in the bucket it names put in `scope`; each
 /// file bucket, a directory holding the local bucket's locks, put in `scope` whole.
 fn walk(dir: &Path, finder: &Finder, report: &mut Report, scope: &mut Scope) -> anyhow::Result<()> {
@@ -158,7 +159,7 @@ fn walk(dir: &Path, finder: &Finder, report: &mut Report, scope: &mut Scope) -> 
                 let name = name.to_string_lossy();
                 bucket |= name.starts_with(bucket_cell::local::LOCK);
                 if name == "store" {
-                    store(&dir, report, scope)?;
+                    cell_dir(&dir, report, scope)?;
                 }
                 search_file(&path, finder, report)?;
             }
@@ -170,14 +171,14 @@ fn walk(dir: &Path, finder: &Finder, report: &mut Report, scope: &mut Scope) -> 
     Ok(())
 }
 
-/// Checks the store in `dir`, if it holds one (its description, `store`, says so).
-fn store(dir: &Path, report: &mut Report, scope: &mut Scope) -> anyhow::Result<()> {
+/// Checks the cell directory `dir`, if it holds a cell (its description, `store`, says so).
+fn cell_dir(dir: &Path, report: &mut Report, scope: &mut Scope) -> anyhow::Result<()> {
     let host = local_cell::HostDir::new(dir).with_context(|| dir.display().to_string())?;
     let Some(on_disk) = local_cell::on_disk(&host).with_context(|| dir.display().to_string())?
     else {
         return Ok(());
     };
-    report.stores += 1;
+    report.cell_dirs += 1;
     for file in on_disk.clear {
         report.clear.push(format!("{}/{}: {}, in the clear", dir.display(), file.path, file.what));
     }
@@ -216,9 +217,9 @@ async fn bucket(
     finder: &Finder,
     report: &mut Report,
 ) -> anyhow::Result<()> {
-    let store =
+    let object_bucket =
         bucket_cell::object_bucket::ObjectBucket::from_url(url).map_err(anyhow::Error::msg)?;
-    let listed = store.list(prefix).await.with_context(|| format!("listing {url}{prefix}"))?;
+    let listed = object_bucket.list(prefix).await.with_context(|| format!("listing {url}{prefix}"))?;
     let written: BTreeSet<_> = listed
         .iter()
         .filter_map(|meta| match layout::kind(&meta.key) {
@@ -231,7 +232,7 @@ async fn bucket(
     for meta in &listed {
         let key = meta.key.as_str();
         let at = || format!("{url} {key}");
-        let Some(object) = bucket_cell::bucket::get(&store, key).await else {
+        let Some(object) = bucket_cell::bucket::get(&object_bucket, key).await else {
             continue; // Deleted since it was listed.
         };
         let framed = match layout::kind(key) {
@@ -386,7 +387,7 @@ mod tests {
     }
 
     /// A directory of files: one holding a run of the canary at an odd offset is named, with its
-    /// offset; the others, and a store-less directory, find nothing.
+    /// offset; the others, and a cell-less directory, find nothing.
     #[test]
     fn files_holding_known_plaintext_are_named() {
         let dir = tempdir::TempDir::new("encrypted").unwrap();
@@ -397,7 +398,7 @@ mod tests {
         std::fs::create_dir(dir.path().join("sub")).unwrap();
         std::fs::write(dir.path().join("sub/held"), &held).unwrap();
         let report = case(dir.path()).unwrap();
-        assert_eq!((report.stores, report.files), (0, 2));
+        assert_eq!((report.cell_dirs, report.files), (0, 2));
         let held = dir.path().join("sub/held");
         // Found at the first place in it, the second chunk's first byte.
         assert_eq!(report.clear, [format!("{}: holds known plaintext at {CHUNK}", held.display())]);

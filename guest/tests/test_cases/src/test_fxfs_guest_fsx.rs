@@ -3,23 +3,23 @@
 // found in the LICENSE file.
 
 //! cladefs: fsx-style random operations on the guest's Fxfs, differential against ext4 in the same
-//! guest (TASK-44.15, TASK-149.12): scripts of the wide mix (`script::WIDE`: writes, stores through
+//! guest (TASK-44.15, TASK-149.12): scripts of the wide mix (`script::WIDE`: writes, writes through
 //! mappings kept, made and private, reads, truncations, punches, ranges zeroed, allocated, cloned
 //! and copied, fsyncs, fdatasyncs, msyncs, O_DIRECT, page caches dropped and files evicted and read
 //! in again, which on a DAX mount makes them DAX, copying on write) and the hostile one's
 //! (`script::HOSTILE`, TASK-149.16: offsets and lengths at and past i64's end and the largest
 //! file's, ranges onto themselves, mappings at odd offsets, MAP_FIXED over those kept, moved by
-//! mremap, madvised away, truncations racing stores, writes from buffers that fault partway and
+//! mremap, madvised away, truncations racing writes, writes from buffers that fault partway and
 //! from the file's own mapping), seed after seed for
 //! CLADEFS_FSX_SECS (one script if 0), each on three files of Fxfs's and three of ext4's, a disk of
 //! the guest's own, step by step, both held to the model and to each other (`differential`).
 //!
-//! Each script's seed is said as it starts, CLADEFS_SEED replaying it with CLADEFS_FSX_SECS=0. A failure
-//! is shrunk in the guest, a try a run of the script, no boot, for CLADEFS_FSX_SHRINK_SECS at most;
-//! the host replays what it shrank to once, from a boot, to say whether that replays it. A guest
-//! that died, hung or complained is shrunk by the host, a VM each try (`script_vm`), as
-//! fxfs-guest-script's are. The last script's files stay in the store, with their models, which
-//! the host's Fxfs reads and compares.
+//! Each script's seed is said as it starts, CLADEFS_SEED replaying it with CLADEFS_FSX_SECS=0. A
+//! failure is shrunk in the guest, a try a run of the script, no boot, for CLADEFS_FSX_SHRINK_SECS
+//! at most; the host replays what it shrank to once, from a boot, to say whether that replays it. A
+//! guest that died, hung or complained is shrunk by the host, a VM each try (`script_vm`), as
+//! fxfs-guest-script's are. The last script's files stay in the cell, with their models, which the
+//! host's Fxfs reads and compares.
 //!
 //! fxfs-guest-fsx-dax with a DAX window, -delay-dax with delays injected at the DAX protocol's
 //! racing steps (cladefs.dax_delay_us), and -faults-dax, on the debug kernel, with the Fxfs half's
@@ -408,9 +408,9 @@ mod guest {
             Differential::new(seed, reference, subject)
         }
 
-        /// Says `failure`, of the script of `seed`, `len` operations long, those of `drops` dropped,
-        /// and shrinks it, if it was the whole script, for `shrink` at most: each try the script
-        /// run again, on files made anew.
+        /// Says `failure`, of the script of `seed`, `len` operations long, those of `drops`
+        /// dropped, and shrinks it, if it was the whole script, for `shrink` at most: each try the
+        /// script run again, on files made anew.
         fn failed(
             &self,
             seed: u64,

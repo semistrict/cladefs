@@ -65,7 +65,7 @@ Within one configuration there is one writer and one sequence, so every member's
   configuration's log is written once: only that writer, at that epoch, appends to it, and nothing
   else ever does. The head names one configuration, the **active** one.
 - **Tag:** a commit's identity, `writer_epoch<<40 | commit number` (`extent_frame/src/segment.rs:279`).
-  Commit numbers continue across epochs (`open_cell`'s take: the store's epoch is
+  Commit numbers continue across epochs (`open_cell`'s take: the cell's epoch is
   `epoch_of(last_commit)`), so the tags of one cell's history increase.
 - **A member's end:** the greatest tag through which it holds every record of the configuration,
   synced.
@@ -218,14 +218,14 @@ The new writer `W'`, at the VM manager's take, on any host:
    recovered tail to them, and wait until f of them hold it all (f+1 with `W'`).
 6. **Activate:** a conditional swap of the head to `replicas = c+1`. Only then does `W'` serve.
    Then `Drop{cell, c+1}` to `M`, best effort (stale logs are also swept, below).
-   *As built (`Replicator::base`, TASK-537.3.3):* the store's replicator starts after the last
+   *As built (`Replicator::base`, TASK-537.3.3):* the cell's replicator starts after the last
    commit the take opened with, its own write-ahead log's included (a reopen on the same disk may
    hold more than the members did), which no member of `c+1` need hold. So no commit after a take
    is told Replicated before the bucket holds every commit through that one; until then its commits
    wait for Uploaded. A take while the bucket is out of reach serves, but its commits wait for the
    bucket (cladefs's `replicated_commits_survive_their_daemon_killed_and_reopened`).
    *TASK-678's review:* the members' logs are given `c+1`'s members only if they are of the
-   store's own history, when its own log is what it recovers: a retake after a deferred one may
+   the cell's own history, when its own log is what it recovers: a retake after a deferred one may
    find `c`'s members holding an earlier writer's commits past what its own log, a later writer's,
    went on from (none of them told Replicated). Of one writer's sequence, a log holding a commit
    of that writer at or past the members' last place holds it (`Recovering::holds_commits`).
@@ -285,7 +285,7 @@ As built (TASK-537.3.5, `upload::Shared::keep` and `replace`, `replicate::Replic
   `Abandon` action, its rule `abandonUnissued` and its mutation `AbandonIssued`).
 - A take that asks for another f than the configuration it recovers from replicates at the
   greater f first, and the writer then replaces it with one of the f asked for: to f = 0 by the
-  rule below, after which the store replicates no more.
+  rule below, after which the cell replicates no more.
 
 ### Degraded
 
@@ -334,7 +334,7 @@ configuration's logs once the head names a greater configuration, or the cell is
 
 - **A version** names a commit in the head, and forks on other hosts read it from the bucket. So
   making one, and a freeze, still wait for Uploaded.
-- **Unmount** and the daemon closing a store wait for Replicated. A store closing for good (drain,
+- **Unmount** and the daemon closing a cell wait for Replicated. A cell closing for good (drain,
   TASK-141.4) uploads everything, then sends `Drop`.
 - **Followers** (doc-8) and forks see only what is uploaded, as before.
 ## The spec (TASK-537.2)
@@ -414,7 +414,7 @@ For a cell whose fsync waits for Replicated, with f = 1 (3 members):
 | Guest crash, VMM killed | kept | kept |
 | cladefsd killed, or the host rebooted, disk kept | kept: the reopen recovers from the members and its own WAL | kept |
 | Writer's host lost | kept: the take recovers from the 2 peers | kept |
-| Writer's host and a peer lost | Replicated commits not yet uploaded may go: more than f failures. The take waits for the lost peer, and can't complete without it. The VM manager may then take it forced (TASK-681): on a host holding its store, `PlaceCell`'s `force` (`cladefsctl place --force`); on a new one, `CreateCell`'s `force` (`cladefsctl take --force`). The take goes on with the members that answer and the bucket, losing that tail, and `StatCell`'s `forced_after` names the last commit it recovered | as fsync |
+| Writer's host and a peer lost | Replicated commits not yet uploaded may go: more than f failures. The take waits for the lost peer, and can't complete without it. The VM manager may then take it forced (TASK-681): on a host holding its cell, `PlaceCell`'s `force` (`cladefsctl place --force`); on a new one, `CreateCell`'s `force` (`cladefsctl take --force`). The take goes on with the members that answer and the bucket, losing that tail, and `StatCell`'s `forced_after` names the last commit it recovered | as fsync |
 | A peer lost, writer up | kept; the cell replaces the peer and stays Replicated | kept |
 | Both peers lost, writer up | kept: degraded, waits for Uploaded until replaced | kept |
 | The bucket failing | kept, Replicated as before; waits at the lag bound | kept |
@@ -493,7 +493,7 @@ For a cell whose fsync waits for Replicated, with f = 1 (3 members):
 
 ## Where this meets other work
 
-- **TASK-96** (the store as a standalone layer) settled a "peer log" of one peer named in the lease.
+- **TASK-96** (the extent store as a standalone layer) settled a "peer log" of one peer named in the lease.
   This supersedes it: a majority, and the head rather than a lease.
 - **TASK-224** (fsync waiting for Local) becomes the `fsync = Local` option.
 - **TASK-322 and TASK-384** (disk sync tails) bound a Replicated commit's latency on the writer's

@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! pjdfstest (BSD-2-Clause) on cladefs's guest kernel's Fxfs, on an extent-store device on a new
-//! store: libkrun's pjdfstest case (TASK-40), run on Fxfs only.
+//! cell: libkrun's pjdfstest case (TASK-40), run on Fxfs only.
 
 use macros::{guest, host};
 
@@ -73,10 +73,10 @@ mod host {
             let only_env = CString::new(format!("PJDFSTEST_ONLY={only}"))?;
             let mut vm = Vm::new(2, 1024)?;
             vm.guest_kernel()?;
-            let store = test_setup.tmp_dir.join("extents");
+            let cell_dir = test_setup.tmp_dir.join("extents");
             let window =
                 if self.dax { crate::common::dax_window(crate::common::Window::Large)? } else { 0 };
-            vm.cell("extents", &store, 1 << 30, window)?;
+            vm.cell("extents", &cell_dir, 1 << 30, window)?;
             vm.env(&host_os_env);
             vm.env(&only_env);
             vm.enter(&setup_rootfs(&test_setup)?, &test_setup.test_case)

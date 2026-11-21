@@ -41,7 +41,7 @@ cladefs splits the filesystem where each half is cheap:
   itself, so a `stat` or a `create` is work in guest memory, as with ext4.
 - **Data lives on the host, as extents.** An extent is an immutable piece of data, written once
   and named by an ID, not by an address. The guest reads, writes, maps, frees and commits extents
-  through its extent store device, in place of a block device. The store has no fixed size and no
+  through its extent store device, in place of a block device. The cell has no fixed size and no
   free space to manage: it holds what was written.
 - **Immutable extents can be shared.** The daemon maps a sealed extent's pages read-only into
   every guest that asks for it, so file data is one copy per host, not one per VM, and is in no
@@ -85,7 +85,7 @@ Four abstractions carry the whole design ([CONTEXT.md](CONTEXT.md) defines every
 ## How it works
 
 ```
-guest (Linux + Fxfs)     guest/: Fxfs in the kernel; DAX loads and stores
+guest (Linux + Fxfs)     guest/: Fxfs in the kernel; DAX reads and writes
   │  virtio extent store device: READ, WRITE, MAP, UNMAP, FREE, COMMIT
 Firecracker              vendor/firecracker: the device, a client of the daemon
   │  Unix socket; shared memfd arenas mirrored into KVM via userfaultfd
@@ -102,7 +102,7 @@ bucket(s)                crates/bucket_cell: durable cells across S3 / GCS / Azu
   the local part cache, a peer daemon in the same cloud region, or the bucket—and mirrors them
   read-only into the VM process using `userfaultfd` and `KVM_PRE_FAULT_MEMORY` on stock Linux
   6.1+. Two VMs mapping one extent map the same physical host pages.
-- **A write (copy-on-write DAX).** A guest store to a mapped read-only page faults through
+- **A write (copy-on-write DAX).** A guest write to a mapped read-only page faults through
   `userfaultfd` and copies it to a VM-private page at the same address (bounded per VM by
   `private_max`, charged to the VM process rather than the daemon). Writeback sends dirty pages as
   `WRITE`s to new open extents, `COMMIT` seals them and records the filesystem's new root, and the
@@ -157,8 +157,8 @@ See [docs/architecture.md](docs/architecture.md) for the full mechanics.
 - **Replicated commits:** optional 2f+1 quorum replication across peer hosts so commits survive a
   host loss before bucket upload completes ([doc-21](<docs/design/doc-21 - Replicated-commits-a-majority-of-hosts-disks-before-the-bucket.md>)).
 - **One memory budget and one disk governor:** every data file and cache bypasses the host OS page
-  cache (`O_DIRECT` on Linux, `F_NOCACHE` on macOS). `cladefsd` manages its extent cache, store
-  page cache, uploads and fetches under one memory governor, and bounds local stores and the part
+  cache (`O_DIRECT` on Linux, `F_NOCACHE` on macOS). `cladefsd` manages its extent cache, cells'
+  page cache, uploads and fetches under one memory governor, and bounds local cells and the part
   cache under one disk governor ([doc-22](<docs/design/doc-22 - Disk-governor-the-hosts-disk-as-a-managed-resource.md>)).
 - **Peer part caches:** daemons in the same cloud region serve cached 1 MiB bucket parts to each
   other over the peer network before going to object storage.

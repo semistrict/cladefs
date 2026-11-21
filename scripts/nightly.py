@@ -78,7 +78,7 @@ BAD_NIGHTS = 3
 # counts.sh's work and the artifacts kept (CLADEFS_AB_KEEP), copied there from the run's: an hour
 # after the first night, which built both sides, the nightly's run directories held 83 GB, and a
 # fifth more is 100G. Its
-# measurement: the rounds' results, each case's store and guests' images on the same disk while it
+# measurement: the rounds' results, each case's cell and guests' images on the same disk while it
 # runs and what failed cases leave there until the end; no night had measured yet, so 20G,
 # a guess until rounds-size.txt says more, which the margin then follows.
 ROOM = {"build": ("CLADEFS_NIGHTLY_ROOM_BUILD", "100G"),
@@ -435,7 +435,7 @@ def night_markdown(record, comparison, push):
                   for check in taken["checks"]]
         lines += [f"- {what}: {gib(taken[figure])}." for figure, what in
                   (("built", "The run's directory once built"),
-                   ("rounds", "The rounds' results before their stores went"))
+                   ("rounds", "The rounds' results before their cells went"))
                   if taken[figure] is not None]
         lines.append("")
     if record["tasks"]:

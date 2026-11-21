@@ -149,8 +149,8 @@ class Report(unittest.TestCase):
     def test_each_sides_failures_by_kind_and_round(self):
         a = [side("q", failures={"framings": 1, "writes": 1},
                   failed=["framings: host-a framed 4 segments slower than 1000 ms",
-                          "writes: the stores wrote 1.85 times"]),
-             side("q", failures={"writes": 1}, failed=["writes: the stores wrote 1.91 times"])]
+                          "writes: the cells wrote 1.85 times"]),
+             side("q", failures={"writes": 1}, failed=["writes: the cells wrote 1.91 times"])]
         b = [side("q"), side("q")]
         lines = bench_ab.failure_table("pin", a, "main", b).splitlines()
         self.assertEqual(lines[:4], ["| Failed | pin | main |", "|---|---|---|",

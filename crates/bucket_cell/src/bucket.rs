@@ -5,7 +5,7 @@
 //! What cells need of an object store: objects under keys, read whole, listed by prefix, and
 //! written with conditions (S3's `If-None-Match` and `If-Match`, GCS's generation preconditions).
 //!
-//! The helpers below retry requests the store failed, which may or may not have taken effect, so
+//! The helpers below retry requests the backend failed, which may or may not have taken effect, so
 //! that callers see only answers: a write that landed and then failed, retried into a failed
 //! condition, is recognised by reading the object back.
 
@@ -31,13 +31,13 @@ pub enum PutMode {
     Update(Version),
 }
 
-/// What a store says of an object.
+/// What a backend says of an object.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Meta {
     pub key: String,
     pub version: Version,
     pub size: u64,
-    /// When it was written, by the store's clock ([`Bucket::now`]).
+    /// When it was written, by the backend's clock ([`Bucket::now`]).
     pub modified: u64,
 }
 
@@ -107,8 +107,8 @@ impl Page<'_> {
     pub const FIRST: Page<'static> = Page { after: None, max: LIST_PAGE };
 }
 
-/// cladefs: the most prefixes and objects a page of a listing by delimiter holds: as many as S3's and
-/// GCS's ListObjects give a request.
+/// cladefs: the most prefixes and objects a page of a listing by delimiter holds: as many as S3's
+/// and GCS's ListObjects give a request.
 pub const LIST_PAGE: usize = 1000;
 
 /// cladefs: the requests a listing of `objects` objects takes where a request lists a page of
@@ -136,7 +136,7 @@ pub struct Object {
 
 impl Object {
     /// cladefs: the object a write of `bytes` at `key` left, of `version`, as of `now`, the
-    /// store's clock: what a read of it would find, until another's write (TASK-449).
+    /// backend's clock: what a read of it would find, until another's write (TASK-449).
     pub(crate) fn written(key: &str, bytes: Vec<u8>, version: Version, now: u64) -> Self {
         let meta = Meta { key: key.to_owned(), version, size: bytes.len() as u64, modified: now };
         Self { bytes, meta }
@@ -154,8 +154,8 @@ pub enum Error {
     /// The request failed. It may or may not have taken effect.
     #[error("the store is unavailable")]
     Unavailable,
-    /// cladefs: the store does not do what the request asks, as a filesystem's store an update of
-    /// a version (TASK-699): an answer, never retried, where [`Error::Unavailable`] is none.
+    /// cladefs: the backend does not do what the request asks, as a filesystem's backend an update
+    /// of a version (TASK-699): an answer, never retried, where [`Error::Unavailable`] is none.
     #[error("the store does not do what the request asks")]
     Unsupported,
 }
@@ -170,7 +170,7 @@ pub enum ByteRange {
 
 impl ByteRange {
     /// Whether it begins within an object of `size` bytes: a read of it reads some of the object.
-    /// Stores refuse one that does not.
+    /// Backends refuse one that does not.
     pub(crate) fn begins_within(&self, size: u64) -> bool {
         match self {
             Self::Bounded(range) => range.start < size,
@@ -194,11 +194,11 @@ pub trait Bucket: Send + Sync + 'static {
     /// The objects whose keys start with `prefix`, in the order of their keys.
     fn list(&self, prefix: &str) -> impl Future<Output = Result<Vec<Meta>, Error>> + Send;
 
-    /// cladefs: a page of one level of the keys under `prefix`, empty or ending with `/`, by delimiter
-    /// `/` (S3's and GCS's `delimiter=/`, TASK-395.5): the objects right under it, and the
-    /// prefixes of the rest, listing none of the objects under those; of them, `page.max` at most,
-    /// after where `page` says, in the order of their keys, and where the next page starts, if
-    /// any are left. Every bucket lists so: none falls back to listing every object under
+    /// cladefs: a page of one level of the keys under `prefix`, empty or ending with `/`, by
+    /// delimiter `/` (S3's and GCS's `delimiter=/`, TASK-395.5): the objects right under it, and
+    /// the prefixes of the rest, listing none of the objects under those; of them, `page.max` at
+    /// most, after where `page` says, in the order of their keys, and where the next page starts,
+    /// if any are left. Every bucket lists so: none falls back to listing every object under
     /// `prefix`, which costs a request a page of them. Pages are read one after another, as S3's
     /// are: a key created or deleted meanwhile is listed, or not, as the pages before it went.
     fn list_delimited(
@@ -218,7 +218,7 @@ pub trait Bucket: Send + Sync + 'static {
     fn delete(&self, key: &str) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// cladefs: deletes the objects at `keys`, at most [`DELETE_BATCH`] of them (TASK-395.5): in
-    /// one request where the store deletes many at once (S3's DeleteObjects), else, as here, one
+    /// one request where the backend deletes many at once (S3's DeleteObjects), else, as here, one
     /// each, [`DELETES_AT_ONCE`] at once. Deleting none is no error. It fails if a delete did,
     /// which may or may not have taken effect, nor need the others have.
     fn delete_batch(&self, keys: &[&str]) -> impl Future<Output = Result<(), Error>> + Send {
@@ -229,7 +229,7 @@ pub trait Bucket: Send + Sync + 'static {
             .fold(Ok(()), |result, deleted| std::future::ready(result.and(deleted)))
     }
 
-    /// cladefs: waits until the store takes another write of `key` (TASK-690): at once where it
+    /// cladefs: waits until the backend takes another write of `key` (TASK-690): at once where it
     /// takes a key's writes as fast as they come. GCS takes about one a second of an object and
     /// refuses more (`429`), so its bucket waits out the second since it last wrote the key, as
     /// each write of the key does first anyway. For a writer to gather, until then, all its next
@@ -247,7 +247,7 @@ pub trait Bucket: Send + Sync + 'static {
         std::future::ready(crate::identity::DEFAULT_HEAD_SLOTS)
     }
 
-    /// The store's clock, which [`Meta::modified`] is in.
+    /// The backend's clock, which [`Meta::modified`] is in.
     fn now(&self) -> u64;
 
     /// Waits before a request that failed `failures` times in a row goes again.
@@ -256,9 +256,9 @@ pub trait Bucket: Send + Sync + 'static {
         std::future::ready(())
     }
 
-    /// cladefs: the checkpoints' states the recoveries reading through it decoded, which they share,
-    /// if it keeps them: a host's bucket does, so that the forks of a base it opens decode the
-    /// checkpoint they start from once (TASK-92.55).
+    /// cladefs: the checkpoints' states the recoveries reading through it decoded, which they
+    /// share, if it keeps them: a host's bucket does, so that the forks of a base it opens decode
+    /// the checkpoint they start from once (TASK-92.55).
     fn decoded(&self) -> Option<&crate::recovery::Decoded> {
         None
     }
@@ -313,8 +313,8 @@ impl From<Past> for crate::Error {
 
 /// The bytes of `range` of the object at `key`, if there is one; of a range of no bytes, none,
 /// asking nothing. `object_store` refuses a range that begins past the object's end as it fails
-/// when the store is out of reach (`Generic`, [`Error::Unavailable`] here): a read that fails goes
-/// again only once the object's size shows the range begins within it, and is [`Past`] its end
+/// when the backend is out of reach (`Generic`, [`Error::Unavailable`] here): a read that fails
+/// goes again only once the object's size shows the range begins within it, and is [`Past`] its end
 /// otherwise.
 pub(crate) async fn get_range(
     bucket: &impl Bucket,
@@ -381,9 +381,9 @@ pub(crate) async fn list_delimited_page(
 }
 
 /// cladefs: the prefixes of the listing of `prefix` by delimiter ([`Bucket::list_delimited`]), in
-/// their order, a page at a time, each page listed once those before it are taken, and retried while
-/// it fails: so that a level of millions, a tenant's cells, is held no more than a page of it at a
-/// time (TASK-395.5, TASK-395.8). A request for every [`LIST_PAGE`] keys of the level.
+/// their order, a page at a time, each page listed once those before it are taken, and retried
+/// while it fails: so that a level of millions, a tenant's cells, is held no more than a page of it
+/// at a time (TASK-395.5, TASK-395.8). A request for every [`LIST_PAGE`] keys of the level.
 pub(crate) fn prefixes<B: Bucket>(
     bucket: &B,
     prefix: String,
@@ -421,9 +421,9 @@ pub(crate) async fn list_delimited(bucket: &impl Bucket, prefix: &str) -> Listin
     }
 }
 
-/// cladefs: deletes the objects at `keys`, in batches of [`DELETE_BATCH`] ([`Bucket::delete_batch`]),
-/// [`BATCHES_AT_ONCE`] at once, in any order, each batch retried whole while it fails: deleting
-/// what is gone is no error (TASK-395.5).
+/// cladefs: deletes the objects at `keys`, in batches of [`DELETE_BATCH`]
+/// ([`Bucket::delete_batch`]), [`BATCHES_AT_ONCE`] at once, in any order, each batch retried whole
+/// while it fails: deleting what is gone is no error (TASK-395.5).
 pub(crate) async fn delete_all(bucket: &impl Bucket, keys: &[&str]) {
     use futures::StreamExt as _;
     // The batches' futures made first: a stream mapping them in holds the closure in its type,
@@ -733,7 +733,7 @@ mod tests {
         }
     }
 
-    /// A request the store failed goes again, after a pause that counts the failures in a row.
+    /// A request the backend failed goes again, after a pause that counts the failures in a row.
     #[test]
     fn failed_requests_pause_counting_their_failures() {
         let bucket = Flaky { failing: Mutex::new(3), pauses: Mutex::default() };
@@ -743,7 +743,7 @@ mod tests {
 
     /// Objects in memory, of `object_store`'s, whose requests the test fails where they would go
     /// again: what `object_store` refuses but for the protocol's conditions, it says as it says the
-    /// store is out of reach, which is retried.
+    /// backend is out of reach, which is retried.
     struct Unretried(crate::object_bucket::ObjectBucket);
 
     impl Bucket for Unretried {
@@ -798,7 +798,7 @@ mod tests {
     }
 
     /// TASK-79.40: a ranged read starting past the end of an object, which `object_store` refuses
-    /// as it says the store is out of reach, goes not again for ever: the object's size says why,
+    /// as it says the backend is out of reach, goes not again for ever: the object's size says why,
     /// and the object is corrupt. So an object's tail whose trailer says it is longer than it is.
     #[test]
     fn ranges_past_an_objects_end_go_not_again() {

@@ -6,28 +6,28 @@
 //!
 //! Cells rely on conditional writes (doc-7, The head): a create where an object is must fail,
 //! and an update of a version that is not the object's. `object_store` sends S3's `If-None-Match`
-//! and `If-Match`, and GCS's generation preconditions; [`probe`] checks that a store honours them
+//! and `If-Match`, and GCS's generation preconditions; [`probe`] checks that a backend honours them
 //! before anything relies on it, once for each bucket ([`ObjectBucket::probed`]).
 //!
 //! A bucket counts the requests it makes, by kind, those that fail too, which object storage bills,
 //! and the bytes it uploads, by kind of object, and downloads ([`ObjectBucket::stats`]).
 //!
 //! cladefs: requests that fail, which the helpers of [`crate::bucket`] retry until they answer, it
-//! counts by kind ([`Stats::failures`]) and logs, a warning naming the store's error, the first of
-//! a run of failures of a kind and then every [`FAILING_EVERY`], with how many failed, and once
+//! counts by kind ([`Stats::failures`]) and logs, a warning naming the backend's error, the first
+//! of a run of failures of a kind and then every [`FAILING_EVERY`], with how many failed, and once
 //! the kind answers again (TASK-314): a bucket that keeps failing, full, out of reach or refusing
-//! its credentials, stalls its stores' guests' commits at their lag bound (doc-7, decision 3),
-//! which the log says why of. And once a write fails, writes of its kind take turns ([`Turns`],
+//! its credentials, stalls its cells' guests' commits at their lag bound (doc-7, decision 3), which
+//! the log says why of. And once a write fails, writes of its kind take turns ([`Turns`],
 //! TASK-382): one at a time, probing the bucket, until one is answered, then more as more are.
 //! Updates take none: each is of its own key, which GCS refuses a write of within about a second of
 //! the last, while it takes the others' (TASK-690). A bucket spaces its writes of a key as its
-//! store needs ([`Rewrites`]).
+//! backend needs ([`Rewrites`]).
 //!
-//! cladefs: a level of keys listed by delimiter, it lists a page a request where the store pages
-//! (S3, GCS and Azure, [`PaginatedListStore`]), as many prefixes and objects as the page asks, never
-//! the whole level (TASK-395.5): a tenant's millions of cells are listed a page at a time. Files
-//! and memory list a level whole, which their pages are cut out of: a directory is read whole by
-//! any listing of it, and memory has nothing cheaper.
+//! cladefs: a level of keys listed by delimiter, it lists a page a request where the backend pages
+//! (S3, GCS and Azure, [`PaginatedListStore`]), as many prefixes and objects as the page asks,
+//! never the whole level (TASK-395.5): a tenant's millions of cells are listed a page at a time.
+//! Files and memory list a level whole, which their pages are cut out of: a directory is read whole
+//! by any listing of it, and memory has nothing cheaper.
 //!
 //! cladefs: every reader of a bucket reads it through an `ObjectBucket`, which warns of reading
 //! what the collector's newest mark-only pass marked ([`crate::marks`], TASK-264): on wherever a
@@ -52,9 +52,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A bucket's objects under a prefix.
 pub struct ObjectBucket {
-    store: Arc<dyn ObjectStore>,
-    /// cladefs: the same store, which lists a level of keys a page a request, if it does (S3, GCS,
-    /// Azure): none for files and memory, which list it whole (TASK-395.5).
+    backend: Arc<dyn ObjectStore>,
+    /// cladefs: the same backend, which lists a level of keys a page a request, if it does (S3,
+    /// GCS, Azure): none for files and memory, which list it whole (TASK-395.5).
     pages: Option<Arc<dyn PaginatedListStore>>,
     prefix: String,
     counts: Counts,
@@ -73,7 +73,7 @@ pub struct ObjectBucket {
     /// cladefs: the other buckets its requests go to, by the bucket of their keys' cells
     /// ([`ObjectBucket::routed`], TASK-633.4): none for a bucket whose requests all stay in it.
     route: Option<Route>,
-    /// cladefs: its own store, unrouted, once asked for ([`ObjectBucket::own`], TASK-633.8).
+    /// cladefs: its own bucket, unrouted, once asked for ([`ObjectBucket::own`], TASK-633.8).
     own: std::sync::OnceLock<Arc<ObjectBucket>>,
     /// cladefs: whether this bucket holds a mirror of a version of each cell of another bucket it
     /// was asked of, and when it last listed that cell's markers ([`ObjectBucket::mirrored`]).
@@ -83,8 +83,8 @@ pub struct ObjectBucket {
     /// those this process mirrors ([`ObjectBucket::mirror_wanted`]), each by its cell and where it
     /// is.
     mirrors: crate::mirror::Mirrors,
-    /// cladefs: how far apart its store takes writes of one key, and when it last wrote each
-    /// (TASK-690): shared with its own store's twin ([`ObjectBucket::own`]).
+    /// cladefs: how far apart its backend takes writes of one key, and when it last wrote each
+    /// (TASK-690): shared with its own bucket's twin ([`ObjectBucket::own`]).
     rewrites: Arc<Rewrites>,
     /// cladefs: its settings, as its identity says, once read, or written by its formatting
     /// (TASK-691): the defaults' for a bucket with none; shared with its twin.
@@ -92,22 +92,23 @@ pub struct ObjectBucket {
 }
 
 /// cladefs: how long after GCS takes a write of an object it takes another: about one a second,
-/// refusing more with `429 Too Many Requests` ("The rate of change requests to the object ... exceeds
-/// the rate limit", Cloud Storage's quotas: "up to once per second" for one object). S3 and Azure
-/// have no such limit (TASK-690).
+/// refusing more with `429 Too Many Requests` ("The rate of change requests to the object ...
+/// exceeds the rate limit", Cloud Storage's quotas: "up to once per second" for one object). S3 and
+/// Azure have no such limit (TASK-690).
 pub const GCS_REWRITE_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// cladefs: how far apart a bucket's store takes writes of one key, and when the bucket's last write
-/// of each was answered, for each write of it to wait out the rest of that time first (TASK-690):
-/// GCS's second ([`GCS_REWRITE_EVERY`]), none for other stores, which wait for nothing.
+/// cladefs: how far apart a bucket's backend takes writes of one key, and when the bucket's last
+/// write of each was answered, for each write of it to wait out the rest of that time first
+/// (TASK-690): GCS's second ([`GCS_REWRITE_EVERY`]), none for other backends, which wait for
+/// nothing.
 #[derive(Debug, Default)]
 struct Rewrites {
     every: std::time::Duration,
     written: std::sync::Mutex<Written>,
 }
 
-/// cladefs: when a bucket's last write of each key was answered, of those within [`Rewrites::every`]
-/// of their last pruning, at least.
+/// cladefs: when a bucket's last write of each key was answered, of those within
+/// [`Rewrites::every`] of their last pruning, at least.
 #[derive(Debug, Default)]
 struct Written {
     at: std::collections::HashMap<Path, tokio::time::Instant>,
@@ -124,7 +125,7 @@ impl Rewrites {
         self.written.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Waits until the store takes another write of `path`: [`Rewrites::every`] after its last
+    /// Waits until the backend takes another write of `path`: [`Rewrites::every`] after its last
     /// was answered.
     async fn wait(&self, path: &Path) {
         if self.every.is_zero() {
@@ -190,7 +191,7 @@ pub enum Request {
     Delete,
     /// cladefs: a listing of one level of keys, by delimiter (TASK-395.5).
     ListDelimited,
-    /// cladefs: a batch of deletes (TASK-395.5): one request where the store deletes many at once
+    /// cladefs: a batch of deletes (TASK-395.5): one request where the backend deletes many at once
     /// (S3's DeleteObjects, of up to 1,000; Azure's, of 256 each), one an object behind it
     /// where it does not (GCS, files, memory), which `object_store` does not say.
     DeleteBatch,
@@ -227,7 +228,7 @@ impl Request {
     }
 
     /// cladefs: whether its writes take turns once one failed ([`Turns`], TASK-382): all but an
-    /// update, of a key of its own, a cell's head, which says nothing of the store by failing as
+    /// update, of a key of its own, a cell's head, which says nothing of the backend by failing as
     /// GCS refuses a write of a key within about a second of the last, while it takes others'; it
     /// backs off alone, as its retries do (TASK-690).
     fn takes_turns(self) -> bool {
@@ -407,8 +408,8 @@ impl Drop for Turn<'_> {
     }
 }
 
-/// cladefs: how often a run of failures of requests of a kind is logged again, with how many failed,
-/// after its first (TASK-314).
+/// cladefs: how often a run of failures of requests of a kind is logged again, with how many
+/// failed, after its first (TASK-314).
 pub const FAILING_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// cladefs: the run of failures of requests of one kind going on, if one is: since its first, until
@@ -579,7 +580,7 @@ impl Timed<'_> {
     /// bytes, as `bytes` counts those of what it answered, or its error. cladefs: and logged, at
     /// debug, with its kind, object, time, and bytes or error (TASK-260): in the extent daemon,
     /// its log gives the record the guest request the work is for, if any (`cladefs::request`). A
-    /// failure, unanswered, is counted and logged as [`Failing`] says, with the store's error
+    /// failure, unanswered, is counted and logged as [`Failing`] says, with the backend's error
     /// (TASK-314); an answer ends a run of them.
     fn answered<T>(
         &self,
@@ -641,16 +642,16 @@ impl Drop for Timed<'_> {
     }
 }
 impl ObjectBucket {
-    /// The objects of `store` under `prefix`, a path of segments separated by `/`, or empty.
+    /// The objects of `backend` under `prefix`, a path of segments separated by `/`, or empty.
     /// cladefs: it lists a level of keys whole, as files and memory do, cutting pages out of it.
-    pub fn new(store: Arc<dyn ObjectStore>, prefix: &str) -> Self {
-        Self::paged(store, None, prefix)
+    pub fn new(backend: Arc<dyn ObjectStore>, prefix: &str) -> Self {
+        Self::paged(backend, None, prefix)
     }
 
-    /// cladefs: the objects of `store` under `prefix`, a level of which `pages`, the same store,
-    /// lists a page a request, if given (TASK-395.5): S3's, GCS's and Azure's.
+    /// cladefs: the objects of `backend` under `prefix`, a level of which `pages`, the same
+    /// backend, lists a page a request, if given (TASK-395.5): S3's, GCS's and Azure's.
     pub fn paged(
-        store: Arc<dyn ObjectStore>,
+        backend: Arc<dyn ObjectStore>,
         pages: Option<Arc<dyn PaginatedListStore>>,
         prefix: &str,
     ) -> Self {
@@ -660,7 +661,7 @@ impl ObjectBucket {
         let (route, own, mirrored) = (None, std::sync::OnceLock::new(), Default::default());
         let (mirrors, rewrites, settings) = Default::default();
         Self {
-            store,
+            backend,
             pages,
             prefix,
             counts,
@@ -678,23 +679,23 @@ impl ObjectBucket {
         }
     }
 
-    /// cladefs: the bucket `reached` reaches ([`reach`]), spacing its writes of a key as its store
-    /// needs.
+    /// cladefs: the bucket `reached` reaches ([`reach`]), spacing its writes of a key as its
+    /// backend needs.
     fn reached(reached: Reached) -> Self {
         let Reached { objects, pages, prefix, rewrite_every } = reached;
         Self::paged(objects, pages, &prefix).rewriting_every(rewrite_every)
     }
 
     /// cladefs: the same bucket, each write of a key at least `every` after the last of it was
-    /// answered, as its store takes them no faster (TASK-690): GCS's [`GCS_REWRITE_EVERY`].
+    /// answered, as its backend takes them no faster (TASK-690): GCS's [`GCS_REWRITE_EVERY`].
     pub fn rewriting_every(self, every: std::time::Duration) -> Self {
         Self { rewrites: Arc::new(Rewrites { every, ..Rewrites::default() }), ..self }
     }
 
-    /// cladefs: its own store, every request of it there whatever cell its keys are of, unrouted
+    /// cladefs: its own bucket, every request of it there whatever cell its keys are of, unrouted
     /// (TASK-633.8): what a mirror of another bucket's cell's version writes and reads in this
     /// bucket at that cell's keys, and what this bucket's collector keeps or deletes of it. Itself,
-    /// if it routes nothing; else the same store, made once, its requests counted apart.
+    /// if it routes nothing; else the same backend, made once, its requests counted apart.
     pub fn own(self: &Arc<Self>) -> Arc<ObjectBucket> {
         match self.route {
             None => self.clone(),
@@ -702,10 +703,10 @@ impl ObjectBucket {
         }
     }
 
-    /// cladefs: its own store, unrouted, made once ([`ObjectBucket::own`]).
+    /// cladefs: its own bucket, unrouted, made once ([`ObjectBucket::own`]).
     fn twin(&self) -> &Arc<ObjectBucket> {
         let own = || {
-            let twin = ObjectBucket::paged(self.store.clone(), self.pages.clone(), &self.prefix);
+            let twin = ObjectBucket::paged(self.backend.clone(), self.pages.clone(), &self.prefix);
             let (rewrites, settings) = (self.rewrites.clone(), self.settings.clone());
             Arc::new(ObjectBucket { rewrites, settings, ..twin })
         };
@@ -738,7 +739,7 @@ impl ObjectBucket {
     }
 
     /// cladefs: the mirror here of the version `cell` was forked from
-    /// ([`ObjectBucket::mirror_wanted`]): what a host opening `cell`'s store asks for, the host
+    /// ([`ObjectBucket::mirror_wanted`]): what a host opening `cell` asks for, the host
     /// that forked it perhaps dead before it did (TASK-633.8). With the version, its origin.
     pub async fn mirror_for(
         self: Arc<Self>,
@@ -756,19 +757,21 @@ impl ObjectBucket {
     }
 
     /// cladefs: this bucket, its requests of the objects of cells of other buckets sent there
-    /// (TASK-633.4, backlog doc-23): each key's cell's ID names its bucket ([`crate::objectid::bucket_of`]),
-    /// which `resolve` opens, once, unless it is this one, or none (the IDs tests name); keys of no
-    /// cell's (its identity, its registry, blocks of IDs, tenants' KEKs) stay here. A listing goes
-    /// where its prefix's cell is, a batch of deletions to each bucket of its keys. A bucket that
-    /// can't be opened is unavailable to the request, as a bucket failing is, logged: requests try
-    /// again, so that a registry spread meanwhile lets them on.
+    /// (TASK-633.4, backlog doc-23): each key's cell's ID names its bucket
+    /// ([`crate::objectid::bucket_of`]), which `resolve` opens, once, unless it is this one, or
+    /// none (the IDs tests name); keys of no cell's (its identity, its registry, blocks of IDs,
+    /// tenants' KEKs) stay here. A listing goes where its prefix's cell is, a batch of deletions to
+    /// each bucket of its keys. A bucket that can't be opened is unavailable to the request, as a
+    /// bucket failing is, logged: requests try again, so that a registry spread meanwhile lets them
+    /// on.
     pub fn routed(self, resolve: Arc<dyn Resolve>) -> Self {
         let (home, members) = Default::default();
         Self { route: Some(Route { resolve, home, members }), ..self }
     }
 
-    /// cladefs: the bucket numbered `number`, as this one's requests reach it ([`ObjectBucket::routed`]):
-    /// opened by its resolver, unless opened before. `NoBucket` for a bucket that routes nothing.
+    /// cladefs: the bucket numbered `number`, as this one's requests reach it
+    /// ([`ObjectBucket::routed`]): opened by its resolver, unless opened before. `NoBucket` for a
+    /// bucket that routes nothing.
     pub async fn numbered(&self, number: u16) -> Result<Arc<ObjectBucket>, crate::Error> {
         let route = self.route.as_ref().ok_or(crate::Error::NoBucket(number))?;
         if let Some(member) = route.members.lock().unwrap().get(&number) {
@@ -781,14 +784,14 @@ impl ObjectBucket {
     /// cladefs: its own number, read once from its identity: none if it has none yet.
     /// cladefs: its settings, as its identity says, read once (TASK-691): the defaults' for a
     /// bucket not formatted, as tests' are, which a host's allocator formats before it gives any
-    /// cell an ID, its write of the identity noted ([`ObjectBucket::store_put`]).
+    /// cell an ID, its write of the identity noted ([`ObjectBucket::object_put`]).
     async fn settings(&self) -> crate::identity::Settings {
         if let Some(settings) = self.settings.get() {
             return *settings;
         }
         let mut failures = 0;
         let settings = loop {
-            match self.store_get(layout::IDENTITY).await {
+            match self.object_get(layout::IDENTITY).await {
                 Ok(object) => match crate::identity::parse(&object.bytes) {
                     Ok(identity) => break identity.settings,
                     Err(err) => {
@@ -810,7 +813,7 @@ impl ObjectBucket {
         if let Some(number) = *route.home.lock().unwrap() {
             return Ok(Some(number));
         }
-        let identity = match self.store_get(layout::IDENTITY).await {
+        let identity = match self.object_get(layout::IDENTITY).await {
             Ok(object) => crate::identity::parse(&object.bytes).map_err(|err| {
                 log::warn!("bucket: reading its own identity: {err}");
                 Error::Unavailable
@@ -834,11 +837,11 @@ impl ObjectBucket {
             return held;
         }
         let listed = std::time::Instant::now();
-        let markers = self.store_list(&layout::mirrors(cell)).await.unwrap_or_default();
+        let markers = self.object_list(&layout::mirrors(cell)).await.unwrap_or_default();
         let mut held = false;
         for meta in markers {
             let layout::Kind::Mirror { at, .. } = layout::kind(&meta.key) else { continue };
-            let Ok(object) = self.store_get(&meta.key).await else { continue };
+            let Ok(object) = self.object_get(&meta.key).await else { continue };
             let Ok(marker) = layout::decode::<layout::Mirror>(&object.bytes) else { continue };
             self.known.named(cell, at, marker.epoch);
             held = true;
@@ -877,7 +880,8 @@ impl ObjectBucket {
         self.mirrored(cell).await
     }
 
-    /// cladefs: the bucket `key`'s request goes to, if another than this one ([`ObjectBucket::routed`]).
+    /// cladefs: the bucket `key`'s request goes to, if another than this one
+    /// ([`ObjectBucket::routed`]).
     async fn member(&self, key: &str) -> Result<Option<Arc<ObjectBucket>>, Error> {
         let Some(route) = &self.route else { return Ok(None) };
         let Some(number) = layout::routed_to(key) else { return Ok(None) };
@@ -897,7 +901,7 @@ impl ObjectBucket {
     }
 
     /// Checks that it honours the conditional writes cells rely on ([`probe`]), with an object
-    /// of `nonce`'s, unless it found it does before: a host's stores share their bucket, which it
+    /// of `nonce`'s, unless it found it does before: a host's cells share their bucket, which it
     /// checks once, at their first attach, not at each (doc-7, The head).
     pub async fn probed(&self, nonce: u64) -> Result<(), String> {
         if !self.honoured.load(Ordering::Relaxed) {
@@ -931,15 +935,15 @@ impl ObjectBucket {
         }
     }
 
-    /// cladefs: reads the newest marks object of the collector's mark-only passes over `cell`, if it
-    /// is another than the one it holds (TASK-264, TASK-395.2): a listing of the cell's
+    /// cladefs: reads the newest marks object of the collector's mark-only passes over `cell`, if
+    /// it is another than the one it holds (TASK-264, TASK-395.2): a listing of the cell's
     /// `gc/marks/`, then a read of the newest. A bucket does every [`crate::marks::REFRESH`] for
     /// each cell it reads, alongside a read of it; its requests go uncounted
     /// ([`ObjectBucket::stats`]), being no reader's. A request failed, it keeps what it held, until
     /// the next; marks it can't decode, it warns of, holding none.
     pub async fn refresh_marks(&self, cell: layout::CellId) {
         let prefix = self.path(layout::marks_of(cell).trim_end_matches('/'));
-        let listed = match self.store.list(Some(&prefix)).try_collect::<Vec<_>>().await {
+        let listed = match self.backend.list(Some(&prefix)).try_collect::<Vec<_>>().await {
             Ok(listed) => listed,
             Err(error) => {
                 log::debug!(error:%; "object storage: listing the collector's marks: {error}");
@@ -954,7 +958,8 @@ impl ObjectBucket {
             return;
         }
         let path = self.path(&newest.key);
-        let read = async { self.store.get_opts(&path, GetOptions::default()).await?.bytes().await };
+        let read =
+            async { self.backend.get_opts(&path, GetOptions::default()).await?.bytes().await };
         match read.await.map(|bytes| layout::decode::<layout::Marks>(&bytes)) {
             Ok(Ok(marks)) => self.marks.hold(cell, Some((&newest, marks))),
             Ok(Err(error)) => {
@@ -965,12 +970,12 @@ impl ObjectBucket {
         }
     }
 
-    /// cladefs: reads whether a mark-only pass marks the bucket ([`layout::MARKING`]), a HEAD, which
-    /// says whether readers watch the cells' marks at all (TASK-395.4's review). A request failed,
-    /// it keeps what it held, until the next.
+    /// cladefs: reads whether a mark-only pass marks the bucket ([`layout::MARKING`]), a HEAD,
+    /// which says whether readers watch the cells' marks at all (TASK-395.4's review). A request
+    /// failed, it keeps what it held, until the next.
     pub async fn refresh_marking(&self) {
         let head = GetOptions { head: true, ..GetOptions::default() };
-        match self.store.get_opts(&self.path(layout::MARKING), head).await {
+        match self.backend.get_opts(&self.path(layout::MARKING), head).await {
             Ok(_) => self.marks.hold_marking(true),
             Err(object_store::Error::NotFound { .. }) => self.marks.hold_marking(false),
             Err(error) => {
@@ -1030,7 +1035,7 @@ impl ObjectBucket {
     }
 
     /// The path of the objects under the prefix `prefix` of keys, empty or ending with `/`, as
-    /// `object_store` lists by them: whole segments, none for every object of the store.
+    /// `object_store` lists by them: whole segments, none for every object of the backend.
     fn prefix_path(&self, prefix: &str) -> Option<Path> {
         assert!(prefix.is_empty() || prefix.ends_with('/'), "a prefix of keys: {prefix}");
         match (self.prefix.is_empty(), prefix.trim_end_matches('/')) {
@@ -1060,8 +1065,8 @@ impl ObjectBucket {
 }
 
 /// The object store at `url`, as [`ObjectBucket::from_url`] reaches it, and the prefix the URL
-/// names in it: for tests that put themselves between a store and its objects. cladefs: a degraded
-/// one, if the environment says so (`CLADEFS_BUCKET_LATENCY_MS`, `CLADEFS_BUCKET_FAULTS`:
+/// names in it: for tests that put themselves between a backend and its objects. cladefs: a
+/// degraded one, if the environment says so (`CLADEFS_BUCKET_LATENCY_MS`, `CLADEFS_BUCKET_FAULTS`:
 /// [`crate::faults`]): an object store as far as a host's own may be, as the sandbox team's RustFS,
 /// 25 ms away, which made Fxfs's commits wait (TASK-61, TASK-62), or one failing for a while
 /// (TASK-330.3).
@@ -1080,21 +1085,21 @@ pub(crate) fn object_store_with(
     Ok((objects, prefix))
 }
 
-/// cladefs: a store as it lists a level of keys a page a request, if it does
+/// cladefs: a backend as it lists a level of keys a page a request, if it does
 /// ([`ObjectBucket::paged`]).
 type Pages = Option<Arc<dyn PaginatedListStore>>;
 
 /// cladefs: what a bucket's URL reaches ([`reach`]).
 pub(crate) struct Reached {
     pub objects: Arc<dyn ObjectStore>,
-    /// The same store, which lists a level of keys a page a request, if it does: S3's, GCS's and
+    /// The same backend, which lists a level of keys a page a request, if it does: S3's, GCS's and
     /// Azure's; not a degraded one's ([`crate::faults`]), whose pages would go around its faults,
     /// which lists a level whole as files and memory do.
     pub pages: Pages,
     /// The prefix the URL names in it.
     pub prefix: String,
-    /// cladefs: how far apart its store takes writes of one key ([`Rewrites`], TASK-690): GCS's
-    /// [`GCS_REWRITE_EVERY`], or a degraded store's that refuses them faster
+    /// cladefs: how far apart its backend takes writes of one key ([`Rewrites`], TASK-690): GCS's
+    /// [`GCS_REWRITE_EVERY`], or a degraded backend's that refuses them faster
     /// ([`crate::faults::Fault::rewrite_every`]).
     pub rewrite_every: std::time::Duration,
 }
@@ -1109,7 +1114,8 @@ pub struct Registered {
 }
 
 impl Registered {
-    /// Buckets opened with `vars`' options: the environment's, for a host ([`Registered::from_env`]).
+    /// Buckets opened with `vars`' options: the environment's, for a host
+    /// ([`Registered::from_env`]).
     pub fn new(vars: impl IntoIterator<Item = (String, String)>) -> Self {
         Self { vars: vars.into_iter().collect() }
     }
@@ -1199,15 +1205,15 @@ pub fn provider_of(url: &str) -> Result<&'static str, String> {
     }
 }
 
-/// cladefs: the object store at `url`, as [`object_store_with`] reaches it, and how it lists a level
-/// of keys a page at a time, if it does (TASK-395.5).
+/// cladefs: the object store at `url`, as [`object_store_with`] reaches it, and how it lists a
+/// level of keys a page at a time, if it does (TASK-395.5).
 pub(crate) fn reach(
     url: &str,
     options: impl IntoIterator<Item = (String, String)>,
     client: &Client,
 ) -> Result<Reached, String> {
     let url = url::Url::parse(url).map_err(|error| format!("{url}: {error}"))?;
-    let (store, pages, path): (Arc<dyn ObjectStore>, _, Path) = match url.scheme() {
+    let (backend, pages, path): (Arc<dyn ObjectStore>, _, Path) = match url.scheme() {
         // cladefs: `object_store`'s own refuses conditional updates (TASK-165.1).
         "file" => {
             let dir = url.to_file_path().map_err(|()| format!("{url}: no directory"))?;
@@ -1224,14 +1230,14 @@ pub(crate) fn reach(
     let (objects, pages): (Arc<dyn ObjectStore>, _) = match crate::faults::Faults::from_env()? {
         Some(faults) => {
             rewrite_every = rewrite_every.max(faults.now().rewrite_every);
-            (Arc::new(crate::faults::Faulty::new(store, faults)), None)
+            (Arc::new(crate::faults::Faulty::new(backend, faults)), None)
         }
-        None => (store, pages),
+        None => (backend, pages),
     };
     Ok(Reached { objects, pages, prefix: path.as_ref().to_owned(), rewrite_every })
 }
 
-/// The store of a URL of a cloud's, or of memory, the same store as it lists a level of keys a
+/// The backend of a URL of a cloud's, or of memory, the same backend as it lists a level of keys a
 /// page a request, if it does, and the path it names in it, as `object_store::parse_url_opts`
 /// makes them, but with `client`.
 fn cloud(
@@ -1258,7 +1264,7 @@ fn cloud(
             (built.clone() as Arc<dyn ObjectStore>, Some(built as Arc<dyn PaginatedListStore>))
         }};
     }
-    let (store, pages) = match scheme {
+    let (backend, pages) = match scheme {
         Scheme::Memory => {
             (Arc::new(object_store::memory::InMemory::new()) as Arc<dyn ObjectStore>, None)
         }
@@ -1270,11 +1276,11 @@ fn cloud(
             return Err(object_store::Error::Generic { store: "cladefs", source });
         }
     };
-    Ok((store, pages, path))
+    Ok((backend, pages, path))
 }
 
 /// What a request's failure means to cells. Failures other than the ones the protocol answers
-/// are retried: the store may be unreachable for a while, and cells wait (doc-7, decision 3).
+/// are retried: the backend may be unreachable for a while, and cells wait (doc-7, decision 3).
 fn error(error: &object_store::Error) -> Error {
     match error {
         object_store::Error::NotFound { .. } => Error::NotFound,
@@ -1293,14 +1299,14 @@ fn error(error: &object_store::Error) -> Error {
 /// cladefs: its requests of its own objects: those [`Bucket`]'s, routed, send here, or to another
 /// bucket's ([`ObjectBucket::routed`]).
 impl ObjectBucket {
-    fn store_get(&self, key: &str) -> impl Future<Output = Result<Object, Error>> + Send {
+    fn object_get(&self, key: &str) -> impl Future<Output = Result<Object, Error>> + Send {
         self.marks.reached(Request::Get, key);
         let refresh = self.marks_due(key);
-        let (store, path) = (self.store.clone(), self.path(key));
+        let (backend, path) = (self.backend.clone(), self.path(key));
         let get = async move {
             let timed = self.counts.request(Request::Get, Some(&path));
             let got = async {
-                let result = store.get_opts(&path, GetOptions::default()).await?;
+                let result = backend.get_opts(&path, GetOptions::default()).await?;
                 let meta = self.meta(result.meta.clone());
                 let bytes = result.bytes().await?;
                 self.counts.downloaded.fetch_add(bytes.len() as u64, Ordering::Relaxed);
@@ -1311,14 +1317,14 @@ impl ObjectBucket {
         async move { futures::join!(get, refresh).0 }
     }
 
-    fn store_get_range(
+    fn object_get_range(
         &self,
         key: &str,
         range: ByteRange,
     ) -> impl Future<Output = Result<Vec<u8>, Error>> + Send {
         self.marks.reached(Request::GetRange, key);
         let refresh = self.marks_due(key);
-        let (store, path) = (self.store.clone(), self.path(key));
+        let (backend, path) = (self.backend.clone(), self.path(key));
         let range = match range {
             ByteRange::Bounded(range) => GetRange::Bounded(range),
             ByteRange::Suffix(n) => GetRange::Suffix(n),
@@ -1327,8 +1333,8 @@ impl ObjectBucket {
             let timed = self.counts.request(Request::GetRange, Some(&path));
             let got = async {
                 let options = GetOptions { range: Some(range.clone()), ..GetOptions::default() };
-                let result = match store.get_opts(&path, options).await {
-                    // A store that reads no suffix of an object (Azure Blob Storage, TASK-46),
+                let result = match backend.get_opts(&path, options).await {
+                    // A backend that reads no suffix of an object (Azure Blob Storage, TASK-46),
                     // which it says before any request: the object's size first, then the range
                     // it ends with.
                     Err(object_store::Error::NotSupported { .. })
@@ -1337,10 +1343,10 @@ impl ObjectBucket {
                         let GetRange::Suffix(len) = range else { unreachable!() };
                         let _head = self.counts.request(Request::Head, Some(&path));
                         let head = GetOptions { head: true, ..GetOptions::default() };
-                        let size = store.get_opts(&path, head).await?.meta.size;
+                        let size = backend.get_opts(&path, head).await?.meta.size;
                         let range = GetRange::Bounded(size.saturating_sub(len)..size);
                         let options = GetOptions { range: Some(range), ..GetOptions::default() };
-                        store.get_opts(&path, options).await?
+                        backend.get_opts(&path, options).await?
                     }
                     result => result?,
                 };
@@ -1353,21 +1359,21 @@ impl ObjectBucket {
         async move { futures::join!(get, refresh).0 }
     }
 
-    fn store_head(&self, key: &str) -> impl Future<Output = Result<Meta, Error>> + Send {
+    fn object_head(&self, key: &str) -> impl Future<Output = Result<Meta, Error>> + Send {
         self.marks.reached(Request::Head, key);
         let refresh = self.marks_due(key);
-        let (store, path) = (self.store.clone(), self.path(key));
+        let (backend, path) = (self.backend.clone(), self.path(key));
         let head = async move {
             let timed = self.counts.request(Request::Head, Some(&path));
             let options = GetOptions { head: true, ..GetOptions::default() };
-            let result = store.get_opts(&path, options).await;
+            let result = backend.get_opts(&path, options).await;
             timed.answered(result.map(|result| self.meta(result.meta)), |_| 0)
         };
         async move { futures::join!(head, refresh).0 }
     }
 
-    fn store_list(&self, prefix: &str) -> impl Future<Output = Result<Vec<Meta>, Error>> + Send {
-        let store = self.store.clone();
+    fn object_list(&self, prefix: &str) -> impl Future<Output = Result<Vec<Meta>, Error>> + Send {
+        let backend = self.backend.clone();
         let path = self.prefix_path(prefix);
         let refresh = self.marks_due(prefix);
         let prefix = prefix.to_owned();
@@ -1375,7 +1381,7 @@ impl ObjectBucket {
             // A listing of many objects takes a request for each page of them (1,000 on S3 and
             // GCS), which `object_store` does not say: counted as its pages (TASK-455).
             let timed = self.counts.request(Request::List, path.as_ref());
-            let listed = store.list(path.as_ref()).try_collect::<Vec<ObjectMeta>>().await;
+            let listed = backend.list(path.as_ref()).try_collect::<Vec<ObjectMeta>>().await;
             let listed = timed.answered(listed, |_| 0)?;
             let more = crate::bucket::list_pages(listed.len()) - 1;
             self.counts.requests[Request::List as usize].fetch_add(more, Ordering::Relaxed);
@@ -1393,15 +1399,15 @@ impl ObjectBucket {
         }
     }
 
-    /// cladefs: a page a request where the store pages ([`ObjectBucket::paged`]); else the level
+    /// cladefs: a page a request where the backend pages ([`ObjectBucket::paged`]); else the level
     /// whole, which the page is cut out of ([`Listing::page`]).
-    fn store_list_delimited(
+    fn object_list_delimited(
         &self,
         prefix: &str,
         page: Page<'_>,
     ) -> impl Future<Output = Result<Listing, Error>> + Send {
         assert!((1..=LIST_PAGE).contains(&page.max), "a page of 1 to {LIST_PAGE}: {}", page.max);
-        let (store, pages) = (self.store.clone(), self.pages.clone());
+        let (backend, pages) = (self.backend.clone(), self.pages.clone());
         let path = self.prefix_path(prefix);
         let refresh = self.marks_due(prefix);
         let prefix = prefix.to_owned();
@@ -1422,7 +1428,7 @@ impl ObjectBucket {
                     paged.map(|paged| (paged.result, paged.page_token))
                 }
                 // A request for each page of the level, which `object_store` does not say.
-                None => store.list_with_delimiter(path.as_ref()).await.map(|whole| (whole, None)),
+                None => backend.list_with_delimiter(path.as_ref()).await.map(|whole| (whole, None)),
             };
             let (listed, next) = timed.answered(listed, |_| 0)?;
             let mut prefixes: Vec<String> = (listed.common_prefixes.iter())
@@ -1450,13 +1456,13 @@ impl ObjectBucket {
         }
     }
 
-    fn store_put(
+    fn object_put(
         &self,
         key: &str,
         bytes: bytes::Bytes,
         mode: PutMode,
     ) -> impl Future<Output = Result<Version, Error>> + Send {
-        let (store, path) = (self.store.clone(), self.path(key));
+        let (backend, path) = (self.backend.clone(), self.path(key));
         let identity = key == layout::IDENTITY;
         let (request, mode) = match mode {
             PutMode::Overwrite => (Request::Overwrite, object_store::PutMode::Overwrite),
@@ -1467,7 +1473,7 @@ impl ObjectBucket {
         };
         let upload = Upload::of(key);
         async move {
-            // cladefs: as long after its last write of the key as the store needs (TASK-690).
+            // cladefs: as long after its last write of the key as the backend needs (TASK-690).
             self.rewrites.wait(&path).await;
             // cladefs: its turn, once a write of its kind failed (TASK-382).
             let _turn = match request.takes_turns() {
@@ -1478,7 +1484,7 @@ impl ObjectBucket {
             let len = bytes.len() as u64;
             let options = PutOptions { mode, ..PutOptions::default() };
             let identity = identity.then(|| bytes.clone());
-            let result = store.put_opts(&path, PutPayload::from(bytes), options).await;
+            let result = backend.put_opts(&path, PutPayload::from(bytes), options).await;
             self.rewrites.wrote(&path);
             // cladefs: its formatting's, or addition's, settings, as its readers go by them.
             if let (Ok(_), Some(bytes)) = (&result, identity)
@@ -1492,13 +1498,13 @@ impl ObjectBucket {
         }
     }
 
-    fn store_delete(&self, key: &str) -> impl Future<Output = Result<(), Error>> + Send {
-        let (store, path) = (self.store.clone(), self.path(key));
+    fn object_delete(&self, key: &str) -> impl Future<Output = Result<(), Error>> + Send {
+        let (backend, path) = (self.backend.clone(), self.path(key));
         async move {
             let timed = self.counts.request(Request::Delete, Some(&path));
             let deleting = path.clone();
             let mut deleted =
-                store.delete_stream(stream::once(async move { Ok(deleting) }).boxed());
+                backend.delete_stream(stream::once(async move { Ok(deleting) }).boxed());
             let deleted = match deleted.next().await {
                 Some(Err(object_store::Error::NotFound { .. })) | Some(Ok(_)) | None => Ok(()),
                 Some(Err(other)) => Err(other),
@@ -1507,18 +1513,19 @@ impl ObjectBucket {
         }
     }
 
-    /// cladefs: through `object_store`'s `delete_stream`, which deletes in batches where the store
-    /// has a batch delete (S3's DeleteObjects, Azure's), and several at once where it has not
-    /// (TASK-395.5); cladefs's buckets of files take their lock once a batch ([`crate::local`]).
-    fn store_delete_batch(&self, keys: &[&str]) -> impl Future<Output = Result<(), Error>> + Send {
-        let store = self.store.clone();
+    /// cladefs: through `object_store`'s `delete_stream`, which deletes in batches where the
+    /// backend has a batch delete (S3's DeleteObjects, Azure's), and several at once where it has
+    /// not (TASK-395.5); cladefs's buckets of files take their lock once a batch
+    /// ([`crate::local`]).
+    fn object_delete_batch(&self, keys: &[&str]) -> impl Future<Output = Result<(), Error>> + Send {
+        let backend = self.backend.clone();
         let paths: Vec<object_store::Result<Path>> =
             keys.iter().map(|key| Ok(self.path(key))).collect();
         async move {
             let timed = self.counts.request(Request::DeleteBatch, None);
             let objects = paths.len();
             // Every answer awaited, the first failure kept: the rest took effect, or failed too.
-            let deleted = store
+            let deleted = backend
                 .delete_stream(stream::iter(paths).boxed())
                 .fold(Ok(()), |result, deleted| {
                     std::future::ready(match deleted {
@@ -1546,40 +1553,41 @@ impl Bucket for ObjectBucket {
         self.route.as_ref().map(|_| self as &dyn crate::mirror::Here)
     }
 
-    /// cladefs: an object a mirror copied here read here first (TASK-633.8), else its cell's bucket.
+    /// cladefs: an object a mirror copied here read here first (TASK-633.8), else its cell's
+    /// bucket.
     async fn get(&self, key: &str) -> Result<Object, Error> {
         if self.read_here_first(key).await
-            && let Ok(object) = self.store_get(key).await
+            && let Ok(object) = self.object_get(key).await
         {
             return Ok(object);
         }
         match self.member(key).await? {
-            Some(member) => member.store_get(key).await,
-            None => self.store_get(key).await,
+            Some(member) => member.object_get(key).await,
+            None => self.object_get(key).await,
         }
     }
 
     async fn get_range(&self, key: &str, range: ByteRange) -> Result<Vec<u8>, Error> {
         if self.read_here_first(key).await
-            && let Ok(bytes) = self.store_get_range(key, range.clone()).await
+            && let Ok(bytes) = self.object_get_range(key, range.clone()).await
         {
             return Ok(bytes);
         }
         match self.member(key).await? {
-            Some(member) => member.store_get_range(key, range).await,
-            None => self.store_get_range(key, range).await,
+            Some(member) => member.object_get_range(key, range).await,
+            None => self.object_get_range(key, range).await,
         }
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {
         if self.read_here_first(key).await
-            && let Ok(meta) = self.store_head(key).await
+            && let Ok(meta) = self.object_head(key).await
         {
             return Ok(meta);
         }
         match self.member(key).await? {
-            Some(member) => member.store_head(key).await,
-            None => self.store_head(key).await,
+            Some(member) => member.object_head(key).await,
+            None => self.object_head(key).await,
         }
     }
 
@@ -1588,9 +1596,9 @@ impl Bucket for ObjectBucket {
     /// keys of their own.
     async fn list(&self, prefix: &str) -> Result<Vec<Meta>, Error> {
         if self.lists_here_too(prefix).await {
-            let mut listed = self.store_list(prefix).await?;
+            let mut listed = self.object_list(prefix).await?;
             let there = match self.member(prefix).await {
-                Ok(Some(member)) => member.store_list(prefix).await.unwrap_or_default(),
+                Ok(Some(member)) => member.object_list(prefix).await.unwrap_or_default(),
                 _ => Vec::new(),
             };
             let here: std::collections::BTreeSet<String> =
@@ -1600,22 +1608,22 @@ impl Bucket for ObjectBucket {
             return Ok(listed);
         }
         match self.member(prefix).await? {
-            Some(member) => member.store_list(prefix).await,
-            None => self.store_list(prefix).await,
+            Some(member) => member.object_list(prefix).await,
+            None => self.object_list(prefix).await,
         }
     }
 
     async fn list_delimited(&self, prefix: &str, page: Page<'_>) -> Result<Listing, Error> {
         match self.member(prefix).await? {
-            Some(member) => member.store_list_delimited(prefix, page).await,
-            None => self.store_list_delimited(prefix, page).await,
+            Some(member) => member.object_list_delimited(prefix, page).await,
+            None => self.object_list_delimited(prefix, page).await,
         }
     }
 
     async fn put(&self, key: &str, bytes: crate::Bytes, mode: PutMode) -> Result<Version, Error> {
         match self.member(key).await? {
-            Some(member) => member.store_put(key, bytes, mode).await,
-            None => self.store_put(key, bytes, mode).await,
+            Some(member) => member.object_put(key, bytes, mode).await,
+            None => self.object_put(key, bytes, mode).await,
         }
     }
 
@@ -1627,7 +1635,7 @@ impl Bucket for ObjectBucket {
         }
     }
 
-    /// cladefs: as the store its writes of `key` go to takes them (TASK-690); its own, if which
+    /// cladefs: as the backend its writes of `key` go to takes them (TASK-690); its own, if which
     /// that is can't be told now, as the write will find out.
     async fn rewritable(&self, key: &str) {
         match self.member(key).await {
@@ -1638,15 +1646,15 @@ impl Bucket for ObjectBucket {
 
     async fn delete(&self, key: &str) -> Result<(), Error> {
         match self.member(key).await? {
-            Some(member) => member.store_delete(key).await,
-            None => self.store_delete(key).await,
+            Some(member) => member.object_delete(key).await,
+            None => self.object_delete(key).await,
         }
     }
 
     /// cladefs: each bucket's keys deleted there, in one batch each (TASK-633.4).
     async fn delete_batch(&self, keys: &[&str]) -> Result<(), Error> {
         if self.route.is_none() {
-            return self.store_delete_batch(keys).await;
+            return self.object_delete_batch(keys).await;
         }
         let mut here = Vec::new();
         let mut there: Vec<(Arc<ObjectBucket>, Vec<&str>)> = Vec::new();
@@ -1660,10 +1668,10 @@ impl Bucket for ObjectBucket {
             }
         }
         if !here.is_empty() {
-            self.store_delete_batch(&here).await?;
+            self.object_delete_batch(&here).await?;
         }
         for (member, keys) in there {
-            member.store_delete_batch(&keys).await?;
+            member.object_delete_batch(&keys).await?;
         }
         Ok(())
     }
@@ -1677,7 +1685,7 @@ impl Bucket for ObjectBucket {
     }
 }
 
-/// cladefs: a routed bucket's mirrors of other buckets' cells' versions, in its own store
+/// cladefs: a routed bucket's mirrors of other buckets' cells' versions, in its own bucket
 /// (TASK-633.8).
 impl crate::mirror::Here for ObjectBucket {
     /// A marker found tells its version's checkpoint epoch, as [`ObjectBucket::mirrored`]'s do,
@@ -1745,7 +1753,7 @@ fn backoff(failures: u32) -> std::time::Duration {
 /// Checks that `bucket` honours the conditional writes cells rely on, with an object of its
 /// own at `probe/<nonce>`, which it removes: a create where an object is fails, so does an update
 /// of a version that is not the object's, and one of the object's version succeeds. cladefs: a step
-/// failing as a bucket out of reach does, `Unavailable`, says nothing of what the store honours:
+/// failing as a bucket out of reach does, `Unavailable`, says nothing of what the backend honours:
 /// the probe begins again, with an object of its own anew, as a conditional write that failed so
 /// may or may not have landed, backing off as the bucket's requests do (TASK-699).
 pub async fn probe(bucket: &impl Bucket, nonce: u64) -> Result<(), String> {
@@ -1795,7 +1803,7 @@ async fn probe_once(bucket: &impl Bucket, nonce: u64) -> Probed {
     if again != Err(Error::AlreadyExists) {
         return refused("a create where an object is", &again);
     }
-    // No store makes this ETag; GCS's generation 0 is no object's.
+    // No backend makes this ETag; GCS's generation 0 is no object's.
     let other =
         Version { e_tag: Some("\"cladefs-probe\"".to_owned()), version: Some("0".to_owned()) };
     let stale = bucket.put(&key, bytes::Bytes::from_static(b"stale"), PutMode::Update(other)).await;
@@ -1852,20 +1860,20 @@ pub(crate) mod tests {
             // The checkpoint at the version, and the segment holding its extent.
             assert_eq!(mirrored, Mirrored::Done { copied: 2, referred: 1, retired: 1 });
             let (hold, marker) = (layout::hold(parent, at, 1), layout::mirror(parent, at));
-            assert!(two.other.store_get(&hold).await.is_ok(), "no hold");
-            assert!(two.home.store_get(&marker).await.is_ok(), "no marker");
-            assert!(two.home.store_get(&layout::pin(parent, at)).await.is_err(), "the pin stands");
+            assert!(two.other.object_get(&hold).await.is_ok(), "no hold");
+            assert!(two.home.object_get(&marker).await.is_ok(), "no marker");
+            assert!(two.home.object_get(&layout::pin(parent, at)).await.is_err(), "the pin stands");
             assert_eq!(two.refers(origin, child).await, (false, true, true));
             let again = mirror(&*bucket, &*own, 1, parent, at).await.unwrap();
             assert_eq!(again, Mirrored::Done { copied: 0, referred: 0, retired: 0 });
             // Its hold deleted, as B's collector deletes it with the copy, the marker read before:
             // a mirror begun again, finding the marker, writes none (`mirrorHoldsUnmarked`).
-            two.other.store_delete(&hold).await.unwrap();
+            two.other.object_delete(&hold).await.unwrap();
             let again = mirror(&*bucket, &*own, 1, parent, at).await.unwrap();
             assert_eq!(again, Mirrored::Done { copied: 0, referred: 0, retired: 0 });
-            assert!(two.other.store_get(&hold).await.is_err(), "a hold written again");
+            assert!(two.other.object_get(&hold).await.is_err(), "a hold written again");
             two.other
-                .store_put(
+                .object_put(
                     &hold,
                     layout::encode(&layout::Reference::of(0)).into(),
                     PutMode::Overwrite,
@@ -1875,13 +1883,13 @@ pub(crate) mod tests {
             let unnamed = at + 7;
             let dropped = mirror(&*bucket, &*own, 1, parent, unnamed).await.unwrap();
             assert_eq!(dropped, Mirrored::Unnamed);
-            assert!(two.other.store_get(&layout::hold(parent, unnamed, 1)).await.is_err());
-            assert!(two.home.store_get(&layout::pin(parent, unnamed)).await.is_err());
-            assert!(two.home.store_get(&layout::mirror(parent, unnamed)).await.is_err());
+            assert!(two.other.object_get(&layout::hold(parent, unnamed, 1)).await.is_err());
+            assert!(two.home.object_get(&layout::pin(parent, unnamed)).await.is_err());
+            assert!(two.home.object_get(&layout::mirror(parent, unnamed)).await.is_err());
 
-            let listed = two.other.store_list(&parent.prefix()).await.unwrap();
+            let listed = two.other.object_list(&parent.prefix()).await.unwrap();
             for meta in listed.into_iter().filter(|meta| crate::peer::served(&meta.key)) {
-                two.other.store_delete(&meta.key).await.unwrap();
+                two.other.object_delete(&meta.key).await.unwrap();
             }
             let fresh = two.routed();
             let inherited = recovery::recover(&*fresh, child, Some(origin)).await.unwrap().state;
@@ -1911,8 +1919,8 @@ pub(crate) mod tests {
             let report = pass.collect_copy(&*fresh, &*fresh_own, 1, parent).await.unwrap();
             // Its copy and its marker.
             assert_eq!((report.deleted, report.retired), (3, 0), "nothing needing it");
-            assert_eq!(two.home.store_list(&parent.prefix()).await.unwrap(), [], "left here");
-            assert!(two.other.store_get(&hold).await.is_err(), "the hold stands");
+            assert_eq!(two.home.object_list(&parent.prefix()).await.unwrap(), [], "left here");
+            assert!(two.other.object_get(&hold).await.is_err(), "the hold stands");
         });
     }
 
@@ -1924,12 +1932,12 @@ pub(crate) mod tests {
         other: ObjectBucket,
     }
 
-    /// cladefs: `cell`'s head in `bucket`'s own store made `head`, over what is there, as a test's
+    /// cladefs: `cell`'s head in `bucket`'s own twin made `head`, over what is there, as a test's
     /// writer leaves it (TASK-691): every slot, each a copy of it newer than any there. Each slot's
     /// key and bytes.
     async fn put_head(bucket: &ObjectBucket, cell: layout::CellId, head: layout::Head) {
         for (key, bytes) in head_over(bucket, cell, head).await {
-            bucket.store_put(&key, bytes.into(), PutMode::Overwrite).await.unwrap();
+            bucket.object_put(&key, bytes.into(), PutMode::Overwrite).await.unwrap();
         }
     }
 
@@ -2014,9 +2022,9 @@ pub(crate) mod tests {
             let Origin { parent, at } = origin;
             let reference = layout::reference(parent, at, child);
             (
-                self.other.store_get(&reference).await.is_ok(),
-                self.home.store_get(&reference).await.is_ok(),
-                self.other.store_get(&layout::retired(parent, at, child)).await.is_ok(),
+                self.other.object_get(&reference).await.is_ok(),
+                self.home.object_get(&reference).await.is_ok(),
+                self.other.object_get(&layout::retired(parent, at, child)).await.is_ok(),
             )
         }
     }
@@ -2071,7 +2079,7 @@ pub(crate) mod tests {
                 let updates = self.updates.fetch_add(1, Ordering::Relaxed) + 1;
                 if self.taken_at == Some(updates) {
                     let another = layout::encode(&layout::Reference::of(u64::MAX));
-                    self.own.store_put(key, another.into(), PutMode::Overwrite).await?;
+                    self.own.object_put(key, another.into(), PutMode::Overwrite).await?;
                 }
             }
             self.own.put(key, bytes, mode).await
@@ -2123,7 +2131,7 @@ pub(crate) mod tests {
             for holder in [8, 9] {
                 collect_cell(&*bucket, parent, holder, &compacting).await.unwrap();
             }
-            let moves = two.other.store_list(&layout::moves_of(&segment).unwrap()).await.unwrap();
+            let moves = two.other.object_list(&layout::moves_of(&segment).unwrap()).await.unwrap();
             assert_eq!(moves.len(), 1, "{segment} not compacted");
 
             let later = ExtentId::new(parent.id, writer.chain().next_sequence());
@@ -2134,9 +2142,9 @@ pub(crate) mod tests {
             let mirrored = mirror(&*bucket, &*bucket.own(), 1, parent, at).await.unwrap();
             assert!(matches!(mirrored, Mirrored::Done { referred: 1, .. }), "{mirrored:?}");
 
-            let listed = two.other.store_list(&parent.prefix()).await.unwrap();
+            let listed = two.other.object_list(&parent.prefix()).await.unwrap();
             for meta in listed.into_iter().filter(|meta| crate::peer::served(&meta.key)) {
-                two.other.store_delete(&meta.key).await.unwrap();
+                two.other.object_delete(&meta.key).await.unwrap();
             }
             let fresh = two.routed();
             let inherited = recovery::recover(&*fresh, child, Some(origin)).await.unwrap().state;
@@ -2244,7 +2252,7 @@ pub(crate) mod tests {
         });
     }
 
-    /// TASK-633.8: a child's store opening here asks for its version's mirror
+    /// TASK-633.8: a child's cell opening here asks for its version's mirror
     /// ([`ObjectBucket::mirror_for`]), the host that forked it perhaps dead before it did: the
     /// version mirrored, once; none for a cell of no origin.
     #[test]
@@ -2318,8 +2326,9 @@ pub(crate) mod tests {
                 let failed = mirror(&*bucket, &*own, 1, parent, at).await;
                 fail::remove(step);
                 assert!(failed.is_err(), "{step}: {failed:?}");
-                assert!(two.other.store_get(&layout::hold(parent, at, 1)).await.is_err(), "{step}");
-                assert!(two.home.store_get(&layout::pin(parent, at)).await.is_err(), "{step}");
+                let held = two.other.object_get(&layout::hold(parent, at, 1)).await;
+                assert!(held.is_err(), "{step}");
+                assert!(two.home.object_get(&layout::pin(parent, at)).await.is_err(), "{step}");
             }
             let mirrored = mirror(&*bucket, &*own, 1, parent, at).await.unwrap();
             assert!(matches!(mirrored, Mirrored::Done { referred: 1, .. }), "{mirrored:?}");
@@ -2349,13 +2358,13 @@ pub(crate) mod tests {
             let (marker, marked) =
                 (layout::mirror(parent, at), layout::encode(&layout::Mirror::of(epoch)));
             let put = PutMode::Overwrite;
-            two.home.store_put(&marker, marked.clone().into(), put.clone()).await.unwrap();
+            two.home.object_put(&marker, marked.clone().into(), put.clone()).await.unwrap();
             let after = test_cell(1 << 48 | 3);
             fork_version(&*bucket, after, VERSION, origin, 7).await.unwrap();
             assert_eq!(two.refers(origin, after).await, (false, true, false), "mirrored");
 
             // The marker made as the fork referred in the parent's bucket.
-            two.home.store_delete(&marker).await.unwrap();
+            two.home.object_delete(&marker).await.unwrap();
             let scenario = fail::FailScenario::setup();
             let path = dir.path().join("home").join(&marker);
             fail::cfg_callback("version::referred", move || {
@@ -2382,7 +2391,7 @@ pub(crate) mod tests {
                 }
             })
             .unwrap();
-            two.home.store_delete(&marker).await.unwrap();
+            two.home.object_delete(&marker).await.unwrap();
             let path = dir.path().join("home").join(&marker);
             let marked = layout::encode(&layout::Mirror::of(epoch));
             fail::cfg_callback("version::referred", move || {
@@ -2423,32 +2432,32 @@ pub(crate) mod tests {
                 (bucket.own(), layout::pin(parent, at), layout::mirror(parent, at));
             let another = layout::encode(&layout::Reference::of(u64::MAX));
             let put = PutMode::Overwrite;
-            two.home.store_put(&pin, another.clone().into(), put).await.unwrap();
+            two.home.object_put(&pin, another.clone().into(), put).await.unwrap();
 
             assert_eq!(mirror(&*bucket, &*own, 1, parent, at).await.unwrap(), Mirrored::UnderWay);
-            assert!(two.home.store_get(&marker).await.is_err(), "marked under another's pin");
+            assert!(two.home.object_get(&marker).await.is_err(), "marked under another's pin");
 
             // Its pin taken over as it refreshes it before its marker.
             let taken = Watched::new(own.clone(), PIN_STALE + 1, Some(2));
             let gave_up = mirror(&*bucket, &taken, 1, parent, at).await.unwrap();
             assert_eq!(gave_up, Mirrored::GaveUp("its pin, stale, taken over".to_owned()));
-            assert!(two.home.store_get(&marker).await.is_err(), "marked, its pin taken over");
-            assert_eq!(two.home.store_get(&pin).await.unwrap().bytes, another, "the pin taken");
+            assert!(two.home.object_get(&marker).await.is_err(), "marked, its pin taken over");
+            assert_eq!(two.home.object_get(&pin).await.unwrap().bytes, another, "the pin taken");
 
             let later = Watched::new(own.clone(), PIN_STALE + 1, None);
             let options = Options { compact_below: 0.5, grace: 0 };
             let report = Collector::new(options).collect_copy(&*bucket, &later, 1, parent).await;
             assert_eq!(report.unwrap().deleted, 0);
-            assert!(two.home.store_get(&marker).await.is_ok(), "not marked, begun again");
-            assert!(two.home.store_get(&pin).await.is_err(), "the pin stands");
+            assert!(two.home.object_get(&marker).await.is_ok(), "not marked, begun again");
+            assert!(two.home.object_get(&pin).await.is_err(), "the pin stands");
             assert_eq!(two.refers(origin, child).await, (false, true, true));
 
             // Its pin taken over as it lets it go, written again first: the other's left.
-            two.home.store_put(&pin, another.clone().into(), PutMode::Overwrite).await.unwrap();
+            two.home.object_put(&pin, another.clone().into(), PutMode::Overwrite).await.unwrap();
             let taken = Watched::new(own.clone(), PIN_STALE + 1, Some(2));
             let done = mirror(&*bucket, &taken, 1, parent, at).await.unwrap();
             assert_eq!(done, Mirrored::Done { copied: 0, referred: 0, retired: 0 });
-            assert_eq!(two.home.store_get(&pin).await.unwrap().bytes, another, "the other's pin");
+            assert_eq!(two.home.object_get(&pin).await.unwrap().bytes, another, "the other's pin");
         });
     }
 
@@ -2594,14 +2603,14 @@ pub(crate) mod tests {
                 let location = &state.extents[&extent];
                 assert_eq!(read(&fresh, extent, location).await.unwrap(), b"versioned", "{step}");
                 let checkpoint = layout::checkpoint(parent, at, epoch);
-                let there = two.other.store_get(&checkpoint).await.is_ok();
-                let here = two.home.store_get(&checkpoint).await.is_ok();
+                let there = two.other.object_get(&checkpoint).await.is_ok();
+                let here = two.home.object_get(&checkpoint).await.is_ok();
                 assert_eq!((there, here), (true, marked), "{step}: where the version is");
-                let held = two.other.store_get(&layout::hold(parent, at, 1)).await.is_ok();
+                let held = two.other.object_get(&layout::hold(parent, at, 1)).await.is_ok();
                 assert_eq!(held, marked, "{step}: the hold");
                 let reference = two.refers(origin, child).await;
                 assert_eq!((reference.0, reference.1), (!retired, marked), "{step}: references");
-                assert!(two.home.store_get(&layout::pin(parent, at)).await.is_err(), "{step}");
+                assert!(two.home.object_get(&layout::pin(parent, at)).await.is_err(), "{step}");
             });
             let again = block_on(mirror(&*bucket, &*own, 1, parent, at)).unwrap();
             // The reference left there written here again, and left there still.
@@ -2616,10 +2625,10 @@ pub(crate) mod tests {
         scenario.teardown();
     }
 
-    /// TASK-633.8: a bucket holding a mirror of a version of another bucket's cell reads that cell's
-    /// objects written once here first, the cell's own bucket for those not copied; learns the
-    /// version's checkpoint epoch from the marker; and lists that cell's moves here and there. A
-    /// bucket holding no marker of the cell reads its bucket alone.
+    /// TASK-633.8: a bucket holding a mirror of a version of another bucket's cell reads that
+    /// cell's objects written once here first, the cell's own bucket for those not copied; learns
+    /// the version's checkpoint epoch from the marker; and lists that cell's moves here and there.
+    /// A bucket holding no marker of the cell reads its bucket alone.
     #[test]
     fn objects_of_versions_mirrored_here_are_read_here_first() {
         use crate::layout::Mirror;
@@ -2633,7 +2642,7 @@ pub(crate) mod tests {
             let moves_there = layout::moves(&only_there, 7).unwrap();
             let moves_here = layout::moves(&copied, 6).unwrap();
             async fn put(bucket: &ObjectBucket, key: &str, bytes: &[u8]) {
-                bucket.store_put(key, bytes.to_vec().into(), PutMode::Overwrite).await.unwrap();
+                bucket.object_put(key, bytes.to_vec().into(), PutMode::Overwrite).await.unwrap();
             }
             for key in [&copied, &only_there, &moves_there] {
                 put(other, key, b"there").await;
@@ -2677,10 +2686,10 @@ pub(crate) mod tests {
             let (parent, child) = (test_cell(2 << 48 | 1), test_cell(1 << 48 | 5));
             let origin = Origin { parent, at: 3 };
             async fn put(bucket: &ObjectBucket, key: &str, bytes: Vec<u8>) {
-                bucket.store_put(key, bytes.into(), PutMode::Overwrite).await.unwrap();
+                bucket.object_put(key, bytes.into(), PutMode::Overwrite).await.unwrap();
             }
             async fn listed(bucket: &ObjectBucket, cell: layout::CellId) -> Vec<String> {
-                let listed = bucket.store_list(&cell.prefix()).await.unwrap();
+                let listed = bucket.object_list(&cell.prefix()).await.unwrap();
                 listed.into_iter().map(|meta| meta.key).collect()
             }
             let version = Version { id: 9, at: 3, shared: false };
@@ -2721,14 +2730,14 @@ pub(crate) mod tests {
             assert_eq!((report.deleted, report.retired), (0, 0), "a deleted child's");
             // Gone, its cell removed: retired here.
             for key in heads_of(child) {
-                home.store_delete(&key).await.unwrap();
+                home.object_delete(&key).await.unwrap();
             }
             put(home, &layout::pin(parent, 3), b"pin".to_vec()).await;
             let report = pass().collect_copy(&*routed, &*own, 1, parent).await.unwrap();
             assert_eq!((report.deleted, report.retired), (0, 1), "pinned");
-            assert!(home.store_get(&reference).await.is_err(), "a gone child's reference stands");
+            assert!(home.object_get(&reference).await.is_err(), "a gone child's reference stands");
 
-            home.store_delete(&layout::pin(parent, 3)).await.unwrap();
+            home.object_delete(&layout::pin(parent, 3)).await.unwrap();
             let log = Arc::new(std::sync::Mutex::new(Vec::new()));
             let watched = Watched { deleted: log.clone(), ..Watched::new(routed.clone(), 0, None) };
             let watched_own =
@@ -2746,7 +2755,7 @@ pub(crate) mod tests {
         });
     }
 
-    /// TASK-633.8: a collector's sweep of this bucket, given its own store, passes over the copy
+    /// TASK-633.8: a collector's sweep of this bucket, given its own bucket, passes over the copy
     /// of another bucket's cell's versions as a copy: a mark-only one marks nothing of it; one
     /// deleting deletes it, nothing needing it, as a collector's pass over every cell does.
     #[test]
@@ -2768,10 +2777,10 @@ pub(crate) mod tests {
                     (layout::checkpoint(parent, 3, 1), b"copied".to_vec()),
                     (layout::mirror(parent, 3), layout::encode(&Mirror::of(1))),
                 ] {
-                    home.store_put(&key, bytes.into(), PutMode::Overwrite).await.unwrap();
+                    home.object_put(&key, bytes.into(), PutMode::Overwrite).await.unwrap();
                 }
             };
-            let left = || async { home.store_list(&parent.prefix()).await.unwrap().len() };
+            let left = || async { home.object_list(&parent.prefix()).await.unwrap().len() };
             copy().await;
             let options = Options { compact_below: 0.5, grace: 0 };
             let sweep = |mode| Sweep {
@@ -2785,7 +2794,7 @@ pub(crate) mod tests {
             };
             let marking = sweep(Mode::MarkOnly).run_with_own(&routed, Some(&own), |_| {}).await;
             assert_eq!((marking.report.deleted, left().await), (0, 2), "marked");
-            let there = other.store_list(&parent.prefix()).await.unwrap();
+            let there = other.object_list(&parent.prefix()).await.unwrap();
             let there: Vec<String> = there.into_iter().map(|meta| meta.key).collect();
             assert_eq!(there, heads_of(parent), "marked there");
             let swept = sweep(Mode::Delete).run_with_own(&routed, Some(&own), |_| {}).await;
@@ -2842,7 +2851,7 @@ pub(crate) mod tests {
                 assert_eq!(routed.get(&key).await.map(|object| object.bytes), Ok(b"head".to_vec()));
             }
             async fn at(bucket: &ObjectBucket, cell: layout::CellId) -> bool {
-                bucket.store_get(&layout::head(cell, 0)).await.is_ok()
+                bucket.object_get(&layout::head(cell, 0)).await.is_ok()
             }
             assert_eq!((at(&other, theirs).await, at(&home, theirs).await), (true, false));
             assert_eq!((at(&home, ours).await, at(&other, ours).await), (true, false));
@@ -2853,12 +2862,12 @@ pub(crate) mod tests {
                 [layout::head(theirs, 0)]
             );
 
-            // TASK-633.8: its own store, unrouted, takes a key of another bucket's cell here.
+            // TASK-633.8: its own bucket, unrouted, takes a key of another bucket's cell here.
             let pin = layout::pin(theirs, 3);
             let resolve = Arc::new(Registered::new(Vec::<(String, String)>::new()));
             let own = Arc::new(ObjectBucket::from_url(&home_url).unwrap().routed(resolve)).own();
             own.put(&pin, b"pin".to_vec().into(), PutMode::Create).await.unwrap();
-            let (here, there) = (home.store_get(&pin).await, other.store_get(&pin).await);
+            let (here, there) = (home.object_get(&pin).await, other.object_get(&pin).await);
             assert_eq!((here.is_ok(), there.is_ok()), (true, false));
             assert!(Arc::ptr_eq(&own, &own.own()), "an unrouted bucket's own is itself");
 
@@ -2911,12 +2920,13 @@ pub(crate) mod tests {
         assert_eq!(waits, [50, 100, 200, 400, 800, 1600, 3200, 5000, 5000, 5000]);
     }
 
-    /// TASK-690: a bucket of a store that takes a key's writes a second apart, as GCS does, writes
-    /// each key no sooner than that after its last write of it, and other keys at once; none is
-    /// refused. And an update the store refuses holds back no update of another key, as a failed
-    /// write of a kind held back every write of its kind (TASK-382): each update is of its own key.
+    /// TASK-690: a bucket of a backend that takes a key's writes a second apart, as GCS does,
+    /// writes each key no sooner than that after its last write of it, and other keys at once; none
+    /// is refused. And an update the backend refuses holds back no update of another key, as a
+    /// failed write of a kind held back every write of its kind (TASK-382): each update is of its
+    /// own key.
     #[tokio::test(start_paused = true)]
-    async fn writes_of_a_key_are_spaced_as_its_store_takes_them() {
+    async fn writes_of_a_key_are_spaced_as_its_backend_takes_them() {
         use crate::faults::{Fault, Faults, Faulty};
         use std::time::Duration;
         let second = Duration::from_secs(1);
@@ -2948,24 +2958,25 @@ pub(crate) mod tests {
         assert_eq!(unspaced.stats().failures(Request::Update), 1);
     }
 
-    /// TASK-382: a host's uploads, as many as its upload memory holds, each sending its object whole
-    /// every try, to a full bucket: 48 creates failing for 92.5 s. Each tried on its own, they
-    /// failed 25 times each, 1,200 objects sent; taking turns, the first fails and the others wait,
-    /// the bucket probed as one create alone would try it. Answering again, a second a write, they
-    /// go as more are answered: one, then two, four, and so on, not all at once.
+    /// TASK-382: a host's uploads, as many as its upload memory holds, each sending its object
+    /// whole every try, to a full bucket: 48 creates failing for 92.5 s. Each tried on its own,
+    /// they failed 25 times each, 1,200 objects sent; taking turns, the first fails and the others
+    /// wait, the bucket probed as one create alone would try it. Answering again, a second a write,
+    /// they go as more are answered: one, then two, four, and so on, not all at once.
     #[tokio::test(start_paused = true)]
     async fn writes_failing_take_turns_until_they_land() {
         use crate::faults::{Failing, Fault, Faults, Faulty};
         let faults = Faults::new(std::time::Duration::ZERO, None);
         let objects = Arc::new(object_store::memory::InMemory::new());
-        let store = Arc::new(ObjectBucket::new(Arc::new(Faulty::new(objects, faults.clone())), ""));
+        let faulty = Arc::new(Faulty::new(objects, faults.clone()));
+        let bucket = Arc::new(ObjectBucket::new(faulty, ""));
         faults.set(Fault { failing: Failing::NoSpace, ..Fault::default() });
         let start = tokio::time::Instant::now();
         let creates: Vec<_> = (0..48)
             .map(|segment| {
-                let (store, key) = (store.clone(), layout::segment(test_cell(1), segment, 1));
+                let (bucket, key) = (bucket.clone(), layout::segment(test_cell(1), segment, 1));
                 tokio::spawn(async move {
-                    let created = crate::bucket::create(&*store, &key, vec![1, 2, 3]).await;
+                    let created = crate::bucket::create(&*bucket, &key, vec![1, 2, 3]).await;
                     assert!(matches!(created, crate::bucket::Created::Created(_)), "{key}");
                     start.elapsed()
                 })
@@ -2973,7 +2984,7 @@ pub(crate) mod tests {
             .collect();
         tokio::time::sleep(std::time::Duration::from_millis(92_500)).await;
         // Reads answer meanwhile, a full bucket's, and take no turn.
-        assert_eq!(store.get("other").await.map(|object| object.bytes), Err(Error::NotFound));
+        assert_eq!(bucket.get("other").await.map(|object| object.bytes), Err(Error::NotFound));
         let second = std::time::Duration::from_secs(1);
         faults.set(Fault { latency: second, failing: Failing::Not, ..Fault::default() });
         let mut landed = Vec::new();
@@ -2984,7 +2995,7 @@ pub(crate) mod tests {
         // Failed at 0 s, then probed at 50 ms, 150 ms, ... 3.15 s, 6.35 s, then every 5 s to
         // 91.35 s; the probe at 96.35 s lands a second later, then two, four, eight, 16, and the
         // last 17 at once, each a second after the last.
-        let stats = store.stats();
+        let stats = bucket.stats();
         assert_eq!((stats.requests(Request::Create), stats.failures(Request::Create)), (73, 25));
         let probe = std::time::Duration::from_millis(97_350);
         let rounds = [1, 2, 4, 8, 16, 17];
@@ -3005,23 +3016,24 @@ pub(crate) mod tests {
         use crate::faults::{Failing, Fault, Faults, Faulty};
         let faults = Faults::new(std::time::Duration::ZERO, None);
         let objects = Arc::new(object_store::memory::InMemory::new());
-        let store = Arc::new(ObjectBucket::new(Arc::new(Faulty::new(objects, faults.clone())), ""));
+        let faulty = Arc::new(Faulty::new(objects, faults.clone()));
+        let bucket = Arc::new(ObjectBucket::new(faulty, ""));
         faults.set(Fault { failing: Failing::NoSpace, ..Fault::default() });
         let key = layout::segment(test_cell(1), 0, 1);
         let creating = tokio::spawn({
-            let (store, key) = (store.clone(), key.clone());
-            async move { crate::bucket::create(&*store, &key, vec![1, 2, 3]).await }
+            let (bucket, key) = (bucket.clone(), key.clone());
+            async move { crate::bucket::create(&*bucket, &key, vec![1, 2, 3]).await }
         });
         tokio::time::sleep(std::time::Duration::from_secs(40)).await;
-        assert_eq!(store.get("other").await.map(|object| object.bytes), Err(Error::NotFound));
+        assert_eq!(bucket.get("other").await.map(|object| object.bytes), Err(Error::NotFound));
         tokio::time::sleep(std::time::Duration::from_secs(55)).await;
         faults.set(Fault::default());
         assert!(matches!(creating.await.unwrap(), crate::bucket::Created::Created(_)));
-        assert_eq!(store.get(&key).await.unwrap().bytes, [1, 2, 3]);
+        assert_eq!(bucket.get(&key).await.unwrap().bytes, [1, 2, 3]);
 
         // Failed at 0 s, 50 ms, 150 ms, ... 3.15 s, 6.35 s, then every 5 s to 91.35 s; landed at
         // 96.35 s.
-        let stats = store.stats();
+        let stats = bucket.stats();
         assert_eq!((stats.requests(Request::Create), stats.failures(Request::Create)), (26, 25));
         assert_eq!(stats.failures(Request::Get), 0);
         assert!(stats.line().ends_with(
@@ -3085,16 +3097,16 @@ pub(crate) mod tests {
         // SAFETY: nextest runs each test in a process of its own, whose other threads don't read
         // the environment yet.
         unsafe { std::env::set_var("CLADEFS_BUCKET_LATENCY_MS", "50") };
-        let store = ObjectBucket::from_url("memory:///latency").unwrap();
+        let bucket = ObjectBucket::from_url("memory:///latency").unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
         let start = std::time::Instant::now();
         runtime.block_on(async {
-            store.put("a", vec![1].into(), PutMode::Create).await.unwrap();
-            assert_eq!(store.get("a").await.unwrap().bytes, vec![1]);
+            bucket.put("a", vec![1].into(), PutMode::Create).await.unwrap();
+            assert_eq!(bucket.get("a").await.unwrap().bytes, vec![1]);
         });
         let took = start.elapsed();
         assert!(took >= std::time::Duration::from_millis(100), "two requests took {took:?}");
-        let stats = store.stats();
+        let stats = bucket.stats();
         let timed = |request| std::time::Duration::from_nanos(stats.request_ns(request));
         for request in [Request::Create, Request::Get] {
             assert!(timed(request) >= std::time::Duration::from_millis(50), "{request:?}");
@@ -3113,25 +3125,26 @@ pub(crate) mod tests {
         unsafe { std::env::set_var("CLADEFS_BUCKET_LATENCY_MS", "50") };
         let dir = tempfile::tempdir().unwrap();
         let url = format!("file://{}/", dir.path().canonicalize().unwrap().display());
-        let store = ObjectBucket::from_url(&url).unwrap();
+        let bucket = ObjectBucket::from_url(&url).unwrap();
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         let start = std::time::Instant::now();
         runtime.block_on(async {
-            store.put("a", vec![1, 2, 3, 4].into(), PutMode::Create).await.unwrap();
-            assert_eq!(store.get("a").await.unwrap().bytes, vec![1, 2, 3, 4]);
+            bucket.put("a", vec![1, 2, 3, 4].into(), PutMode::Create).await.unwrap();
+            assert_eq!(bucket.get("a").await.unwrap().bytes, vec![1, 2, 3, 4]);
             let range = ByteRange::Bounded(1..3);
-            assert_eq!(store.get_range("a", range).await.unwrap(), vec![2, 3]);
+            assert_eq!(bucket.get_range("a", range).await.unwrap(), vec![2, 3]);
         });
         let took = start.elapsed();
         assert!(took >= std::time::Duration::from_millis(150), "three requests took {took:?}");
     }
 
     /// TASK-264: a bucket reads the collector's newest marks with requests it doesn't count, at its
-    /// first read, alongside it, and warns as it gets or heads a key they name, of no other key; nor
-    /// of one listed, which a caller may pass over. With no marks, it warns of nothing. TASK-395.2:
-    /// a cell's marks, under its prefix, of each cell it reads, read at its first read of the cell.
+    /// first read, alongside it, and warns as it gets or heads a key they name, of no other key;
+    /// nor of one listed, which a caller may pass over. With no marks, it warns of nothing.
+    /// TASK-395.2: a cell's marks, under its prefix, of each cell it reads, read at its first read
+    /// of the cell.
     #[test]
-    fn stores_warn_of_reading_what_the_newest_marks_name() {
+    fn buckets_warn_of_reading_what_the_newest_marks_name() {
         use crate::layout::{CellId, Marked, Marks, TEST_CELL};
         let log = crate::marks::captured();
         let objects: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -3213,38 +3226,38 @@ pub(crate) mod tests {
     /// object, and downloads.
     #[test]
     fn counts_requests_and_bytes() {
-        let store = memory();
+        let bucket = memory();
         futures::executor::block_on(async {
             let segment = layout::segment(test_cell(1), 0, 1);
-            let version = store.put(&segment, vec![1; 100].into(), PutMode::Create).await.unwrap();
-            assert!(store.put(&segment, vec![2; 7].into(), PutMode::Create).await.is_err());
-            store.put(&segment, vec![3; 50].into(), PutMode::Update(version)).await.unwrap();
-            store
+            let version = bucket.put(&segment, vec![1; 100].into(), PutMode::Create).await.unwrap();
+            assert!(bucket.put(&segment, vec![2; 7].into(), PutMode::Create).await.is_err());
+            bucket.put(&segment, vec![3; 50].into(), PutMode::Update(version)).await.unwrap();
+            bucket
                 .put(&layout::checkpoint(test_cell(1), 0, 1), vec![4; 30].into(), PutMode::Create)
                 .await
                 .unwrap();
-            store
+            bucket
                 .put(&layout::head(test_cell(1), 0), vec![5; 9].into(), PutMode::Overwrite)
                 .await
                 .unwrap();
             let extent =
                 layout::extent(layout::TEST_CELL, 1, 0, storage_device::ExtentId::new(1, 5));
-            store.put(&extent, vec![6; 11].into(), PutMode::Create).await.unwrap();
-            store
+            bucket.put(&extent, vec![6; 11].into(), PutMode::Create).await.unwrap();
+            bucket
                 .put(&layout::moves(&segment, 1).unwrap(), vec![7; 13].into(), PutMode::Create)
                 .await
                 .unwrap();
-            assert_eq!(store.get(&segment).await.unwrap().bytes.len(), 50);
+            assert_eq!(bucket.get(&segment).await.unwrap().bytes.len(), 50);
             let range = ByteRange::Bounded(10..30);
-            assert_eq!(store.get_range(&segment, range).await.unwrap().len(), 20);
-            assert!(store.get(&layout::segment(test_cell(1), 9, 1)).await.is_err());
-            store.head(&segment).await.unwrap();
-            store.list("segments/").await.unwrap();
-            store.list_delimited("segments/", crate::bucket::Page::FIRST).await.unwrap();
-            store.delete(&segment).await.unwrap();
-            store.delete_batch(&[&extent, &layout::moves(&segment, 1).unwrap()]).await.unwrap();
+            assert_eq!(bucket.get_range(&segment, range).await.unwrap().len(), 20);
+            assert!(bucket.get(&layout::segment(test_cell(1), 9, 1)).await.is_err());
+            bucket.head(&segment).await.unwrap();
+            bucket.list("segments/").await.unwrap();
+            bucket.list_delimited("segments/", crate::bucket::Page::FIRST).await.unwrap();
+            bucket.delete(&segment).await.unwrap();
+            bucket.delete_batch(&[&extent, &layout::moves(&segment, 1).unwrap()]).await.unwrap();
         });
-        let stats = store.stats();
+        let stats = bucket.stats();
         let requests: Vec<_> =
             Request::ALL.iter().map(|request| (request.name(), stats.requests(*request))).collect();
         assert_eq!(
@@ -3264,8 +3277,8 @@ pub(crate) mod tests {
         );
         assert_eq!(stats.uploaded, [150, 11, 30, 13, 9]);
         assert_eq!(stats.downloaded, 70);
-        // cladefs: what the protocol answers fails no request (TASK-314): the create where an object
-        // was, the get of none.
+        // cladefs: what the protocol answers fails no request (TASK-314): the create where an
+        // object was, the get of none.
         assert_eq!(stats.failures, [0; Request::ALL.len()]);
         // Its line, each kind of request's time after the rest, then its failures: as of times
         // and failures set here, as each request's time is its own.
@@ -3438,25 +3451,25 @@ pub(crate) mod tests {
 
     /// TASK-92.6: a bucket probed once is not probed again: the second asks nothing.
     #[test]
-    fn stores_are_probed_once() {
-        let store = memory();
-        futures::executor::block_on(store.probed(1)).unwrap();
-        let probing = store.stats();
+    fn buckets_are_probed_once() {
+        let bucket = memory();
+        futures::executor::block_on(bucket.probed(1)).unwrap();
+        let probing = bucket.stats();
         let writes = [Request::Create, Request::Update, Request::Delete];
         let asked = writes.map(|request| (request.name(), probing.requests(request)));
         assert_eq!(asked, [("create", 2), ("update", 2), ("delete", 1)]);
-        futures::executor::block_on(store.probed(2)).unwrap();
-        assert_eq!(store.stats(), probing);
+        futures::executor::block_on(bucket.probed(2)).unwrap();
+        assert_eq!(bucket.stats(), probing);
     }
 
     #[test]
     fn keys_are_under_the_prefix() {
-        let store = memory();
+        let bucket = memory();
         futures::executor::block_on(async {
             for key in ["segments/01/00", "segments/01/01", "segments/02/00", "heads/01"] {
-                store.put(key, key.as_bytes().to_vec().into(), PutMode::Create).await.unwrap();
+                bucket.put(key, key.as_bytes().to_vec().into(), PutMode::Create).await.unwrap();
             }
-            let listed: Vec<String> = store
+            let listed: Vec<String> = bucket
                 .list("segments/01/")
                 .await
                 .unwrap()
@@ -3464,16 +3477,16 @@ pub(crate) mod tests {
                 .map(|meta| meta.key)
                 .collect();
             assert_eq!(listed, ["segments/01/00", "segments/01/01"]);
-            assert_eq!(store.list("").await.unwrap().len(), 4);
-            let object = store.get("heads/01").await.unwrap();
+            assert_eq!(bucket.list("").await.unwrap().len(), 4);
+            let object = bucket.get("heads/01").await.unwrap();
             assert_eq!(
                 (object.bytes.as_slice(), object.meta.key.as_str()),
                 (&b"heads/01"[..], "heads/01")
             );
-            assert_eq!(store.get("heads/02").await.map(|_| ()), Err(Error::NotFound));
-            store.delete("heads/01").await.unwrap();
-            store.delete("heads/01").await.unwrap();
-            assert_eq!(store.head("heads/01").await.map(|_| ()), Err(Error::NotFound));
+            assert_eq!(bucket.get("heads/02").await.map(|_| ()), Err(Error::NotFound));
+            bucket.delete("heads/01").await.unwrap();
+            bucket.delete("heads/01").await.unwrap();
+            assert_eq!(bucket.head("heads/01").await.map(|_| ()), Err(Error::NotFound));
         });
     }
 
@@ -3583,7 +3596,7 @@ pub(crate) mod tests {
             crate::testing::forked_at(&*routed, child, origin).await;
 
             async fn at(bucket: &ObjectBucket, key: String) -> bool {
-                bucket.store_get(&key).await.is_ok()
+                bucket.object_get(&key).await.is_ok()
             }
             let (parents, childs) = (layout::head(parent, 0), layout::head(child, 0));
             assert_eq!(
@@ -3593,7 +3606,7 @@ pub(crate) mod tests {
             assert_eq!((at(&home, childs.clone()).await, at(&other, childs).await), (true, false));
             let reference = layout::reference(parent, fork, child);
             assert!(at(&other, reference).await, "the reference is not in the parent's bucket");
-            assert_eq!(home.store_list(&parent.prefix()).await.map(|listed| listed.len()), Ok(0));
+            assert_eq!(home.object_list(&parent.prefix()).await.map(|listed| listed.len()), Ok(0));
 
             let inherited = recovery::recover(&*routed, child, Some(origin)).await.unwrap().state;
             assert_eq!(inherited.extents.keys().copied().collect::<Vec<_>>(), [small, large]);
@@ -3724,7 +3737,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn cells_on_a_memory_store() {
+    fn cells_on_a_memory_bucket() {
         futures::executor::block_on(cell_lifecycle(memory(), 1));
     }
 
@@ -3769,7 +3782,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn cells_on_a_file_store() {
+    fn cells_on_a_file_bucket() {
         let dir = tempfile::tempdir().unwrap();
         futures::executor::block_on(cell_lifecycle(file(dir.path()), 1));
     }
@@ -3785,10 +3798,10 @@ pub(crate) mod tests {
     }
 
     /// cladefs: a bucket's connections are tasks of the runtime that opened them (`reqwest`, as
-    /// `object_store` uses it, spawns each on the runtime it is asked on): requests each on a runtime
-    /// of their own, dropped after, as `local_cell::upload::block_on`'s were, connect anew each
-    /// time, the one before closed with its runtime, a handshake more a request (TCP's, and on a
-    /// bucket elsewhere TLS's too); on one runtime that lives on, they share one (TASK-449).
+    /// `object_store` uses it, spawns each on the runtime it is asked on): requests each on a
+    /// runtime of their own, dropped after, as `local_cell::upload::block_on`'s were, connect anew
+    /// each time, the one before closed with its runtime, a handshake more a request (TCP's, and on
+    /// a bucket elsewhere TLS's too); on one runtime that lives on, they share one (TASK-449).
     #[test]
     fn requests_on_runtimes_dropped_after_connect_anew() {
         let serving = runtime();
@@ -3826,7 +3839,7 @@ pub(crate) mod tests {
 
     /// cladefs: over S3, deletes go in DeleteObjects of 1,000 keys each, and a listing by delimiter
     /// is one ListObjectsV2 by `delimiter=/`, listing none of the objects under the prefixes it
-    /// finds (TASK-395.5): as the server serves them, and the store counts them.
+    /// finds (TASK-395.5): as the server serves them, and the backend counts them.
     #[test]
     fn s3_deletes_in_batches_and_lists_by_delimiter() {
         runtime().block_on(async {
@@ -4003,9 +4016,10 @@ pub(crate) mod tests {
         });
     }
 
-    /// TASK-205: what cladefs's client costs at a bandwidth nothing limits, against `object_store`'s
-    /// own: 32 objects of 16 MiB uploaded at once to the S3 server in memory, by each in turn,
-    /// 25 times, then their median. Run with `--run-ignored only --no-capture`, in release.
+    /// TASK-205: what cladefs's client costs at a bandwidth nothing limits, against
+    /// `object_store`'s own: 32 objects of 16 MiB uploaded at once to the S3 server in memory, by
+    /// each in turn, 25 times, then their median. Run with `--run-ignored only --no-capture`, in
+    /// release.
     #[test]
     #[ignore = "a benchmark (TASK-205): --run-ignored only, in release"]
     fn client_throughput() {
@@ -4024,19 +4038,19 @@ pub(crate) mod tests {
                     });
                 Arc::new(ObjectBucket::new(Arc::new(builder.build().unwrap()), prefix))
             };
-            let stores = [
+            let buckets = [
                 ("cladefs's", s3(&server, "ours", &Client::DEFAULT)),
                 ("object_store's", theirs("theirs")),
             ];
             let body = noise(SIZE, 1);
             let mut rates = [vec![], vec![]];
             for round in 0..ROUNDS {
-                for ((name, store), rates) in stores.iter().zip(&mut rates) {
+                for ((name, bucket), rates) in buckets.iter().zip(&mut rates) {
                     let start = std::time::Instant::now();
                     let puts = (0..OBJECTS).map(|object| {
-                        let (store, body) = (&store, body.clone());
+                        let (bucket, body) = (&bucket, body.clone());
                         async move {
-                            store.put(&format!("{object}"), body.into(), PutMode::Create).await
+                            bucket.put(&format!("{object}"), body.into(), PutMode::Create).await
                         }
                     });
                     for put in futures::future::join_all(puts).await {
@@ -4047,11 +4061,11 @@ pub(crate) mod tests {
                     eprintln!("round {round}: {name} client: {took:?}, {rate:.0} MB/s");
                     rates.push(rate);
                     for object in 0..OBJECTS {
-                        store.delete(&format!("{object}")).await.unwrap();
+                        bucket.delete(&format!("{object}")).await.unwrap();
                     }
                 }
             }
-            for ((name, _), rates) in stores.iter().zip(&mut rates) {
+            for ((name, _), rates) in buckets.iter().zip(&mut rates) {
                 rates.sort_by(f64::total_cmp);
                 eprintln!("{name} client: median {:.0} MB/s", rates[ROUNDS / 2]);
             }
@@ -4059,17 +4073,17 @@ pub(crate) mod tests {
     }
 
     /// Probes the bucket at `url`'s conditional writes, and runs cells' lifecycle there.
-    fn over_a_real_store(url: &str) {
+    fn over_a_real_bucket(url: &str) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let store = Arc::new(ObjectBucket::from_url(url).unwrap());
-            probe(&*store, std::process::id().into()).await.unwrap();
+            let bucket = Arc::new(ObjectBucket::from_url(url).unwrap());
+            probe(&*bucket, std::process::id().into()).await.unwrap();
             // Each run its own cells, and objects: of IDs no allocator gives, so that a collector
             // over the bucket finds them its own, not a bucket's of another number that it can't
             // reach (TASK-645). Even, so that the child's, the next, is one too.
             let root = (crate::objectid::named() & !1).max(2);
-            crate::bucket::conformance(&*store, &format!("conformance-{root:x}")).await;
-            cell_lifecycle(store, root).await;
+            crate::bucket::conformance(&*bucket, &format!("conformance-{root:x}")).await;
+            cell_lifecycle(bucket, root).await;
         });
     }
 
@@ -4078,31 +4092,31 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "needs an S3 bucket: scripts/test-rustfs.sh, CI's object-stores job"]
     fn rustfs() {
-        over_a_real_store(
+        over_a_real_bucket(
             &std::env::var("CLADEFS_S3_URL").expect("CLADEFS_S3_URL names the bucket"),
         );
     }
 
-    /// cladefs: the same over GCS, through cladefs's client (TASK-205): `CLADEFS_GCS_URL` names a bucket
-    /// and a prefix, under which the run leaves its cells, reached with the environment's
-    /// credentials. Then 32 objects of 8 MiB uploaded at once, which a host's upstream below
-    /// 9 MB/s took longer to carry than `object_store`'s 30 s: each lands at its first attempt.
+    /// cladefs: the same over GCS, through cladefs's client (TASK-205): `CLADEFS_GCS_URL` names a
+    /// bucket and a prefix, under which the run leaves its cells, reached with the environment's
+    /// credentials. Then 32 objects of 8 MiB uploaded at once, which a host's upstream below 9 MB/s
+    /// took longer to carry than `object_store`'s 30 s: each lands at its first attempt.
     #[test]
     #[ignore = "needs a GCS bucket and its credentials: CLADEFS_GCS_URL (TASK-205)"]
     fn gcs() {
         let url = std::env::var("CLADEFS_GCS_URL").expect("CLADEFS_GCS_URL names the bucket");
-        over_a_real_store(&url);
+        over_a_real_bucket(&url);
         const OBJECTS: u64 = 32;
         const SIZE: usize = 8 << 20;
         runtime().block_on(async {
-            let store = ObjectBucket::from_url(&url).unwrap();
+            let bucket = ObjectBucket::from_url(&url).unwrap();
             let run = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
             let keys: Vec<String> = (0..OBJECTS).map(|n| format!("uploads-{run:x}/{n}")).collect();
             let start = std::time::Instant::now();
             let puts = keys
                 .iter()
                 .zip(1..)
-                .map(|(key, seed)| store.put(key, noise(SIZE, seed).into(), PutMode::Create));
+                .map(|(key, seed)| bucket.put(key, noise(SIZE, seed).into(), PutMode::Create));
             let landed: Vec<bool> =
                 futures::future::join_all(puts).await.iter().map(Result::is_ok).collect();
             let took = start.elapsed();
@@ -4110,19 +4124,19 @@ pub(crate) mod tests {
             eprintln!("{OBJECTS} objects of {SIZE} bytes at once: {took:?}, {rate:.1} MB/s");
             assert_eq!(landed, vec![true; OBJECTS as usize]);
             for key in &keys {
-                store.delete(key).await.unwrap();
+                bucket.delete(key).await.unwrap();
             }
         });
     }
 
     /// The same over Azure Blob Storage, as its emulator, Azurite, serves it (TASK-46):
-    /// `scripts/test-azurite.sh` starts it and runs this with `CLADEFS_AZURE_URL` naming a container
-    /// of it, and the `AZURE_*` variables to reach it.
+    /// `scripts/test-azurite.sh` starts it and runs this with `CLADEFS_AZURE_URL` naming a
+    /// container of it, and the `AZURE_*` variables to reach it.
     #[test]
     #[ignore = "needs Azurite: scripts/test-azurite.sh, CI's object-stores job"]
     fn azurite() {
         let url =
             std::env::var("CLADEFS_AZURE_URL").expect("CLADEFS_AZURE_URL names the container");
-        over_a_real_store(&url);
+        over_a_real_bucket(&url);
     }
 }

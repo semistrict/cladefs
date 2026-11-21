@@ -1,7 +1,7 @@
 import { After, Inv, Predict, Ref, Scenes } from "../../../ui/mdx.tsx";
 import { sharedScene } from "../scene.ts";
 
-Two VMs boot as forks of one base store. In each, a process maps a large data file `MAP_SHARED`
+Two VMs boot as forks of one base cell. In each, a process maps a large data file `MAP_SHARED`
 and reads its first page: doc-13's own requirement case, a 400 GB file mapped read-write, about 5%
 of it written in this fork.
 
@@ -15,7 +15,7 @@ VM process's userfaultfd hands the fault to cladefsd, which maps the page.
 
 <After id="copies">
 
-The cache keys each sealed extent by its ID and keeps its pages once per host. Every store and
+The cache keys each sealed extent by its ID and keeps its pages once per host. Every open cell and
 window maps them read-only: an extent never changes once sealed.
 
 <Inv id="one-copy" />

@@ -2,45 +2,45 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: a store's cell kept in object storage, and its uploader (backlog doc-7, Uploads;
+//! cladefs: a cell kept in object storage, and its uploader (backlog doc-7, Uploads;
 //! doc-14; TASK-28.5, TASK-165.9), which runs on the host's runtime, its uploads within the host's
 //! budget ([`Runtime`]). cladefs's `bucket` keeps the host's configuration, budgets, runtime and
 //! errno mapping.
 //!
-//! **Opening a store** ([`open`]) is the same whether its cell was here, elsewhere or never
-//! anywhere (doc-14, Opening a store): the cell's writer takes its head, with the epoch of
-//! its cell's taking by the store's placement, or the host's, recovers it and fences its end
-//! (`bucket_cell::Writer`); the store opens as the bucket holds the cell, its write-ahead log
+//! **Opening a cell** ([`open`]) is the same whether its cell was here, elsewhere or never
+//! anywhere (doc-14, Opening a cell): the cell's writer takes its head, with the epoch of
+//! its cell's taking by the cell's placement, or the host's, recovers it and fences its end
+//! (`bucket_cell::Writer`); the cell opens as the bucket holds the cell, its write-ahead log
 //! put after the cell's end by its commits, what of it landed acknowledged and the rest stamped
 //! anew on the writer's chain ([`Recovering::open`]). A log another writer's commits moved past
 //! refuses to open (`bucket_cell::Error::Diverged`, `ESTALE`) until `cladefsctl take` drops it;
 //! one that plainly diverged before the head is taken refuses before, fencing no writer. A cell
-//! is made by its maker, a root, before its store first opens (`bucket_cell::lifecycle::create`).
+//! is made by its maker, a root, before its cell first opens (`bucket_cell::lifecycle::create`).
 //!
-//! **A store at a version** takes no head (doc-20): its store holds the version's state, recovered,
+//! **A cell at a version** takes no head (doc-20): it holds the version's state, recovered,
 //! which nothing writes, and no log; nothing it does goes to the bucket but its forks' records
 //! ([`Uploader::forked`], `bucket_cell::lifecycle::fork_version`). Any number of hosts hold one at
 //! once.
 //!
-//! **The uploader** hands the store's write-ahead log's segments, framed, whose commits are durable
-//! ([`LocalCell::closed`]), to the writer (`Writer::add_segment`), each the object it is in the bucket,
-//! or stamped anew after a takeover; uploads them, [`IN_FLIGHT`] at once at most, each read only as
-//! its upload goes, within the host's budget; and acknowledges them in order once a read of the
-//! head shows them the cell's ([`LocalCell::acknowledged`]): their extents are the bucket's from then
-//! on, their files the host's cache's. The store closes its open segment for the uploader when a
-//! commit waits for its upload, at a fork, as its interval runs out, and as the uploader stops:
-//! dropping it uploads what the store made durable, its open segment's commits too (TASK-192).
-//! Commits waiting to be durable (`COMMIT_UPLOADED`) complete once acknowledged.
+//! **The uploader** hands the cell's write-ahead log's segments, framed, whose commits are durable
+//! ([`LocalCell::closed`]), to the writer (`Writer::add_segment`), each the object it is in the
+//! bucket, or stamped anew after a takeover; uploads them, [`IN_FLIGHT`] at once at most, each read
+//! only as its upload goes, within the host's budget; and acknowledges them in order once a read of
+//! the head shows them the cell's ([`LocalCell::acknowledged`]): their extents are the bucket's
+//! from then on, their files the host's cache's. The cell closes its open segment for the uploader
+//! when a commit waits for its upload, at a fork, as its interval runs out, and as the uploader
+//! stops: dropping it uploads what the cell made durable, its open segment's commits too
+//! (TASK-192). Commits waiting to be durable (`COMMIT_UPLOADED`) complete once acknowledged.
 //!
-//! A fork the store makes is a fork of the cell once the segment its commit ends is
+//! A fork the cell makes is a fork of the cell once the segment its commit ends is
 //! acknowledged, which gives the child its record, and checkpointed ([`Uploader::forked`]): the
-//! child's store is made only then, opening it recovering the child from the bucket. A fork that
+//! child's cell is made only then, opening it recovering the child from the bucket. A fork that
 //! fails before is deleted in the bucket, as the fork's alone ([`Uploader::unfork`]).
 //!
 //! A failure of its writer's stops the uploader for good, and the commits waiting for uploads fail
 //! with it from then on: its writer fenced, its swap of the cell's head refused as a later writer
 //! took it, its cell deleted, or the log diverged, another writer's commits past it. Only opening
-//! the store anew takes the cell again then. (Until TASK-407, a writer displaced, an earlier
+//! it anew takes the cell again then. (Until TASK-407, a writer displaced, an earlier
 //! writer's segment landed late where its next went, took the cell again, TASK-204: no segment
 //! lands where another's goes now, each at a key of its writer's epoch; doc-7, The head.)
 
@@ -63,13 +63,13 @@ use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::{Duration, SystemTime};
 
-/// How many of a store's segments upload at once: as many of a segment's size as the host's
-/// uploads may hold at once ([`UPLOAD_BYTES`]), so that a store catching up uploads as many at once
+/// How many of a cell's segments upload at once: as many of a segment's size as the host's
+/// uploads may hold at once ([`UPLOAD_BYTES`]), so that a cell catching up uploads as many at once
 /// as the host's budget lets it, about ten keeping 1 GB/s going with PUTs of 0.35 s, and holds no
 /// more of its segments' files open for them (TASK-79.19).
 pub const IN_FLIGHT: usize = (UPLOAD_BYTES / SEGMENT) as usize;
 
-/// About the most bytes of a segment: a store's segments' size
+/// About the most bytes of a segment: a cell's segments' size
 /// (`local_cell::Options::segment_size`).
 const SEGMENT: u64 = 32 << 20;
 
@@ -89,9 +89,9 @@ fn mirror_wanted(bucket: &Arc<ObjectBucket>, child: CellId, origin: Origin) -> R
 }
 
 /// cladefs: the mirror in `bucket` of the version `cell` was forked from, if of another bucket's
-/// cell, begun in the background on `runtime`, the store's uploader's, as `cell`'s store opens
+/// cell, begun in the background on `runtime`, the cell's uploader's, as `cell` opens
 /// ([`ObjectBucket::mirror_for`]): the host that forked it may have died before it began it. A
-/// process that opens stores on a runtime of its own, as a VM's does, makes no other.
+/// process that opens cells on a runtime of its own, as a VM's does, makes no other.
 fn mirror_for(bucket: &Arc<ObjectBucket>, cell: CellId, runtime: &tokio::runtime::Handle) {
     let mirroring = bucket.clone().mirror_for(cell);
     runtime.spawn(async move {
@@ -124,15 +124,15 @@ macro_rules! failing {
     };
 }
 
-/// What a host gives its stores' uploaders: the runtime they run on, sized by the host, not by
-/// how many stores it serves, as each waits on object storage mostly, and does its disk work in
+/// What a host gives its cells' uploaders: the runtime they run on, sized by the host, not by
+/// how many cells it serves, as each waits on object storage mostly, and does its disk work in
 /// `block_in_place`, which leaves the runtime's threads to the others (TASK-34); and the budget of
 /// the PUTs of objects they upload, each holding its object's bytes while it goes, bounded in
-/// bytes, [`UPLOAD_BYTES`], so that a host whose stores are far behind holds no more than these
+/// bytes, [`UPLOAD_BYTES`], so that a host whose cells are far behind holds no more than these
 /// at once, whatever their number (TASK-79.19), and in number.
 ///
 /// cladefs: and the keys it encrypts and reads under (TASK-411.3): its KMS, if it has one, and the
-/// keys its fetchers share, which each store's are held in while it is open.
+/// keys its fetchers share, which each cell's are held in while it is open.
 #[derive(Clone)]
 pub struct Runtime {
     pub handle: tokio::runtime::Handle,
@@ -141,12 +141,12 @@ pub struct Runtime {
 }
 
 node_local::node_local! {
-    /// How many stores' uploaders run in this process ([`open`]): until each, its store dropped, has
-    /// uploaded what its store made durable, and stopped.
+    /// How many cells' uploaders run in this process ([`open`]): until each, its cell dropped, has
+    /// uploaded what its cell made durable, and stopped.
     static UPLOADERS: tokio::sync::watch::Sender<usize> = tokio::sync::watch::channel(0).0;
 }
 
-/// How many stores' uploaders run in this process, as it changes: what an extent daemon's drain
+/// How many cells' uploaders run in this process, as it changes: what an extent daemon's drain
 /// waits to see none of (cladefs TASK-141.4).
 pub fn uploaders() -> tokio::sync::watch::Receiver<usize> {
     UPLOADERS.get().subscribe()
@@ -186,16 +186,16 @@ pub fn wait_on<F: std::future::Future>(future: F) -> F::Output {
     block_on(future).expect("the bucket runtime")
 }
 
-/// cladefs: the runtime the host's uploaders and fetches run on (TASK-34, TASK-449's review), one for the
-/// process: every store's uploader and fetches, and the calls from no runtime's task
+/// cladefs: the runtime the host's uploaders and fetches run on (TASK-34, TASK-449's review), one
+/// for the process: every cell's uploader and fetches, and the calls from no runtime's task
 /// ([`block_on`]), so that one runtime serves every connection to the host's buckets. A bucket's
 /// connections are tasks of the runtime they opened on (`reqwest`'s, as `object_store` uses it,
-/// spawns them there), which stay in the bucket's pool for the next request, whatever its
-/// runtime. Sized by the host, not by how many stores it serves, as each store waits on object
-/// storage mostly, and does its disk work in `block_in_place`, which leaves the runtime's threads
-/// to the others. Its threads hold their lists of the shared locks they take from their start
-/// ([`crate::shared`]). Made at its first need; a making that fails, a thread not spawned, is
-/// made anew at the next, not kept failed for the process's life.
+/// spawns them there), which stay in the bucket's pool for the next request, whatever its runtime.
+/// Sized by the host, not by how many cells it serves, as each cell waits on object storage mostly,
+/// and does its disk work in `block_in_place`, which leaves the runtime's threads to the others.
+/// Its threads hold their lists of the shared locks they take from their start ([`crate::shared`]).
+/// Made at its first need; a making that fails, a thread not spawned, is made anew at the next, not
+/// kept failed for the process's life.
 pub fn bucket_runtime() -> Result<&'static tokio::runtime::Runtime, Failure> {
     node_local::node_local! {
         static BUCKET_RUNTIME: Retried<tokio::runtime::Runtime> = Retried::new();
@@ -253,12 +253,12 @@ pub async fn delete_cell(bucket: &ObjectBucket, cell: CellId, token: u64) -> Res
 pub enum Failure {
     /// What object storage's protocol found of the cell, as `bucket_cell` says it: another
     /// writer took it (`Fenced`), it was deleted, a later placement holds it
-    /// (`Stale`, TASK-39.7), another writer's commits moved it on from the store's write-ahead log
+    /// (`Stale`, TASK-39.7), another writer's commits moved it on from the cell's write-ahead log
     /// (`Diverged`), another cell has a fork's child's ID (`IdTaken`, TASK-79.82), or what it
     /// needs is gone or corrupt.
     #[error(transparent)]
     Bucket(#[from] bucket_cell::Error),
-    /// The version a store is of was deleted: it forks no more, and its forks live on.
+    /// The version a cell is of was deleted: it forks no more, and its forks live on.
     #[error("the version was dropped")]
     VersionDropped,
     /// This host's own: its files, a runtime, the uploader gone, as the error says.
@@ -297,7 +297,7 @@ impl PartialEq for Failure {
 
 impl Eq for Failure {}
 
-/// The store's errors are this host's, but what object storage's protocol found of the cell, as
+/// The cell's errors are this host's, but what object storage's protocol found of the cell, as
 /// a write-ahead log diverged from it.
 impl From<anyhow::Error> for Failure {
     fn from(error: anyhow::Error) -> Self {
@@ -333,16 +333,16 @@ pub struct Options {
     /// How many commits may wait to be uploaded: the next waits, while object storage is out of
     /// reach, rather than the lag grow without bound (doc-7, decision 3).
     pub max_lag: u64,
-    /// How many bytes of the store's write-ahead log may wait to be acknowledged, likewise: what
+    /// How many bytes of the cell's write-ahead log may wait to be acknowledged, likewise: what
     /// the local disk holds until uploaded.
     pub max_lag_bytes: u64,
-    /// The host's cache of the bucket's objects, which its stores share: what the bucket
-    /// acknowledged of a store's goes into it (TASK-165.8).
+    /// The host's cache of the bucket's objects, which its cells share: what the bucket
+    /// acknowledged of a cell's goes into it (TASK-165.8).
     pub cache: Option<Arc<Cache>>,
-    /// cladefs: what holds the parts of segments packed as they fill, which its stores share, if
+    /// cladefs: what holds the parts of segments packed as they fill, which its cells share, if
     /// the host has it ([`crate::Opening::held`], TASK-400): else each its own.
     pub held: Option<Arc<HeldParts>>,
-    /// The fencing token of a store never placed: its host's placement's.
+    /// The fencing token of a cell never placed: its host's placement's.
     pub token: u64,
     /// cladefs: how many segments go between checkpoints, which recoveries start from: the segments
     /// a checkpoint covers are no longer read by them, and the collector may compact them.
@@ -354,8 +354,8 @@ pub struct Options {
     /// 10 s and more each, the interval closing the segments they filled at 10 s, their commits
     /// copying out a segment's worth each.
     pub filling_wait: Duration,
-    /// cladefs: the replication a taking of the store's cell gives it (doc-21, TASK-537.3.1):
-    /// a store made, or taken, by the control API, as its call asked; none keeps what the cell's
+    /// cladefs: the replication a taking of the cell gives it (doc-21, TASK-537.3.1):
+    /// a cell made, or taken, by the control API, as its call asked; none keeps what the cell's
     /// head says.
     pub replication: Option<bucket_cell::layout::Wish>,
     /// cladefs: the hosts a replicated cell's configurations are made of, and how they are reached
@@ -368,7 +368,7 @@ pub struct Options {
     /// one member down of f = 1 leaves the cell's commits replicated on the other, and a cell with
     /// no quorum its commits uploaded at once (the user's word, 2026-11-19: 1 s was far too short).
     pub replace_after: Duration,
-    /// cladefs: whether this opening's taking of a replicated cell is forced, as a store placed
+    /// cladefs: whether this opening's taking of a replicated cell is forced, as a cell placed
     /// forced is (TASK-681, `CreateCell`'s `force`): it goes on with the members of the
     /// configuration the cell's head names that answer, however few.
     pub force: bool,
@@ -458,15 +458,15 @@ impl Default for Options {
     }
 }
 
-/// Opens the store `recovering` recovered, keeping its cell in `bucket` (see the module's
+/// Opens the cell `recovering` recovered, keeping its cell in `bucket` (see the module's
 /// docs): as `holder` of the cell's head, which must differ from every other taking's, with
-/// `store_options`, its uploader uploading as `options` say, on `runtime`. Returns the store and
+/// `cell_options`, its uploader uploading as `options` say, on `runtime`. Returns the cell and
 /// its uploader; or why it can't be opened: its log diverged, its cell deleted, a later
 /// placement's, or out of reach. cladefs: once its uploader, a task, opened it, holding no thread
 /// meanwhile (TASK-685.3); dropped before, the uploader stops, as the opener is gone.
 pub async fn open<D: Dir>(
     recovering: Recovering<D>,
-    store_options: crate::Options,
+    cell_options: crate::Options,
     bucket: Arc<ObjectBucket>,
     (holder, options): (u64, Options),
     runtime: &Runtime,
@@ -490,14 +490,14 @@ pub async fn open<D: Dir>(
         match uploads.probed(holder).await {
             Ok(()) => {
                 let recovering = (recovering, learned);
-                uploader.run(recovering, store_options, uploads, holder, started).await
+                uploader.run(recovering, cell_options, uploads, holder, started).await
             }
             // Its opener gone or not, it says why it stopped to whoever listens.
             Err(err) => drop(started.send(Err(Failure::msg(err)))),
         }
-        // The store let go of before the uploader says it stopped: so that dropping this returns
-        // with nothing of the uploader's holding the store open, which the process may open again
-        // at once (`Dir::claim` refusing a second opening), as cladefsd does a store an image it
+        // The cell let go of before the uploader says it stopped: so that dropping this returns
+        // with nothing of the uploader's holding the cell open, which the process may open again
+        // at once (`Dir::claim` refusing a second opening), as cladefsd does a cell an image it
         // imported made (TASK-165.6).
         drop(uploader);
         UPLOADERS.get().send_modify(|running| *running -= 1);
@@ -505,7 +505,7 @@ pub async fn open<D: Dir>(
         fail::fail_point!("upload::stopped");
     });
     let opened = match start.await {
-        Ok(Ok(store)) => store,
+        Ok(Ok(open_cell)) => open_cell,
         Ok(Err(err)) => {
             stopped.stopped().await;
             return Err(err);
@@ -518,9 +518,9 @@ pub async fn open<D: Dir>(
     Ok((opened, uploader))
 }
 
-/// cladefs: an ephemeral cell's keys, as its local checkpoint keeps them (doc-25, TASK-698.3): its owner, and
-/// what its fork gave it, wrapped, as a fork's head holds them: its cell's KEK under its tenant's,
-/// its first DEK and the keys it inherits under its cell's KEK.
+/// cladefs: an ephemeral cell's keys, as its local checkpoint keeps them (doc-25, TASK-698.3): its
+/// owner, and what its fork gave it, wrapped, as a fork's head holds them: its cell's KEK under its
+/// tenant's, its first DEK and the keys it inherits under its cell's KEK.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct EphemeralKeys {
     owner: u64,
@@ -529,16 +529,16 @@ struct EphemeralKeys {
     inherited: Vec<keys::InheritedDek>,
 }
 
-/// cladefs: opens the ephemeral cell's store `recovering` recovered (doc-25, TASK-698.3), with
-/// `store_options`: its keys, as its local checkpoint keeps them, unwrapped through the host's KMS as its
-/// fork's head would give them; its parent's state at its version recovered from `bucket`, its
-/// parent's, under them, which its store starts from. No uploader: nothing of it goes to a bucket.
-/// Its parent's extents are read through `cache`, the host's, if it has one. Its keys are held among
-/// the host's while what it returns with the store is, so that the host's fetchers read what it
-/// inherits, and forgetting its tenant or cell drops them (TASK-698.7).
+/// cladefs: opens the ephemeral cell `recovering` recovered (doc-25, TASK-698.3), with
+/// `cell_options`: its keys, as its local checkpoint keeps them, unwrapped through the host's KMS
+/// as its fork's head would give them; its parent's state at its version recovered from `bucket`,
+/// its parent's, under them, which its cell starts from. No uploader: nothing of it goes to a
+/// bucket. Its parent's extents are read through `cache`, the host's, if it has one. Its keys are
+/// held among the host's while what it returns with the cell is, so that the host's fetchers read
+/// what it inherits, and forgetting its tenant or cell drops them (TASK-698.7).
 pub async fn open_ephemeral<D: Dir>(
     recovering: Recovering<D>,
-    store_options: crate::Options,
+    cell_options: crate::Options,
     bucket: Arc<ObjectBucket>,
     runtime: &Runtime,
     (cache, held): (Option<Arc<Cache>>, Option<Arc<HeldParts>>),
@@ -560,12 +560,12 @@ pub async fn open_ephemeral<D: Dir>(
     let holding = runtime.keys.ring.hold(ring.clone());
     let forked = Forked { origin, ring: ring.clone() };
     let opening = crate::EphemeralOpening { parent: state, keys: ring, cache, held };
-    let store = blocking(|| recovering.open_ephemeral(store_options, opening))?;
-    Ok((Arc::new(store), holding, forked))
+    let open_cell = blocking(|| recovering.open_ephemeral(cell_options, opening))?;
+    Ok((Arc::new(open_cell), holding, forked))
 }
 
-/// cladefs: a store of a fork of a version, as its read evidence needs it (TASK-702.2): the
-/// version, by its origin, and the store's keys, which hold the version's cell's DEKs, inherited.
+/// cladefs: a cell of a fork of a version, as its read evidence needs it (TASK-702.2): the
+/// version, by its origin, and the cell's keys, which hold the version's cell's DEKs, inherited.
 #[derive(Clone, Debug)]
 pub struct Forked {
     pub origin: Origin,
@@ -605,28 +605,28 @@ impl Stopped {
     }
 }
 
-/// A store's uploader (see the module's docs). Dropping it closes the store's open segment, if its
-/// store is open still, uploads what the store made durable, then stops.
+/// A cell's uploader (see the module's docs). Dropping it closes the cell's open segment, if its
+/// cell is open still, uploads what the cell made durable, then stops.
 pub struct Uploader<D: Dir> {
     shared: Arc<Shared<D>>,
-    /// The bucket the store's cell is kept in.
+    /// The bucket the cell is kept in.
     bucket: Arc<ObjectBucket>,
     /// Says the uploader stopped, once it has: taken by [`Uploader::close`], or its drop, which
     /// wait for it.
     stopped: Option<Arc<Stopped>>,
-    /// The store's directory, held taken for this process until the uploader stopped, last of its
+    /// The cell directory, held taken for this process until the uploader stopped, last of its
     /// fields to go (TASK-129).
     _dir: DirHold<D>,
 }
 
 pub(crate) struct Shared<D: Dir, B: bucket_cell::Bucket = ObjectBucket> {
-    /// The store, once opened.
-    store: std::sync::OnceLock<Arc<LocalCell<D>>>,
+    /// The cell, once opened.
+    cell: std::sync::OnceLock<Arc<LocalCell<D>>>,
     /// The cell's writer, once it took the cell, and as it takes it again (TASK-204).
     writer: Mutex<Option<Arc<Writer<B>>>>,
     /// The fencing token its writers take the cell's head with, once one did.
     token: std::sync::OnceLock<u64>,
-    /// cladefs: the version the store is at, if it is one (TASK-476).
+    /// cladefs: the version the cell is at, if it is one (TASK-476).
     at_version: std::sync::OnceLock<AtVersion>,
     progress: Mutex<Progress>,
     /// Notified as the progress changes: what waits for uploads listens to it, blocking or not
@@ -646,15 +646,15 @@ pub(crate) struct Shared<D: Dir, B: bucket_cell::Bucket = ObjectBucket> {
     holders: Mutex<Holders>,
     /// cladefs: the host's keys ([`Runtime::keys`], TASK-411.3).
     keys: keys::Host,
-    /// cladefs: the store's keys, held among the host's for as long as the uploader lives.
+    /// cladefs: the cell's keys, held among the host's for as long as the uploader lives.
     held: Mutex<Option<RingHold>>,
     /// cladefs: of a replicated cell, what its head asks for and the configuration its taking
     /// activated, which [`Shared::keep`] keeps from then on (TASK-537.3.5).
     keeping: Mutex<Option<(bucket_cell::layout::Wish, bucket_cell::layout::Configuration, bool)>>,
     /// cladefs: said, as its sender goes, once its keeper is done, which holds it, and so its
-    /// store, meanwhile: what [`Shared::run`] waits for before it returns (TASK-701).
+    /// cell, meanwhile: what [`Shared::run`] waits for before it returns (TASK-701).
     kept: Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
-    /// cladefs: the configuration whose members' logs its taking recovered the store from, if it
+    /// cladefs: the configuration whose members' logs its taking recovered the cell from, if it
     /// did, its own write-ahead log holding less (TASK-537.3.4): what the simulation follows the
     /// history of the commits of (TASK-680).
     #[cfg(test)]
@@ -688,18 +688,18 @@ pub(crate) type Clock = Arc<dyn Fn(Duration) -> BoxFuture<'static, ()> + Send + 
 /// which polls it as a seed says (TASK-680).
 pub(crate) type Spawn = Arc<dyn Fn(BoxFuture<'static, ()>) + Send + Sync>;
 
-/// Runs `work`, which blocks on the store's disk, on the uploaders' runtime: on its thread, which
+/// Runs `work`, which blocks on the cell's disk, on the uploaders' runtime: on its thread, which
 /// hands its other tasks to another meanwhile; or as it is, on a thread no runtime runs, as the
-/// simulation's (`tokio::task::block_in_place` runs it so there). cladefs: the daemon's async paths'
-/// disk work too, a store's making, opening and forking (TASK-685.3).
+/// simulation's (`tokio::task::block_in_place` runs it so there). cladefs: the daemon's async
+/// paths' disk work too, a cell's making, opening and forking (TASK-685.3).
 #[allow(clippy::disallowed_methods, reason = "the work waits on the disk alone")]
 pub fn blocking<T>(work: impl FnOnce() -> T) -> T {
     // TASK-685.1: madsim's one thread runs it as it is.
     #[cfg(madsim)]
     return work();
-    // cladefs: a current-thread runtime's one thread, as tests' and FUSE storage's are, has no other
-    // to hand its tasks to (`block_in_place` panics there): it runs it as it is, as a thread no
-    // runtime runs does (TASK-685.3).
+    // cladefs: a current-thread runtime's one thread, as tests' and FUSE storage's are, has no
+    // other to hand its tasks to (`block_in_place` panics there): it runs it as it is, as a thread
+    // no runtime runs does (TASK-685.3).
     #[cfg(not(madsim))]
     match tokio::runtime::Handle::try_current().map(|runtime| runtime.runtime_flavor()) {
         Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(work),
@@ -715,7 +715,7 @@ struct Fenced {
     short: Option<String>,
 }
 
-/// cladefs: a version of its cell a store is at, and the segment its cell's head names
+/// cladefs: a version of its cell a cell is at, and the segment its cell's head names
 /// it at (TASK-476): its forks fork the version, which its cell's head must name still.
 struct AtVersion {
     origin: Origin,
@@ -780,12 +780,12 @@ struct Progress {
     cut: bool,
     /// The writer's taking of the cell's head, once it took it.
     taking: Option<Taking>,
-    /// The store's latest commits not uploaded, as the uploader saw them, and when it did: the
+    /// The cell's latest commits not uploaded, as the uploader saw them, and when it did: the
     /// first is when the oldest commit waiting was seen first (TASK-50.5).
     seen: VecDeque<(u64, SystemTime)>,
 }
 
-/// cladefs: a store's versions ([`Remote::versions`], TASK-476), by their commits' levels.
+/// cladefs: a cell's versions ([`Remote::versions`], TASK-476), by their commits' levels.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Versions {
     /// Those its cell's head names, uploaded, oldest first.
@@ -817,8 +817,8 @@ pub struct Replicated {
     pub f: u8,
     pub fsync: bucket_cell::layout::Fsync,
     pub configuration: Option<u64>,
-    /// cladefs: if the taking was forced and fenced fewer members than a take needs (TASK-681):
-    /// the epoch of the last commit the bucket held, past which commits told replicated may be lost.
+    /// cladefs: if the taking was forced and fenced fewer members than a take needs (TASK-681): the
+    /// epoch of the last commit the bucket held, past which commits told replicated may be lost.
     pub forced_after: Option<u64>,
 }
 
@@ -834,12 +834,12 @@ impl Replicated {
     }
 }
 
-/// What a store's uploader has done, and has left to do (TASK-50.5).
+/// What a cell's uploader has done, and has left to do (TASK-50.5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UploadStatus {
     /// Its writer's taking of its cell's head, once taken.
     pub taking: Option<Taking>,
-    /// The epoch of the store's latest commit uploaded.
+    /// The epoch of the cell's latest commit uploaded.
     pub uploaded: u64,
     /// The bytes of its write-ahead log not yet acknowledged.
     pub pending_bytes: u64,
@@ -868,7 +868,7 @@ pub struct ReplicationStatus {
 }
 
 impl Progress {
-    /// Notes the store's commits through `epoch` uploaded.
+    /// Notes the cell's commits through `epoch` uploaded.
     fn uploaded_through(&mut self, epoch: u64) {
         self.uploaded = self.uploaded.max(epoch);
         while self.seen.front().is_some_and(|(seen, _)| *seen <= self.uploaded) {
@@ -878,9 +878,9 @@ impl Progress {
 }
 
 impl<D: Dir> Uploader<D> {
-    /// The store.
-    fn store(&self) -> &Arc<LocalCell<D>> {
-        self.shared.store()
+    /// The cell.
+    fn cell(&self) -> &Arc<LocalCell<D>> {
+        self.shared.cell()
     }
 
     /// Returns once the commits up to `epoch` are uploaded and acknowledged: a future, which holds
@@ -914,7 +914,7 @@ impl<D: Dir> Uploader<D> {
         }
     }
 
-    /// cladefs: the replication of the store's cell, as its writer's taking found its head
+    /// cladefs: the replication of the cell, as its writer's taking found its head
     /// (doc-21): none for a cell durable off its host once uploaded alone, or not taken yet.
     pub fn replication(&self) -> Option<Replicated> {
         self.shared.progress.lock().unwrap().taking.and_then(|taking| taking.replication)
@@ -939,15 +939,15 @@ impl<D: Dir> Uploader<D> {
         self.awaiting(self.waiting_replicated(epoch))
     }
 
-    /// cladefs: what waiting for the commits up to `epoch` replicated or uploaded waits for, if they
-    /// aren't ([`Uploader::replicated`]).
+    /// cladefs: what waiting for the commits up to `epoch` replicated or uploaded waits for, if
+    /// they aren't ([`Uploader::replicated`]).
     fn waiting_replicated(&self, epoch: u64) -> Result<Option<Waiting>, Failure> {
         let shared = &self.shared;
-        let Some(replicator) = self.store().replicator() else {
+        let Some(replicator) = self.cell().replicator() else {
             return self.waiting_uploaded(epoch);
         };
         // cladefs: and while a replacement is under way, whose members may take long to catch up
-        // (TASK-537.3.5); and while the bucket holds not yet what the store opened with, which no
+        // (TASK-537.3.5); and while the bucket holds not yet what the cell opened with, which no
         // member need hold, nothing told replicated before (`Replicator::told`, TASK-678).
         let gated = shared.last_uploaded() < replicator.base();
         if replicator.degraded() || replicator.replacing_now() || gated {
@@ -960,7 +960,7 @@ impl<D: Dir> Uploader<D> {
         Ok(Some(Waiting::Told(replicator, epoch)))
     }
 
-    /// The epoch of the store's latest commit uploaded and acknowledged, as the uploader says,
+    /// The epoch of the cell's latest commit uploaded and acknowledged, as the uploader says,
     /// whether or not it stopped.
     pub fn last_uploaded(&self) -> u64 {
         self.shared.last_uploaded()
@@ -970,8 +970,8 @@ impl<D: Dir> Uploader<D> {
     pub fn status(&self) -> Result<UploadStatus, Failure> {
         let shared = &self.shared;
         shared.observe()?;
-        let pending_bytes = self.store().wal_bytes()?;
-        let replication = self.store().replicator().map(|replicator| ReplicationStatus {
+        let pending_bytes = self.cell().wal_bytes()?;
+        let replication = self.cell().replicator().map(|replicator| ReplicationStatus {
             f: u8::try_from(replicator.f()).unwrap_or(u8::MAX),
             members_up: u32::try_from(replicator.members_up()).unwrap_or(u32::MAX),
             degraded: replicator.degraded(),
@@ -1005,7 +1005,7 @@ impl<D: Dir> Uploader<D> {
         Ok((!self.shared.ask(epoch, Awaited::Lag)?).then_some(waiting))
     }
 
-    /// Makes the fork of the version the store is at to `child` (`lifecycle::fork_version`): its
+    /// Makes the fork of the version the cell is at to `child` (`lifecycle::fork_version`): its
     /// head, which fails if the version was dropped ([`Failure::VersionDropped`]), and, for a child
     /// of another cell, the checkpoint at the version, sealed under the version's cell's keys
     /// (TASK-476).
@@ -1013,10 +1013,10 @@ impl<D: Dir> Uploader<D> {
     /// cladefs: the child's head made with the keys `inheriting` gives ([`Uploader::inheriting`]):
     /// a KEK from the host's pool, its DEK and those it inherits, rewrapped under that KEK
     /// (TASK-411.4). Failing, the fork fails, which its host deletes. It says what it left of the
-    /// child's head to the child's store's first opening here ([`Learned`], TASK-449).
+    /// child's head to the child's cell's first opening here ([`Learned`], TASK-449).
     pub async fn forked(&self, child: Child, inheriting: keys::Inheriting) -> Result<(), Failure> {
         failing!("upload::forked");
-        let at = self.shared.at_version.get().expect("a fork is of a store at a version");
+        let at = self.shared.at_version.get().expect("a fork is of a cell at a version");
         let keys = keys::Parents::Held(&at.sealing);
         let given = (child.owner, Some(inheriting.given()));
         let forking = lifecycle::fork_version_keyed(
@@ -1042,11 +1042,11 @@ impl<D: Dir> Uploader<D> {
         Ok(())
     }
 
-    /// cladefs: forks the version the store is at to `child`, an ephemeral cell kept on the host of
+    /// cladefs: forks the version the cell is at to `child`, an ephemeral cell kept on the host of
     /// incarnation `incarnation` alone (doc-25, TASK-698.3): its reference written in the bucket
     /// before the cell's head is read, which must name the version still
-    /// (`lifecycle::fork_ephemeral`); then what `inheriting` gives it, its keys, kept in its local checkpoint,
-    /// which it returns, its state the version's. Fails as [`Uploader::forked`] does.
+    /// (`lifecycle::fork_ephemeral`); then what `inheriting` gives it, its keys, kept in its local
+    /// checkpoint, which it returns, its state the version's. Fails as [`Uploader::forked`] does.
     pub async fn forked_ephemeral(
         &self,
         child: Child,
@@ -1054,7 +1054,7 @@ impl<D: Dir> Uploader<D> {
         incarnation: u64,
     ) -> Result<crate::LocalCheckpoint, Failure> {
         failing!("upload::forked_ephemeral");
-        let at = self.shared.at_version.get().expect("a fork is of a store at a version");
+        let at = self.shared.at_version.get().expect("a fork is of a cell at a version");
         let forking = lifecycle::fork_ephemeral(
             &*self.bucket,
             child.cell,
@@ -1076,19 +1076,19 @@ impl<D: Dir> Uploader<D> {
         Ok(crate::LocalCheckpoint::fork(parent, &at.state, bucket_cell::layout::encode(&keys)))
     }
 
-    /// cladefs: what a fork of the store to `child` gives its child, asked for before anything of the
-    /// fork is made, its commit or its head, so that a fork refused makes nothing (TASK-411.4): the
-    /// store's keys, which it inherits, and a KEK for the child's cell from the host's pool. Refused
-    /// if the host's KMS last heard a tenant of theirs revoked or destroyed, or as the KMS refuses
-    /// a KEK (`keys::inheriting`). No KMS call is made with the pool not empty.
+    /// cladefs: what a fork of the cell to `child` gives its child, asked for before anything of
+    /// the fork is made, its commit or its head, so that a fork refused makes nothing (TASK-411.4):
+    /// the cell's keys, which it inherits, and a KEK for the child's cell from the host's pool.
+    /// Refused if the host's KMS last heard a tenant of theirs revoked or destroyed, or as the KMS
+    /// refuses a KEK (`keys::inheriting`). No KMS call is made with the pool not empty.
     pub async fn inheriting(&self, child: Child) -> Result<keys::Inheriting, Failure> {
-        let source = self.store().keys();
+        let source = self.cell().keys();
         Ok(keys::inheriting(&self.shared.keys.kms, source, child).await?)
     }
 
-    /// Deletes `child` in object storage, a fork of the version the store is at that
+    /// Deletes `child` in object storage, a fork of the version the cell is at that
     /// [`Uploader::forked`] failed to make: its record may land after all, a dead host's, which
-    /// would keep what it inherited for ever, no store holding it. Only a cell the fork made is
+    /// would keep what it inherited for ever, no cell holding it. Only a cell the fork made is
     /// deleted, its record naming the fork's owner: one of another's, which took the child's ID, is
     /// left as it is (TASK-79.82). It is deleted as the host's placement (`Options::token`).
     pub async fn unfork(&self, child: Child) -> Result<(), Failure> {
@@ -1105,16 +1105,16 @@ impl<D: Dir> Uploader<D> {
         Ok(())
     }
 
-    /// cladefs: the store's versions (doc-18, TASK-476): those its cell's head names, uploaded,
+    /// cladefs: the cell's versions (doc-18, TASK-476): those its cell's head names, uploaded,
     /// as its writer last swapped it, oldest first; then those its commits cut that the head names
     /// not yet, local, each by its commit's number, which [`Remote::uploaded`] waits for. None of a
-    /// version's or a store at a version, which has no writer.
+    /// version's or a cell at a version, which has no writer.
     pub async fn versions(&self) -> Versions {
         let uploaded = match self.shared.writer() {
             Some(writer) => writer.versions().await,
             None => Vec::new(),
         };
-        let local = self.store().local_versions(self.last_uploaded());
+        let local = self.cell().local_versions(self.last_uploaded());
         let local = (local.into_iter())
             .filter(|(_, cut)| uploaded.iter().all(|version| version.id != cut.id))
             .collect();
@@ -1123,52 +1123,52 @@ impl<D: Dir> Uploader<D> {
 
     /// cladefs: drops the versions `ids` names, uploaded or local: the head swapped to name them
     /// no more, and no acknowledgement naming those local (`Writer::drop_versions`, TASK-476).
-    /// Fails with no writer, of a version's or a store at a version.
+    /// Fails with no writer, of a version's or a cell at a version.
     pub async fn drop_versions(&self, ids: &BTreeSet<u64>) -> Result<(), Failure> {
         failing!("upload::drop_versions");
         let writer = self.shared.writer().ok_or_else(|| Failure::msg("no writer: no versions"))?;
-        self.store().forget_versions(ids);
+        self.cell().forget_versions(ids);
         Ok(writer.drop_versions(ids).await?)
     }
 
-    /// cladefs: shares the uploaded version `id`, if `shared`, or no longer: other tenants' cells may
-    /// restore it while it is (`Writer::share_version`, TASK-476).
+    /// cladefs: shares the uploaded version `id`, if `shared`, or no longer: other tenants' cells
+    /// may restore it while it is (`Writer::share_version`, TASK-476).
     pub async fn share_version(&self, id: u64, shared: bool) -> Result<(), Failure> {
         let writer = self.shared.writer().ok_or_else(|| Failure::msg("no writer: no versions"))?;
         Ok(writer.share_version(id, shared).await?)
     }
 
-    /// Whether the store is a store at a version: nothing it does goes to object storage but its
+    /// Whether it is a cell at a version: nothing it does goes to object storage but its
     /// forks' records.
     pub fn at_version_origin(&self) -> Option<Origin> {
         self.shared.at_version.get().map(|at| at.origin)
     }
 
-    /// cladefs: of the store of a fork of a version, once its writer took the cell, the version
-    /// and its keys ([`Forked`], TASK-702.2); none of a store of another cell, or at a version.
+    /// cladefs: of the cell of a fork of a version, once its writer took the cell, the version
+    /// and its keys ([`Forked`], TASK-702.2); none of another cell's, or at a version.
     pub fn forked_from(&self) -> Option<Forked> {
         let writer = self.shared.writer()?;
         let origin = writer.taken().head.origin()?;
         Some(Forked { origin, ring: writer.keys().clone() })
     }
 
-    /// Whether its store is at a version, which nothing writes (TASK-476).
+    /// Whether its cell is at a version, which nothing writes (TASK-476).
     pub fn is_at_version(&self) -> bool {
         self.shared.at_version.get().is_some()
     }
 
-    /// The lowest sequence number the store's guest may mint extents' IDs from, which the writer's
+    /// The lowest sequence number the cell's guest may mint extents' IDs from, which the writer's
     /// epoch gives: no writer of the cell before minted from there.
     pub fn next_sequence(&self) -> u64 {
         self.shared.next_sequence()
     }
 
-    /// The bucket the store's cell is kept in.
+    /// The bucket the cell is kept in.
     pub fn bucket(&self) -> &ObjectBucket {
         &self.bucket
     }
 
-    /// What it keeps the store's cell as.
+    /// What it keeps the cell as.
     pub fn options(&self) -> &Options {
         &self.shared.options
     }
@@ -1178,17 +1178,17 @@ impl<D: Dir> Uploader<D> {
         self.shared.progress.lock().unwrap().stalls
     }
 
-    /// Why uploading stopped, if it did: the store's commits are its cell's no more.
+    /// Why uploading stopped, if it did: the open cell's commits are the cell's no more.
     pub fn failed(&self) -> Option<Failure> {
         self.shared.failed()
     }
 
     /// What has the uploader, once it stops, or as it is stopping, stop at once (TASK-216): as a
-    /// writer opening the store again here waits for it, which the store's write-ahead log keeps
+    /// writer opening the cell again here waits for it, which the cell's write-ahead log keeps
     /// what it hadn't uploaded for, and whose opening uploads it. Stopped so, its uploads in flight
     /// are given up on, as a crashed host's are, landing or not, and its writer writes no
     /// checkpoint. Its uploader gone, it does nothing. Stopping as dropping it does otherwise, it
-    /// uploads all its store made durable first, which takes as long as the bucket takes.
+    /// uploads all its cell made durable first, which takes as long as the bucket takes.
     pub fn cut_short(&self) -> impl Fn() + Send + Sync + 'static {
         let shared = Arc::downgrade(&self.shared);
         move || {
@@ -1198,8 +1198,8 @@ impl<D: Dir> Uploader<D> {
         }
     }
 
-    /// Has the uploader, stopping, upload all its store made durable first, as it does unless
-    /// cut short ([`Uploader::cut_short`]): for a store another writer took over, as it was, its
+    /// Has the uploader, stopping, upload all its cell made durable first, as it does unless
+    /// cut short ([`Uploader::cut_short`]): for a cell another writer took over, as it was, its
     /// uploader going on, whose going later no writer waits for.
     pub fn drain_on_stop(&self) {
         self.shared.progress.lock().unwrap().cut = false;
@@ -1207,10 +1207,10 @@ impl<D: Dir> Uploader<D> {
 }
 
 impl<D: Dir> Uploader<D> {
-    /// cladefs: stops it, as dropping it does, and returns once it stopped: its store's open segment
-    /// closed, if its store is open still, what the store made durable uploaded, and nothing of it
-    /// holding the store open, which may be opened again at once (TASK-685.3). Holds no thread
-    /// while it waits, as the daemon closes its stores: dropping it, unclosed, blocks, unless its
+    /// cladefs: stops it, as dropping it does, and returns once it stopped: its cell's open segment
+    /// closed, if its cell is open still, what the cell made durable uploaded, and nothing of it
+    /// holding the cell open, which may be opened again at once (TASK-685.3). Holds no thread
+    /// while it waits, as the daemon closes its cells: dropping it, unclosed, blocks, unless its
     /// task stopped already.
     pub async fn close(mut self) {
         self.shared.stop();
@@ -1232,8 +1232,8 @@ impl<D: Dir> Uploader<D> {
 impl<D: Dir> Drop for Uploader<D> {
     fn drop(&mut self) {
         self.shared.stop();
-        // cladefs: its host dying, killed, as a simulated host is, nothing waits: its task went with
-        // it (doc-24).
+        // cladefs: its host dying, killed, as a simulated host is, nothing waits: its task went
+        // with it (doc-24).
         if node_local::dying() {
             return;
         }
@@ -1252,7 +1252,7 @@ impl<D: Dir> Drop for Uploader<D> {
     }
 }
 
-/// cladefs: its disk under pressure urges it: it closes its store's open segment at its next
+/// cladefs: its disk under pressure urges it: it closes its cell's open segment at its next
 /// gather, whatever its guest is doing, and uploads it, so that what it held leaves the disk.
 impl<D: Dir, B: bucket_cell::Bucket> bucket_cell::host_disk::Urge for Shared<D, B> {
     fn urge(&self) {
@@ -1263,8 +1263,8 @@ impl<D: Dir, B: bucket_cell::Bucket> bucket_cell::host_disk::Urge for Shared<D, 
 
 impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// An uploader that uploads as `options` say, within `uploads`, its interval running out on
-    /// `clock`: started by [`Shared::run`]. cladefs: encrypting and reading under `keys`, the host's
-    /// (TASK-411.3); its keeper run on `spawn`.
+    /// `clock`: started by [`Shared::run`]. cladefs: encrypting and reading under `keys`, the
+    /// host's (TASK-411.3); its keeper run on `spawn`.
     pub(crate) fn new(
         options: Options,
         uploads: Arc<Budget>,
@@ -1272,7 +1272,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         keys: keys::Host,
     ) -> Arc<Self> {
         Arc::new(Self {
-            store: std::sync::OnceLock::new(),
+            cell: std::sync::OnceLock::new(),
             writer: Default::default(),
             token: Default::default(),
             at_version: Default::default(),
@@ -1293,7 +1293,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         })
     }
 
-    /// cladefs: holds `ring`, the store's keys, among the host's, which its fetchers read under,
+    /// cladefs: holds `ring`, the cell's keys, among the host's, which its fetchers read under,
     /// from now on.
     fn hold_ring(&self, ring: &Arc<Ring>) {
         *self.held.lock().unwrap() = Some(self.keys.ring.hold(ring.clone()));
@@ -1304,12 +1304,12 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         self.holders.lock().unwrap().next()
     }
 
-    /// The epoch of the store's latest commit uploaded and acknowledged.
+    /// The epoch of the cell's latest commit uploaded and acknowledged.
     pub(crate) fn last_uploaded(&self) -> u64 {
         self.progress.lock().unwrap().uploaded
     }
 
-    /// The lowest sequence number the store's guest may mint extents' IDs from.
+    /// The lowest sequence number the cell's guest may mint extents' IDs from.
     pub(crate) fn next_sequence(&self) -> u64 {
         self.progress.lock().unwrap().next_sequence
     }
@@ -1324,7 +1324,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         self.writer.lock().unwrap().clone()
     }
 
-    /// Has the uploader stop: once it uploaded what its store made durable, its open segment's
+    /// Has the uploader stop: once it uploaded what its cell made durable, its open segment's
     /// commits too, unless cut short ([`Uploader::cut_short`]).
     pub(crate) fn stop(&self) {
         self.progress.lock().unwrap().stop = true;
@@ -1344,13 +1344,13 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         matches!(futures::future::select(notified, ran_out).await, Either::Left(_))
     }
 
-    fn store(&self) -> &Arc<LocalCell<D>> {
-        self.store.get().expect("the uploader opened its store")
+    fn cell(&self) -> &Arc<LocalCell<D>> {
+        self.cell.get().expect("the uploader opened its cell")
     }
 
-    /// Notes the store's latest commit, if it isn't uploaded, as seen now.
+    /// Notes the cell's latest commit, if it isn't uploaded, as seen now.
     fn observe(&self) -> Result<(), Failure> {
-        let epoch = self.store().last_commit()?;
+        let epoch = self.cell().last_commit()?;
         let mut progress = self.progress.lock().unwrap();
         let newer = progress.seen.back().is_none_or(|(seen, _)| *seen < epoch);
         if epoch > progress.uploaded && newer {
@@ -1370,7 +1370,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         progress.wanted = true;
         if awaited == Awaited::Lag {
             progress.stalls += 1;
-            let pending = self.store().wal_bytes()?;
+            let pending = self.cell().wal_bytes()?;
             let commits = epoch.saturating_sub(progress.uploaded);
             let oldest = progress.seen.front().and_then(|(_, seen)| seen.elapsed().ok());
             let max = self.options.max_lag_bytes;
@@ -1408,7 +1408,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// is durable.
     fn within_lag(&self, uploaded: u64, epoch: u64) -> Result<bool, Failure> {
         let max_bytes = self.options.max_lag_bytes;
-        Ok(uploaded >= epoch && self.store().wal_bytes()? <= max_bytes)
+        Ok(uploaded >= epoch && self.cell().wal_bytes()? <= max_bytes)
     }
 
     /// cladefs: what `waiting` finds in `progress`: done, or failed, or, if nothing yet, `None`
@@ -1438,9 +1438,9 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         }
     }
 
-    /// Runs the uploader of the store `recovering` recovered, opening it first, with what the host
+    /// Runs the uploader of the cell `recovering` recovered, opening it first, with what the host
     /// learned of its cell for this opening, if anything ([`learned`]): returns once it stopped,
-    /// its keeper too, if it has one, so that nothing of it holds the store open (TASK-701).
+    /// its keeper too, if it has one, so that nothing of it holds the cell open (TASK-701).
     pub(crate) async fn run(
         self: &Arc<Self>,
         recovering: (Recovering<D>, Option<Learned>),
@@ -1471,21 +1471,21 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let writer = match self.start(recovering, options, &bucket, holder).await {
             Ok(writer) => {
                 // cladefs: urged by its disk as it comes under pressure (doc-22, TASK-539.9).
-                if let Some(disk) = crate::dir::Dir::disk(self.store().dir()) {
+                if let Some(disk) = crate::dir::Dir::disk(self.cell().dir()) {
                     let urged: std::sync::Weak<dyn bucket_cell::host_disk::Urge> =
                         Arc::downgrade(self) as _;
                     disk.on_pressure(urged);
                 }
                 // cladefs: its opener gone, as an opening's future dropped, nothing waits for the
-                // store: it stops, as it would were it dropped (TASK-685.3).
-                if started.send(Ok(self.store().clone())).is_err() {
+                // cell: it stops, as it would were it dropped (TASK-685.3).
+                if started.send(Ok(self.cell().clone())).is_err() {
                     return;
                 }
                 writer
             }
             Err(err) => return drop(started.send(Err(err))),
         };
-        // A version's store has nothing to upload.
+        // A version's cell has nothing to upload.
         let Some(writer) = writer else {
             while !self.progress.lock().unwrap().stop {
                 self.wake.notified().await;
@@ -1511,15 +1511,15 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let (mut segments, mut checkpointed) = (0, 0);
         let mut in_flight = InFlight::default();
         // cladefs: the work with the cell's head under way, an acknowledgement or a checkpoint, one
-        // at a time, beside the uploads, which go on meanwhile as it waits for the bucket's store
-        // to take the head's next write: an acknowledgement then names all they uploaded
+        // at a time, beside the uploads, which go on meanwhile as it waits for the bucket's object
+        // store to take the head's next write: an acknowledgement then names all they uploaded
         // (`Writer::acknowledge`, TASK-690). And whether an upload since it began wants an
         // acknowledgement.
         let mut head_work: Option<BoxFuture<'static, Result<HeadWork, bucket_cell::Error>>> = None;
         let mut ack_wanted = false;
-        // Whether the next gather closes the store's open segment: for a commit waiting for its
+        // Whether the next gather closes the cell's open segment: for a commit waiting for its
         // upload, or a fork, or as the interval is up, or the uploader stops; and whether the last
-        // took segments, after which the store may hold more closed, which the next takes,
+        // took segments, after which the cell may hold more closed, which the next takes,
         // closing none for them (TASK-92.15).
         // cladefs: and whether a commit waits for it, or a fork, or the uploader stops: closing
         // whatever it holds, not only once the guest is filling it no more (TASK-92.41).
@@ -1528,7 +1528,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             if let Err(err) = self.observe() {
                 return self.fail(&writer, err);
             }
-            // cladefs: acknowledgements the store's disk refused before, tried again.
+            // cladefs: acknowledgements the cell's disk refused before, tried again.
             if !in_flight.acknowledging.is_empty()
                 && let Err(err) = self.acknowledge_pending(&mut in_flight).await
             {
@@ -1541,7 +1541,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 (progress.stop, progress.cut)
             };
             // Cut short (TASK-216): what it has in flight, and what it would have taken, the
-            // store's log keeps, for the store's next opening.
+            // cell's log keeps, for the cell's next opening.
             if stop && cut {
                 return self.fail(&writer, Failure::msg("the uploader stopped, cut short"));
             }
@@ -1552,7 +1552,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                     Ok(gathered) => gathered,
                     Err(err) => return self.fail(&writer, err),
                 };
-                // Done with once closed; the segments the store had closed taking the room, it
+                // Done with once closed; the segments the cell had closed taking the room, it
                 // closes the next time.
                 close &= !gathered.closed;
                 urgent &= !gathered.closed;
@@ -1647,10 +1647,10 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         self.changed.notify(usize::MAX);
     }
 
-    /// Opens the store `recovering` recovered, as the bucket holds its cell (see the module's
+    /// Opens the cell `recovering` recovered, as the bucket holds its cell (see the module's
     /// docs), and returns its writer, none for a version. Its log is checked to follow the cell as
-    /// recovery finds it before the head is taken, so that a store plainly stale fences no writer;
-    /// then, the head taken, the writer recovers it on from there (TASK-92.6) and the store opens
+    /// recovery finds it before the head is taken, so that a cell plainly stale fences no writer;
+    /// then, the head taken, the writer recovers it on from there (TASK-92.6) and the cell opens
     /// as the writer found its end, which another writer may have moved on meanwhile.
     async fn start(
         &self,
@@ -1664,7 +1664,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let placement = recovering.token().unwrap_or(self.options.token);
         let kms = &self.keys.kms;
         let read = first_read(&**bucket, cell, learned, kms).await?;
-        // A cell with no head is none: its maker makes it before its store first opens.
+        // A cell with no head is none: its maker makes it before its cell first opens.
         let Some(found) = read.head(cell)? else {
             return Err(match recovering.version() {
                 Some(_) => Failure::VersionDropped,
@@ -1676,8 +1676,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 self.version(bucket, cell, found, id).await?;
             let opening =
                 Opening { state, layer, taken: None, cache, keys: keys.clone(), held: parts };
-            let store = blocking(|| recovering.open(options, opening))?;
-            let _ = self.store.set(Arc::new(store));
+            let open_cell = blocking(|| recovering.open(options, opening))?;
+            let _ = self.cell.set(Arc::new(open_cell));
             self.hold_ring(&keys);
             let mut progress = self.progress.lock().unwrap();
             progress.uploaded_through(u64::MAX);
@@ -1714,10 +1714,10 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         };
         // cladefs: its head taken by this placement, in one conditional write that gives the cell
         // what it lacks (TASK-515): a new cell's KEK from the host's pool, wrapped by its tenant's
-        // ahead (every cell is encrypted, TASK-411.28), its DEK, and the kind of the store, unless
+        // ahead (every cell is encrypted, TASK-411.28), its DEK, and the kind of the cell, unless
         // it is of another (`OtherKind`, doc-20). Not a version's, which no writer
         // takes, and any number of hosts open at once. A cell with no head is no cell: its maker
-        // makes it, before its store opens (`lifecycle::create`), and no taking does.
+        // makes it, before its cell opens (`lifecycle::create`), and no taking does.
         let taking = head::Taking {
             holder,
             token: placement,
@@ -1731,7 +1731,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // (doc-21, TASK-537.3.4): no writer of an earlier epoch has a commit replicated after.
         let named = (held.head.replication.as_ref())
             .and_then(|replication| replication.configuration.clone());
-        // cladefs: a replicated cell's, whose writer's copies its store notes (TASK-683).
+        // cladefs: a replicated cell's, whose writer's copies its cell notes (TASK-683).
         let replicated = held.head.replication.is_some() || self.options.replication.is_some();
         let old = named.clone().filter(|configuration| configuration.f >= 1);
         // cladefs: or, its placement's takings forced, those of them that answer, however few
@@ -1746,15 +1746,15 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             }
             None => None,
         };
-        // cladefs: the host serves a cell of the tenant's: its pool of new cell KEKs, which forks of
-        // its stores into new cells take, filled off this path (TASK-411.4).
+        // cladefs: the host serves a cell of the tenant's: its pool of new cell KEKs, which forks
+        // of its cells into new cells take, filled off this path (TASK-411.4).
         kms.refill(cell);
         let keys = keys::ring(&**bucket, &cell_keys, cell, &held.head, true).await?;
         let writer = Writer::holding(bucket.clone(), cell, held, before, keys).await?;
         let writer = Arc::new(writer.uploading_within(self.uploads.clone()));
         let keys = writer.keys().clone();
         // cladefs: what the fenced members hold, the longest copy of each log, after the head's
-        // last commit: the store's write-ahead log, if it holds none, and what the new
+        // last commit: the cell's write-ahead log, if it holds none, and what the new
         // configuration's members are given before it is active (TASK-537.3.4).
         let (seed, recovering, short, restored) = match (&old, fenced) {
             (Some(old), Some(Fenced { members: fenced, short })) => {
@@ -1771,12 +1771,13 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                     Err(err) => return Err(err.into()),
                 };
                 // Its own write-ahead log, if it holds one, recovered unless the members' go past
-                // it: a later writer's, or this writer's beyond its own sync (TASK-537.3.4's review).
+                // it: a later writer's, or this writer's beyond its own sync (TASK-537.3.4's
+                // review).
                 let own = recovering.last_commit_held();
                 let members = crate::replicate::last_commit(cell, &seed);
                 let ahead = crate::replicate::members_ahead(own, members);
                 // Its own kept, the members' logs are given the new configuration only if they are
-                // of its history: else an earlier writer's, past what a later one, this store's
+                // of its history: else an earlier writer's, past what a later one, this cell's
                 // own, went on from, none of it told replicated (TASK-678's review: a retake whose
                 // take before deferred, the head naming the configuration before still).
                 let seed = match ahead || members.is_none() || recovering.holds_commits(members) {
@@ -1811,7 +1812,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             }
             _ => (Vec::new(), recovering, None, false),
         };
-        // cladefs: taken by force from too few members: what may be lost noted in the store's
+        // cladefs: taken by force from too few members: what may be lost noted in the cell's
         // description, which its status says from now on, while this placement holds it; or, of an
         // earlier taking of this forced placement, what that one noted (TASK-681).
         let mut recovering = recovering;
@@ -1838,8 +1839,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         };
         let (state, layer, taken) = (writer.state(), writer.layer(), Some(writer.taken().clone()));
         let opening = Opening { state, layer, taken, cache, keys: keys.clone(), held: parts };
-        let store = blocking(|| recovering.open(options, opening))?;
-        let _ = self.store.set(Arc::new(store));
+        let open_cell = blocking(|| recovering.open(options, opening))?;
+        let _ = self.cell.set(Arc::new(open_cell));
         self.hold_ring(&keys);
         let _ = self.token.set(placement);
         self.took(&writer, placement);
@@ -1880,11 +1881,11 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// replicated from now on (doc-21, TASK-537.3.3, TASK-537.3.4): a configuration of this host
     /// and 2f members picked from its peers, given `seed`, what the configuration `old` before held
     /// after the head's last commit, and activated by a swap of the head once f of them hold it, so
-    /// that what `old` held replicated stays so; then the store's replicator started, of the
+    /// that what `old` held replicated stays so; then the cell's replicator started, of the
     /// commits after those it opened with, on no member of the new configuration but the seed's.
     /// The configuration before's members drop what they held of it, if they answer.
     ///
-    /// A store that opened holding more than `old`'s members gave, its own write-ahead log's
+    /// A cell that opened holding more than `old`'s members gave, its own write-ahead log's
     /// commits on its own host (a retake on the writer's disk, the member holding the rest out of
     /// reach), may hold commits told replicated that no member of the new configuration is given:
     /// it is activated only by the acknowledgement that names them all, in the same swap
@@ -1901,13 +1902,13 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         use bucket_cell::layout::Configuration;
         let bucket_cell::layout::Replication { wish, configuration } = replication;
         let members = self.members()?;
-        let store = self.store().clone();
-        let cell = store.description().cell;
+        let open_cell = self.cell().clone();
+        let cell = open_cell.description().cell;
         let before = configuration.clone();
         let number = configuration.map_or(1, |configuration| configuration.number + 1);
         let me = members.me().map_err(Failure::msg)?;
         let picked = (me, members.pick(cell, number, wish.f, &[]).await);
-        let base = store.last_commit()?;
+        let base = open_cell.last_commit()?;
         let epoch = writer.epoch();
         // The last commit the head names, which every configuration's members go on from.
         let named = writer.taken().last_commit.map(epoch_of);
@@ -1919,7 +1920,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             // take that recovered what the configuration before held, which it can give no
             // configuration of its own, a host of three lost (TASK-537.3.6): the head goes on
             // naming that configuration, fenced, its members holding what was told, until the
-            // acknowledgement that names all the store recovered names its own, of f = 0, in the
+            // acknowledgement that names all the cell recovered names its own, of f = 0, in the
             // same swap (`Writer::configure_past`; the spec's aloneSwitch).
             (me, Err(err)) => {
                 log::warn!(
@@ -1927,13 +1928,13 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                      commits waiting for the bucket: {err}",
                     wish.f
                 );
-                let spool = blocking(|| store.spool())?;
+                let spool = blocking(|| open_cell.spool())?;
                 let replicator = self.replicator(&members, 0, base, spool, Vec::new());
-                store.replicate_to(replicator).await;
+                open_cell.replicate_to(replicator).await;
                 return Ok(match before {
                     Some(before) if before.f == 0 => (before, false),
                     // The writer's own, of f = 0, which the head names once it names all the
-                    // store recovered: at once if the bucket holds it all.
+                    // cell recovered: at once if the bucket holds it all.
                     Some(before) => {
                         let number = before.number + 1;
                         let alone = Configuration { number, epoch, f: 0, members: vec![me] };
@@ -1954,10 +1955,10 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let configuration = Configuration { number, epoch, f: wish.f, members: all };
         let links =
             others.iter().map(|member| members.link(cell, &configuration, member)).collect();
-        let spool = blocking(|| store.spool())?;
+        let spool = blocking(|| open_cell.spool())?;
         let replicator = self.replicator(&members, usize::from(wish.f), base, spool, links);
         // What `old`'s members held, which they give the new configuration's: through the seed's
-        // last commit, or the head's. The store holding more, its own log's, of `old`'s writer's
+        // last commit, or the head's. The cell holding more, its own log's, of `old`'s writer's
         // (TASK-678): the head names the new configuration once it names those too.
         let given = crate::replicate::last_commit(cell, &seed).map(epoch_of).max(named);
         if bucket_cell::rules().installs_own && old.is_some() && given.unwrap_or(0) < base {
@@ -1969,7 +1970,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 old.as_ref().map_or(0, |old| old.number),
             );
             writer.configure_past(base, configuration.clone());
-            store.replicate_to(replicator).await;
+            open_cell.replicate_to(replicator).await;
             return Ok((configuration, true));
         }
         if !seed.is_empty() {
@@ -1989,7 +1990,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             }
         }
         writer.configure(configuration.clone()).await?;
-        store.replicate_to(replicator).await;
+        open_cell.replicate_to(replicator).await;
         self.configured(number);
         log::info!(
             "cladefs: {cell:?} replicated in configuration {number} with {:?}",
@@ -2077,7 +2078,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             if self.stopping() {
                 return;
             }
-            let Some(replicator) = self.store().replicator() else { return };
+            let Some(replicator) = self.cell().replicator() else { return };
             if replicator.fenced().is_some() {
                 return;
             }
@@ -2112,7 +2113,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 // What StatCell says of it, the head naming it now (Codex's review).
                 self.configured(configuration.number);
                 if configuration.f == 0 && wish.f == 0 {
-                    self.store().unreplicate().await;
+                    self.cell().unreplicate().await;
                     log::info!("cladefs: {cell:?} replicated no more, as its head asks");
                     return;
                 }
@@ -2141,7 +2142,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                     backoff = 0;
                     avoid.clear();
                     if configuration.f == 0 && wish.f == 0 {
-                        self.store().unreplicate().await;
+                        self.cell().unreplicate().await;
                         log::info!("cladefs: {cell:?} replicated no more, as its head asks");
                         return;
                     }
@@ -2178,7 +2179,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         }
     }
 
-    /// cladefs: the configuration whose members' logs its taking recovered the store from, if it
+    /// cladefs: the configuration whose members' logs its taking recovered the cell from, if it
     /// did ([`Shared::recovered_from`]'s field).
     #[cfg(test)]
     pub(crate) fn recovered_from(&self) -> Option<bucket_cell::layout::Configuration> {
@@ -2202,24 +2203,24 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         }
     }
 
-    /// cladefs: has the uploader close and upload what the store holds at once, if it holds
+    /// cladefs: has the uploader close and upload what the cell holds at once, if it holds
     /// commits not uploaded: as a replicated cell's commits wait for the bucket (doc-21, Degraded).
     fn eager(&self) {
-        let Ok(last) = self.store().last_commit() else { return };
+        let Ok(last) = self.cell().last_commit() else { return };
         if last > self.last_uploaded() {
             bucket_cell::host_disk::Urge::urge(self);
         }
     }
 
     /// cladefs: replaces `writer`'s configuration `from` with `number`, of `f`, `number` moved past
-    /// it once its members are sent anything (doc-21, Replacing a member; TASK-537.3.5): this host and 2f members picked from its peers, those at `avoid`
-    /// aside, made at its epoch; given every log the replicator spools, and every flush from now,
-    /// its commits counted on both meanwhile (the joint rule); swapped into the head once f of its
-    /// members hold all the guest was told replicated, or, for f = 0, once the bucket does; then
-    /// counted alone. The new configuration, or none if none was to be had, or it took not what
-    /// it needed within [`SEEDING`], given up, those of its members that refused the writer added
-    /// to `avoid`. Fails if the head's swap does: the writer stops, the replacement's joint rule
-    /// kept, as the head may name either.
+    /// it once its members are sent anything (doc-21, Replacing a member; TASK-537.3.5): this host
+    /// and 2f members picked from its peers, those at `avoid` aside, made at its epoch; given every
+    /// log the replicator spools, and every flush from now, its commits counted on both meanwhile
+    /// (the joint rule); swapped into the head once f of its members hold all the guest was told
+    /// replicated, or, for f = 0, once the bucket does; then counted alone. The new configuration,
+    /// or none if none was to be had, or it took not what it needed within [`SEEDING`], given up,
+    /// those of its members that refused the writer added to `avoid`. Fails if the head's swap
+    /// does: the writer stops, the replacement's joint rule kept, as the head may name either.
     async fn replace(
         &self,
         writer: &Arc<Writer<B>>,
@@ -2303,7 +2304,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// cladefs: fences `cell` at `epoch` on the members of `old`, the configuration its head named
     /// as it was taken (doc-21, TASK-537.3.4): f+1 members other than its writer must answer, so
     /// that no ack quorum of `old` is left unfenced, the writer's own copy, which nothing fences,
-    /// counting only if this host is the writer and holds it (`own`: its store noted as the
+    /// counting only if this host is the writer and holds it (`own`: its cell noted as the
     /// writer's copy of `old`, TASK-683). Each
     /// that answered, with the ends of the logs it holds. `forced` (TASK-681), fewer may: why they
     /// are too few, then.
@@ -2345,12 +2346,13 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// cladefs: of each log the members `fenced` hold of `old`, the longest copy, read from the
     /// member holding it: every commit a guest was told replicated is on one of them, and each
     /// member's logs are prefixes of the writer's (doc-21, TASK-537.3.4). Of a segment's records,
-    /// the longest copy `keys`, the cell's, find authentic, cut to what of it is whole: what a member
-    /// answers is unauthenticated, and a longer copy garbled, or forged, would otherwise hide an
-    /// honest one (TASK-684). Only a copy found not authentic is passed over: one that can't be
-    /// read, or reads shorter than its member's fence said, fails the take, as it may be the only
-    /// one holding commits told replicated; and so does a log none of whose copies is authentic, as
-    /// a log missing would look like a writer's base, given up (`replicate::trimmed`).
+    /// the longest copy `keys`, the cell's, find authentic, cut to what of it is whole: what a
+    /// member answers is unauthenticated, and a longer copy garbled, or forged, would otherwise
+    /// hide an honest one (TASK-684). Only a copy found not authentic is passed over: one that
+    /// can't be read, or reads shorter than its member's fence said, fails the take, as it may be
+    /// the only one holding commits told replicated; and so does a log none of whose copies is
+    /// authentic, as a log missing would look like a writer's base, given up
+    /// (`replicate::trimmed`).
     async fn read_longest(
         &self,
         cell: CellId,
@@ -2420,15 +2422,15 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         Ok(logs)
     }
 
-    /// `writer` took the cell, with the fencing token `token`: the store names what it reads in
+    /// `writer` took the cell, with the fencing token `token`: the cell names what it reads in
     /// the bucket where the writer's checkpoints move it, as the writer does (TASK-195); the
-    /// cell's commits are uploaded, its forks made, and what the store's write-ahead log holds
+    /// cell's commits are uploaded, its forks made, and what the cell's write-ahead log holds
     /// after them is the uploader's to upload.
     fn took(&self, writer: &Arc<Writer<B>>, token: u64) {
-        let following = Arc::downgrade(self.store());
+        let following = Arc::downgrade(self.cell());
         writer.following(move |moved| {
-            let Some(store) = following.upgrade() else { return };
-            if let Err(err) = store.moved(moved) {
+            let Some(cell) = following.upgrade() else { return };
+            if let Err(err) = cell.moved(moved) {
                 log::warn!("cladefs: following the collector's moves: {err:#}");
             }
         });
@@ -2444,9 +2446,9 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         self.changed.notify(usize::MAX);
     }
 
-    /// cladefs: opens the store of `cell`, whose head is `head`, as a copy of its version `id`,
+    /// cladefs: opens `cell`, whose head is `head`, as a copy of its version `id`,
     /// which the head must name (TASK-476): its state at the version, which never changes, as
-    /// recovered, with its keys, under its KEK as read, taking it not. No taking: nothing the store
+    /// recovered, with its keys, under its KEK as read, taking it not. No taking: nothing the cell
     /// does goes to the bucket but its forks' heads. Fails if the version is named no more
     /// ([`Failure::VersionDropped`]).
     async fn version(
@@ -2464,7 +2466,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let keys = keys::ring(&**bucket, &cell_keys, cell, &head, true).await?;
         let recovering = bucket_cell::recovery::recover_version(&**bucket, cell, version.at, &keys);
         let recovered = recovering.await?;
-        // cladefs: its store's open segment, which nothing writes, encrypted as every store's is
+        // cladefs: its cell's open segment, which nothing writes, encrypted as every cell's is
         // (TASK-411.28); its forks' checkpoints sealed under its cell's.
         let sealing = keys.clone();
         let keys = keys.for_version(cell);
@@ -2473,10 +2475,10 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         Ok((recovered, keys))
     }
 
-    /// Adds the segments of the store's write-ahead log whose commits are durable to the writer, to
+    /// Adds the segments of the cell's write-ahead log whose commits are durable to the writer, to
     /// be uploaded as they are, after those uploading (`in_flight`), as many as may upload at once
-    /// with them: the rest stay in the store, unread, until those are uploaded. If `close`, the
-    /// store closes its open segment first if fewer wait: for a commit waiting for its upload, a
+    /// with them: the rest stay in the cell, unread, until those are uploaded. If `close`, the
+    /// cell closes its open segment first if fewer wait: for a commit waiting for its upload, a
     /// fork, the interval up, or the uploader stopping; for no other, as the commits no one waits
     /// for wait in it for those, rather than each go in a segment of its own (TASK-92.15).
     /// cladefs: if not `urgent`, the interval's, the open segment the guest is filling stays open
@@ -2488,12 +2490,12 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         (close, urgent): (bool, bool),
     ) -> Result<Gathered, Failure> {
         failing!("upload::gather");
-        let store = self.store();
+        let cell = self.cell();
         let room = IN_FLIGHT.saturating_sub(in_flight.len());
         // What a waiter wants is durable; then closed, if fewer segments wait than may upload, and
         // what the closing closed durable too.
-        store.flush().await?;
-        let mut closed = store.closed(room).await?;
+        cell.flush().await?;
+        let mut closed = cell.closed(room).await?;
         let mut closing = close && closed.len() < room;
         if closing {
             let waited = {
@@ -2505,16 +2507,17 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             // more (TASK-384). Asked again at the next interval, if the guest still hasn't
             // committed.
             match urgent || waited {
-                true => drop(store.close_for_upload(false).await?),
-                false => closing = store.close_for_upload(true).await?,
+                true => drop(cell.close_for_upload(false).await?),
+                false => closing = cell.close_for_upload(true).await?,
             }
-            store.flush().await?;
-            closed.extend(store.closed(room - closed.len()).await?);
+            cell.flush().await?;
+            closed.extend(cell.closed(room - closed.len()).await?);
         }
         let mut segments = Vec::with_capacity(closed.len());
         for closed in closed {
             let (number, tag) = (closed.number, closed.tag());
-            // cladefs: what reads its files, on a blocking thread, as `blocking` gives (board 2944).
+            // cladefs: what reads its files, on a blocking thread, as `blocking` gives (board
+            // 2944).
             let own = blocking(|| {
                 let own = closed.own.iter().map(|(key, file)| Ok((key.clone(), stored(file)?)));
                 own.collect::<Result<_, Failure>>()
@@ -2532,7 +2535,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     }
 
     /// Acknowledges what the writer has uploaded: the commits of the segments it acknowledges are
-    /// uploaded, and the store's segments leave it, read in the bucket, into the host's cache if
+    /// uploaded, and the cell's segments leave it, read in the bucket, into the host's cache if
     /// it has one (TASK-165.8); then the forks they name are made, with a checkpoint at them, which
     /// their children's recovery starts from.
     async fn acknowledged(
@@ -2546,17 +2549,17 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         self.acknowledge_pending(in_flight).await
     }
 
-    /// cladefs: has the store record the segments the writer acknowledged, in order, which leave it
+    /// cladefs: has the cell record the segments the writer acknowledged, in order, which leave it
     /// then, and counts their commits uploaded: as many as its disk lets it, the rest kept for the
-    /// next pass, as a full disk fails the record of an acknowledgement, which leaves the one before
-    /// it whole (`wal::StartFile`), and the store goes on; any other failure is the uploader's
-    /// (TASK-539.12). Before, the store failed for it. A disk failing otherwise (EIO) is no full
-    /// one: tried again for ever, it left every wait on an upload hanging (board 5359).
+    /// next pass, as a full disk fails the record of an acknowledgement, which leaves the one
+    /// before it whole (`wal::StartFile`), and the cell goes on; any other failure is the
+    /// uploader's (TASK-539.12). Before, the cell failed for it. A disk failing otherwise (EIO) is
+    /// no full one: tried again for ever, it left every wait on an upload hanging (board 5359).
     async fn acknowledge_pending(&self, in_flight: &mut InFlight) -> Result<(), Failure> {
         let mut epoch = None;
         let stored = async {
             while let Some(segment) = in_flight.acknowledging.front() {
-                self.store().acknowledged(segment.number).await?;
+                self.cell().acknowledged(segment.number).await?;
                 epoch = Some(segment.epoch());
                 in_flight.acknowledging.pop_front();
             }
@@ -2568,9 +2571,9 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             Err(err) if full(&err) => {
                 if !std::mem::replace(&mut in_flight.acknowledging_failed, true) {
                     log::warn!(
-                        "cladefs: cell {}'s store records no acknowledgement for now, tried again \
+                        "cladefs: cell {} records no acknowledgement for now, tried again \
                          each pass: {err:#}",
-                        self.store().description().cell
+                        self.cell().description().cell
                     );
                 }
             }
@@ -2584,10 +2587,10 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     }
 }
 
-/// What this host learned of the cell `recovering` recovered, which the opening of its store
+/// What this host learned of the cell `recovering` recovered, which the opening of its cell
 /// takes from the bucket's [`Known`](bucket_cell::known::Known) as it begins, whatever comes of
 /// it after: so nothing learned for an opening outlives it, a failed one's no later one's
-/// (TASK-449's review). Only for a store whose log goes on from nothing the bucket acknowledged:
+/// (TASK-449's review). Only for a cell whose log goes on from nothing the bucket acknowledged:
 /// one that has, learned nothing of here, its learning dropped.
 fn learned<B: bucket_cell::Bucket, D: Dir>(
     bucket: &B,
@@ -2597,12 +2600,12 @@ fn learned<B: bucket_cell::Bucket, D: Dir>(
     learned.filter(|_| recovering.start().is_none())
 }
 
-/// What an opening of the store of `cell` reads first (TASK-165.11, TASK-449): its head, which
+/// What an opening of the cell of `cell` reads first (TASK-165.11, TASK-449): its head, which
 /// the taking goes on from and its recovery starts from; of a cell this host has just made,
 /// `learned` ([`learned`]) stands for that read: its head as its fork left it, as a read made then,
 /// the taking conditional on it. A fork of a version its host crashed in the middle of, its head
 /// saying so, is resumed first ([`lifecycle::resume_version_fork`]: its reference written, the
-/// fork made), which fails if the version was dropped: so the store takes no state of a fork not
+/// fork made), which fails if the version was dropped: so the cell takes no state of a fork not
 /// made.
 async fn first_read<B: bucket_cell::Bucket>(
     bucket: &B,
@@ -2638,15 +2641,15 @@ fn stored<F: File>(file: &Arc<F>) -> Result<Body, Failure> {
 
 /// What a gather did ([`Shared::gather`]).
 struct Gathered {
-    /// Whether it took segments the store closed: the store may have closed more meanwhile.
+    /// Whether it took segments the cell closed: the cell may have closed more meanwhile.
     took: bool,
-    /// Whether it closed the store's open segment, as asked: what was committed before is in the
-    /// segments the store closed, taken, or to be taken next.
+    /// Whether it closed the cell's open segment, as asked: what was committed before is in the
+    /// segments the cell closed, taken, or to be taken next.
     closed: bool,
 }
 
-/// A segment uploading: its number in the cell, and in the store; and the tag of the store's
-/// commit it ends with.
+/// A segment uploading: its number in the cell, and in the open cell; and the tag of the open
+/// cell's commit it ends with.
 struct Uploading {
     segment: u64,
     number: u64,
@@ -2654,14 +2657,14 @@ struct Uploading {
 }
 
 impl Uploading {
-    /// The store's epoch of the commit it ends with.
+    /// The cell's epoch of the commit it ends with.
     fn epoch(&self) -> u64 {
         epoch_of(self.tag)
     }
 }
 
 /// The segments uploading, in order, and the futures of their uploads: an acknowledgement takes
-/// exactly the segments the writer acknowledged. Each is in the store's write-ahead log, durably,
+/// exactly the segments the writer acknowledged. Each is in the cell's write-ahead log, durably,
 /// before its upload goes (TASK-79.72's rule), so that nothing lands in the writer's name that the
 /// log doesn't hold.
 /// cladefs: the uploader's run's work with its cell's head, done.
@@ -2685,11 +2688,11 @@ enum Happened {
 struct InFlight {
     segments: VecDeque<Uploading>,
     uploads: FuturesOrdered<BoxFuture<'static, Result<(), bucket_cell::Error>>>,
-    /// cladefs: the segments the writer acknowledged that the store hasn't yet, its last try at
+    /// cladefs: the segments the writer acknowledged that the cell hasn't yet, its last try at
     /// recording it failing on its disk, as a full one fails it: tried again at each pass
     /// ([`Shared::acknowledge_pending`], TASK-539.12).
     acknowledging: VecDeque<Uploading>,
-    /// cladefs: whether the store's last try failed so: said once until one succeeds.
+    /// cladefs: whether the cell's last try failed so: said once until one succeeds.
     acknowledging_failed: bool,
 }
 
@@ -2799,13 +2802,12 @@ mod tests {
         );
     }
 
-    /// TASK-364: a store opened takes its cell, making it for a new cell, whose cell
-    /// it is from then on (doc-20); its cell's head is taken with the cell's epoch. A later placement's
-    /// taking of the cell, and of the cell's head with the epoch it took it at, fences the
-    /// store's writer: its next commit's upload fails, and a placement of a lower token takes the
-    /// cell back no more.
+    /// TASK-364: an opening takes its cell, making it for a new cell, whose cell it is from then on
+    /// (doc-20); its cell's head is taken with the cell's epoch. A later placement's taking of the
+    /// cell, and of the cell's head with the epoch it took it at, fences the cell's writer: its
+    /// next commit's upload fails, and a placement of a lower token takes the cell back no more.
     #[tokio::test(flavor = "multi_thread")]
-    async fn stores_take_their_cells_and_are_fenced_with_them() {
+    async fn open_cells_take_their_cells_and_are_fenced_with_them() {
         let host = Runtime {
             handle: tokio::runtime::Handle::current(),
             uploads: Budget::new(Limits::UNBOUNDED),
@@ -2820,34 +2822,34 @@ mod tests {
         lifecycle::create(&*bucket, CELL, 1).await.unwrap();
         let options = Options { token: 5, ..Options::default() };
         let recovering = LocalCell::recover_unmade(dir).unwrap();
-        let (store, uploader) =
+        let (cell, uploader) =
             open(recovering, crate::Options::default(), bucket.clone(), (1, options), &host)
                 .await
                 .unwrap();
-        store.made().unwrap();
+        cell.made().unwrap();
         let head = bucket_cell::head::get(&*bucket, CELL).await.unwrap().unwrap();
         assert_eq!((head.epoch, head.holder, head.token), (1, 1, 5));
         assert_eq!(head.kind, Some(bucket_cell::cell::Kind::Fxfs));
 
-        store.write(ExtentId::new(CELL.id, 1), 0, &[1; 4096]).await.unwrap();
-        store.commit(None).await.unwrap();
-        uploader.uploaded(store.last_commit().unwrap()).await.unwrap();
+        cell.write(ExtentId::new(CELL.id, 1), 0, &[1; 4096]).await.unwrap();
+        cell.commit(None).await.unwrap();
+        uploader.uploaded(cell.last_commit().unwrap()).await.unwrap();
         // Another placement takes the cell, fencing it (TASK-371).
         let taken = bucket_cell::testing::take(&*bucket, CELL, 0x66, 6).await;
         assert_eq!(taken.map(|held| held.head.epoch), Ok(2));
-        store.write(ExtentId::new(CELL.id, 2), 0, &[2; 4096]).await.unwrap();
-        store.commit(None).await.unwrap();
-        let fenced = uploader.uploaded(store.last_commit().unwrap()).await;
+        cell.write(ExtentId::new(CELL.id, 2), 0, &[2; 4096]).await.unwrap();
+        cell.commit(None).await.unwrap();
+        let fenced = uploader.uploaded(cell.last_commit().unwrap()).await;
         assert!(matches!(fenced, Err(Failure::Bucket(bucket_cell::Error::Fenced))), "{fenced:?}");
         let back = bucket_cell::testing::take(&*bucket, CELL, 0x55, 5).await;
         assert_eq!(back.map(|held| held.head), Err(bucket_cell::Error::Stale));
     }
 
-    /// TASK-539.9: a store's disk under pressure urges its uploader, which closes the open segment
+    /// TASK-539.9: a cell's disk under pressure urges its uploader, which closes the open segment
     /// its guest is filling and uploads it at once, rather than wait out its interval, and
     /// `filling_wait` past it, so that what it held leaves the disk (doc-22).
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_disk_under_pressure_has_its_stores_uploaded_at_once() {
+    async fn a_disk_under_pressure_has_its_cells_uploaded_at_once() {
         let host = Runtime {
             handle: tokio::runtime::Handle::current(),
             uploads: Budget::new(Limits::UNBOUNDED),
@@ -2864,14 +2866,14 @@ mod tests {
         let hour = Duration::from_secs(3600);
         let options = Options { interval: hour, filling_wait: hour, ..Options::default() };
         let recovering = LocalCell::recover_unmade(dir).unwrap();
-        let (store, uploader) =
+        let (cell, uploader) =
             open(recovering, crate::Options::default(), bucket.clone(), (1, options), &host)
                 .await
                 .unwrap();
-        store.made().unwrap();
-        store.write(ExtentId::new(CELL.id, 1), 0, &[1; 4096]).await.unwrap();
-        store.commit(None).await.unwrap();
-        let epoch = store.last_commit().unwrap();
+        cell.made().unwrap();
+        cell.write(ExtentId::new(CELL.id, 1), 0, &[1; 4096]).await.unwrap();
+        cell.commit(None).await.unwrap();
+        let epoch = cell.last_commit().unwrap();
         std::thread::sleep(Duration::from_millis(200));
         assert!(uploader.last_uploaded() < epoch, "uploaded unasked");
         disk.urge();
@@ -2880,17 +2882,13 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "not uploaded as its disk urged it");
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(
-            store.closed(usize::MAX).await.unwrap().len(),
-            0,
-            "its segments left unuploaded"
-        );
+        assert_eq!(cell.closed(usize::MAX).await.unwrap().len(), 0, "its segments left unuploaded");
     }
 
-    /// TASK-539.12: the store's disk refusing the record of an acknowledgement, as a full one does,
-    /// fails neither the store nor its uploader: the record before it whole, the store writes and
+    /// TASK-539.12: the cell's disk refusing the record of an acknowledgement, as a full one does,
+    /// fails neither the cell nor its uploader: the record before it whole, the cell writes and
     /// commits on, its segments wait in it, and the uploader records them once it can, which lets
-    /// them go. Before, the store failed for good.
+    /// them go. Before, the cell failed for good.
     #[tokio::test(flavor = "multi_thread")]
     async fn acknowledgements_a_full_disk_refuses_wait_for_room() {
         let scenario = fail::FailScenario::setup();
@@ -2907,27 +2905,27 @@ mod tests {
         lifecycle::create(&*bucket, CELL, 1).await.unwrap();
         let options = Options { interval: Duration::from_millis(20), ..Options::default() };
         let recovering = LocalCell::recover_unmade(dir).unwrap();
-        let (store, uploader) =
+        let (cell, uploader) =
             open(recovering, crate::Options::default(), bucket.clone(), (1, options), &host)
                 .await
                 .unwrap();
-        store.made().unwrap();
+        cell.made().unwrap();
         fail::cfg("wal::start", "return").unwrap();
-        store.write(ExtentId::new(CELL.id, 1), 0, &[1; 4096]).await.unwrap();
-        store.commit(None).await.unwrap();
-        let epoch = store.last_commit().unwrap();
+        cell.write(ExtentId::new(CELL.id, 1), 0, &[1; 4096]).await.unwrap();
+        cell.commit(None).await.unwrap();
+        let epoch = cell.last_commit().unwrap();
         // Its interval's passes, 25 of them, each trying again.
         std::thread::sleep(Duration::from_millis(500));
         assert!(uploader.last_uploaded() < epoch, "counted uploaded, unrecorded");
-        store.write(ExtentId::new(CELL.id, 2), 0, &[2; 4096]).await.unwrap();
-        store.commit(None).await.unwrap();
+        cell.write(ExtentId::new(CELL.id, 2), 0, &[2; 4096]).await.unwrap();
+        cell.commit(None).await.unwrap();
         fail::remove("wal::start");
-        uploader.uploaded(store.last_commit().unwrap()).await.unwrap();
-        assert_eq!(store.closed(usize::MAX).await.unwrap().len(), 0, "its segments left in it");
+        uploader.uploaded(cell.last_commit().unwrap()).await.unwrap();
+        assert_eq!(cell.closed(usize::MAX).await.unwrap().len(), 0, "its segments left in it");
         scenario.teardown();
     }
 
-    /// board 5359: the store's disk failing the record of an acknowledgement otherwise than a full
+    /// board 5359: the cell's disk failing the record of an acknowledgement otherwise than a full
     /// disk does (EIO) fails the uploader with it, and a wait on the upload returns that failure:
     /// before, the record was tried again for ever, as a full disk's is, and the wait never ended.
     #[tokio::test(flavor = "multi_thread")]
@@ -2946,15 +2944,15 @@ mod tests {
         lifecycle::create(&*bucket, CELL, 1).await.unwrap();
         let options = Options { interval: Duration::from_millis(20), ..Options::default() };
         let recovering = LocalCell::recover_unmade(dir).unwrap();
-        let (store, uploader) =
+        let (cell, uploader) =
             open(recovering, crate::Options::default(), bucket.clone(), (1, options), &host)
                 .await
                 .unwrap();
-        store.made().unwrap();
+        cell.made().unwrap();
         fail::cfg("wal::start", "return(eio)").unwrap();
-        store.write(ExtentId::new(CELL.id, 1), 0, &[1; 4096]).await.unwrap();
-        store.commit(None).await.unwrap();
-        let waited = uploader.uploaded(store.last_commit().unwrap()).await;
+        cell.write(ExtentId::new(CELL.id, 1), 0, &[1; 4096]).await.unwrap();
+        cell.commit(None).await.unwrap();
+        let waited = uploader.uploaded(cell.last_commit().unwrap()).await;
         let failure = format!("{:#}", waited.unwrap_err());
         assert!(failure.contains("writing the WAL's start"), "{failure}");
         assert_eq!(uploader.failed().map(|failed| format!("{failed:#}")), Some(failure));
@@ -2962,11 +2960,11 @@ mod tests {
         scenario.teardown();
     }
 
-    /// TASK-690: a store's uploader swaps its cell's head no faster than a bucket of GCS's store
-    /// takes it, however fast the store commits: a guest waiting for each commit's upload, then
-    /// one closing segment after segment. Each swap names all uploaded since the last, the uploads
-    /// going on as it waits; the store refuses no write of the head. TASK-691: each slot of the head
-    /// a second apart, the head many times a second.
+    /// TASK-690: a cell's uploader swaps its cell's head no faster than a bucket of GCS's object
+    /// store takes it, however fast the cell commits: a guest waiting for each commit's upload,
+    /// then one closing segment after segment. Each swap names all uploaded since the last, the
+    /// uploads going on as it waits; the cell refuses no write of the head. TASK-691: each slot of
+    /// the head a second apart, the head many times a second.
     #[tokio::test(flavor = "multi_thread")]
     async fn heads_are_swapped_as_fast_as_gcs_takes_them() {
         use bucket_cell::faults::{Fault, Faults, Faulty};
@@ -2986,7 +2984,7 @@ mod tests {
         LocalCell::make(&dir, description, Some("memory:///gcs"), None).unwrap();
         lifecycle::create(&*bucket, CELL, 1).await.unwrap();
         let recovering = LocalCell::recover_unmade(dir).unwrap();
-        let (store, uploader) = open(
+        let (cell, uploader) = open(
             recovering,
             crate::Options::default(),
             bucket.clone(),
@@ -2995,7 +2993,7 @@ mod tests {
         )
         .await
         .unwrap();
-        store.made().unwrap();
+        cell.made().unwrap();
         // Its updates from now on: the head's swaps, the bucket's probe and the taking done.
         let updates = || bucket.stats().requests(Request::Update);
         let opened = updates();
@@ -3003,28 +3001,25 @@ mod tests {
         let mut sequence = 0;
         let mut write = async |close: bool| {
             sequence += 1;
-            store
-                .write(ExtentId::new(CELL.id, sequence), 0, &[sequence as u8; 4096])
-                .await
-                .unwrap();
+            cell.write(ExtentId::new(CELL.id, sequence), 0, &[sequence as u8; 4096]).await.unwrap();
             if close {
-                store.close_segment().unwrap();
+                cell.close_segment().unwrap();
             }
-            store.commit(None).await.unwrap();
+            cell.commit(None).await.unwrap();
             sequence
         };
         let mut waits = Vec::new();
         while started.elapsed() < 3 * second {
             write(false).await;
             let waiting = std::time::Instant::now();
-            uploader.uploaded(store.last_commit().unwrap()).await.unwrap();
+            uploader.uploaded(cell.last_commit().unwrap()).await.unwrap();
             waits.push(waiting.elapsed());
         }
         for _ in 0..3 * IN_FLIGHT {
             write(true).await;
         }
         let last = write(false).await;
-        uploader.uploaded(store.last_commit().unwrap()).await.unwrap();
+        uploader.uploaded(cell.last_commit().unwrap()).await.unwrap();
         let elapsed = started.elapsed();
         let stats = bucket.stats();
         assert_eq!(stats.failures(Request::Update), 0, "writes of the head refused");
@@ -3043,8 +3038,8 @@ mod tests {
         assert_eq!(sequences, (1..=last).collect::<Vec<_>>());
     }
 
-    /// TASK-79.19: a gather takes no more of the segments the store closed than may upload at once,
-    /// with those uploading; the rest it leaves in the store, until those it took are uploaded.
+    /// TASK-79.19: a gather takes no more of the segments the cell closed than may upload at once,
+    /// with those uploading; the rest it leaves in the cell, until those it took are uploaded.
     #[tokio::test(flavor = "multi_thread")]
     async fn gathers_take_what_may_upload_at_once() {
         let host = Runtime {
@@ -3061,20 +3056,17 @@ mod tests {
         // Its uploader uploads nothing it is not asked to within the hour: the test gathers.
         let options = Options { interval: Duration::from_secs(3600), ..Options::default() };
         let recovering = LocalCell::recover_unmade(dir).unwrap();
-        let (store, uploader) =
+        let (cell, uploader) =
             open(recovering, crate::Options::default(), bucket.clone(), (1, options), &host)
                 .await
                 .unwrap();
-        store.made().unwrap();
+        cell.made().unwrap();
         // Each commit closes its segment.
         let closed = 2 * IN_FLIGHT + 1;
         for sequence in 1..=closed as u64 {
-            store
-                .write(ExtentId::new(CELL.id, sequence), 0, &[sequence as u8; 4096])
-                .await
-                .unwrap();
-            store.close_segment().unwrap();
-            store.commit(None).await.unwrap();
+            cell.write(ExtentId::new(CELL.id, sequence), 0, &[sequence as u8; 4096]).await.unwrap();
+            cell.close_segment().unwrap();
+            cell.commit(None).await.unwrap();
         }
         let shared = &uploader.shared;
         let writer = shared.writer.lock().unwrap().clone().unwrap();
@@ -3092,7 +3084,7 @@ mod tests {
             .await;
         }
         assert_eq!(taken, [IN_FLIGHT, IN_FLIGHT, 1]);
-        assert_eq!(uploader.last_uploaded(), store.last_commit().unwrap());
+        assert_eq!(uploader.last_uploaded(), cell.last_commit().unwrap());
         drop(uploader);
         let state = bucket_cell::recover(&*bucket, CELL, None).await.unwrap().state;
         let sequences: Vec<u64> = state.extents.keys().map(|extent| extent.sequence).collect();
@@ -3100,9 +3092,9 @@ mod tests {
     }
 }
 
-/// cladefs: a store committing, sealing and forking, its uploader uploading what it commits, and
+/// cladefs: a cell committing, sealing and forking, its uploader uploading what it commits, and
 /// passes of the collector running over the bucket all along (TASK-291.1), under Shuttle, whose
-/// scheduler chooses every interleaving of their threads at each of the store's locks and at each
+/// scheduler chooses every interleaving of their threads at each of the cell's locks and at each
 /// request to the bucket, and replays a failing one from its seed.
 /// `cargo nextest run -p local_cell --features shuttle --lib shuttle_tests::`.
 #[cfg(all(test, feature = "shuttle"))]
@@ -3126,7 +3118,7 @@ mod shuttle_tests {
     /// Small segments, so that commits close several, and extents of two blocks or more in
     /// objects of their own, which upload before the segments naming them (TASK-79.3); flushes of
     /// two blocks at most held in their log records, larger ones sealed (TASK-301).
-    const STORE: crate::Options = crate::Options {
+    const OPTIONS: crate::Options = crate::Options {
         max_extent: 64 << 20,
         segment_size: 3 * BLOCK as u64,
         segment_age: Duration::from_secs(3600),
@@ -3148,8 +3140,9 @@ mod shuttle_tests {
 
     /// A bucket in memory whose requests each give Shuttle's scheduler a turn first, as a real
     /// bucket's round trips let the other threads go on: so that a pass of the collector, the
-    /// uploader and the store interleave at each. Its requests take effect at once, and never fail.
-    /// Its gate, once armed, holds up the next listing of the whole bucket, a pass's of its objects.
+    /// uploader and the cell interleave at each. Its requests take effect at once, and never fail.
+    /// Its gate, once armed, holds up the next listing of the whole bucket, a pass's of its
+    /// objects.
     struct Turns {
         direct: Direct,
         gate: Gate,
@@ -3301,14 +3294,14 @@ mod shuttle_tests {
         }
     }
 
-    /// A store of `cell` on a disk of its own, made empty, and its uploader, running on a thread
+    /// A cell of `cell` on a disk of its own, made empty, and its uploader, running on a thread
     /// of its own as `holder`, whose writer has taken the cell.
     struct Session {
         uploader: Arc<Shared<MemDir, Turns>>,
         running: shuttle::thread::JoinHandle<()>,
-        store: Arc<LocalCell<MemDir>>,
+        open_cell: Arc<LocalCell<MemDir>>,
         cell: CellId,
-        /// What the store's extents hold, by their IDs.
+        /// What the cell's extents hold, by their IDs.
         holds: BTreeMap<ExtentId, Vec<u8>>,
         /// The first sequence number of its own extents'.
         next: u64,
@@ -3336,14 +3329,14 @@ mod shuttle_tests {
                 let (uploader, bucket) = (uploader.clone(), bucket.clone());
                 shuttle::thread::spawn(move || {
                     let recovering = (recovering, None);
-                    let running = uploader.run(recovering, STORE, bucket, holder, started);
+                    let running = uploader.run(recovering, OPTIONS, bucket, holder, started);
                     shuttle::future::block_on(running)
                 })
             };
-            let store = received(&mut start).unwrap();
-            store.made().unwrap();
+            let open_cell = received(&mut start).unwrap();
+            open_cell.made().unwrap();
             let next = uploader.next_sequence();
-            Self { uploader, running, store, cell, holds: BTreeMap::new(), next }
+            Self { uploader, running, open_cell, cell, holds: BTreeMap::new(), next }
         }
 
         fn extent(&self, at: u64) -> ExtentId {
@@ -3352,26 +3345,26 @@ mod shuttle_tests {
 
         fn write(&mut self, at: u64, blocks: usize) {
             let bytes = pattern(self.cell.id ^ at, blocks);
-            shuttle::future::block_on(self.store.write(self.extent(at), 0, &bytes)).unwrap();
+            shuttle::future::block_on(self.open_cell.write(self.extent(at), 0, &bytes)).unwrap();
             self.holds.insert(self.extent(at), bytes);
         }
 
         fn free(&mut self, extent: ExtentId) {
-            self.store.free(extent).unwrap();
+            self.open_cell.free(extent).unwrap();
             self.holds.remove(&extent);
         }
 
-        /// Asks the uploader for what the store committed.
+        /// Asks the uploader for what the cell committed.
         fn ask(&self) {
-            self.uploader.ask(self.store.last_commit().unwrap(), Awaited::Uploaded).unwrap();
+            self.uploader.ask(self.open_cell.last_commit().unwrap(), Awaited::Uploaded).unwrap();
         }
 
-        /// The uploader uploads all the store made durable, and stops; and the store closes.
+        /// The uploader uploads all the cell made durable, and stops; and the cell closes.
         fn end(self) -> Result<BTreeMap<ExtentId, Vec<u8>>, String> {
-            let last = self.store.last_commit().unwrap();
+            let last = self.open_cell.last_commit().unwrap();
             self.uploader.stop();
             self.running.join().unwrap();
-            drop(self.store);
+            drop(self.open_cell);
             let (failed, uploaded) = (self.uploader.failed(), self.uploader.last_uploaded());
             if failed != Some(Failure::msg("the uploader stopped")) || uploaded != last {
                 return Err(format!("the uploader: {failed:?}, through {uploaded} of {last}"));
@@ -3380,10 +3373,11 @@ mod shuttle_tests {
         }
     }
 
-    /// One schedule: the writer writes, frees and commits, asking for uploads; its uploader uploads;
-    /// passes of the collector run all along. Then the uploader uploads what is left and stops, a
-    /// last pass runs alone, and the cell, recovered from the bucket, holds what its store's last
-    /// commit left, each extent reading as it was written. What went wrong, if anything did.
+    /// One schedule: the writer writes, frees and commits, asking for uploads; its uploader
+    /// uploads; passes of the collector run all along. Then the uploader uploads what is left and
+    /// stops, a last pass runs alone, and the cell, recovered from the bucket, holds what its
+    /// cell's last commit left, each extent reading as it was written. What went wrong, if anything
+    /// did.
     fn collected_while_committing() -> Result<(), String> {
         let bucket = Turns::new();
         let mut parent = Session::open(&bucket, CELL, 1);
@@ -3405,7 +3399,7 @@ mod shuttle_tests {
         };
 
         parent.write(0, 1);
-        shuttle::future::block_on(parent.store.commit_ordered(None)).unwrap();
+        shuttle::future::block_on(parent.open_cell.commit_ordered(None)).unwrap();
         // Asked for that commit with an extent of its own open, the uploader closes the open
         // segment between commits: its footer's next sequence number counts the extent, which the
         // next segment names, its object uploaded first (TASK-79.3).
@@ -3413,17 +3407,17 @@ mod shuttle_tests {
         parent.ask();
         parent.write(2, 2);
         parent.free(parent.extent(0));
-        shuttle::future::block_on(parent.store.commit(None)).unwrap();
+        shuttle::future::block_on(parent.open_cell.commit(None)).unwrap();
         parent.ask();
         parent.write(3, 1);
-        shuttle::future::block_on(parent.store.commit(None)).unwrap();
+        shuttle::future::block_on(parent.open_cell.commit(None)).unwrap();
         parent.ask();
         parent.free(parent.extent(1));
         parent.write(4, 2);
-        shuttle::future::block_on(parent.store.commit_ordered(None)).unwrap();
+        shuttle::future::block_on(parent.open_cell.commit_ordered(None)).unwrap();
         parent.ask();
         parent.free(parent.extent(3));
-        shuttle::future::block_on(parent.store.commit(None)).unwrap();
+        shuttle::future::block_on(parent.open_cell.commit(None)).unwrap();
         parent.ask();
         let parent = parent.end()?;
         writing.store(false, SeqCst);
@@ -3440,29 +3434,29 @@ mod shuttle_tests {
         shuttle::Runner::new(scheduler, config).run(schedule);
     }
 
-    /// TASK-291.1: whatever the interleaving, what the store committed and its uploader
+    /// TASK-291.1: whatever the interleaving, what the cell committed and its uploader
     /// acknowledged stays its cell's, the collector running all along. [`listed_while_committing`]
     /// holds a pass up as it lists.
     #[test]
-    fn collection_keeps_what_a_store_commits_meanwhile() {
+    fn collection_keeps_what_a_cell_commits_meanwhile() {
         let schedule = || collected_while_committing().unwrap();
         explore(RandomScheduler::new(runs()), schedule);
         explore(PctScheduler::new(3, runs()), schedule);
     }
 
     /// One schedule: a pass of the collector, held up as it lists the cell's objects, while the
-    /// store commits and its uploader uploads its segment and acknowledges it. Then the pass goes
+    /// cell commits and its uploader uploads its segment and acknowledges it. Then the pass goes
     /// on, the uploader uploads what is left and stops, a last pass runs alone, and the cell,
-    /// recovered from the bucket, holds what its store's last commit left. What went wrong, if
+    /// recovered from the bucket, holds what its cell's last commit left. What went wrong, if
     /// anything did.
     fn listed_while_committing() -> Result<(), String> {
         let bucket = Turns::new();
         let mut parent = Session::open(&bucket, CELL, 1);
         parent.write(0, 1);
         parent.write(1, 3);
-        shuttle::future::block_on(parent.store.commit_ordered(None)).unwrap();
+        shuttle::future::block_on(parent.open_cell.commit_ordered(None)).unwrap();
         parent.ask();
-        let before = parent.store.last_commit().unwrap();
+        let before = parent.open_cell.last_commit().unwrap();
         until(|| parent.uploader.last_uploaded() >= before);
         bucket.gate.arm();
         let passing = {
@@ -3475,9 +3469,9 @@ mod shuttle_tests {
         bucket.gate.reached();
         parent.write(2, 1);
         parent.free(parent.extent(0));
-        shuttle::future::block_on(parent.store.commit_ordered(None)).unwrap();
+        shuttle::future::block_on(parent.open_cell.commit_ordered(None)).unwrap();
         parent.ask();
-        let committed = parent.store.last_commit().unwrap();
+        let committed = parent.open_cell.last_commit().unwrap();
         until(|| parent.uploader.last_uploaded() >= committed);
         bucket.gate.open();
         passing.join().unwrap()?;

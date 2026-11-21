@@ -10,7 +10,7 @@
 # again provisions what is missing, and changes nothing else.
 #
 # Inside it: the packages Firecracker, the guest kernel (cross-built for x86-64 too) and the
-# guests' root filesystems need, and fuse3, whose fusermount3 mounts the FUSE tests' stores
+# guests' root filesystems need, and fuse3, whose fusermount3 mounts the FUSE tests' cells
 # (crates/cladefs/tests/fuse_mount.rs); Rust and cargo-nextest (the guest's pinned nightly installs
 # itself, from guest/rust/rust-toolchain.toml), with the musl targets the guest tests' agent is
 # built for; and libseccomp 2.6 in /usr/local, which Firecracker's seccompiler needs and Ubuntu

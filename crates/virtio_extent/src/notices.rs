@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! What the device's guest and the extent daemon tell each other beside requests: the store's
+//! What the device's guest and the extent daemon tell each other beside requests: the cell's
 //! capacity and the shrinks the guest is asked to take, a follower's writer's commits, the
 //! daemon's asks for the guest's stats, and whether the guest's filesystem is frozen. The device
 //! tells the guest of a change with a configuration change interrupt, which the VMM raises
@@ -41,7 +41,7 @@ fn raise(interrupt: &Mutex<Option<Arc<dyn ConfigInterrupt>>>) -> bool {
     }
 }
 
-/// cladefs: what the device knows of its store's capacity, which the daemon changes
+/// cladefs: what the device knows of its cell's capacity, which the daemon changes
 /// (`CellClient::on_capacity`): the capacity, the shrink the guest is asked to take, if any
 /// (0 if none), and how the guest is told, once the driver activates the device. The daemon's
 /// changes and the guest's answers are made one at a time (`changing`), so that an answer to a
@@ -64,7 +64,7 @@ impl std::fmt::Debug for Resizing {
 }
 
 impl Resizing {
-    /// The store's capacity, as the guest is told it.
+    /// The cell's capacity, as the guest is told it.
     pub fn capacity(&self) -> u64 {
         self.capacity.load(Ordering::Acquire)
     }
@@ -84,7 +84,7 @@ impl Resizing {
         (capacity, self.asked())
     }
 
-    /// The store's capacity is `capacity` bytes, as it opens, before the guest is told anything.
+    /// The cell's capacity is `capacity` bytes, as it opens, before the guest is told anything.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn opened(&self, capacity: u64) {
         self.capacity.store(capacity, Ordering::Release);
@@ -96,7 +96,7 @@ impl Resizing {
         *self.interrupt.lock().expect("Poisoned lock") = interrupt;
     }
 
-    /// The daemon set the store's capacity to `capacity` bytes, or, if `ask`, asks the guest to
+    /// The daemon set the cell's capacity to `capacity` bytes, or, if `ask`, asks the guest to
     /// shrink to it: the guest is told, with a configuration change.
     pub fn changed(&self, capacity: u64, ask: bool) {
         let _changing = self.changing.lock().expect("Poisoned lock");
@@ -183,7 +183,7 @@ impl StatsAsks {
         self.asked.load(Ordering::Acquire)
     }
 
-    /// Has `interrupt` ask the guest from here on, or, if none, no guest asked: the store answers
+    /// Has `interrupt` ask the guest from here on, or, if none, no guest asked: the cell answers
     /// at once, with none of the guest's.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn set_interrupt(&self, interrupt: Option<Arc<dyn ConfigInterrupt>>) {
@@ -209,7 +209,7 @@ impl StatsAsks {
 }
 
 /// cladefs: what the device's guest and the daemon tell each other beside requests, which the
-/// requests are served with: the store's capacity, whether the guest's filesystem is frozen
+/// requests are served with: the cell's capacity, whether the guest's filesystem is frozen
 /// (`VIRTIO_EXTENT_T_FREEZE`), as a snapshot needs it, and the daemon's asks for the guest's stats
 /// (`VIRTIO_EXTENT_F_STATS`).
 #[derive(Debug, Default)]
@@ -284,7 +284,7 @@ pub(crate) mod tests {
 
     /// cladefs TASK-111.4: the daemon's asks for the guest's stats reach the guest, the
     /// configuration's `stats_asked` and a configuration change, while the driver takes asks; while
-    /// it doesn't, none is asked, for the store to answer at once.
+    /// it doesn't, none is asked, for the cell to answer at once.
     #[test]
     fn stats_are_asked_of_guests_that_take_asks() {
         let asks = StatsAsks::default();
