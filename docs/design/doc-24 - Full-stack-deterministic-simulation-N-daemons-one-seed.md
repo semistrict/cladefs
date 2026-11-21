@@ -193,7 +193,7 @@ ephemeral journal, version directories and the part cache take a root `Dir` each
 
 cladefsd starts its threads at 41 sites outside tests. They fall into four groups:
 
-- **12 become tasks**: the control, peers, VM-receive (`server::IO`), pager and bucket runtimes;
+- **12 become tasks**: the control, peers, VM-receive (`server::io`), pager and bucket runtimes;
   the request pool and the flushers; the HTTP server; the sweep and stats loops.
 - **5 already run inline** on a serial `Dir` (`Dir::concurrent()`); only `framing::on_threads`
   is not gated yet.

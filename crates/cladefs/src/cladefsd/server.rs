@@ -47,16 +47,20 @@ pub(super) const PAGE_INS: usize = 64;
 /// (TASK-34): a few threads, whatever the number of connections, as each waits for its VM process
 /// mostly. A thread that received a request serves it, out of the runtime, which another thread
 /// takes over meanwhile ([`receive`]); what else blocks runs on its blocking threads.
-pub(super) static IO: std::sync::LazyLock<tokio::runtime::Runtime> =
-    std::sync::LazyLock::new(|| {
-        // cladefs: the daemon's seam: its runtime, madsim's under madsim (doc-24).
-        tokio::runtime::Builder::new_multi_thread()
+/// cladefs: the daemon's seam: its runtime, madsim's under madsim (doc-24), each simulated host's
+/// its own, as its tasks are (board 5473): madsim's keeps every task spawned on it, which, the
+/// process's, the simulations sharing it kept for good.
+pub(super) fn io() -> &'static tokio::runtime::Runtime {
+    node_local::node_local! {
+        static IO: tokio::runtime::Runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("cladefsd io")
             .enable_all()
             .build()
-            .expect("cladefsd's runtime")
-    });
+            .expect("cladefsd's runtime");
+    }
+    IO.get()
+}
 
 /// cladefs: how long a commit only ordered (`COMMIT` without `COMMIT_UPLOADED`) waits at most to be
 /// made local: the host's lag, which doc-2's requirement 11 bounds.
@@ -447,7 +451,7 @@ fn start_connection(stream: super::wire::Stream, tenant: Arc<Tenant>) -> mpsc::R
         log::warn!("cladefsd: refusing a VM process's connection: the daemon drains");
         return finished;
     };
-    IO.spawn(async move {
+    io().spawn(async move {
         run_connection(stream, tenant).await;
         drop((connected, counted));
         let _ = done.send(());
@@ -514,7 +518,7 @@ async fn run_connection(stream: super::wire::Stream, tenant: Arc<Tenant>) {
     match AsyncReceiver::new(stream) {
         Ok(receiver) => {
             let (gone, mut went) = tokio::sync::oneshot::channel();
-            IO.spawn(receive(connection.clone(), receiver, gone));
+            io().spawn(receive(connection.clone(), receiver, gone));
             // cladefs: its process gone, so is it, whoever it left the socket's end to, as a child,
             // which would hold its cell open for good (TASK-79.101). And as the daemon drains,
             // its VM told so, as at the daemon's exit, and its cell closed as a connection going
@@ -634,7 +638,7 @@ fn receive(
                 }
                 Ok(Some(admitted)) => {
                     let Some((message, charge)) = connection.admit(admitted) else { continue };
-                    IO.spawn(receive(connection.clone(), receiver, gone));
+                    io().spawn(receive(connection.clone(), receiver, gone));
                     // The task does nothing more: its receiving goes on in another. Inline under
                     // madsim, which has one thread (`upload::blocking`, doc-24 step 11).
                     local_cell::upload::blocking(move || connection.serve_in_turn(message, charge));
@@ -1001,7 +1005,7 @@ fn serve_future(turn: Turn, serving: impl std::future::Future<Output = ()> + Sen
         return;
     }
     let poll = |runnable: async_task::Runnable| {
-        let _io = IO.enter();
+        let _io = io().enter();
         runnable.run();
     };
     let (runnable, task) = async_task::spawn(future, move |runnable| {
@@ -1187,7 +1191,7 @@ impl Drop for Connection {
         let phase = self.phase.get_mut().get_mut().unwrap_or_else(PoisonError::into_inner);
         let phase = std::mem::replace(phase, Phase::Unopened);
         let alive = self.alive.take();
-        drop(IO.spawn(async move {
+        drop(io().spawn(async move {
             if let Some(open_cell) = open_cell {
                 crate::open_cell::release(open_cell).await;
             }
@@ -1257,7 +1261,7 @@ impl Connection {
         work: impl FnOnce(tokio::sync::oneshot::Receiver<()>) -> F,
     ) {
         let (stop, stopped) = tokio::sync::oneshot::channel();
-        let task = IO.spawn(work(stopped));
+        let task = io().spawn(work(stopped));
         *self.behind.with(Mutex::lock) = Some((stop, task));
     }
 
@@ -2530,7 +2534,7 @@ impl Peer {
             // whichever simulated host is first (TASK-685.14); the watchdog is each daemon's.
             static QUARANTINED: std::sync::Once = std::sync::Once::new();
             QUARANTINED.call_once(|| physmem::quarantine_with(quarantine));
-            IO.spawn(watch());
+            io().spawn(watch());
         });
         let process = peer_process(stream)?;
         if let Some(process) = &process {

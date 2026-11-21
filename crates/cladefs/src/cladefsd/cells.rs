@@ -295,7 +295,7 @@ async fn release_held(held: Arc<HeldCell>) {
 /// cladefs: lets `held` go in a task of its own, on the runtime that lives as long as the daemon:
 /// what lets one go where it can't await its close, as a drop, or a call that may be cancelled.
 fn release_held_behind(held: Arc<HeldCell>) -> tokio::task::JoinHandle<()> {
-    super::server::IO.spawn(release_held(held))
+    super::server::io().spawn(release_held(held))
 }
 
 impl Drop for Here {
@@ -375,7 +375,7 @@ fn keep(hold: &Hold, open_cell: OpenCell) -> Arc<HeldCell> {
         Ok(()) => {
             let idle = let_go_when_idle(hold.key().to_owned(), Arc::downgrade(&held));
             // On the runtime that lives as long as the daemon, whatever its caller's.
-            drop(super::server::IO.spawn(idle));
+            drop(super::server::io().spawn(idle));
         }
         Err(_) => log::error!(
             "cladefsd: {} has something open already: the kept opened isn't kept",
