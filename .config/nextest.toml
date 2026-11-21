@@ -30,6 +30,7 @@ not (
     | package(fxfs-sim-diff)
     | binary_id(local_cell::crash)
     | binary_id(local_cell::reserve)
+    | binary_id(cladefs::migration)
     | (package(bucket_cell) & (
         test(=fetch::tests::reads_of_many_objects_find_their_tails_kept)
         | test(=object_bucket::tests::mirrors_dying_at_each_step_leave_nothing_needed_gone)
