@@ -12,4 +12,3 @@
 5721    ephemeral_cells_survive_disk_faults             round \d+: handing over: Errno\(ENOENT\)
 5721    ephemeral_cells_survive_disk_faults             the cell noted on hosts \[\d+, \d+\], held on \d+
 5721    ephemeral_cells_survive_disk_faults             host \d+ never answered
-5469    ephemeral_cells_survive_crashes_and_migrations  called `Result::unwrap\(\)` on an `Err` value: Errno\(EBUSY\)
