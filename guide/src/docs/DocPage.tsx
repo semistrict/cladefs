@@ -71,7 +71,7 @@ export function MarkdownPage({ path, eyebrow }: { path: string; eyebrow: string 
 export function DocPage({ id }: { id: string }) {
   const doc = evidence.docs.find((d) => d.id === id);
   if (!doc) return <p className="muted">There is no {id}.</p>;
-  return <MarkdownPage path={`backlog/docs/${doc.file}`} eyebrow={`Design doc ${doc.id}`} />;
+  return <MarkdownPage path={`docs/design/${doc.file}`} eyebrow={`Design doc ${doc.id}`} />;
 }
 
 export function DeadEndPage({ slug }: { slug: string }) {

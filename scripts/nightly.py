@@ -14,8 +14,8 @@ main, and its head is tonight's baseline.
   plan
       `skip WHY` if the newest night that measured (outcome `measured`) measured main's code
       already, else `run BASE HEAD`. HEAD is the newest commit of origin's main that changed more
-      than what the nightly writes (docs/measurements, backlog; others' backlog commits too, which
-      measure the same), so that a night's own commit is no change to measure. BASE is the newest
+      than what the nightly writes (docs/measurements; and backlog/, where tasks were until
+      2026-11-21, which measures the same), so that a night's own commit is no change to measure. BASE is the newest
       measured night's head; with none, the first night's base; with no night at all, HEAD's
       first parent. A night that could not run, or whose rounds were all left out, measured
       nothing: the next night measures the same commits again, or main's newer head against the
@@ -29,7 +29,7 @@ main, and its head is tonight's baseline.
       says why their defaults), take bytes or K, M, G and T.
   report --results DIR --base SHA --head SHA --status N
       judges the night (scripts/ab-rounds.py), writes night.json and nightly.md in DIR,
-      regenerates docs/measurements/nightly-history.md, and files a backlog task for each metric
+      regenerates docs/measurements/nightly-history.md, and files a task on the board for each metric
       that moved, or notes it on the open task filed for it before; and one when the last three
       nights had no result.
   history
@@ -38,7 +38,7 @@ main, and its head is tonight's baseline.
       takes origin's main: fetches, rebases what the nightly committed and could not push on it
       (or sets it aside on a branch, nightly-unpushed-<time>, if it conflicts) and pushes it.
   publish --results DIR
-      commits the night's results, the history page and the backlog's changes, and pushes them to
+      commits the night's results and the history page, and pushes them to
       origin's main, fetching and rebasing on a main that moved meanwhile, never forcing. A push
       that fails leaves the commit here and says so in STATE/push-failed.txt, which the next
       night's report repeats, and its sync pushes.
@@ -86,7 +86,10 @@ ROOM = {"build": ("CLADEFS_NIGHTLY_ROOM_BUILD", "100G"),
 # How many of the newest nights' sizes the need follows, and by how much more (a fifth).
 ROOM_NIGHTS = 7
 ROOM_MARGIN = (6, 5)
-LABELS = "perf,nightly"
+# The board's channel of tasks, the labels of what the nightly files, and the profile it writes as.
+CHANNEL = "tasks"
+LABELS = ["priority=high", "tag.perf=yes", "tag.nightly=yes"]
+PROFILE = "nightly"
 PUSH_TRIES = 3
 A, B = "base", "head"
 
@@ -299,45 +302,47 @@ def judge(results, base, head, status, environ=os.environ):
     return record, comparison
 
 
-class Backlog:
-    """The backlog of ROOT, through its CLI: the tasks the nightly filed, and filing them."""
+class Board:
+    """The task board, through its CLI (`vb`, at the BOARD_URL the cron entry sets): the open tasks
+    the nightly filed, and filing them, as the profile `nightly`. A task is cited as `board ID`."""
 
-    def __init__(self, root):
-        self.root = root
-
-    def run(self, *args):
-        done = subprocess.run(["backlog", *args], cwd=self.root, capture_output=True, text=True)
+    def run(self, *args, text=None):
+        done = subprocess.run(["vb", *args, "--json", "--as", PROFILE], input=text,
+                              capture_output=True, text=True)
         if done.returncode:
-            raise RuntimeError(f"backlog {' '.join(args[:2])} failed: {done.stderr.strip()}")
-        return done.stdout
+            raise RuntimeError(f"vb {' '.join(args[:2])} failed: {done.stderr.strip()}")
+        return json.loads(done.stdout)
 
     def open_task(self, marker):
-        """The open task whose title carries `marker`, its ID; None if none."""
-        listed = json.loads(self.run("task", "list", "--labels", "nightly", "--json"))
-        for task in listed["tasks"]:
-            if marker in task["title"] and task["status"] != "Done":
-                return task["id"]
-        return None
+        """The open nightly task whose title carries `marker`, its ID; None if none."""
+        after = []
+        while True:
+            page = self.run("tasks", CHANNEL, "--label", "tag.nightly=yes", "-n", "500", *after)
+            for task in page["tasks"]:
+                if marker in task["message"]["text"].split("\n", 1)[0]:
+                    return task["message"]["id"]
+            if len(page["tasks"]) < 500:
+                return None
+            after = ["--after", page["cursor"]]
 
     def file(self, marker, title, description, note):
-        """Notes `note` on the open task `marker` names, or files a task: (ID, filed or noted)."""
+        """Notes `note` on the open task `marker` names, or files a task: (`board ID`, filed or
+        noted)."""
         found = self.open_task(marker)
         if found:
-            self.run("task", "edit", found, "--append-notes", note)
-            return found, "noted"
-        said = self.run("task", "create", f"{title} {marker}", "-d", description, "-l", LABELS,
-                        "--priority", "high", "--plain")
-        created = re.search(r"^Task (TASK-[0-9.]+) - ", said, re.MULTILINE)
-        if not created:
-            raise RuntimeError(f"backlog task create said no task: {said[:200]}")
-        return created[1], "filed"
+            self.run("reply", found, "-", text=note)
+            return f"board {found}", "noted"
+        labels = [arg for label in LABELS for arg in ("--label", label)]
+        made = self.run("tasks", "create", CHANNEL, "-", *labels,
+                        text=f"# {title} {marker}\n\n## Description\n\n{description}\n")
+        return f"board {made['task']['id']}", "filed"
 
 
 def marker(text):
     return f"[nightly:{text}]"
 
 
-def file_tasks(backlog, record, results_name):
+def file_tasks(board, record, results_name):
     """One task for each metric of `record` that moved and each thing that broke, or a note on the
     open one filed for it before; the tasks, as record['tasks'] lists them."""
     base, head = record["base"], record["head"]
@@ -361,7 +366,7 @@ def file_tasks(backlog, record, results_name):
             "here.")
         note = (f"{record['date'][:10]}: again on {short(base)}..{short(head)}: {rounds} "
                 f"({where})")
-        found, action = backlog.file(marker(row["key"]), title, description, note)
+        found, action = board.file(marker(row["key"]), title, description, note)
         tasks.append({"key": row["key"], "id": found, "action": action})
     for each in record["broken"]:
         title = f"Nightly: {each['what']} on main, {short(base)}..{short(head)}"
@@ -371,7 +376,7 @@ def file_tasks(backlog, record, results_name):
             + "".join(f"- {detail}\n" for detail in each["details"])
             + f"\nReplay on the nightly host, from a checkout of main:\n\n    {each['replay']}\n")
         note = f"{record['date'][:10]}: again on {short(base)}..{short(head)} ({where})"
-        found, action = backlog.file(marker(each["key"]), title, description, note)
+        found, action = board.file(marker(each["key"]), title, description, note)
         tasks.append({"key": each["key"], "id": found, "action": action})
     return tasks
 
@@ -386,7 +391,7 @@ def bad_streak(found):
     return streak
 
 
-def file_streak(backlog, found, results_name):
+def file_streak(board, found, results_name):
     """The task for BAD_NIGHTS nights in a row that measured nothing, filed or noted, if the newest
     nights of `found` are such; else nothing."""
     streak = bad_streak(found)
@@ -402,7 +407,7 @@ def file_streak(backlog, found, results_name):
         f"docs/measurements/{HISTORY}. Find why (a build broken, a host whose rounds are all "
         "left out), and fix it.")
     note = f"{found[-1]['date'][:10]}: {streak} nights in a row now. {said.splitlines()[-1]}"
-    found_id, action = backlog.file(marker("no-result"), title, description, note)
+    found_id, action = board.file(marker("no-result"), title, description, note)
     return [{"key": "no-result", "id": found_id, "action": action}]
 
 
@@ -451,7 +456,8 @@ def history(measurements):
         "Each night on the nightly host (scripts/nightly-host.sh, TASK-441), main's head measured "
         "against the commit the night before measured, in interleaved rounds of the same night, "
         "with the control case and exact counts (scripts/ab-rounds.py). A night main did not move "
-        "ran nothing and is not here. A metric that moved is a backlog task, labelled nightly. "
+        "ran nothing and is not here. A metric that moved is a task on the board, labelled "
+        "tag.nightly. "
         "Written by scripts/nightly.py; do not edit.",
         "",
     ]
@@ -480,11 +486,11 @@ def report(root, results, base, head, status, state, environ=os.environ):
     record, comparison = judge(results, base, head, status, environ)
     push = push_said(state)
     record["push"] = push
-    backlog = Backlog(root)
-    record["tasks"] = file_tasks(backlog, record, results.name)
+    board = Board()
+    record["tasks"] = file_tasks(board, record, results.name)
     (results / NIGHT).write_text(json.dumps(record, indent=1) + "\n")
     found = nights(measurements)
-    record["tasks"] += file_streak(backlog, found, results.name)
+    record["tasks"] += file_streak(board, found, results.name)
     (results / NIGHT).write_text(json.dumps(record, indent=1) + "\n")
     (results / "nightly.md").write_text(night_markdown(record, comparison, push))
     history(measurements)
@@ -575,8 +581,6 @@ def publish(root, results, state):
     record = json.loads((results / NIGHT).read_text())
     measurements = Path("docs") / "measurements"
     git(root, "add", "-f", "--", str(measurements / results.name), str(measurements / HISTORY))
-    if (root / "backlog").exists():
-        git(root, "add", "--", "backlog")
     summary = record["outcome"]
     if record["moved"] or record["broken"]:
         summary = ", ".join([f"{row['case']} {row['name']} {row['change']}"

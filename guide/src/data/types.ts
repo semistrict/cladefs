@@ -71,7 +71,7 @@ export interface DeadEnd {
   why: string;
 }
 
-/** A backlog design doc (backlog/docs/doc-N - Title.md). */
+/** A design doc (docs/design/doc-N - Title.md). */
 export interface Doc {
   id: string;
   title: string;

@@ -2,7 +2,7 @@
 
 How cladefs's parts work together: what the guest asks of its extent store device, how the DAX
 window is kept, and what the extent daemon owns and whom it trusts. `README.md` is the overview;
-`CONTEXT.md` defines the words used here; the designs are the backlog's docs (`backlog/docs`:
+`CONTEXT.md` defines the words used here; the designs are the design docs (`docs/design`:
 doc-2 the split between guest and host, doc-4 the device, doc-13 copy-on-write DAX, doc-7 and
 doc-14 the bucket and local disk). Running a daemon is `operating-a-host.md`.
 

@@ -18,13 +18,20 @@ check covering a data loss bug had been switched off on DAX). So each of these s
 - A hand mutant no test can kill (guest/mutants, `Killer: none`): its header says why, equivalent
   or out of every oracle's reach, as guest/mutants/README.md has it.
 
-A task is open unless backlog/tasks has it Done, or it is archived. scripts/test.sh's scripts part
-runs this, as CI does. Exits 1, saying each, if anything breaks these.
+A task is cited as `board 812`, or, for a task from Backlog.md, as its TASK-N (its label `task` on
+the board). It is open while the board has it waiting, ready, claimed or blocked: completed,
+canceled and failed tasks aren't. The states are the board's, read with `vb` where BOARD_URL is set,
+on the user's machines; CI's runners can't reach the board, so there only that each names a task is
+checked (the user's call, 2026-11-21). A BOARD_URL set and a board that can't be read fail it.
+scripts/test.sh's scripts part runs this, as CI does. Exits 1, saying each, if anything breaks these.
 
 Usage: scripts/check-exclusions.py
 """
 
+import json
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -42,39 +49,52 @@ MUTANTS = "guest/mutants"
 # Where cladefs's Rust tests are: not vendor/, Firecracker's and the guest kernel's sources.
 RUST = ["crates", "guest/tests", "guest/rust"]
 
-TASK = re.compile(r"\bTASK-\d+(?:\.\d+)*\b")
+TASK = re.compile(r"\b(?:TASK-\d+(?:\.\d+)*|board \d+)\b")
+# The board's states of a task that is no longer open.
+CLOSED = ("completed", "canceled", "failed")
+PAGE = 500
 BARE_IGNORE = re.compile(r"#\[ignore\]|#\[cfg_attr\([^]]*,\s*ignore\s*\)\]")
 FUCHSIA = re.compile(r"Copyright \d{4} The Fuchsia Authors")
 
 
-def task_states(root):
-    """Each task's status, by ID (TASK-1.2): backlog/tasks' as their front matter says; an archived
-    task's "Archived"."""
-    states = {}
-    for directory, archived in (("tasks", False), ("completed", True), ("archive", True)):
-        for path in sorted((root / "backlog" / directory).rglob("*.md")):
-            front = path.read_text(errors="replace").split("---")
-            if len(front) < 3:
-                continue
-            fields = dict(
-                line.split(":", 1) for line in front[1].splitlines() if ":" in line
-            )
-            task = fields.get("id", "").strip().strip("'\"").upper()
-            if task:
-                status = fields.get("status", "").strip().strip("'\"")
-                states[task] = "Archived" if archived else status
-    return states
+def vb(*args):
+    """What the board's CLI answers ARGS, as JSON; a failure ends the check."""
+    done = subprocess.run(["vb", *args, "--json"], capture_output=True, text=True)
+    if done.returncode:
+        sys.exit(f"vb {' '.join(args)} failed, with BOARD_URL set: {done.stderr.strip()}")
+    return json.loads(done.stdout)
+
+
+def task_states(environ=os.environ, ask=vb):
+    """Each task's state on the board, by how it is cited (`board 812`, and a task from Backlog.md
+    by its TASK-N too); None where BOARD_URL isn't set, so that states go unchecked."""
+    if not environ.get("BOARD_URL"):
+        return None
+    states, after = {}, []
+    while True:
+        page = ask("tasks", "tasks", "--state", "all", "-n", str(PAGE), *after)
+        for each in page["tasks"]:
+            message = each["message"]
+            states[f"board {message['id']}"] = message["task"]["state"]
+            if "task" in message["labels"]:
+                states[message["labels"]["task"]] = message["task"]["state"]
+        if len(page["tasks"]) < PAGE:
+            return states
+        after = ["--after", page["cursor"]]
 
 
 def closed(text, states):
-    """The tasks `text` names that aren't open: Done, archived or unknown, each with why."""
+    """The tasks `text` names that aren't open: closed or unknown, each with why; none when STATES
+    is None (unchecked)."""
+    if states is None:
+        return []
     found = []
     for task in TASK.findall(text):
         state = states.get(task)
         if state is None:
             found.append(f"{task}, no such task")
-        elif state in ("Done", "Archived"):
-            found.append(f"{task}, {state.lower()}")
+        elif state in CLOSED:
+            found.append(f"{task}, {state}")
     return found
 
 
@@ -96,10 +116,11 @@ def known_list(path, text, states):
     for number, line in enumerate(text.splitlines(), 1):
         if not line.strip() or line.startswith("#"):
             continue
-        first = line.split()[0]
-        if not TASK.fullmatch(first):
+        first = TASK.match(line)
+        if not first:
             problems.append(f"{path}:{number}: names no task first: {line}")
-        for task in closed(first, states):
+            continue
+        for task in closed(first[0], states):
             problems.append(f"{path}:{number}: its task isn't open ({task}): drop the line")
     return problems
 
@@ -144,9 +165,9 @@ def unkillable(path, text):
     return [f"{path}: Killer: none, and its header says no why (equivalent, or out of every oracle's reach)"]
 
 
-def check(root):
-    """Every problem of the tree at `root`, each a line."""
-    states = task_states(root)
+def check(root, states):
+    """Every problem of the tree at `root`, each a line, tasks' states as STATES has them (None:
+    unchecked)."""
     problems = []
     for directory in RUST:
         for path in sorted((root / directory).rglob("*.rs")):
@@ -163,7 +184,10 @@ def check(root):
 
 
 def main():
-    problems = check(ROOT)
+    states = task_states()
+    if states is None:
+        print("exclusions: BOARD_URL isn't set, so whether each task named is open goes unchecked")
+    problems = check(ROOT, states)
     for problem in problems:
         print(problem, file=sys.stderr)
     print(f"exclusions: {len(problems)} saying no why, or why no longer")

@@ -161,8 +161,8 @@ make check-tla             # about two hours, each model in minutes, on Java; fe
 
 Every night at 02:00 a cron entry on the nightly host (a test host) runs
 `scripts/nightly-host.sh` from the nightly's own clone (`~/src/cladefs-nightly`), main's own copy of it (TASK-441). If main's code didn't change
-since the last night that measured (its newest commit that changed more than `docs/measurements` and
-`backlog`), it does nothing. Otherwise it measures main's head against the commit that night
+since the last night that measured (its newest commit that changed more than `docs/measurements`, or
+`backlog/` before tasks moved to the board), it does nothing. Otherwise it measures main's head against the commit that night
 measured, as an A/B (`scripts/bench-ab-host.sh`, on the test host itself, `CLADEFS_TEST_HOST=local`): the
 head built as work, the base's artifacts kept from the night it was the head (`CLADEFS_AB_KEEP`),
 then three rounds of both sides interleaved alone in `fxjob --bench`, each of the fs bench's cases
@@ -180,9 +180,9 @@ run once more; a metric moved only if it moved the same way past its bound (10%)
 kept, a count if it differs at all in every round (a daemon's peak memory, sampled, past 10%)
 (`CLADEFS_AB_BOUND`, `CLADEFS_AB_CONTROL_BOUND`,
 `CLADEFS_AB_COUNT_BOUND`, and `CLADEFS_AB_BOUNDS` for single metrics). Each metric that moved, and
-each case or count benchmark that failed only on the head, becomes a backlog task labelled
-`nightly` with both commits, every round's numbers and the command that replays it; a later night
-that finds it again adds a note to the open task. A quiet night files nothing. Each night's results
+each case or count benchmark that failed only on the head, becomes a task on the board labelled
+`tag.nightly` with both commits, every round's numbers and the command that replays it; a later night
+that finds it again adds a reply to the open task. A quiet night files nothing. Each night's results
 are committed to main from the clone, the push retried on a main that moved; a push that fails
 stays in the clone and is said in `~/.local/state/cladefs/nightly/push-failed.txt`, and the next
 night pushes it first.
@@ -212,11 +212,11 @@ A night by hand, on the test host (it skips if a night measured main's code alre
 ```
 
 The nightly host's setup installs it: it runs `scripts/nightly-install.sh` as the user (the clone,
-its git identity, the cron entry; it checks first that fxjob, flock, cargo-nextest, Backlog.md's
-`backlog` and a fetch without a prompt are there):
+its git identity, the cron entry; it checks first that fxjob, flock, cargo-nextest, the board's
+`vb`, `BOARD_URL` (which the cron entry keeps) and a fetch without a prompt are there):
 
 ```sh
-scripts/nightly-install.sh
+BOARD_URL=<the board, as the host reaches it> scripts/nightly-install.sh
 ```
 
 ## Benchmarks

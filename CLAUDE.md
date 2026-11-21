@@ -1,24 +1,13 @@
-
-<!-- BACKLOG.MD GUIDELINES START -->
-<!-- backlog.md-instructions-version: 1.53.0 -->
 <CRITICAL_INSTRUCTION>
 
-## Backlog.md Workflow
+## Tasks live on the board
 
-This project uses Backlog.md for task and project management.
+This project's tasks are on the team board (Vercel Board, `vb`), channel `tasks`, not in
+Backlog.md, which is retired: there is no `backlog/` and no `backlog` CLI to run.
 
-**At the beginning of each conversation in this project, run `backlog instructions overview` before answering or taking action. Re-read it only if you have not read it yet in the current conversation.**
-
-Use the overview to decide whether to search, read, create, or update Backlog tasks.
-
-Before task lifecycle actions, read the matching detailed guide:
-- `backlog instructions task-creation` before creating or splitting tasks
-- `backlog instructions task-execution` before planning, changing status or assignee, adding a plan or implementation notes, or implementing task work
-- `backlog instructions task-finalization` before checking acceptance criteria, writing final summaries, or moving tasks to terminal statuses
-
-Use `backlog <command> --help` before running unfamiliar commands. Help shows options, fields, and examples.
-
-Do not edit Backlog task, draft, document, decision, or milestone markdown files directly. Use the `backlog` CLI so metadata, relationships, and history stay consistent.
+Before any task action (finding, filing, claiming, noting, finishing), read AGENTS.md's
+**Tasks: the board** and follow it: claim a task before working it, write as your agent
+(`--as claude`), cite tasks by board ID (`board 3012`) or, for tasks from Backlog.md, by their
+`TASK-N`. AGENTS.md is how all work on cladefs is done; read the rest of it too.
 
 </CRITICAL_INSTRUCTION>
-<!-- BACKLOG.MD GUIDELINES END -->

@@ -5,7 +5,7 @@
 """Tests of the nightly (TASK-441.1, TASK-441.2), end to end: scripts/nightly-host.sh as cron runs
 it, in the nightly's clone of an origin, on this machine as its local test host
 (scripts/lib/host.sh's CLADEFS_TEST_HOST=local), with fake_ssh.py's host tools (fxjob, which says
-whether a job measured, sudo, setsid, timeout, flock), a backlog CLI of its own (FAKE_BACKLOG) and a host script in the
+whether a job measured, sudo, setsid, timeout, flock), a board CLI of its own (FAKE_VB) and a host script in the
 bench-ab-linux-host.sh's place (FAKE_AB) whose rounds are fixtures shaped as the test host's
 (test_ab_rounds.write_round). And scripts/nightly-install.sh's cron entry."""
 
@@ -55,39 +55,37 @@ if [[ -n ${CLADEFS_FAKE_ROUNDS_SIZE:-} ]]; then
 fi
 """
 
-# Backlog.md's CLI, as the nightly calls it, its tasks in $BACKLOG_STATE: `task list --labels L
-# --json`, `task create TITLE -d D -l LABELS --priority P --plain` (a file of the task in
-# backlog/tasks, as the real one writes), `task edit ID --append-notes NOTE`.
-FAKE_BACKLOG = r"""
+# The board's CLI, as the nightly calls it, its tasks in $BOARD_STATE: `tasks CHANNEL --label L
+# -n N`, its open tasks with the label; `tasks create CHANNEL - --label L...`, a task of stdin's
+# text; `reply ID -`, a reply of stdin's; each with --json and --as, whose profile it keeps.
+FAKE_VB = r"""
 import json, os, sys
 from pathlib import Path
-state = Path(os.environ["BACKLOG_STATE"])
+state = Path(os.environ["BOARD_STATE"])
 tasks = json.loads(state.read_text()) if state.exists() else []
 args = sys.argv[1:]
 def option(name):
     return args[args.index(name) + 1]
-def write(task):
-    path = Path("backlog/tasks") / f"{task['id'].lower()} - nightly.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(task, indent=1))
-if args[:2] == ["task", "list"]:
-    label = option("--labels")
-    print(json.dumps({"schemaVersion": 1, "kind": "task-list",
-                      "tasks": [t for t in tasks if label in t["labels"]]}))
-elif args[:2] == ["task", "create"]:
-    task = {"id": f"TASK-{900 + len(tasks)}", "title": args[2], "status": "To Do",
-            "labels": option("-l").split(","), "priority": option("--priority"),
-            "description": option("-d"), "notes": []}
+def options(name):
+    return [args[at + 1] for at, arg in enumerate(args) if arg == name]
+assert "--json" in args, args
+profile = option("--as")
+if args[:3] == ["tasks", "create", "tasks"] and args[3] == "-":
+    task = {"id": str(900 + len(tasks)), "text": sys.stdin.read(), "state": "ready", "as": profile,
+            "labels": dict(label.split("=", 1) for label in options("--label")), "replies": []}
     tasks.append(task)
-    write(task)
-    print(f"File: backlog/tasks/x.md\n\nTask {task['id']} - {task['title']}\n=====")
-elif args[:2] == ["task", "edit"]:
-    task = next(t for t in tasks if t["id"] == args[2])
-    task["notes"].append(option("--append-notes"))
-    write(task)
-    print(f"Task {task['id']} - {task['title']}")
+    print(json.dumps({"task": {"id": task["id"]}, "outcome": "created"}))
+elif args[:2] == ["tasks", "tasks"]:
+    key, value = option("--label").split("=", 1)
+    listed = [t for t in tasks if t["labels"].get(key) == value and t["state"] != "completed"]
+    print(json.dumps({"tasks": [{"message": {"id": t["id"], "text": t["text"]}} for t in listed],
+                      "cursor": "0"}))
+elif args[0] == "reply" and args[2] == "-":
+    task = next(t for t in tasks if t["id"] == args[1])
+    task["replies"].append({"text": sys.stdin.read(), "as": profile})
+    print(json.dumps({"message": {"id": "1"}, "outcome": "posted"}))
 else:
-    sys.exit(f"backlog: no such call: {args}")
+    sys.exit(f"vb: no such call: {args}")
 state.write_text(json.dumps(tasks))
 """
 
@@ -113,21 +111,22 @@ class NightlyHost:
         self.home.mkdir()
         bin_ = self.dir / "bin"
         fake_ssh.tools(bin_)
-        (bin_ / "fake_backlog.py").write_text(FAKE_BACKLOG)
-        (bin_ / "backlog").write_text(
-            f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "{bin_}/fake_backlog.py" "$@"\n')
-        (bin_ / "backlog").chmod(0o755)
+        (bin_ / "fake_vb.py").write_text(FAKE_VB)
+        (bin_ / "vb").write_text(
+            f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "{bin_}/fake_vb.py" "$@"\n')
+        (bin_ / "vb").chmod(0o755)
         self.state = self.home / ".local" / "state" / "cladefs" / "nightly"
         # The scratch disk as fake_ssh.py's df has it, 250 GiB free, as the test host's whole: room for a
         # night, whatever this machine's disk has.
         (self.home / "df-free").write_text(f"{250 << 20}\n")
-        self.backlog = self.dir / "backlog.json"
+        self.board = self.dir / "board.json"
         self.environment = {
             "PATH": f"{bin_}:/usr/bin:/bin:/usr/sbin:/sbin",
             "HOME": str(self.home),
             "CLADEFS_TEST_HOST_SCRATCH": str(self.dir / "scratch"),
             "CLADEFS_NIGHTLY_KEEP": str(self.dir / "keep"),
-            "BACKLOG_STATE": str(self.backlog),
+            "BOARD_STATE": str(self.board),
+            "BOARD_URL": "http://127.0.0.1:4100/api/board",
             **IDENTITY,
         }
         firecracker = self.dir / "firecracker"
@@ -198,7 +197,7 @@ class NightlyHost:
         return done.returncode, done.stdout, done.stderr
 
     def tasks(self):
-        return json.loads(self.backlog.read_text()) if self.backlog.exists() else []
+        return json.loads(self.board.read_text()) if self.board.exists() else []
 
     def nights(self):
         """The nights' records on origin's main, oldest first."""
@@ -268,29 +267,30 @@ class Nights(unittest.TestCase):
         self.assertEqual(status, 0, err)
         [task] = host1.tasks()
         marker = "[nightly:fxfs-guest-dax fsync-append slower]"
-        self.assertEqual(task["title"], f"Nightly: fxfs-guest-dax fsync-append 25% slower on main, "
-                                        f"{parent[:8]}..{first[:8]} {marker}")
-        self.assertEqual((task["labels"], task["notes"]), (["perf", "nightly"], []))
+        self.assertEqual(task["text"].split("\n\n## Description\n\n")[0],
+                         f"# Nightly: fxfs-guest-dax fsync-append 25% slower on main, "
+                         f"{parent[:8]}..{first[:8]} {marker}")
+        self.assertEqual((task["labels"], task["as"], task["replies"]),
+                         ({"priority": "high", "tag.perf": "yes", "tag.nightly": "yes"}, "nightly", []))
         [record] = host1.nights()
         where = f"docs/measurements/{record_directory(host1, record)}/nightly.md"
         self.assertIn(f"- Base, the commit the night before measured: {parent}\n"
                       f"- Head, main: {first}\n"
                       "- Each round, base against head: r1: base 6,089, head 4,871 (1.250×); "
                       "r2: base 6,089, head 4,871 (1.250×); r3: base 6,089, head 4,871 (1.250×)\n"
-                      f"- Results: {where}\n", task["description"])
+                      f"- Results: {where}\n", task["text"])
         self.assertIn(f"    CLADEFS_AB_A=base={parent} CLADEFS_AB_B=head={first} "
                       "CLADEFS_AB_ROUNDS=3 CLADEFS_AB_RERUN=1 CLADEFS_BENCH_CASES='bench-fs-ext4-"
                       "guest-kernel bench-fs-fxfs-guest-dax bench-fork-fxfs-guest-dax-cold "
                       "bench-fork-fxfs-guest-dax-warm' CLADEFS_BENCH_GROUPS='io,files,fsync,sync' "
                       "scripts/bench-ab-host.sh RESULTS && scripts/ab-rounds.py compare RESULTS "
-                      "base head\n", task["description"])
-        # The commit holds the results, the history page and the task.
+                      "base head\n", task["text"])
+        # The commit holds the results and the history page; the task is on the board.
         changed = host1.git(host1.origin, "show", "--name-only", "--format=", "main").splitlines()
         self.assertIn("docs/measurements/nightly-history.md", changed)
-        self.assertIn("backlog/tasks/task-900 - nightly.md", changed)
         self.assertIn(f"docs/measurements/{record_directory(host1, record)}/night.json", changed)
         self.assertEqual(record["tasks"], [{"key": "fxfs-guest-dax fsync-append slower",
-                                            "id": "TASK-900", "action": "filed"}])
+                                            "id": "board 900", "action": "filed"}])
 
         second = host1.advance("second")
         status, _, err = host1.night(host1.rounds(0.8))
@@ -298,13 +298,13 @@ class Nights(unittest.TestCase):
         [task] = host1.tasks()
         _, record = host1.nights()
         self.assertEqual((record["base"], record["head"]), (first, second))
-        self.assertEqual(task["notes"], [
+        self.assertEqual(task["replies"], [{"as": "nightly", "text":
             f"{record['date'][:10]}: again on {first[:8]}..{second[:8]}: r1: base 6,089, head 4,871 "
             "(1.250×); r2: base 6,089, head 4,871 (1.250×); r3: base 6,089, head 4,871 (1.250×) "
-            f"(docs/measurements/{record_directory(host1, record)}/nightly.md)"])
+            f"(docs/measurements/{record_directory(host1, record)}/nightly.md)"}])
         self.assertEqual(record["tasks"], [{"key": "fxfs-guest-dax fsync-append slower",
-                                            "id": "TASK-900", "action": "noted"}])
-        self.assertIn("| fxfs-guest-dax fsync-append 25% slower | TASK-900 (noted) |",
+                                            "id": "board 900", "action": "noted"}])
+        self.assertIn("| fxfs-guest-dax fsync-append 25% slower | board 900 (noted) |",
                       host1.history())
 
     def test_a_done_task_is_filed_again(self):
@@ -312,12 +312,12 @@ class Nights(unittest.TestCase):
         host1.advance("first")
         host1.night(host1.rounds(0.8))
         tasks = host1.tasks()
-        tasks[0]["status"] = "Done"
-        host1.backlog.write_text(json.dumps(tasks))
+        tasks[0]["state"] = "completed"
+        host1.board.write_text(json.dumps(tasks))
         host1.advance("second")
         status, _, err = host1.night(host1.rounds(0.8))
         self.assertEqual(status, 0, err)
-        self.assertEqual([task["id"] for task in host1.tasks()], ["TASK-900", "TASK-901"])
+        self.assertEqual([task["id"] for task in host1.tasks()], ["900", "901"])
 
     def test_three_nights_in_a_row_without_a_result_file_a_task(self):
         host1 = NightlyHost()
@@ -334,8 +334,8 @@ class Nights(unittest.TestCase):
                            "head failed to build (see build-b.log and guest-kernel-b.log)")
                           for head in heads])
         [task] = host1.tasks()
-        self.assertEqual(task["title"], "Nightly: 3 nights in a row measured nothing "
-                                        "[nightly:no-result]")
+        self.assertEqual(task["text"].split("\n", 1)[0], "# Nightly: 3 nights in a row measured nothing "
+                                                          "[nightly:no-result]")
         self.assertIn("**The last 3 nights measured nothing** (a task is filed).", host1.history())
         # A night that measured ends the streak.
         host1.advance("fixed")
@@ -608,6 +608,7 @@ class Install(unittest.TestCase):
         self.assertEqual(crontab.read_text().splitlines(), [
             "5 * * * * other job",
             f"0 2 * * * PATH={bin_}:/usr/local/bin:/usr/bin:/bin "
+            "BOARD_URL=http://127.0.0.1:4100/api/board "
             f"{host1.dir / 'installed'}/scripts/nightly-host.sh >> {state}/cron.log 2>&1 "
             "# cladefs nightly (scripts/nightly-install.sh)"])
         self.assertEqual(host1.git(host1.dir / "installed", "config", "user.name"), "cladefs nightly")
@@ -622,9 +623,9 @@ class Install(unittest.TestCase):
             (path / tool).symlink_to(shutil.which(tool))
         done = subprocess.run(["/bin/bash", str(SCRIPTS / "nightly-install.sh"), str(host1.origin)],
                               capture_output=True, text=True,
-                              env={**host1.environment, "PATH": str(path)})
+                              env={**host1.environment, "PATH": str(path), "BOARD_URL": ""})
         self.assertEqual((done.returncode, done.stderr),
-                         (1, "The nightly can't run here: missing fxjob flock backlog cargo\n"))
+                         (1, "The nightly can't run here: missing fxjob flock vb cargo BOARD_URL\n"))
 
 
 if __name__ == "__main__":

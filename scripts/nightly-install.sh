@@ -14,8 +14,9 @@
 # ORIGIN is what the clone fetches from: by default the origin of ~/src/fxdax, the clone the host
 # runs use. The clone is CLADEFS_NIGHTLY_REPO (~/src/cladefs-nightly), made if missing; it is the
 # nightly's alone, which it resets to origin's main each night. It fails, saying what is missing,
-# if the nightly could not run: fxjob, cargo nextest, flock, backlog (Backlog.md's CLI, which files
-# the tasks), or a fetch from ORIGIN without a prompt (cron has no agent or terminal).
+# if the nightly could not run: fxjob, cargo nextest, flock, vb (the board's CLI, which files the
+# tasks) and BOARD_URL (the board's URL, which the cron entry sets), or a fetch from ORIGIN without
+# a prompt (cron has no agent or terminal).
 # CLADEFS_NIGHTLY_CRONTAB names crontab(1) (for the tests).
 set -euo pipefail
 clone=${CLADEFS_NIGHTLY_REPO:-$HOME/src/cladefs-nightly}
@@ -24,11 +25,14 @@ origin=${1:-$(git -C "$HOME/src/fxdax" remote get-url origin)}
 mark="# cladefs nightly (scripts/nightly-install.sh)"
 
 missing=()
-for tool in fxjob flock backlog cargo hostname; do
+for tool in fxjob flock vb cargo hostname; do
     command -v "$tool" > /dev/null || missing+=("$tool")
 done
 if command -v cargo > /dev/null && ! cargo nextest --version > /dev/null 2>&1; then
     missing+=("cargo-nextest")
+fi
+if [[ -z ${BOARD_URL:-} ]]; then
+    missing+=("BOARD_URL")
 fi
 if ! GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="ssh -o BatchMode=yes" \
     git ls-remote -q "$origin" HEAD > /dev/null; then
@@ -48,13 +52,13 @@ git -C "$clone" config user.email "nightly@$(hostname -s)"
 
 # cron's PATH is /usr/bin:/bin: the tools' own directories, as this user finds them, before it.
 path=
-for tool in cargo fxjob backlog; do
+for tool in cargo fxjob vb; do
     directory=$(dirname "$(command -v "$tool")")
     [[ :$path: == *:$directory:* ]] || path+=$directory:
 done
 path+=/usr/local/bin:/usr/bin:/bin
 state=$HOME/.local/state/cladefs/nightly
 mkdir -p "$state"
-line="0 2 * * * PATH=$path $clone/scripts/nightly-host.sh >> $state/cron.log 2>&1 $mark"
+line="0 2 * * * PATH=$path BOARD_URL=$BOARD_URL $clone/scripts/nightly-host.sh >> $state/cron.log 2>&1 $mark"
 { "$crontab" -l 2> /dev/null | { grep -vF -- "$mark" || true; }; echo "$line"; } | "$crontab" -
 echo "Installed: $line"

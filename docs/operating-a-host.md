@@ -187,7 +187,7 @@ under the KMS its own environment names, as below.
 
 ## Encryption and shredding
 
-Backlog doc-16 is the design. Every store is encrypted, always:
+Design doc-16 is the design. Every store is encrypted, always:
 the bucket, the stores' directories and the part cache hold its data encrypted,
 under its cell's KEK, which its tenant's KEK wraps. Every process that opens
 stores (cladefsd, cladefsctl, cladefs-mount, cladefs-gc to collect) refuses to start

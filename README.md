@@ -33,7 +33,7 @@ usual choices give up at least one.
 - **virtio-fs with DAX** shares the host's page cache, but the filesystem is on the host, so every
   `stat`, `create` or `readdir` the guest has not cached is a round trip out of the VM. cladefs
   began this way, and measured creates, cold stats, readdirs and unlinks at 8 to 55 times ext4's
-  cost under nested KVM ([doc-2](<backlog/docs/doc-2 - Guest-owned-metadata-Fxfs-in-the-guest-kernel-over-a-virtio-extent-store.md>)).
+  cost under nested KVM ([doc-2](<docs/design/doc-2 - Guest-owned-metadata-Fxfs-in-the-guest-kernel-over-a-virtio-extent-store.md>)).
 
 cladefs splits the filesystem where each half is cheap:
 
@@ -80,7 +80,7 @@ Four abstractions carry the whole design ([CONTEXT.md](CONTEXT.md) defines every
 - **Fork:** a new cell created in O(1) from a parent's version, inheriting its extents without
   copying them. Any number of hosts can fork one version at once, including across buckets in
   different cloud regions. An **ephemeral cell** is a leaf fork whose own writes stay on one host's
-  local disk, never uploaded, and move to another host by live hand-over ([doc-25](<backlog/docs/doc-25 - Ephemeral-cells-host-local-children-of-a-version-migrated-live.md>)).
+  local disk, never uploaded, and move to another host by live hand-over ([doc-25](<docs/design/doc-25 - Ephemeral-cells-host-local-children-of-a-version-migrated-live.md>)).
 
 ## How it works
 
@@ -106,13 +106,13 @@ bucket(s)                crates/bucket_cell: durable cells across S3 / GCS / Azu
   `userfaultfd` and copies it to a VM-private page at the same address (bounded per VM by
   `private_max`, charged to the VM process rather than the daemon). Writeback sends dirty pages as
   `WRITE`s to new open extents, `COMMIT` seals them and records the filesystem's new root, and the
-  guest rebinds the pages back to the sealed extents so they can be shared again ([doc-13](<backlog/docs/doc-13 - Copy-on-write-DAX.md>)).
-- **A commit (durability levels).** Commits progress through four levels ([doc-12](<backlog/docs/doc-12 - The-fsync-durability-contract.md>)):
+  guest rebinds the pages back to the sealed extents so they can be shared again ([doc-13](<docs/design/doc-13 - Copy-on-write-DAX.md>)).
+- **A commit (durability levels).** Commits progress through four levels ([doc-12](<docs/design/doc-12 - The-fsync-durability-contract.md>)):
   1. **Ordered:** `cladefsd` has the commit in order in memory (default for `fsync`).
   2. **Local:** synced to the host's disk (within a second, 50 ms at the median).
   3. **Replicated** *(optional, per cell)*: synced to the disks of a majority (f+1 of 2f+1) of
      host members over the peer network—surviving a host loss in one LAN round trip without waiting
-     for object storage, while the bucket stays the sole authority ([doc-21](<backlog/docs/doc-21 - Replicated-commits-a-majority-of-hosts-disks-before-the-bucket.md>)).
+     for object storage, while the bucket stays the sole authority ([doc-21](<docs/design/doc-21 - Replicated-commits-a-majority-of-hosts-disks-before-the-bucket.md>)).
   4. **Uploaded:** sealed extents framed into compressed, encrypted segments, uploaded to the
      bucket, and acknowledged by a conditional write of the cell's head (`sync` waits for
      Uploaded, or Replicated on a replicated cell).
@@ -123,7 +123,7 @@ bucket(s)                crates/bucket_cell: durable cells across S3 / GCS / Azu
   with no bucket round trip; uploading and recording it in the head happen asynchronously. When a
   cell in one cloud region forks a version from another bucket, it reads the parent's bucket lazily
   while a background mirror copies the parent version's objects byte for byte into the child's
-  bucket ([doc-23](<backlog/docs/doc-23 - Cells-across-buckets-a-bucket-per-cloud-region-forks-that-span-them.md>)).
+  bucket ([doc-23](<docs/design/doc-23 - Cells-across-buckets-a-bucket-per-cloud-region-forks-that-span-them.md>)).
   The collector (`cladefs-gc`) is the only component that deletes from a bucket, removing extents
   once no cell, version or ephemeral-cell reference holds them.
 
@@ -141,9 +141,9 @@ See [docs/architecture.md](docs/architecture.md) for the full mechanics.
   no bucket round trip, and restore that VM snapshot on any host ([docs/integrator-guide.md](docs/integrator-guide.md)).
 - **Ephemeral cells with live hand-over:** host-local forks over a bucket version for disposable
   sandbox writes that never touch the bucket, with pre-copy live migration to another host
-  ([doc-25](<backlog/docs/doc-25 - Ephemeral-cells-host-local-children-of-a-version-migrated-live.md>)).
+  ([doc-25](<docs/design/doc-25 - Ephemeral-cells-host-local-children-of-a-version-migrated-live.md>)).
 - **Shared volumes:** attach a read-only base—such as a Git checkout kept current—to a running VM
-  under a writable layer of its own ([doc-10](<backlog/docs/doc-10 - Shared-volumes-Fxfs-volumes-over-read-only-bases.md>)).
+  under a writable layer of its own ([doc-10](<docs/design/doc-10 - Shared-volumes-Fxfs-volumes-over-read-only-bases.md>)).
 - **Container images as bases:** `cladefsctl import` turns an OCI image layout or `docker export`
   tarball into a base cell for VMs to boot forks of.
 
@@ -153,13 +153,13 @@ See [docs/architecture.md](docs/architecture.md) for the full mechanics.
   its bucket, and fencing tokens keep a partitioned host from writing it again.
 - **Multi-region buckets:** one bucket per cloud region across S3, GCS and Azure Blob Storage,
   coordinated by a shared bucket registry, with cross-bucket forks and automatic mirroring
-  ([doc-23](<backlog/docs/doc-23 - Cells-across-buckets-a-bucket-per-cloud-region-forks-that-span-them.md>)).
+  ([doc-23](<docs/design/doc-23 - Cells-across-buckets-a-bucket-per-cloud-region-forks-that-span-them.md>)).
 - **Replicated commits:** optional 2f+1 quorum replication across peer hosts so commits survive a
-  host loss before bucket upload completes ([doc-21](<backlog/docs/doc-21 - Replicated-commits-a-majority-of-hosts-disks-before-the-bucket.md>)).
+  host loss before bucket upload completes ([doc-21](<docs/design/doc-21 - Replicated-commits-a-majority-of-hosts-disks-before-the-bucket.md>)).
 - **One memory budget and one disk governor:** every data file and cache bypasses the host OS page
   cache (`O_DIRECT` on Linux, `F_NOCACHE` on macOS). `cladefsd` manages its extent cache, store
   page cache, uploads and fetches under one memory governor, and bounds local stores and the part
-  cache under one disk governor ([doc-22](<backlog/docs/doc-22 - Disk-governor-the-hosts-disk-as-a-managed-resource.md>)).
+  cache under one disk governor ([doc-22](<docs/design/doc-22 - Disk-governor-the-hosts-disk-as-a-managed-resource.md>)).
 - **Peer part caches:** daemons in the same cloud region serve cached 1 MiB bucket parts to each
   other over the peer network before going to object storage.
 
@@ -171,7 +171,7 @@ See [docs/architecture.md](docs/architecture.md) for the full mechanics.
 - **Encryption at rest, always:** envelope encryption with a tenant KEK in OpenBao, AWS KMS or
   Google Cloud KMS—or in the bucket under a master key (`CLADEFS_MASTER_KEY`). A daemon given
   neither refuses to start. Destroying a tenant's or cell's key cryptographically shreds its data
-  everywhere ([doc-16](<backlog/docs/doc-16 - Per-tenant-encryption-at-rest-tenant-KEKs-cell-KEKs-vdisk-DEKs.md>)).
+  everywhere ([doc-16](<docs/design/doc-16 - Per-tenant-encryption-at-rest-tenant-KEKs-cell-KEKs-vdisk-DEKs.md>)).
 
 ### Linux semantics and host tooling
 
@@ -192,7 +192,7 @@ at several layers ([docs/testing.md](docs/testing.md)):
   multi-bucket mirroring, replication, ephemeral hand-over, DAX copy-on-write, the journal and
   followers—each paired with spec mutations that TLC must reject (`make check-tla`).
 - **Deterministic simulation:** single-threaded seeded simulations test both the storage engine
-  (`local_cell::sim`) and multi-daemon clusters under `madsim` ([doc-24](<backlog/docs/doc-24 - Full-stack-deterministic-simulation-N-daemons-one-seed.md>)), injecting crashes, torn disks, network partitions and failing buckets.
+  (`local_cell::sim`) and multi-daemon clusters under `madsim` ([doc-24](<docs/design/doc-24 - Full-stack-deterministic-simulation-N-daemons-one-seed.md>)), injecting crashes, torn disks, network partitions and failing buckets.
 - **Concurrency and memory ordering:** `shuttle` explores thread schedules and `loom` verifies
   weak-ordering atomic protocols ([docs/memory-ordering.md](docs/memory-ordering.md)).
 - **Mutation and differential testing:** hand mutants (`crates/*/mutants`, `guest/mutants`) put
@@ -218,7 +218,7 @@ candidate for the next pin is qualified against the current one under their load
   better design, and new code refuses old data instead of converting it.
 - **No single-node mode:** the daemon needs a bucket and a fencing token to start. For development
   the bucket may be a directory (`file:///DIR`).
-- **Built but frozen:** live read-only followers of a mounted disk ([doc-8](<backlog/docs/doc-8 - Live-read-only-followers-of-a-mounted-Fxfs.md>)).
+- **Built but frozen:** live read-only followers of a mounted disk ([doc-8](<docs/design/doc-8 - Live-read-only-followers-of-a-mounted-Fxfs.md>)).
 
 ## Try it
 
@@ -272,7 +272,7 @@ read [docs/integrator-guide.md](docs/integrator-guide.md).
 | `specs/` | TLA+ specs of the protocols whose bugs are rare interleavings. |
 | `guide/` | An interactive guide to the code: `cd guide && pnpm install && pnpm dev`. |
 | `explainer/` | The explainer films' sources (`explainer/README.md`); links above. |
-| `backlog/` | Tasks and design docs, managed with Backlog.md. What remains to do is there. |
+| `docs/design/`, `docs/decisions/` | Design docs and decisions. Tasks, what remains to do included, are on the team board ([AGENTS.md](AGENTS.md), Tasks). |
 | `dead-ends/` | Approaches tried and given up on, each with why. |
 
 ## Documentation
@@ -285,11 +285,11 @@ read [docs/integrator-guide.md](docs/integrator-guide.md).
 - [docs/code.md](docs/code.md): where the code comes from, crate by crate; the Firecracker series; the guest's kernel; updating from Fuchsia.
 - [docs/testing.md](docs/testing.md): the test suites, the qualification of a candidate, the nightly measurement, benchmarks.
 - [docs/memory-ordering.md](docs/memory-ordering.md): atomic protocols and `loom` models.
-- `backlog/docs/`: the design docs—start with [doc-2](<backlog/docs/doc-2 - Guest-owned-metadata-Fxfs-in-the-guest-kernel-over-a-virtio-extent-store.md>) (why Fxfs is in the guest), [doc-4](<backlog/docs/doc-4 - Virtio-extent-store-device-specification.md>) (the device), [doc-13](<backlog/docs/doc-13 - Copy-on-write-DAX.md>) (copy-on-write DAX), [doc-7](<backlog/docs/doc-7 - Object-storage-how-the-host-keeps-branches-in-S3-and-GCS.md>) and [doc-14](<backlog/docs/doc-14 - Local-disk-as-the-buckets-write-ahead-log-and-cache-one-storage-engine.md>) (the bucket and local disk), [doc-12](<backlog/docs/doc-12 - The-fsync-durability-contract.md>) (what an `fsync` survives), [doc-16](<backlog/docs/doc-16 - Per-tenant-encryption-at-rest-tenant-KEKs-cell-KEKs-vdisk-DEKs.md>) (encryption), [doc-21](<backlog/docs/doc-21 - Replicated-commits-a-majority-of-hosts-disks-before-the-bucket.md>) (replicated commits), [doc-23](<backlog/docs/doc-23 - Cells-across-buckets-a-bucket-per-cloud-region-forks-that-span-them.md>) (multi-region buckets) and [doc-25](<backlog/docs/doc-25 - Ephemeral-cells-host-local-children-of-a-version-migrated-live.md>) (ephemeral cells).
+- `docs/design/`: the design docs—start with [doc-2](<docs/design/doc-2 - Guest-owned-metadata-Fxfs-in-the-guest-kernel-over-a-virtio-extent-store.md>) (why Fxfs is in the guest), [doc-4](<docs/design/doc-4 - Virtio-extent-store-device-specification.md>) (the device), [doc-13](<docs/design/doc-13 - Copy-on-write-DAX.md>) (copy-on-write DAX), [doc-7](<docs/design/doc-7 - Object-storage-how-the-host-keeps-branches-in-S3-and-GCS.md>) and [doc-14](<docs/design/doc-14 - Local-disk-as-the-buckets-write-ahead-log-and-cache-one-storage-engine.md>) (the bucket and local disk), [doc-12](<docs/design/doc-12 - The-fsync-durability-contract.md>) (what an `fsync` survives), [doc-16](<docs/design/doc-16 - Per-tenant-encryption-at-rest-tenant-KEKs-cell-KEKs-vdisk-DEKs.md>) (encryption), [doc-21](<docs/design/doc-21 - Replicated-commits-a-majority-of-hosts-disks-before-the-bucket.md>) (replicated commits), [doc-23](<docs/design/doc-23 - Cells-across-buckets-a-bucket-per-cloud-region-forks-that-span-them.md>) (multi-region buckets) and [doc-25](<docs/design/doc-25 - Ephemeral-cells-host-local-children-of-a-version-migrated-live.md>) (ephemeral cells).
 - [AGENTS.md](AGENTS.md): how work on cladefs is done.
 
 cladefs was fxdax (Fxfs plus DAX, the first prototype's name) until TASK-437. Records of what ran
-before, such as `docs/measurements` and closed backlog tasks, keep the old name, and
+before, such as `docs/measurements` and tasks closed before it, keep the old name, and
 `scripts/rename-to-cladefs.sh` renames a branch begun before.
 
 ## Licenses

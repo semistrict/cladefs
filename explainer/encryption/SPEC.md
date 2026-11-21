@@ -65,7 +65,7 @@ SHOTS:   S1 0-8  "Tenant 42's sandbox saves a file" on screen from frame 0; the 
             and in the bucket" and "except forks into other tenants' cells; under the bucket KMS, expire
             old versions"; tenant 7's critter hops into view at 58.3 s, then beside its plain `app.py`
             card, landing on the last chord (60.0 s).
-SOURCES: (doc-16 is backlog/docs/doc-16; ops is docs/operating-a-host.md "Encryption and shredding")
+SOURCES: (doc-16 is docs/design/doc-16; ops is docs/operating-a-host.md "Encryption and shredding")
          S1 a sandbox's disk is kept in a cell: CONTEXT.md "Cell" (a tenant's data of one kind; _Avoid_
             "disk" for a cell, hence "kept in"), overview S7; tenant: CONTEXT.md "Tenant". Tenant 42,
             tenant 7 and `main.rs`'s code are illustrative.

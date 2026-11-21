@@ -5,7 +5,6 @@
 """Tests of scripts/check-exclusions.py (TASK-149.20): each exclusion the tests make says why, and a
 why naming a task names one still open."""
 
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -13,7 +12,8 @@ from script import SCRIPTS, load
 
 check = load("check-exclusions")
 
-STATES = {"TASK-143": "To Do", "TASK-150.21": "Done", "TASK-7": "Archived"}
+STATES = {"TASK-143": "ready", "TASK-150.21": "completed", "TASK-7": "canceled", "board 812": "claimed",
+          "board 814": "failed"}
 
 
 class CheckExclusionsTest(unittest.TestCase):
@@ -35,17 +35,20 @@ class CheckExclusionsTest(unittest.TestCase):
     def test_known_failures_name_an_open_task(self):
         text = (
             "# A comment.\n\nTASK-143 chmod/00.t\nTASK-150.21 WARN at fs/dax.c:416\n"
-            "TASK-7 open/07.t\nTASK-99 rename/09.t\nchown/00.t\n"
+            "TASK-7 open/07.t\nTASK-99 rename/09.t\nchown/00.t\nboard 812 link/00.t\nboard 814 mkdir/00.t\n"
         )
         self.assertEqual(
             check.known_list("known", text, STATES),
             [
-                "known:4: its task isn't open (TASK-150.21, done): drop the line",
-                "known:5: its task isn't open (TASK-7, archived): drop the line",
+                "known:4: its task isn't open (TASK-150.21, completed): drop the line",
+                "known:5: its task isn't open (TASK-7, canceled): drop the line",
                 "known:6: its task isn't open (TASK-99, no such task): drop the line",
                 "known:7: names no task first: chown/00.t",
+                "known:9: its task isn't open (board 814, failed): drop the line",
             ],
         )
+        # Where the board can't be read (CI), only that each line names a task first.
+        self.assertEqual(check.known_list("known", text, None), ["known:7: names no task first: chown/00.t"])
 
     def test_xfstests_known_failures_say_why(self):
         text = """\
@@ -65,7 +68,7 @@ class CheckExclusionsTest(unittest.TestCase):
             check.xfstests_known("x.rs", text, STATES),
             [
                 'x.rs:6: "generic/301" is under no comment saying why',
-                "x.rs:9: a known failure's task isn't open (TASK-150.21, done)",
+                "x.rs:9: a known failure's task isn't open (TASK-150.21, completed)",
             ],
         )
 
@@ -73,7 +76,7 @@ class CheckExclusionsTest(unittest.TestCase):
         text = 'const FXFS_SKIPPED: &[(&str, &str)] = &[("chmod/00.t", "TASK-150.21: fixed")];'
         self.assertEqual(
             check.pjdfstest_skipped("p.rs", text, STATES),
-            ["p.rs: a skipped test's task isn't open (TASK-150.21, done)"],
+            ["p.rs: a skipped test's task isn't open (TASK-150.21, completed)"],
         )
 
     def test_unkillable_mutants_say_why(self):
@@ -87,22 +90,32 @@ class CheckExclusionsTest(unittest.TestCase):
         self.assertEqual(check.unkillable("m.patch", equivalent), [])
         self.assertEqual(check.unkillable("m.patch", killed), [])
 
-    def test_task_states_are_the_backlogs(self):
-        with tempfile.TemporaryDirectory() as root:
-            tasks = Path(root, "backlog", "tasks")
-            tasks.mkdir(parents=True)
-            (tasks / "task-3 - a.md").write_text("---\nid: TASK-3\nstatus: Done\n---\n\nBody: x\n")
-            (tasks / "task-4 - b.md").write_text("---\nid: task-4\nstatus: 'In Progress'\n---\n")
-            archive = Path(root, "backlog", "archive", "tasks")
-            archive.mkdir(parents=True)
-            (archive / "task-5 - c.md").write_text("---\nid: TASK-5\nstatus: To Do\n---\n")
-            self.assertEqual(
-                check.task_states(Path(root)),
-                {"TASK-3": "Done", "TASK-4": "In Progress", "TASK-5": "Archived"},
-            )
+    def test_task_states_are_the_boards(self):
+        def task(id_, state, **labels):
+            return {"message": {"id": id_, "labels": labels, "task": {"state": state}}}
+
+        pages = {(): {"tasks": [task("2", "completed", task="TASK-3")] * (check.PAGE - 1)
+                      + [task("4", "ready", task="TASK-4")], "cursor": "4"},
+                 ("--after", "4"): {"tasks": [task("812", "claimed")], "cursor": "812"}}
+        asked = []
+
+        def ask(*args):
+            asked.append(args)
+            return pages[args[6:]]
+
+        self.assertEqual(
+            check.task_states({"BOARD_URL": "http://127.0.0.1:4100/api/board"}, ask),
+            {"board 2": "completed", "TASK-3": "completed", "board 4": "ready", "TASK-4": "ready",
+             "board 812": "claimed"},
+        )
+        self.assertEqual(asked, [("tasks", "tasks", "--state", "all", "-n", "500"),
+                                 ("tasks", "tasks", "--state", "all", "-n", "500", "--after", "4")])
+        # Without BOARD_URL (CI), nothing is asked, and states go unchecked.
+        self.assertIsNone(check.task_states({}, ask))
+        self.assertEqual(len(asked), 2)
 
     def test_the_tree_says_why_of_everything_it_leaves_out(self):
-        self.assertEqual(check.check(SCRIPTS.parent), [])
+        self.assertEqual(check.check(SCRIPTS.parent, None), [])
 
     def test_the_scripts_part_runs_it(self):
         self.assertIn('"$root/scripts/check-exclusions.py"', (SCRIPTS / "test.sh").read_text())

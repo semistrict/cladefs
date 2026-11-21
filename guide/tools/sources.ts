@@ -29,7 +29,7 @@ const paths = new Set<string>([
   ...index.files.map(([path]) => path),
   ...Object.values(anchors).map((a) => a.path),
   ...walk("specs", (p) => p.endsWith(".tla") || p.endsWith(".cfg")),
-  ...walk("backlog/docs", (p) => p.endsWith(".md")),
+  ...walk("docs/design", (p) => p.endsWith(".md")),
   ...walk("dead-ends", (p) => p.endsWith(".md")),
 ]);
 let bytes = 0;

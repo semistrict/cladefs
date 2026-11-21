@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 // The repo's evidence, read where it lives: the mutants of guest/mutants, the TLA+ specs and
-// their mutations under specs/, the dead ends of dead-ends/, and the backlog's design docs.
+// their mutations under specs/, the dead ends of dead-ends/, and the design docs of docs/design.
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -157,7 +157,7 @@ export function parseDeadEnd(file: string, text: string): DeadEnd {
 export function parseDoc(file: string, text: string): Doc {
   const id = /^id:\s*(\S+)/m.exec(text)?.[1];
   const title = /^title:\s*(.+)$/m.exec(text)?.[1];
-  if (!id || !title) throw new Error(`backlog/docs/${file} has no id or title`);
+  if (!id || !title) throw new Error(`docs/design/${file} has no id or title`);
   const headings = [...text.matchAll(/^#{1,3} (.+)$/gm)].map((m) => m[1].trim());
   // YAML's quoted scalars: '' is one ' inside single quotes.
   const unquoted = /^'(.*)'$/.test(title) ? title.slice(1, -1).replaceAll("''", "'") : title.replace(/^"(.*)"$/, "$1");
@@ -197,7 +197,7 @@ export function readEvidence(repo = REPO): Evidence {
   const deadEnds = sorted(deadEndsDir, ".md").map((f) =>
     parseDeadEnd(f, readFileSync(join(deadEndsDir, f), "utf8")),
   );
-  const docsDir = join(repo, "backlog", "docs");
+  const docsDir = join(repo, "docs", "design");
   const docs = sorted(docsDir, ".md")
     .map((f) => parseDoc(f, readFileSync(join(docsDir, f), "utf8")))
     .sort((a, b) => Number(a.id.split("-")[1]) - Number(b.id.split("-")[1]));

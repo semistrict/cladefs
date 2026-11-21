@@ -20,7 +20,7 @@ describe("code by text, from the local source", () => {
   });
 
   test("the guide's copy of a file is served beside the page, its path escaped", () => {
-    expect(sourceUrl("backlog/docs/doc-13 - Copy-on-write-DAX.md")).toBe("source/backlog/docs/doc-13%20-%20Copy-on-write-DAX.md");
+    expect(sourceUrl("docs/design/doc-13 - Copy-on-write-DAX.md")).toBe("source/docs/design/doc-13%20-%20Copy-on-write-DAX.md");
   });
 
   test("an excerpt runs from the comments above the snippet to the end of the block it opens", () => {

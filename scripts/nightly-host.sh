@@ -5,7 +5,7 @@
 
 # The nightly on the test host (TASK-441): main's head measured against the commit the night before
 # measured, in interleaved rounds of the same night, inside one fxjob --bench job, and what moved
-# filed as backlog tasks, pushed to main. A cron entry runs it at 02:00 (scripts/nightly-install.sh),
+# filed as tasks on the board (BOARD_URL), pushed to main. A cron entry runs it at 02:00 (scripts/nightly-install.sh),
 # from the nightly's own clone of cladefs (CLADEFS_NIGHTLY_REPO, default ~/src/cladefs-nightly),
 # which it alone uses: first it takes origin's main there (scripts/nightly.py sync: what an earlier
 # night committed and could not push rebased on it and pushed) and runs main's own copy of itself.
@@ -13,8 +13,8 @@
 #   scripts/nightly-host.sh
 #
 # Then, unless main's code is what the newest night measured (nightly.py plan: its head is main's
-# newest commit that changed more than docs/measurements and backlog, which the nightly's own
-# commits change; then it does nothing more), it runs scripts/bench-ab-host.sh on this test host
+# newest commit that changed more than docs/measurements (and backlog/, where tasks were until
+# 2026-11-21), which the nightly's own commits change; then it does nothing more), it runs scripts/bench-ab-host.sh on this test host
 # itself (CLADEFS_TEST_HOST=local), side `base` the commit the night before measured, side `head`
 # main's: each side built as ordinary work, but for the base, whose artifacts the night before kept,
 # built when it was main's head (CLADEFS_AB_KEEP: a night builds one tree; both if they are gone),
