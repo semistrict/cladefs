@@ -1,5 +1,15 @@
 # Open questions
 
+## Is balloon free page reporting in scope? (board 5649, 2026-11-21)
+
+Needed: your call on giving each VM a Firecracker balloon with free page reporting. Why: no VM
+has one today, so a guest keeps on the host every page it ever touched (a 1 GiB dax-density guest
+held 921–998 MiB with about 447 MB of it free); reporting returns a guest's own freed pages and
+shares nothing between VMs, but your scope note (disk image only, no guest memory sharing) may
+mean you want it left to the VM manager. Recommend: in scope as a measured option of
+cells-per-host, its default left to the VM manager. Until answered: board 5649 tries the other
+items first and leaves this one out of what lands.
+
 ## Is herdtools7 (CeCILL-B) acceptable? (TASK-444.2, 2026-11-15)
 
 Needed: your call on herdtools7's licence, CeCILL-B (BSD-like, French law; GitHub reports
@@ -20,6 +30,24 @@ and Codex. Recommend: the second Claude instance on Opus, else wait for the rese
 the worktrees stay as they are, nothing in them is lost, and TASK-444.4–.11 wait too.
 
 # Decisions
+
+## Cells per host: what a cell is and what stops the count (board 5581, 5583, 2026-11-21)
+
+Decided without you:
+- **A cell here is an idle sandbox:** 1 vCPU, 256 MiB, booted on a fork of a small Alpine base as
+  its root Fxfs (with or without a DAX window), its user running `echo`, `cat` of a base file and
+  a 4 KiB fsynced write every second. Real sandboxes do more, so the count is a ceiling for this
+  shape, not for every load. *Instead:* pgbench or the sandboxes' roles per VM, which would hold
+  far fewer and take hours. *Undo:* `CLADEFS_CELLS_VM_MIB` and the guest's probes.
+- **Budgets for the latency limit:** p99 over a 10 s window, every VM's samples together, 100 ms
+  for tick lateness, echo and cat, 250 ms for fsync (five of cladefsd's 50 ms turns), and 10 s for
+  a step's boots. Two windows past a budget in a row stop the ramp. *Undo:* the constants
+  `PROBES` and `BOOT_BUDGET_MS` in test_cells_per_host.rs.
+- **The daemon is governed, as production's,** its memory counted as room since it gives it all
+  back (mapped pages unmapped first). *Instead:* a fixed daemon memory, which would count a cache
+  production never fixes.
+- **Hitting a limit is not a failure, but anything breaking past one is:** a VM exiting, a guest
+  silent for 60 s, or the daemon letting a VM process go each fail the case, as bugs.
 
 ## Hosts of pages larger than 4 KiB: no windows of extents' blocks; no LSM labels on cladefs-mount (board 5230, 5232, 5234, 2026-11-21)
 
