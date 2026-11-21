@@ -7120,3 +7120,61 @@ fn ephemeral_cells_fork_from_versions_and_retire_their_references() {
     assert_eq!(retired, 1);
     assert_eq!(references(), vec![]);
 }
+
+/// TASK-704: an open ephemeral cell's store is halted as its host forgets its cell's keys, or its
+/// tenant's, as a bucket cell's is: its reads, of its own extents and of what it inherits, and its
+/// writes and commits fail with `EACCES`; another ephemeral cell of the version's reads on until
+/// its tenant's are forgotten.
+#[test]
+fn forgetting_keys_halts_open_ephemeral_cells() {
+    host();
+    let ps = page_size() as usize;
+    let dir = tempfile::tempdir().unwrap();
+    crate::ephemeral_host::open(&dir.path().join("ephemeral")).unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let parent = CellClient::connect(&socket, dir.path().join("parent"), 1 << 24).unwrap();
+    let inherited = ExtentId { cell: parent.cell(), sequence: 1 };
+    write(&parent, inherited, 0, &pattern(1, ps)).unwrap();
+    parent.commit(Some(b"root")).unwrap();
+    let version = parent.make_version().unwrap();
+    drop(parent);
+    let open = |name: &str, byte: u8| {
+        let at = dir.path().join(name);
+        let forked = super::cells::fork_ephemeral_of_version(
+            version_cell(version),
+            version.version,
+            at.clone(),
+            None,
+        );
+        let child = control(forked).unwrap();
+        let store = CellClient::connect(&socket, &at, 1 << 24).unwrap();
+        let own = ExtentId { cell: child.id, sequence: 1 };
+        write(&store, own, 0, &pattern(byte, ps)).unwrap();
+        store.commit(None).unwrap();
+        (child, store, own)
+    };
+    let (first, ours, our_own) = open("first", 2);
+    let (second, theirs, their_own) = open("second", 3);
+    assert_eq!(first.tenant, second.tenant);
+
+    let forgotten = crate::bucket::forget(bucket_cell::keys::Scope::Cell(first), "first shredded");
+    assert_eq!(forgotten.stores, 1, "{forgotten:?}");
+    assert_eq!(read(&ours, our_own, 0, ps), Err(Errno::EACCES));
+    assert_eq!(read(&ours, inherited, 0, ps), Err(Errno::EACCES));
+    let later = ExtentId { cell: first.id, sequence: 2 };
+    assert_eq!(write(&ours, later, 0, &pattern(4, ps)), Err(Errno::EACCES));
+    assert_eq!(ours.commit(None), Err(Errno::EACCES));
+    assert_eq!(read(&theirs, their_own, 0, ps), Ok(pattern(3, ps)));
+    assert_eq!(read(&theirs, inherited, 0, ps), Ok(pattern(1, ps)));
+
+    let tenant = bucket_cell::keys::Scope::Tenant(second.tenant);
+    let forgotten = crate::bucket::forget(tenant, "tenant shredded");
+    // The second's, and the version's, which the daemon holds open for its forks.
+    assert_eq!(forgotten.stores, 2, "{forgotten:?}");
+    assert_eq!(read(&theirs, their_own, 0, ps), Err(Errno::EACCES));
+    let later = ExtentId { cell: second.id, sequence: 2 };
+    assert_eq!(write(&theirs, later, 0, &pattern(5, ps)), Err(Errno::EACCES));
+    assert_eq!(theirs.commit(None), Err(Errno::EACCES));
+}
