@@ -26,7 +26,10 @@
 //! notebook (`marimo export html`), which reads the trips with pandas and answers questions about
 //! them. The first round finds the second and third hosts cold, their memory and part caches
 //! empty; the rounds after find each host warm. The first host is never cold: its import left the
-//! base in its memory.
+//! base in its memory. Each round ends with the baseline (board 5519): the same VM, booted on an
+//! ext4 image of the image's root directory on a virtio-blk disk, as a VM host's local disk holds
+//! a root, the image just made, so in the host's page cache, as a warm host's base is in its
+//! memory: what the sandbox takes on no cladefs.
 //!
 //! A sandbox runs one of two workloads (TASK-702.1), in turn as CLADEFS_PYSANDBOX_WORKLOADS lists
 //! them (default `notebook` alone): `notebook`, marimo's server and the notebook, as above; or
@@ -216,6 +219,9 @@ RUN find / -xdev -name '*.pyc' -delete
     /// VM's connection goes.
     const TRACE_SETTLE: Duration = Duration::from_secs(10);
 
+    /// How a baseline sandbox's root image is named, after the sandbox, in the root's parent.
+    const EXT4_IMAGE: &str = ".rootfs.ext4";
+
     /// A host of the run: its extent daemon, where it is reached, where it writes the traces of
     /// its VMs' reads, what its daemon is started with, and how often it was restarted.
     struct Host {
@@ -379,11 +385,11 @@ RUN find / -xdev -name '*.pyc' -delete
     }
 
     /// A sandbox's phases: the host's milliseconds from just before its fork to the end of each,
-    /// but `boot`, the guest's own from its kernel's start to its agent's; `serving` the
-    /// notebook's alone.
+    /// but `boot`, the guest's own from its kernel's start to its agent's; `fork` a fork's alone,
+    /// `serving` the notebook's alone.
     #[derive(Debug, PartialEq)]
     struct Phases {
-        fork: f64,
+        fork: Option<f64>,
         vm_started: f64,
         boot: u64,
         serving: Option<f64>,
@@ -394,7 +400,7 @@ RUN find / -xdev -name '*.pyc' -delete
     /// its guest said.
     struct Ran {
         workload: Workload,
-        fork: f64,
+        fork: Option<f64>,
         vm_started: f64,
         serving: Option<f64>,
         answered: Option<f64>,
@@ -496,26 +502,60 @@ RUN find / -xdev -name '*.pyc' -delete
         Ok(cladefs::CellVersion { tenant: cell.tenant, cell: cell.id, version })
     }
 
-    /// Runs the sandbox `name` on `host`, its guest running `workload`: forks `version` there,
-    /// boots a VM on the fork, and watches its console as its guest runs, for the moments it says
-    /// it serves and has answered.
+    /// Where a sandbox's root is.
+    #[derive(Clone, Copy)]
+    enum Disk<'a> {
+        /// A fork of the version on the host, through a DAX window.
+        Fork(&'a Host),
+        /// The baseline: an ext4 image of the base's root directory on a virtio-blk disk, as a VM
+        /// host's local disk holds a root, the image made just before the VM starts, so that the
+        /// host's page cache holds it, as a warm host's memory holds its base (TASK-665, board
+        /// 5519).
+        Ext4,
+    }
+
+    impl Disk<'_> {
+        /// What its sandboxes and metrics are named after: its host's letter, or `ext4`.
+        fn label(&self) -> &str {
+            match self {
+                Disk::Fork(host) => &host.name["host-".len()..],
+                Disk::Ext4 => "ext4",
+            }
+        }
+    }
+
+    /// Runs the sandbox `name` on `disk`, its guest running `workload`: forks `version` on its
+    /// host, or makes its image, boots a VM on it, and watches its console as its guest runs, for
+    /// the moments it says it serves and has answered. The clock starts just before the fork, or
+    /// once the image is made: a host makes its forks as sandboxes start, but holds its local
+    /// disks' images.
     fn sandbox(
         test_setup: &TestSetup,
         root: &Path,
-        host: &Host,
+        disk: Disk,
         name: &str,
         workload: Workload,
         version: cladefs::CellVersion,
     ) -> anyhow::Result<Ran> {
-        let fork_path = test_setup.tmp_dir.join(format!("{name}.root"));
-        let began = Instant::now();
-        control(&host.socket)?.fork_version(version, &fork_path)?;
-        let fork = ms_since(began);
         let mut machine = Vm::new(VCPUS, MEMORY_MIB)?;
         machine.guest_kernel()?;
-        machine.cell_served("root", &fork_path, ROOT_CAPACITY, WINDOW, &host.socket);
-        machine.fxfs_root("root");
         machine.env(&std::ffi::CString::new(format!("{WORKLOAD}={}", workload.name()))?);
+        let (began, fork) = match disk {
+            Disk::Fork(host) => {
+                let fork_path = test_setup.tmp_dir.join(format!("{name}.root"));
+                let began = Instant::now();
+                control(&host.socket)?.fork_version(version, &fork_path)?;
+                let fork = ms_since(began);
+                machine.cell_served("root", &fork_path, ROOT_CAPACITY, WINDOW, &host.socket);
+                machine.fxfs_root("root");
+                (began, Some(fork))
+            }
+            Disk::Ext4 => {
+                machine.root_image(&format!("{name}{EXT4_IMAGE}"));
+                machine.make_root_image(root)?;
+                (Instant::now(), None)
+            }
+        };
         let api = Vm::api_socket(name);
         let mut firecracker = machine.spawn_api(root, &test_setup.test_case, name, &api)?;
         let vm_started = ms_since(began);
@@ -585,32 +625,41 @@ RUN find / -xdev -name '*.pyc' -delete
     }
 
     impl Run<'_> {
-        /// Runs a sandbox on `host`, of `hosts`, running `workload`, `case` the case it is of
-        /// (`r1`, the first round; `cold_peers`): says how long its phases took in `measured`, and
-        /// what it cost the hosts, and keeps its trace; or says how it failed.
+        /// Runs a sandbox on `disk`, a fork on one of `hosts` or the baseline, running `workload`,
+        /// `case` the case it is of (`r1`, the first round; `cold_peers`): says how long its
+        /// phases took in `measured`, and what a fork cost the hosts, and keeps its trace; or says
+        /// how it failed.
         fn sandbox(
             &mut self,
             test_setup: &TestSetup,
             measured: &mut Measured,
             hosts: &[Host],
-            host: &Host,
+            disk: Disk,
             case: &str,
             workload: Workload,
         ) -> anyhow::Result<()> {
-            let letter = &host.name["host-".len()..];
-            let name = match case.strip_prefix('r') {
-                Some(round) if round.parse::<usize>().is_ok() => format!("sandbox-{letter}{round}"),
-                _ => format!("sandbox-{letter}-{case}"),
+            let label = disk.label();
+            let name = match (disk, case.strip_prefix('r')) {
+                (Disk::Fork(_), Some(round)) if round.parse::<usize>().is_ok() => {
+                    format!("sandbox-{label}{round}")
+                }
+                _ => format!("sandbox-{label}-{case}"),
             };
             self.ran += 1;
-            let ran = sandbox(test_setup, self.root, host, &name, workload, self.version)?;
-            let trace = format!("{:02}-{name}-{}.reads", self.ran, workload.name());
-            if let Err(err) = keep_trace(host, &self.kept.join(&trace)) {
-                self.failed.push(format!("{name}'s trace: {err:#}"));
-            }
-            let after = all_counts(&test_setup.tmp_dir, hosts)?;
-            let (cost, summed) = cost(&self.counts, &after);
-            self.counts = after;
+            let ran = sandbox(test_setup, self.root, disk, &name, workload, self.version)?;
+            let (on, cost, gets) = match disk {
+                Disk::Fork(host) => {
+                    let trace = format!("{:02}-{name}-{}.reads", self.ran, workload.name());
+                    if let Err(err) = keep_trace(host, &self.kept.join(&trace)) {
+                        self.failed.push(format!("{name}'s trace: {err:#}"));
+                    }
+                    let after = all_counts(&test_setup.tmp_dir, hosts)?;
+                    let (cost, summed) = cost(&self.counts, &after);
+                    self.counts = after;
+                    (host.name, cost, Some(summed["bucket_gets"]))
+                }
+                Disk::Ext4 => ("a local ext4 image", "no daemon".to_owned(), None),
+            };
             let Some(phases) = ran.phases() else {
                 let (status, said) = (ran.status, &ran.said);
                 self.failed.push(format!("{name} exited {status}, saying {said:?}"));
@@ -620,28 +669,31 @@ RUN find / -xdev -name '*.pyc' -delete
             if answers != Some(expected) {
                 self.failed.push(format!("{name} answered {answers:?}, not {expected}"));
             }
-            let serving =
-                phases.serving.map_or("-".to_owned(), |serving| format!("{serving:.0}ms"));
+            let ms = |phase: Option<f64>| phase.map_or("-".to_owned(), |ms| format!("{ms:.0}ms"));
             eprintln!(
-                "pysandbox: {name} on {} running {}: fork={:.0}ms vm_started={:.0}ms \
-                 boot={}ms serving={serving} answered={:.0}ms compiled={} | {cost}",
-                host.name,
+                "pysandbox: {name} on {on} running {}: fork={} vm_started={:.0}ms boot={}ms \
+                 serving={} answered={:.0}ms compiled={} | {cost}",
                 workload.name(),
-                phases.fork,
+                ms(phases.fork),
                 phases.vm_started,
                 phases.boot,
+                ms(phases.serving),
                 phases.answered,
                 ran.said(COMPILED).unwrap_or("?"),
             );
-            let metric = |phase: &str| format!("pysandbox.{letter}.{case}.{phase}");
-            measured.lower(metric("fork"), "ms", phases.fork);
+            let metric = |phase: &str| format!("pysandbox.{label}.{case}.{phase}");
+            if let Some(fork) = phases.fork {
+                measured.lower(metric("fork"), "ms", fork);
+            }
             measured.lower(metric("vm_started"), "ms", phases.vm_started);
             measured.lower(metric("boot"), "ms", phases.boot as f64);
             if let Some(serving) = phases.serving {
                 measured.lower(metric("serving"), "ms", serving);
             }
             measured.lower(metric("answered"), "ms", phases.answered);
-            measured.lower(metric("bucket_gets"), "count", summed["bucket_gets"] as f64);
+            if let Some(gets) = gets {
+                measured.lower(metric("bucket_gets"), "count", gets as f64);
+            }
             Ok(())
         }
     }
@@ -684,17 +736,13 @@ RUN find / -xdev -name '*.pyc' -delete
             let counts = all_counts(dir, &hosts)?;
             let mut run =
                 Run { root: &root, version, kept: &kept, failed: Vec::new(), counts, ran: 0 };
+            // Each round's sandboxes, then the baseline's.
             for round in 1..=rounds {
-                for host in &hosts {
+                let disks = hosts.iter().map(Disk::Fork).chain([Disk::Ext4]);
+                for disk in disks {
                     let workload = workloads[run.ran % workloads.len()];
-                    run.sandbox(
-                        test_setup,
-                        measured,
-                        &hosts,
-                        host,
-                        &format!("r{round}"),
-                        workload,
-                    )?;
+                    let case = format!("r{round}");
+                    run.sandbox(test_setup, measured, &hosts, disk, &case, workload)?;
                 }
             }
             // A cold host's first boot of the version, predicted, with cold peers, then warm ones.
@@ -707,7 +755,8 @@ RUN find / -xdev -name '*.pyc' -delete
                     }
                     run.counts = all_counts(dir, &hosts)?;
                     let workload = workloads[run.ran % workloads.len()];
-                    run.sandbox(test_setup, measured, &hosts, &hosts[on], case, workload)?;
+                    let disk = Disk::Fork(&hosts[on]);
+                    run.sandbox(test_setup, measured, &hosts, disk, case, workload)?;
                 }
             }
             let failed = run.failed;
@@ -729,6 +778,10 @@ RUN find / -xdev -name '*.pyc' -delete
                     || ["sandbox-image", "rootfs"].contains(&&*name);
                 if bulky && path.is_dir() {
                     std::fs::remove_dir_all(&path)
+                        .with_context(|| format!("removing {}", path.display()))?;
+                }
+                if name.ends_with(EXT4_IMAGE) {
+                    std::fs::remove_file(&path)
                         .with_context(|| format!("removing {}", path.display()))?;
                 }
             }
