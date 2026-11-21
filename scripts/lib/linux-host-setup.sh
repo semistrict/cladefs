@@ -343,7 +343,11 @@ host_kernel_key() {
 host_record() {
     local tool
     uname -a
-    grep -m1 'model name' /proc/cpuinfo
+    # The CPU: x86-64's model name; an arm64 one's implementer and part, which its /proc/cpuinfo
+    # has in its place (a run on an arm64 test host ended at this grep, TASK-722).
+    grep -m1 'model name' /proc/cpuinfo ||
+        echo "cpu $(uname -m) $(grep -m2 -E '^CPU (implementer|part)' /proc/cpuinfo |
+            sed 's/[[:space:]]*:[[:space:]]*/ /' | paste -sd ' ' -)"
     echo "cpus $(nproc)"
     grep MemTotal /proc/meminfo
     rustc --version
