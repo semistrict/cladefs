@@ -85,6 +85,16 @@ pub async fn handle<S: Backend>(
     };
     let mut reader = Reader::new(&buffers);
     let writer = Writer::new(&buffers);
+    // cladefs: more room than any request returns into, refused, its response alone written: none
+    // of it zeroed, which a chain naming 4 GiB had the device do (board 2768).
+    if writable > MAX_WRITABLE {
+        writer.obj(
+            room,
+            &Response { status: Errno::EINVAL.raw().cast_unsigned().to_le(), reserved: 0 },
+        );
+        return u32::try_from(writable)
+            .expect("a request's buffers' writable length fits in u32 (Buffers)");
+    }
     let served = serve(cell, notices, cache, bounds, &mut reader, &writer, room).await;
     let (status, written) = match served {
         Ok(written) => (0, written),
@@ -109,6 +119,12 @@ async fn serve<S: Backend>(
 ) -> Result<usize, Errno> {
     let header: RequestHeader = reader.obj()?;
     let type_ = u32::from_le(header.type_);
+    // cladefs: a flag its type doesn't know, refused before anything of it is served (doc-4,
+    // board 2774); and a type no request is of.
+    let known = known_flags(type_).ok_or(Errno::EINVAL)?;
+    if u32::from_le(header.flags) & !known != 0 {
+        return Err(Errno::EINVAL);
+    }
     let flags = match cache {
         CacheType::Writeback => u32::from_le(header.flags),
         CacheType::Unsafe => ordered_only(type_, u32::from_le(header.flags)),
@@ -153,9 +169,6 @@ async fn serve<S: Backend>(
             Ok(0)
         }
         VIRTIO_EXTENT_T_FREE => {
-            if flags & !VIRTIO_EXTENT_FREE_MANY != 0 {
-                return Err(Errno::EINVAL);
-            }
             let id: ExtentIdLe = reader.obj()?;
             let mut extents = vec![id.into()];
             // cladefs: the rest of a flush's dead extents, each freed as it would be alone, in one
@@ -241,7 +254,7 @@ async fn serve<S: Backend>(
         // cladefs: a window that copies on write's, a writer's (backlog doc-13), its arguments
         // UNMAP's.
         VIRTIO_EXTENT_T_PRIVATE => {
-            if flags != 0 || !cell.copies_on_write() {
+            if !cell.copies_on_write() {
                 return Err(Errno::EINVAL);
             }
             let args: UnmapArgs = reader.obj()?;
@@ -1293,12 +1306,58 @@ mod tests {
                     request_as(&cell, &notices, cache, &readable, RESPONSE + room, split);
                 prop_assert_eq!(written.len(), room);
                 prop_assert!(status < 4096, "status {}", status);
+                // cladefs board 2774: a flag its type doesn't know, or a type none is of, refused.
+                if known_flags(type_).is_none_or(|known| flags & !known != 0) {
+                    prop_assert_eq!(
+                        status,
+                        errno(Errno::EINVAL),
+                        "type {} flags {:#x}",
+                        type_,
+                        flags
+                    );
+                }
                 // cladefs TASK-470: nothing out of range reached the cell.
                 let out_of_range = cell.state().out_of_range.clone();
                 prop_assert!(out_of_range.is_empty(), "the cell was asked {:?}", out_of_range);
                 Ok(())
             })
             .unwrap();
+    }
+
+    /// cladefs board 2774: a request of any type setting a flag its type doesn't know is refused,
+    /// `EINVAL`, its cell asked of no range, as is one of a type no request is of. Each of the 32
+    /// bits, beside each type's own.
+    #[test]
+    fn unknown_flags_are_refused_whatever_the_type() {
+        let cell = FakeBackend { copies_on_write: true, ..FakeBackend::default() };
+        for type_ in 0..=VIRTIO_EXTENT_T_LAST + 1 {
+            let known = known_flags(type_);
+            for bit in 0..32 {
+                let flag = 1u32 << bit;
+                if known.is_some_and(|known| known & flag != 0) {
+                    continue;
+                }
+                let asked = cell.state().ranges_asked;
+                let asking = bytes(type_, flag, Some(io(1, 0, 4096)), &[0; 4096]);
+                let (_, status) = request(&cell, &asking, RESPONSE + 4096);
+                assert_eq!(status, errno(Errno::EINVAL), "type {type_} flag {flag:#x}");
+                assert_eq!(cell.state().ranges_asked, asked, "type {type_} flag {flag:#x} asked");
+            }
+        }
+    }
+
+    /// cladefs board 2768: a request with more room than any request returns into is refused,
+    /// `EINVAL` in its response, and nothing else of its buffers written: not zeroed, as an error's
+    /// room was, for as much as a chain's length names.
+    #[test]
+    fn requests_with_more_room_than_any_returns_are_refused_unzeroed() {
+        let cell = FakeBackend::default();
+        let reading = bytes(VIRTIO_EXTENT_T_READ, 0, Some(io(1, 0, 4096)), &[]);
+        let (written, status) = request(&cell, &reading, MAX_WRITABLE + 1);
+        assert_eq!(status, errno(Errno::EINVAL));
+        assert!(written.iter().all(|&byte| byte == 0xa5), "the room was written");
+        let (_, status) = request(&cell, &reading, MAX_WRITABLE);
+        assert_ne!(status, errno(Errno::EINVAL), "the largest room a request may have, refused");
     }
 
     /// cladefs TASK-470: the class of the Linux run's failure. Of every request with a range

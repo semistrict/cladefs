@@ -440,13 +440,20 @@ fn answers_whatever_a_driver_asks() {
     let cell = prop_oneof![Just(client.cell()), any::<u64>()];
     let args = (cell, 0u64..64, near_or_far(), near_or_far(), any::<u32>());
     let word = || prop_oneof![0u32..18, any::<u32>()];
+    // cladefs board 2774: flags its type knows, three times in four, any else: a flag it doesn't
+    // know is refused at the header, which would leave too few served.
+    let flags = (any::<u32>(), 0u8..4);
     let data = proptest::collection::vec(any::<u8>(), 0..2 * BLOCK);
-    let requests = (word(), word(), args, data, 0usize..4 * BLOCK);
+    let requests = (word(), flags, args, data, 0usize..4 * BLOCK);
     let config = Config { cases: 5000, failure_persistence: None, ..Config::default() };
     // Those the device served: refusing each at its header would show nothing.
     let served = AtomicU32::new(0);
     TestRunner::new(config)
-        .run(&requests, |(type_, flags, args, data, room)| {
+        .run(&requests, |(type_, (bits, any), args, data, room)| {
+            let flags = match any {
+                0 => bits,
+                _ => known_flags(type_).unwrap_or(0) & bits,
+            };
             let (cell, sequence, first, second, last) = args;
             let mut readable = bytes::<Info>(type_, flags, None, &[]);
             for word in [cell, sequence, first, second, u64::from(last)] {

@@ -218,6 +218,44 @@ fn within(offset: u64, len: u64, alignment: u64, most: u64) -> Result<(), cladef
 
 /// cladefs: a request's `flags`, of type `type_`, as a device whose cache is `Unsafe` serves them
 /// (TASK-363): a `COMMIT` or a `WRITE`'s commit ordered, not uploaded.
+/// cladefs: the flags requests of `type_` may set (doc-4): `None` for a type no request is of. The
+/// device refuses a request setting any other (`EINVAL`) before anything of it is served, in one
+/// place for every type, so that a type added later is checked as the others are (board 2774).
+pub fn known_flags(type_: u32) -> Option<u32> {
+    Some(match type_ {
+        VIRTIO_EXTENT_T_WRITE => {
+            VIRTIO_EXTENT_WRITE_BARRIER
+                | VIRTIO_EXTENT_WRITE_COMMIT
+                | VIRTIO_EXTENT_WRITE_UPLOADED
+                | VIRTIO_EXTENT_WRITE_ROOT
+        }
+        VIRTIO_EXTENT_T_FREE => VIRTIO_EXTENT_FREE_MANY,
+        VIRTIO_EXTENT_T_MAP => {
+            VIRTIO_EXTENT_MAP_MANY | VIRTIO_EXTENT_MAP_PREFAULT | VIRTIO_EXTENT_MAP_ZEROS
+        }
+        VIRTIO_EXTENT_T_COMMIT => VIRTIO_EXTENT_COMMIT_UPLOADED | VIRTIO_EXTENT_COMMIT_ROOT,
+        VIRTIO_EXTENT_T_RESIZED => VIRTIO_EXTENT_RESIZED_TOOK,
+        VIRTIO_EXTENT_T_FREEZE => VIRTIO_EXTENT_FREEZE_FROZEN,
+        VIRTIO_EXTENT_T_READ
+        | VIRTIO_EXTENT_T_UNMAP
+        | VIRTIO_EXTENT_T_ROOT
+        | VIRTIO_EXTENT_T_INFO
+        | VIRTIO_EXTENT_T_ADVANCE
+        | VIRTIO_EXTENT_T_LET_GO
+        | VIRTIO_EXTENT_T_PIN
+        | VIRTIO_EXTENT_T_UNPIN
+        | VIRTIO_EXTENT_T_PRIVATE
+        | VIRTIO_EXTENT_T_STATS => 0,
+        _ => return None,
+    })
+}
+
+/// cladefs: the most bytes a request's writable buffers hold: the most it returns, a `READ`'s, and
+/// its response (board 2768). The device refuses a request with more, and never writes, nor zeroes,
+/// past it: what a request costs the device is bounded by the protocol, not by the `u32` a chain's
+/// length fits in.
+pub const MAX_WRITABLE: usize = MAX_TRANSFER as usize + size_of::<Response>();
+
 pub fn ordered_only(type_: u32, flags: u32) -> u32 {
     match type_ {
         VIRTIO_EXTENT_T_COMMIT => flags & !VIRTIO_EXTENT_COMMIT_UPLOADED,
