@@ -3,11 +3,11 @@ id: TASK-706
 title: >-
   fuse_differential: a symlink in the mount's root changes the root's mtime but
   not its ctime, once, after TASK-495
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-20 20:33'
-updated_date: '2026-11-20 22:50'
+updated_date: '2026-11-21 02:00'
 labels:
   - bug
   - fuse
@@ -25,14 +25,14 @@ Seen on ubu1 2026-11-20 in TASK-495's first verification run (its fix to stale c
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The mixed result is reproduced and its cause named, or shown gone in 50 stress rounds under full-suite load
+- [x] #1 The mixed result is reproduced and its cause named, or shown gone in 50 stress rounds under full-suite load
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -45,4 +45,12 @@ Seen on ubu1 2026-11-20 in TASK-495's first verification run (its fix to stale c
 
 <!-- SECTION:NOTES:BEGIN -->
 Cause (2026-11-20, ubu1): a desktop session's trash monitor, gvfsd-trash (user ramon's GNOME session on ubu1), looks into every new mount: access(2) of its root, an inotify watch on it, .Trash and .Trash-1000 looked up; strace of the gvfs processes during the mount tests showed 76 such calls on the tests' mounts. With the diagnostic: 'shown before and after (old, old), asked of the filesystem Ok(new)': the server had the new times; the kernel's cache showed old ones, or (before) the new mtime with the old ctime. The server alone changes both times on every entry change (filesystem.rs every_change_of_entries_changes_both_times, 200 rounds). Cause: the same FUSE-client race as TASK-306: another process's GETATTR reply being applied (fuse_change_attributes_common sets mtime, then ctime, after marking the cache valid) while the test's stat reads the cache unlocked; the other process gvfsd-trash, whose inotify watch on the mount's root has it stat the root as each change lands there, hence the root alone. Fix: tests mount at .gvfs, which gvfs ignores (TASK-306's notes). Verified: fuse_differential 30/30 stress rounds on ubu1 (3/30 in each run before); the reproduction test changes_show_their_times_though_others_stat_the_nodes_meanwhile gained root create-then-mkdir checks. The forced-statx diagnostic stays in the differential's time failures.
+
+Verified 2026-11-20 at b4b6dd253: ubu1 fuse_differential + fuse_mount 50/50 stress rounds (12 tests each); macOS workspace 2796/2796, clippy gate clean, upstream-changes --check passes; ubu1 workspace 3161/3162 at the same FUSE code, the one failure TASK-716's, fixed (hostile test 40/40 after).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The root's stale or mixed times were Linux's FUSE client answering a cached stat while gvfsd-trash's reply half updated it (forced statx showed the filesystem right). Tests mount at .gvfs, which gvfs ignores; the differential's time failures report a forced statx. Verified: 50/50 FUSE stress rounds on ubu1 (3/30 per run before).
+<!-- SECTION:FINAL_SUMMARY:END -->
