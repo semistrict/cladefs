@@ -7,7 +7,7 @@
 //! environment of its own ([`set_vars`]) reads that instead, so that daemons in one simulation
 //! are configured apart, each as its own process would be, by the same code: its socket, its
 //! token, its peers' address, its directories. A node killed loses it, as a node's statics are
-//! let go of ([`crate::Plugin`]): its restart gives it again, as a host's boot does.
+//! let go of ([`crate::kill`]): its restart gives it again, as a host's boot does.
 
 use std::env::VarError;
 use std::ffi::{OsStr, OsString};

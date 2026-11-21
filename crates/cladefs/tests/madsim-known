@@ -9,4 +9,3 @@
 # with the bug's fix, as its seeds join madsim-seeds.
 #
 # BOARD TEST                                            PANIC
-5908    ephemeral_cells_survive_disk_faults             kept/\S+: made around its cell directory

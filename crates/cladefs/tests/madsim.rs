@@ -76,7 +76,8 @@ impl Kept {
 /// Boots host `host`'s daemon, its cell directories under `root`, its cells in `bucket`, at
 /// placement token `host`, keeping what `kept` says, and serves for as long as the host runs.
 async fn boot(host: u8, root: &Path, bucket: Arc<ObjectBucket>, kept: Kept) {
-    // As a host's process boots: its statics anew, its node started again after a kill too.
+    // As a host's process boots: its statics anew, its node started again by madsim itself too, as
+    // after a boot failing (`BOOT_FAILED`), which `node_local::restart` doesn't start.
     node_local::starting();
     // Its root on its own disk, in memory, which a kill crashes (host_fs, TASK-685.4): as a host's
     // root is, there before its daemon, durable.
@@ -1211,17 +1212,14 @@ async fn attrition(profile: Profile) -> Result<(), String> {
     // held down through the next round's take, which it forces, then started again.
     let mut killed: Vec<madsim::runtime::NodeHandle> = Vec::new();
     let mut held: Option<madsim::runtime::NodeHandle> = None;
-    let restart = |killed: Vec<madsim::runtime::NodeHandle>| {
-        let handle = handle.clone();
-        async move {
-            if killed.is_empty() {
-                return;
-            }
-            let after = Duration::from_millis(madsim::rand::thread_rng().gen_range(0..5000));
-            madsim::time::sleep(after).await;
-            for node in killed {
-                handle.restart(node.id());
-            }
+    let restart = |killed: Vec<madsim::runtime::NodeHandle>| async move {
+        if killed.is_empty() {
+            return;
+        }
+        let after = Duration::from_millis(madsim::rand::thread_rng().gen_range(0..5000));
+        madsim::time::sleep(after).await;
+        for node in killed {
+            node_local::restart(node.id()).await;
         }
     };
     // The collector's passes meanwhile, each its own holder.
@@ -1306,11 +1304,11 @@ async fn attrition(profile: Profile) -> Result<(), String> {
                         let drained = node(host).spawn(cladefs::cladefsd::drain::drain(within));
                         log::info!("host {}: drained: {:?}", host + 1, drained.await);
                     }
-                    handle.kill(nodes[host].id());
+                    node_local::kill(nodes[host].id()).await;
                     killed.push(nodes[host].clone());
                     if forced {
                         let member = (host + 2) % 3;
-                        handle.kill(nodes[member].id());
+                        node_local::kill(nodes[member].id()).await;
                         held = Some(nodes[member].clone());
                     }
                 }
@@ -1482,12 +1480,11 @@ async fn ephemeral_attrition(disk: bool) -> Result<(), String> {
     let manager = manager();
     let node = |host: usize| handle.get_node(nodes[host].id()).unwrap();
     let restart = |host: usize| {
-        let handle = handle.clone();
         let id = nodes[host].id();
         async move {
             let after = Duration::from_millis(madsim::rand::thread_rng().gen_range(0..3000));
             madsim::time::sleep(after).await;
-            handle.restart(id);
+            node_local::restart(id).await;
         }
     };
 
@@ -1550,7 +1547,7 @@ async fn ephemeral_attrition(disk: bool) -> Result<(), String> {
         if madsim::time::timeout(wait, &mut written).await.is_err() {
             // Killed as it writes: what it was told committed is Local, on the disk kept.
             if madsim::rand::thread_rng().gen_bool(0.5) {
-                handle.kill(nodes[host].id());
+                node_local::kill(nodes[host].id()).await;
                 restart(host).await;
             } else {
                 written.await.unwrap();
@@ -1579,7 +1576,7 @@ async fn ephemeral_attrition(disk: bool) -> Result<(), String> {
         madsim::time::sleep(Duration::from_millis(madsim::rand::thread_rng().gen_range(0..1000)))
             .await;
         if madsim::rand::thread_rng().gen_bool(0.3) {
-            handle.kill(nodes[target].id());
+            node_local::kill(nodes[target].id()).await;
             restart(target).await;
         }
         let from = at.display().to_string();

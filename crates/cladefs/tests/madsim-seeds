@@ -21,3 +21,4 @@
 157     board 5948: a host's boot failed on its part cache's EIO, and the VM manager gave up on its control API within 5 s, before madsim started it again (1 to 10 s; GitHub's runner, Linux)
 868     board 5914: a member's first append of a log failing after its file was made, the empty file was no authentic copy, and every take failed (macOS)
 1171    board 5914: the same, its take failing for good (macOS)
+636     board 5908: a host started again ran a guest's open before its boot, through what its kill left; the boot's own opening of the cell beside it, the first's close linked files the second never counted (macOS)
