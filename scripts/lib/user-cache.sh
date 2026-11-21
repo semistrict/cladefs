@@ -8,7 +8,7 @@
 # kept, as the test host's jobs run (scripts/lib/host.sh's host_command), gives what it made of
 # that path, in the invoking user's home, to that user (SUDO_UID): made root's, ~/.cache/cladefs
 # refused the user's later runs their downloads, `mkdir: Permission denied` with no path
-# (TASK-643). Fails naming the directory it couldn't make.
+# (board 2720). Fails naming the directory it couldn't make.
 user_cache() {
     local dir=${XDG_CACHE_HOME:-$HOME/.cache}/cladefs${1:+/$1} path
     mkdir -p "$dir" 2> /dev/null || { echo "user_cache: couldn't make $dir" >&2; return 1; }

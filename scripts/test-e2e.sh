@@ -87,7 +87,7 @@ fi
 # Inside a measurement (fxjob --bench), nothing builds (TASK-368): its artifacts were built as work
 # beforehand, every one there; else it refuses, saying so, before anything runs.
 source "$(dirname "${BASH_SOURCE[0]}")/lib/measurement.sh"
-# user_cache, the downloads' cache, the invoking user's under sudo (TASK-643).
+# user_cache, the downloads' cache, the invoking user's under sudo (board 2720).
 source "$(dirname "${BASH_SOURCE[0]}")/lib/user-cache.sh"
 if [[ -n $prebuilt ]]; then
     for artifact in "$harness_artifacts/runner" "$harness_artifacts/guest-agent" \

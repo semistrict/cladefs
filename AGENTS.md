@@ -54,7 +54,7 @@ built (`host_job`'s `CLADEFS_TEST_HOST_PHASE`), and anything that would build in
 refuses to (`scripts/lib/measurement.sh`, TASK-368). Guest kernels come
 from a cache on the test host keyed by their sources (`host_kernel`). A driver stopped mid-run leaves
 the job running: `DRIVER resume RUN RESULTS` fetches it, `DRIVER cancel RUN` ends it, within six
-hours of its end, after which the next run removes it, passed or failed (TASK-491). Scratch of your
+hours of its end, after which the next run removes it, passed or failed (board 2324). Scratch of your
 own on a test host's scratch disk (a worktree, a target, results, a kernel) goes in your job's
 `TMPDIR` where it can, which fxjob removes with the job; anything that must outlive one job goes in
 one directory named for your task, which you remove once nothing of yours runs there. fxjob refuses

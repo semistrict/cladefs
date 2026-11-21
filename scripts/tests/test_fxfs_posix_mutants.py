@@ -3,7 +3,7 @@
 # found in the LICENSE file.
 
 """Tests of crates/fxfs-posix/mutants.sh, which runs the model test against the crate's mutants:
-each mutant's fate from nextest's exit, and a run that couldn't test a mutant failing (TASK-642)."""
+each mutant's fate from nextest's exit, and a run that couldn't test a mutant failing (board 2718)."""
 
 import os
 import shutil

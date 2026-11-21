@@ -35,7 +35,7 @@
 # tree), its commit and vendor/firecracker's. It first removes every run, passed or failed, that
 # runs no job and has changed nothing (its directory, its job's status and log) for six hours
 # (stale): its driver has fetched what it would, or is gone. A run that failed, or whose driver
-# died, kept its tens of GB on the scratch disk for days, until the disk was full (TASK-491); a
+# died, kept its tens of GB on the scratch disk for days, until the disk was full (board 2324); a
 # driver stopped for longer than that finds nothing to resume.
 #
 # launch runs job/command apart from the SSH session, as a dropped connection or the driver's
@@ -45,14 +45,14 @@
 # ended without its status, as with the test host's restart, or `lost unreadable` if its status file
 # holds no number, or `none` if no job was launched. The status file is made, its room taken, as
 # the job launches, and the job writes its status over it in place: a full disk at the job's end,
-# which others' runs fill, no longer loses the status of a job whose tests passed (TASK-489,
-# TASK-654). fetch writes a gzipped tar of the results to its standard output: but for what
+# which others' runs fill, no longer loses the status of a job whose tests passed (board 2320,
+# board 2740). fetch writes a gzipped tar of the results to its standard output: but for what
 # aren't results (unresults): the guests' root filesystems (rootfs, their images, and jails), some
 # of whose files (setuid binaries) no one may read; parts caches; and stores, buckets and images,
 # by the names the cases give them, which a job killed mid-case leaves, gigabytes of them, its
-# script's own pruning never run (TASK-372). cancel ends the job, and clean removes the run's
+# script's own pruning never run (board 1868). cancel ends the job, and clean removes the run's
 # directory, its worktrees with it, once no job runs there; two cleans of one run at once, as a
-# cancel's and its waiting driver's, take turns, the second finding nothing left (TASK-367).
+# cancel's and its waiting driver's, take turns, the second finding nothing left (board 1856).
 #
 # sweep removes, as clean does, every run of SCRATCH named for NAME, run-NAME-<time>-<mark>
 # (host_run_name), whose job is not running: the earlier runs of a driver that runs under one
@@ -74,7 +74,7 @@ set -euo pipefail
 
 # The job's command runs as root, sudo's, with the user's Rust (scripts/lib/host.sh's
 # host_command): what it leaves in the user's ~/.cargo and ~/.rustup, the registry's files and a
-# toolchain it installed, and in ~/.cache/cladefs, the scripts' downloads (TASK-643), becomes the
+# toolchain it installed, and in ~/.cache/cladefs, the scripts' downloads (board 2720), becomes the
 # user's again, for the user's builds and runs.
 give_back() {
     local place

@@ -2,7 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-"""Tests of scripts/lib/user-cache.sh, the scripts' cache of downloads (TASK-643): made where
+"""Tests of scripts/lib/user-cache.sh, the scripts' cache of downloads (board 2720): made where
 XDG_CACHE_HOME says, and a directory it can't make named, through rustfs_binary too."""
 
 import os

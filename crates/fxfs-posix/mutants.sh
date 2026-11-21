@@ -15,7 +15,7 @@
 # code it changes. --check runs nothing: it applies and reverses each patch in a copy of what it
 # changes, in a second, as CI does. A patch that doesn't apply fails either; so does a mutant whose
 # tests couldn't run (they didn't build, or cargo didn't start: exit 127 on a host whose
-# non-login shell has no cargo), BROKEN, as it was tried by nothing (TASK-642).
+# non-login shell has no cargo), BROKEN, as it was tried by nothing (board 2718).
 
 set -u -o pipefail
 cd "$(dirname "$0")/../.."

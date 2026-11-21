@@ -617,7 +617,7 @@ class Runs(unittest.TestCase):
         self.assertEqual(fleet.worktrees(), [f"{fleet.scratch}/{first.strip()}/tree"])
 
     def test_runs_that_ran_nothing_for_six_hours_go_passed_or_failed(self):
-        """TASK-491: a run that failed, or whose driver died, kept its directory for days, and
+        """board 2324: a run that failed, or whose driver died, kept its directory for days, and
         such runs filled the scratch disk. Those that ran nothing for six hours go as the next
         run starts, whatever their status; one whose job runs, or ended within six hours, stays."""
         fleet = Fleet()
@@ -990,7 +990,7 @@ class Jobs(unittest.TestCase):
                                               "source.txt"]))
 
     def test_stores_buckets_and_images_a_killed_case_left_are_not_fetched(self):
-        """TASK-372: a job killed mid-case never prunes its stores, bases and images, and the fetch
+        """board 1868: a job killed mid-case never prunes its stores, bases and images, and the fetch
         copied 7.1 GB of them. Those directories stay on the host; files of the same names, as
         perf's, are results."""
         fleet = Fleet()
@@ -1065,7 +1065,7 @@ class Resume(unittest.TestCase):
                          (0, "waiting\nlost\n", ""))
 
     def test_a_jobs_status_is_written_over_the_room_its_launch_took(self):
-        """TASK-654: a job whose tests passed could not write its status, others' runs having
+        """board 2740: a job whose tests passed could not write its status, others' runs having
         filled the scratch disk by its end, and its run failed. The launch takes the status's room;
         the job writes over it in place, the same file, needing no new block."""
         fleet, run = self.left({"CLADEFS_FAKE_HOST": "wait"})
@@ -1089,7 +1089,7 @@ class Resume(unittest.TestCase):
         fleet.drive(f'host_name {run}; host_side clean "$host_dir" "$host_repo"')
 
     def test_two_cleans_of_a_run_at_once_take_turns(self):
-        """TASK-367: a cancel's clean and its waiting driver's both ran rm -r of the run at once,
+        """board 1856: a cancel's clean and its waiting driver's both ran rm -r of the run at once,
         each failing on what the other removed, the run left. They take the runs' lock: both
         wait for it, then the first removes the run, the second finds nothing left."""
         fleet, run = self.left({})

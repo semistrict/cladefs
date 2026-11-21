@@ -2,7 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-"""Tests of scripts/lib/e2e-bucket.sh, scripts/test-e2e.sh's bucket in memory (TASK-331): a run
+"""Tests of scripts/lib/e2e-bucket.sh, scripts/test-e2e.sh's bucket in memory (board 1764): a run
 killed outright leaves its bucket, which the next run removes; a live run's, and one of a tree
 from before, which names no owner, stay."""
 
