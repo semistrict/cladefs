@@ -3,9 +3,11 @@ id: TASK-717
 title: >-
   cladefsd hostile: mallory's floods of page-ins flood no extent now and then
   ('0 extents flooded with page-ins')
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-21 00:29'
+updated_date: '2026-11-21 05:33'
 labels:
   - bug
   - cladefsd
