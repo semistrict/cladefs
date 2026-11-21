@@ -174,7 +174,10 @@ pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
         Failure::Bucket(Error::Inherited { .. }) => Some(Errno::ENOTSUP),
         // A cell, or a bucket, of a newer format than this host reads, until it is upgraded
         // (doc-11).
-        Failure::Bucket(Error::Format { .. } | Error::BucketFormat(_)) => Some(Errno::ENOTSUP),
+        // cladefs: read evidence of another format, which its reader skips (TASK-702.2).
+        Failure::Bucket(
+            Error::Format { .. } | Error::BucketFormat(_) | Error::EvidenceFormat(_),
+        ) => Some(Errno::ENOTSUP),
         // cladefs: a bucket to add that is a bucket already, buckets added to one not the root,
         // and no bucket number left (TASK-633.9).
         Failure::Bucket(Error::Formatted(_)) => Some(Errno::EEXIST),
@@ -612,6 +615,12 @@ impl HostFetcher {
             None => parts,
         };
         Ok(Arc::new(Self { runtime, parts: Arc::new(parts.reading_ahead(spawn)) }))
+    }
+
+    /// cladefs: the runtime its reads run on, which what reads ahead for a store, or writes behind
+    /// it, runs on too ([`HostFetcher::spawn`]).
+    pub(crate) fn runtime(&self) -> &tokio::runtime::Handle {
+        &self.runtime
     }
 
     /// cladefs: runs `future` in a task of its own on the runtime its reads run on: what reads

@@ -213,6 +213,10 @@ pub struct OpenCell {
     /// cladefs: what records the store's page-ins for its base's boot profile, if it is a fork of a
     /// base that has none yet, and what writes it at the window's end, which closing stops early.
     profiling: Option<(Arc<Recorder>, tokio::sync::oneshot::Sender<()>)>,
+    /// cladefs: of a store opened for a guest, a fork of a version, its version's read evidence of
+    /// its tenant's: what predicts its reads, and a recording of them, if it records
+    /// (`crate::evidence`, TASK-702.2).
+    evidence: Option<crate::evidence::Evidence>,
     /// cladefs: held, shared, by writes, which open extents, and alone by a fork only once nothing
     /// is open, which none comes between ([`OpenCell::fork_quiescent`]).
     opening: StoreRwLock<()>,
@@ -569,6 +573,9 @@ impl Drop for OpenCell {
         {
             log::warn!("cladefs: writing a boot profile: {err}");
         }
+        // cladefs: its recording of what its guest read of its version, written behind it as its
+        // evidence goes.
+        drop(self.evidence.take());
         // cladefs: its uploader first, which closes its open segment, uploads what it made local
         // and stops (TASK-192); then the store. A follower's store is its writer's. Closing from
         // the first: what waits for the close, as a fork of a version it made does, waits for its
@@ -592,6 +599,10 @@ impl OpenCell {
     /// again at once (TASK-685.3). Holds no thread while it waits for its uploader, as the daemon
     /// closes its stores; dropped unclosed, it blocks.
     pub async fn close(mut self) {
+        // cladefs: its recording of what its guest read of its version, written first.
+        if let Some(evidence) = self.evidence.take() {
+            evidence.close().await;
+        }
         let profiling = self.profiling.take();
         let following = self.following.is_some();
         local_cell::upload::blocking(|| {
@@ -777,9 +788,11 @@ impl OpenCell {
                 // cladefs: given up to a live migration, it opens here no more (TASK-698.4).
                 true if host_fs::exists(&path.join("migrating")) => return Err(Errno::EBUSY.into()),
                 true => {
-                    let (store, bucket, keys) =
+                    let (store, bucket, keys, forked) =
                         host_cell::open_ephemeral(path, &opening.keeping).await?;
-                    let mut opened = Self::assemble(path, (store, bucket, None), opening).await?;
+                    let assembling =
+                        Self::assemble(path, (store, bucket, None), Some(forked), opening);
+                    let mut opened = assembling.await?;
                     opened.keys = Some(keys);
                     opened
                 }
@@ -839,12 +852,13 @@ impl OpenCell {
     /// forked from the cells `public` are public ([`cell_dir::public_cells`]).
     async fn new(path: &Path, opened: host_cell::Opened, opening: Opening) -> Result<Self, Error> {
         let host_cell::Opened { store, bucket, uploader } = opened;
-        Self::assemble(path, (store, bucket, Some(uploader)), opening).await
+        let forked = uploader.forked_from();
+        Self::assemble(path, (store, bucket, Some(uploader)), forked, opening).await
     }
 
     /// cladefs: the store `store` at `path`, its cell's extents read in `bucket`, with its uploader
-    /// if it has one (an ephemeral cell's has none, doc-25), opened as `opening` says: as
-    /// [`OpenCell::new`] has it.
+    /// if it has one (an ephemeral cell's has none, doc-25), a fork of the version `forked` says,
+    /// if any, opened as `opening` says: as [`OpenCell::new`] has it.
     async fn assemble(
         path: &Path,
         (store, bucket, uploader): (
@@ -852,6 +866,7 @@ impl OpenCell {
             Arc<bucket_cell::object_bucket::ObjectBucket>,
             Option<local_cell::upload::Uploader<HostDir>>,
         ),
+        forked: Option<local_cell::upload::Forked>,
         opening: Opening,
     ) -> Result<Self, Error> {
         // cladefs: what may fail of it first, its store closed if it does (TASK-685.3).
@@ -877,8 +892,14 @@ impl OpenCell {
         let arenas = Arenas { own: arena, public: Arc::new(public) };
         let profiling = profiled.then(|| Self::profile(&store, &arenas, &forked_from, &fetcher));
         let cell = store.description().cell;
+        // cladefs: a guest's boot of a fork of a version, whose reads its version's evidence
+        // predicts, and records (TASK-702.2).
+        let evidence = (forked.filter(|_| profiled)).map(|forked| {
+            crate::evidence::Evidence::opened(forked, cell, bucket.clone(), fetcher.runtime())
+        });
         Ok(Self {
             profiling: profiling.flatten(),
+            evidence,
             arenas,
             forked_from,
             store,
@@ -909,6 +930,7 @@ impl OpenCell {
         let following = Following { writer: self.clone(), view };
         Self {
             profiling: None,
+            evidence: None,
             arenas: self.arenas.clone(),
             forked_from: self.forked_from.clone(),
             store: self.store.clone(),
@@ -1403,6 +1425,43 @@ impl OpenCell {
     #[cfg(test)]
     pub(crate) fn shares_extents_with(&self, other: &Self) -> bool {
         self.store.shares_extents_with(&other.store).unwrap()
+    }
+
+    /// cladefs: whether what its guest reads now is recorded, as its version's read evidence
+    /// ([`OpenCell::guest_read`], TASK-702.2).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn records_reads(&self) -> bool {
+        self.evidence.as_ref().is_some_and(crate::evidence::Evidence::records)
+    }
+
+    /// cladefs: says its guest read `len` bytes at `offset` in `extent`, begun at `began`, by a
+    /// `READ`, a `MAP` or a fault, which its version's read evidence records, if it records
+    /// ([`OpenCell::records_reads`], TASK-702.2).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn guest_read(
+        &self,
+        extent: ExtentId,
+        offset: u64,
+        len: u64,
+        began: std::time::Instant,
+    ) {
+        if let Some(evidence) = &self.evidence {
+            evidence.read(extent, offset, len, began);
+        }
+    }
+
+    /// cladefs: of a fork of a version, the version and its keys, as its uploader says them
+    /// (`Uploader::forked_from`): for tests of its read evidence.
+    #[cfg(test)]
+    pub(crate) fn forked_from(&self) -> Option<local_cell::upload::Forked> {
+        self.uploader.as_ref()?.forked_from()
+    }
+
+    /// cladefs: of a store opened for a guest, a fork of a version, what its version's read evidence
+    /// predicts it reads (TASK-702.2).
+    #[cfg_attr(not(test), expect(dead_code, reason = "TASK-702.3 prefetches what it predicts"))]
+    pub(crate) fn predicted(&self) -> Option<crate::evidence::Predicted> {
+        self.evidence.as_ref().map(crate::evidence::Evidence::predicted)
     }
 
     /// cladefs: `extent`'s length, and whether it is open, if its store holds it, as reads ask
@@ -3895,6 +3954,83 @@ mod tests {
         }
         let counted = stats::stats().since(&before);
         assert_eq!((counted.page_ins, counted.page_in_bytes), (3, 3 * extent_frame::PART));
+    }
+
+    /// TASK-702.2: forks of a version opened for guests read their tenant's evidence of it, once an
+    /// interval for all the forks a host opens, and the first of them in the interval records what
+    /// its guest reads of the version's extents, written as its store closes; another tenant's
+    /// forks read and write theirs alone.
+    #[test]
+    fn forks_of_a_version_read_and_record_their_tenants_evidence() {
+        use bucket_cell::evidence::{Prediction, UNIT, Unit};
+        let (base, dir) = store(64 << 20);
+        let extent = id(&base, 1);
+        write(&base, extent, 0, &pattern(5, 3 * UNIT as usize)).unwrap();
+        local_cell::upload::wait_on(base.commit(None)).unwrap();
+        let at = dir.path().join("version");
+        local_cell::upload::wait_on(base.uploaded_version_at(&at)).unwrap();
+        let version = local_cell::upload::wait_on(OpenCell::open_without_profile(&at)).unwrap();
+        let fork = |name: &str, tenant| {
+            let path = dir.path().join(name);
+            local_cell::upload::wait_on(version.fork_to(&path, host_cell::named(tenant))).unwrap();
+            path
+        };
+        let (first, second, theirs) = (fork("first", 5), fork("second", 5), fork("theirs", 6));
+        let open = |path: &Path| local_cell::upload::wait_on(OpenCell::open(path)).unwrap();
+        let close = |store: OpenCell| local_cell::upload::wait_on(store.close());
+        let predicted = |store: &OpenCell| block_on(store.predicted().unwrap()).unwrap();
+
+        // The first of tenant 5's forks reads none, and records its reads; the second, opened
+        // within the interval, shares its prediction and records nothing.
+        let (one, two) = (open(&first), open(&second));
+        // Reads after the openings, in order: the first 5 ms on, the next 9.
+        let now = std::time::Instant::now();
+        let at = |ms| now + std::time::Duration::from_millis(ms);
+        assert!(one.records_reads() && !two.records_reads());
+        assert!(one.predicted().unwrap().ptr_eq(&two.predicted().unwrap()));
+        assert_eq!(*predicted(&one), Prediction::default());
+        one.guest_read(extent, 2 * UNIT, 1, at(5));
+        one.guest_read(extent, 0, 4096, at(9));
+        one.guest_read(id(&one, 1), 0, 4096, at(1));
+        two.guest_read(extent, UNIT, 1, at(1));
+        let other = open(&theirs);
+        assert!(other.records_reads());
+        other.guest_read(extent, UNIT, 1, at(1));
+        let (version_cell, origin) = (base.cell(), one.forked_from());
+        drop(base);
+        for store in [one, two, other] {
+            close(store);
+        }
+
+        // Each tenant reads its own evidence alone, once the host reads it again.
+        crate::evidence::forget();
+        let units = |store: &OpenCell| -> Vec<(ExtentId, u64)> {
+            let predicted = predicted(store);
+            assert_eq!(predicted.recordings, 1);
+            predicted.units.iter().map(|&Unit { extent, mib, .. }| (extent, mib)).collect()
+        };
+        let (two, other) = (open(&second), open(&theirs));
+        assert_eq!(units(&two), [(extent, 2), (extent, 0)]);
+        assert_eq!(units(&other), [(extent, 1)]);
+        let origin = origin.unwrap().origin;
+        assert_eq!(origin.parent, version_cell);
+        let bucket = two.bucket.clone();
+        for store in [two, other] {
+            close(store);
+        }
+        close(version);
+        let listed = block_on(bucket_cell::bucket::Bucket::list(
+            &*bucket,
+            &bucket_cell::layout::evidence_of_cell(version_cell),
+        ))
+        .unwrap();
+        let tenants: Vec<u64> = (listed.iter())
+            .map(|meta| match bucket_cell::layout::kind(&meta.key) {
+                bucket_cell::layout::Kind::Evidence { tenant, at, .. } if at == origin.at => tenant,
+                kind => panic!("{}: {kind:?}", meta.key),
+            })
+            .collect();
+        assert_eq!(tenants, [5, 6]);
     }
 
     /// cladefs: a fork of a base records the units of the base's extents its page-ins read, as the

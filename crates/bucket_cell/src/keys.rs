@@ -232,6 +232,15 @@ impl Ring {
         (&**self.deks.get(&id).expect("a ring holds the key it encrypts under"), id)
     }
 
+    /// cladefs: the DEK of `cell`'s it holds of the newest generation, and which it is, if it holds
+    /// any: what a fork's host encrypts what it writes under a version of an ancestor's cell
+    /// under, which every fork of the version holds (`crate::evidence`, TASK-702.2).
+    pub fn encrypting_as(&self, cell: u64) -> Option<(&Secret, KeyId)> {
+        let generation = *self.generations(cell).last()?;
+        let id = KeyId { cell, generation };
+        Some((&**self.deks.get(&id)?, id))
+    }
+
     /// Whether it is a writer's, which encrypts ([`Ring::encrypting`]).
     pub fn encrypts(&self) -> bool {
         self.encrypting.is_some()

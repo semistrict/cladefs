@@ -218,7 +218,8 @@ pub(crate) struct Listed {
     /// SHA-256 over every object listed but the collector's own (`<C>gc/`), in the order of their
     /// keys: each one's key, size, time written, and version (its ETag and its version, as the
     /// store names them). Its lease, which every pass writes, and its marks, which no pass decides
-    /// by, change it not.
+    /// by, change it not; nor the read evidence of its versions, which passes trim skipping it
+    /// ([`digest`]).
     pub digest: [u8; 32],
     /// Every object listed but the cell's collector lease, which recording counts as it writes it
     /// ([`record`]).
@@ -263,11 +264,14 @@ pub(crate) async fn list(bucket: &impl Bucket, cell: CellId) -> Listed {
 }
 
 /// The digest of a listing of `cell`, `listed`, in the order of their keys ([`Listed::digest`]):
-/// of every object but the collector's own (`<C>gc/`).
+/// of every object but the collector's own (`<C>gc/`) and the read evidence of the cell's versions
+/// (`<C>reads/`, TASK-702.2), which forks' hosts write as often as they open them, and every pass
+/// trims, skipping the cell or not ([`crate::evidence::doomed`]).
 pub(crate) fn digest<'a>(cell: CellId, listed: impl IntoIterator<Item = &'a Meta>) -> [u8; 32] {
-    let own = layout::collectors(cell);
+    let (own, evidence) = (layout::collectors(cell), layout::evidence_of_cell(cell));
     let mut digest = Sha256::new();
-    for meta in listed.into_iter().filter(|meta| !meta.key.starts_with(&own)) {
+    let decided = |meta: &&Meta| !meta.key.starts_with(&own) && !meta.key.starts_with(&evidence);
+    for meta in listed.into_iter().filter(decided) {
         digest_of(&mut digest, meta);
     }
     digest.finalize().into()

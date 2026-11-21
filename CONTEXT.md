@@ -291,6 +291,13 @@ A base whose pages every tenant's forks share, in the default arena.
 **Attached base**:
 A fork of another store attached to a cell, for an Fxfs volume over a read-only base.
 
+**Read evidence**:
+What forks of a version read of it as they opened, each tenant's apart: a **recording** is one fork's, every MiB of the version's extents its guest read in its first 10 s and when it first did, an object written once beside the version (TASK-702.2). The collector deletes it with the version, and past its tenant's newest 8.
+_Avoid_: working set, boot profile (TASK-38's per-host file, which it replaces)
+
+**Prediction**:
+What a version's next fork will read, as its tenant's newest recordings say: every unit any of them read, the earliest read first.
+
 **Head**:
 A cell's one record that changes: what made it, its keys, who writes it, the commit it ends at, and its versions, kept in its head slots. Taking it is taking the cell.
 

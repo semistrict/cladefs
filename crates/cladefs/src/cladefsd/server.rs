@@ -1794,13 +1794,6 @@ impl Connection {
         answer.send(opened.map(drop), reply, Vec::new(), fds);
     }
 
-    /// Opens the store at `path`, authorized, as `how` says: creating it if it doesn't exist, or
-    /// forking it from the version `how` names if it doesn't exist ([`cells::fork_version`]);
-    /// unless another connection has it open; and returns its cell. cladefs: a store followers
-    /// have open, it takes over ([`cells::take_over`]). Its waits, for a connection whose VM
-    /// process is gone to let the store go, and for a restore's version, hold no thread
-    /// (TASK-92.5); its I/O blocks. A version of another tenant's than the connection's forks only
-    /// if it is shared (`EACCES`, TASK-395.7).
     /// cladefs: records in its trace of its guest's reads, if it keeps one (TASK-702.1), a read of
     /// `kind` the guest began at `began`, of `len` bytes at `offset` in `extent`, of `store`.
     fn traced(
@@ -1812,6 +1805,8 @@ impl Connection {
         offset: u64,
         len: u64,
     ) {
+        // cladefs: its store's version's read evidence, if it records it (TASK-702.2).
+        store.guest_read(extent, offset, len, began);
         if let Some(trace) = self.reads.get() {
             // An extent the store can't say the length of, an attached base's, is of 0.
             let extent_len = store.stored_extent(extent).ok().flatten().map_or(0, |(len, _)| len);
@@ -1823,7 +1818,7 @@ impl Connection {
     /// `mappings`, begun at `began` and made: each of a sealed extent's bytes, as the guest maps a
     /// file's range it touches, whose pages a warm host installs without a fault.
     fn traced_maps(&self, began: std::time::Instant, store: &OpenCell, mappings: &[WindowMapping]) {
-        if self.reads.get().is_none() {
+        if self.reads.get().is_none() && !store.records_reads() {
             return;
         }
         for mapping in mappings {
@@ -1843,12 +1838,11 @@ impl Connection {
         offset: u64,
         access: crate::Access,
     ) {
-        if self.reads.get().is_none() {
+        let Some(store) = self.store() else { return };
+        if self.reads.get().is_none() && !store.records_reads() {
             return;
         }
-        let (Some(store), Some((extent, at))) = (self.store(), window.extent_at(offset)) else {
-            return;
-        };
+        let Some((extent, at)) = window.extent_at(offset) else { return };
         let kind = match access {
             crate::Access::Read => Kind::Fault,
             crate::Access::Write => Kind::Store,
@@ -1856,6 +1850,13 @@ impl Connection {
         self.traced(kind, began, store, extent, at, crate::pages::page_size());
     }
 
+    /// Opens the store at `path`, authorized, as `how` says: creating it if it doesn't exist, or
+    /// forking it from the version `how` names if it doesn't exist ([`cells::fork_version`]);
+    /// unless another connection has it open; and returns its cell. cladefs: a store followers
+    /// have open, it takes over ([`cells::take_over`]). Its waits, for a connection whose VM
+    /// process is gone to let the store go, and for a restore's version, hold no thread
+    /// (TASK-92.5); its I/O blocks. A version of another tenant's than the connection's forks only
+    /// if it is shared (`EACCES`, TASK-395.7).
     async fn open(&self, path: &Path, how: codec::Opening) -> Result<u64, Errno> {
         let opening = self.opening()?;
         let hold = cells::hold_to_write(&store_key(path), self.this.clone()).await?;

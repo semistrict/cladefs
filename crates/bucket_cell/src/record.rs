@@ -129,9 +129,9 @@ mod tests {
         // number, their cells' IDs unique in them alone (TASK-633.9); and 20's, whose heads say
         // nothing of replication (TASK-537.3.1); and 21's, whose versions mirrored in other
         // buckets have no pins nor markers there (TASK-633.8); and 22's, whose heads are one
-        // object (TASK-691).
-        assert_eq!(FORMAT, 23);
-        for format in [1u32, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22] {
+        // object (TASK-691); and 23's, whose versions have no read evidence (TASK-702.2).
+        assert_eq!(FORMAT, 24);
+        for format in [1u32, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23] {
             let mut older = bytes.clone();
             older[..4].copy_from_slice(&format.to_le_bytes());
             assert_eq!(

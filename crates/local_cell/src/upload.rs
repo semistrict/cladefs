@@ -529,7 +529,7 @@ pub async fn open_ephemeral<D: Dir>(
     bucket: Arc<ObjectBucket>,
     runtime: &Runtime,
     (cache, held): (Option<Arc<Cache>>, Option<Arc<HeldParts>>),
-) -> Result<(Arc<LocalCell<D>>, RingHold), Failure> {
+) -> Result<(Arc<LocalCell<D>>, RingHold, Forked), Failure> {
     let checkpoint = recovering.local_checkpoint()?;
     let (parent, cell) = (checkpoint.parent(), recovering.cell());
     let EphemeralKeys { owner, kek, deks, inherited } =
@@ -545,9 +545,18 @@ pub async fn open_ephemeral<D: Dir>(
     let recovered = recovering_parent.await?;
     let state = recovered.layer.unwrap_or_else(|| Arc::new(recovered.state));
     let holding = runtime.keys.ring.hold(ring.clone());
+    let forked = Forked { origin, ring: ring.clone() };
     let opening = crate::EphemeralOpening { parent: state, keys: ring, cache, held };
     let store = blocking(|| recovering.open_ephemeral(store_options, opening))?;
-    Ok((Arc::new(store), holding))
+    Ok((Arc::new(store), holding, forked))
+}
+
+/// cladefs: a store of a fork of a version, as its read evidence needs it (TASK-702.2): the
+/// version, by its origin, and the store's keys, which hold the version's cell's DEKs, inherited.
+#[derive(Clone, Debug)]
+pub struct Forked {
+    pub origin: Origin,
+    pub ring: Arc<Ring>,
 }
 
 /// cladefs: what says an uploader stopped (TASK-685.3): awaited by [`Uploader::close`], waited for,
@@ -1130,6 +1139,14 @@ impl<D: Dir> Uploader<D> {
     /// forks' records.
     pub fn at_version_origin(&self) -> Option<Origin> {
         self.shared.at_version.get().map(|at| at.origin)
+    }
+
+    /// cladefs: of the store of a fork of a version, once its writer took the cell, the version
+    /// and its keys ([`Forked`], TASK-702.2); none of a store of another cell, or at a version.
+    pub fn forked_from(&self) -> Option<Forked> {
+        let writer = self.shared.writer()?;
+        let origin = writer.taken().head.origin()?;
+        Some(Forked { origin, ring: writer.keys().clone() })
     }
 
     /// Whether its store is at a version, which nothing writes (TASK-476).

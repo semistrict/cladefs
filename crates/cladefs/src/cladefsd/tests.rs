@@ -3963,6 +3963,50 @@ fn a_vms_reads_are_traced() {
     );
 }
 
+/// TASK-702.2: a VM restoring a version records what its guest reads of the version, by `MAP` and
+/// by `READ` alike, as the version's read evidence of its tenant's, written as its store closes,
+/// before another connection opens it again.
+#[test]
+fn a_restored_vms_reads_are_its_versions_evidence() {
+    host();
+    let ps = page_size() as usize;
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let store = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let extent = |sequence| ExtentId { cell: store.cell(), sequence };
+    for sequence in [1, 2] {
+        write(&store, extent(sequence), 0, &pattern(sequence as u8, ps)).unwrap();
+    }
+    store.commit(None).unwrap();
+    let version = store.make_version().unwrap();
+
+    let path = dir.path().join("restored");
+    let restored = CellClient::connect_forked(&socket, &path, version, 0).unwrap();
+    let memory = memory(2);
+    // SAFETY: The memory is the test's, and outlives the store.
+    unsafe { restored.create_dax_window_in_host_memory(memory, 2 * ps as u64, None, 1) }.unwrap();
+    restored.map(extent(1), 0, ps as u64, 0).unwrap();
+    assert_eq!(read(&restored, extent(2), 0, 512), Ok(pattern(2, 512)));
+    let theirs = super::cells::table().writer(&super::cells::store_key(&path)).unwrap();
+    let forked = theirs.store().unwrap().forked_from().unwrap();
+    let tenant = theirs.store().unwrap().cell().tenant;
+    drop(theirs);
+    drop(restored);
+    // Opened again once the restore's connection let it go, closed.
+    let again = CellClient::connect(&socket, &path, 1 << 24).unwrap();
+
+    let of = bucket_cell::evidence::Of { origin: forked.origin, tenant };
+    let bucket = super::cells::daemon_bucket().unwrap();
+    let keys = forked.ring.of(of.cell().id);
+    let read = control(bucket_cell::evidence::read(&*bucket, of, &keys)).unwrap();
+    let units: Vec<(ExtentId, u64)> =
+        read.recordings.concat().iter().map(|unit| (unit.extent, unit.mib)).collect();
+    assert_eq!((units, read.refused), (vec![(extent(1), 0), (extent(2), 0)], 0));
+    drop((again, store));
+}
+
 /// TASK-79.17: a store the daemon opens to work on, as no VM process has it open, boots no guest:
 /// the boot profile of the base it is a fork of is not read into the extent cache, as its pages
 /// would be the default arena's, which every VM process holds, a tenant's base's too. Here the

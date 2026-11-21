@@ -74,8 +74,10 @@ pub struct Child {
 /// head is in its bucket's count of objects, its slots, each written in turn ([`head`],
 /// [`Head::swaps`], TASK-691), as GCS takes about one write a second of an object, and a bucket's
 /// identity holds its settings ([`crate::identity::Settings`]); nothing reads 22's, whose head was
-/// one object.
-pub const FORMAT: u32 = 23;
+/// one object. 24: a version's read evidence, what forks of it read of it as they opened, each
+/// tenant's under the version's cell's prefix ([`evidence`], [`crate::evidence`], TASK-702.2);
+/// nothing reads 23's.
+pub const FORMAT: u32 = 24;
 
 /// cladefs: the most slots a cell's head is kept in ([`crate::identity::Settings::head_slots`],
 /// TASK-691): keys past it are no head's.
@@ -103,6 +105,8 @@ const PIN: &str = "mirror";
 /// ([`ephemeral_reference`], doc-25); and, at the bucket's root, the prefix of the index of those
 /// references by incarnation ([`ephemeral_index`]).
 const EPHEMERAL: &str = "ephemeral";
+/// cladefs: under a cell's prefix, the read evidence of its versions ([`evidence`], TASK-702.2).
+const READS: &str = "reads/";
 /// cladefs: the prefix of the blocks of object IDs taken ([`objectid_block`]).
 const OBJECTIDS: &str = "objectid/";
 /// cladefs: the bucket's identity object: its format and its number, written once by its formatting
@@ -395,6 +399,25 @@ pub fn mirror(parent: CellId, at: u64) -> String {
     format!("{}{MIRRORS}{}", parent.prefix(), Padded(at))
 }
 
+/// cladefs: the prefix of the read evidence of `cell`'s versions ([`evidence`]).
+pub fn evidence_of_cell(cell: CellId) -> String {
+    format!("{}{READS}", cell.prefix())
+}
+
+/// cladefs: the prefix of the read evidence of `parent`'s version at the end of its segment `at`
+/// that `tenant`'s forks of it wrote ([`evidence`]): what those forks read of it.
+pub fn evidence_of(parent: CellId, at: u64, tenant: u64) -> String {
+    format!("{}{}/{}/", evidence_of_cell(parent), Padded(at), Padded(tenant))
+}
+
+/// cladefs: a recording of what a fork of `parent`'s version at the end of its segment `at`, a
+/// cell of `tenant`'s, read of it as it opened ([`crate::evidence`], TASK-702.2): created once, by
+/// the fork's host, at an ID it drew, under the version's cell, so that the pass over that cell
+/// deletes it with the version, or once newer evidence of the tenant's replaces it.
+pub fn evidence(parent: CellId, at: u64, tenant: u64, id: u64) -> String {
+    format!("{}{}", evidence_of(parent, at, tenant), Padded(id))
+}
+
 /// cladefs: the prefix of the moves of `cell`'s objects ([`moves`]).
 pub fn moves_prefix(cell: CellId) -> String {
     format!("{}{MOVES}", cell.prefix())
@@ -552,6 +575,14 @@ pub enum Kind<'a> {
     EphemeralIndex {
         incarnation: u64,
     },
+    /// cladefs: a recording of what a fork of `parent`'s version at `at`, of `tenant`'s, read of
+    /// it ([`evidence`], TASK-702.2): no pass's candidate, nor in its listing's digest; the pass
+    /// over `parent` trims it ([`crate::evidence::doomed`]).
+    Evidence {
+        parent: CellId,
+        at: u64,
+        tenant: u64,
+    },
     Unknown,
 }
 
@@ -578,6 +609,7 @@ impl Kind<'_> {
             Self::Mirror { .. } => "mirror",
             Self::Ephemeral { .. } => "ephemeral",
             Self::EphemeralIndex { .. } => "ephemeral-index",
+            Self::Evidence { .. } => "evidence",
             Self::Unknown => "unknown",
         }
     }
@@ -597,6 +629,7 @@ pub fn owner(key: &str) -> Option<CellId> {
         | Kind::Pin { parent: cell, .. }
         | Kind::Hold { parent: cell, .. }
         | Kind::Ephemeral { parent: cell, .. }
+        | Kind::Evidence { parent: cell, .. }
         | Kind::Mirror { cell, .. } => Some(cell),
         Kind::CollectorLease { cell } | Kind::Marks { cell, .. } => Some(cell),
         Kind::Moves { cell, .. } => Some(cell),
@@ -681,6 +714,11 @@ pub fn kind(key: &str) -> Kind<'_> {
         if let Some(at) = rest.strip_prefix(MIRRORS) {
             return Some(Kind::Mirror { cell, at: number(at)? });
         }
+        if let Some(rest) = rest.strip_prefix(READS) {
+            let [at, tenant, id] = rest.split('/').collect::<Vec<_>>()[..] else { return None };
+            number(id)?;
+            return Some(Kind::Evidence { parent: cell, at: number(at)?, tenant: number(tenant)? });
+        }
         if let Some(rest) = rest.strip_prefix(RETIRED) {
             let (parent, at, child) = fork(rest)?;
             return Some(Kind::Retired { parent, at, child });
@@ -746,7 +784,7 @@ pub const DEFAULT_TENANT: u64 = 0;
 
 /// Where a cell was forked from: ordered by its parent, then its segment, so that the forks made
 /// at one segment sort together.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Origin {
     pub parent: CellId,
     pub at: u64,
@@ -1395,6 +1433,18 @@ mod tests {
         assert_eq!(kind(&format!("{}mirrors/x", cell.prefix())), Kind::Unknown);
         assert_eq!(kind(&format!("{}2", origin(cell, 7))), Kind::Unknown);
         assert_eq!(kind(&origin(cell, 7)), Kind::Unknown);
+        // cladefs: a version's read evidence, each tenant's under its own prefix (TASK-702.2).
+        let evidence = evidence(cell, 7, 3, 0x2a);
+        assert_eq!(
+            evidence,
+            "tenants/000000000000a/cells/000000000000c/reads/0000000000007/0000000000003/000000000001a"
+        );
+        assert!(evidence.starts_with(&evidence_of(cell, 7, 3)));
+        assert!(evidence_of(cell, 7, 3).starts_with(&evidence_of_cell(cell)));
+        assert_eq!(kind(&evidence), Kind::Evidence { parent: cell, at: 7, tenant: 3 });
+        assert_eq!(owner(&evidence), Some(cell));
+        assert_eq!(kind(&evidence_of(cell, 7, 3)), Kind::Unknown);
+        assert_eq!(kind(&format!("{}x", evidence_of(cell, 7, 3))), Kind::Unknown);
         // The layout before cells, and keys of cells' prefixes malformed, are no objects of a
         // cell; nor the collector's lease, marks and moves at the bucket's root, as format 8 had
         // them (TASK-395.2).

@@ -61,6 +61,7 @@ pub mod checkpoint;
 pub mod client;
 pub mod collector;
 pub mod direct;
+pub mod evidence;
 pub mod faults;
 pub mod fetch;
 pub mod head;
@@ -186,6 +187,13 @@ pub enum Error {
     /// tenant's ([`layout::DEFAULT_TENANT`]).
     #[error("cell {0}'s version is another tenant's, not shared")]
     NotShared(layout::CellId),
+    /// cladefs: a version's read evidence of another format than this one's, newer or older
+    /// ([`evidence::FORMAT`], TASK-702.2): its reader skips it.
+    #[error(
+        "read evidence of format {0}, which this reader, of format {ours}, doesn't read",
+        ours = evidence::FORMAT
+    )]
+    EvidenceFormat(u32),
     /// cladefs: a pass of the collector over a cell left it to another pass, as the cell's lease
     /// said ([`passed::CollectorLease`], TASK-395.5): nothing failed.
     #[error("the cell is left to another pass of the collector, which {0}")]

@@ -513,6 +513,9 @@ impl Collector {
                         | Kind::Extent { .. }
                         | Kind::Checkpoint { .. }
                         | Kind::Moves { .. }
+                        // cladefs: a fork's read evidence written here, routed nowhere else
+                        // (TASK-702.2).
+                        | Kind::Evidence { .. }
                 )
             })
             .collect();
@@ -588,8 +591,10 @@ impl Collector {
     /// ([`Error::Left`]); or, its listing of the digest the last pass in full recorded, of the same
     /// options, with nothing that pass deferred due, nor its tenant's KEK to be had now if it left
     /// objects encrypted uncompacted, the pass that skips it, which writes nothing and deletes
-    /// nothing: no other pass need be fenced, and it costs the lease's read and the listing. None:
-    /// the pass goes on, taking the lease, with the look's listing and the lease's epoch it read.
+    /// nothing but the read evidence past each tenant's newest of each version, which nothing
+    /// relies on ([`trim_evidence`], TASK-702.2): no other pass need be fenced, and it costs the
+    /// lease's read and the listing. None: the pass goes on, taking the lease, with the look's
+    /// listing and the lease's epoch it read.
     async fn look(
         &self,
         bucket: &impl Bucket,
@@ -616,7 +621,8 @@ impl Collector {
             return Ok(Looked::Changed(listed, epoch));
         }
         let locked = usize::from(uncompacted > 0);
-        Ok(Looked::Unchanged(Report { skipped: 1, locked, uncompacted, ..Report::default() }))
+        let skipped = Report { skipped: 1, locked, uncompacted, ..Report::default() };
+        Ok(Looked::Unchanged(trim_evidence(bucket, cell, &listed, skipped).await))
     }
 
     /// cladefs: what a pass over `cell`, holding its lease as `taken` says, its listing `listed`,
@@ -798,6 +804,7 @@ impl Collector {
         let uncompacted = passed.uncompacted as usize;
         let locked = usize::from(uncompacted > 0);
         let skipped = Report { skipped: 1, locked, uncompacted, ..Report::default() };
+        let skipped = trim_evidence(bucket, cell, listed, skipped).await;
         let now = bucket.now();
         let (due, deferred): (Vec<Deferred>, Vec<Deferred>) =
             passed.deferred.iter().cloned().partition(|deferred| deferred.due <= now);
@@ -809,7 +816,7 @@ impl Collector {
         }
         let keys: Vec<&str> = due.iter().map(|due| due.key.as_str()).collect();
         bucket::delete_all(bucket, &keys).await;
-        let mut report = Report { deleted: keys.len(), ..skipped };
+        let mut report = Report { deleted: skipped.deleted + keys.len(), ..skipped };
         let mut usage = passed.usage.clone();
         for key in keys.iter().copied() {
             if let Some(meta) = listed.objects.get(key) {
@@ -1161,6 +1168,30 @@ async fn first_listing(bucket: &impl Bucket, cell: CellId) -> Option<Listed> {
     match rules().candidates_first {
         true => Some(passed::list(bucket, cell).await),
         false => None,
+    }
+}
+
+/// cladefs: `report`, of a pass over `cell` that skips it, its listing `listed`, with the read
+/// evidence it deletes counted: all but each tenant's newest of each version
+/// ([`crate::evidence::doomed`], TASK-702.2), which a cell's listing leaves out of its digest, so that
+/// forks' hosts writing it as they open the cell's versions leave it skipped. It needs no lease,
+/// nothing relying on evidence.
+async fn trim_evidence(
+    bucket: &impl Bucket,
+    cell: CellId,
+    listed: &Listed,
+    report: Report,
+) -> Report {
+    let evidence = layout::evidence_of_cell(cell);
+    let listed = bucket::under(&listed.objects, &evidence);
+    let doomed = crate::evidence::doomed(cell, &listed, None, bucket.now());
+    let keys: Vec<&str> = doomed.iter().map(|meta| meta.key.as_str()).collect();
+    bucket::delete_all(bucket, &keys).await;
+    let deleted_bytes = doomed.iter().map(|meta| meta.size).sum::<u64>();
+    Report {
+        deleted: report.deleted + keys.len(),
+        deleted_bytes: report.deleted_bytes + deleted_bytes,
+        ..report
     }
 }
 
@@ -2125,6 +2156,16 @@ impl Pass {
             moves.last().map(|moves| due(&self.objects[*moves]))
         };
         let goes = |goes: bool| if goes { Fate::Goes } else { Fate::Stays };
+        // cladefs: the read evidence that goes (TASK-702.2): of versions the head names no more, all
+        // of a dead cell's, and all but each tenant's newest of each.
+        let named: BTreeSet<u64> = (self.records.get(&self.cell).filter(|head| !head.deleted()))
+            .map(|head| head.versions.iter().map(|version| version.at).collect())
+            .unwrap_or_default();
+        let evidence = bucket::under(&self.objects, &layout::evidence_of_cell(self.cell));
+        let evidence: BTreeSet<String> =
+            (crate::evidence::doomed(self.cell, &evidence, Some(&named), now).into_iter())
+                .map(|meta| meta.key.clone())
+                .collect();
         let (mut doomed, mut deferred) = (Vec::new(), Vec::new());
         for (key, meta) in &self.objects {
             let named = self.named.contains_key(key);
@@ -2186,6 +2227,7 @@ impl Pass {
                 | Kind::Buckets
                 | Kind::Kek { .. }
                 | Kind::Unknown => Fate::Stays,
+                Kind::Evidence { .. } => goes(evidence.contains(key)),
             };
             match fate {
                 Fate::Stays => {}
@@ -4345,6 +4387,63 @@ mod tests {
         let location = state.extents.get(&extent).cloned();
         let location = location.ok_or_else(|| Error::Lost(format!("{extent:?} of {cell}")))?;
         crate::testing::read(&reader, extent, &location).await
+    }
+
+    /// TASK-702.2: a version's read evidence is kept to each tenant's newest
+    /// [`crate::evidence::KEPT`], by every pass, one that skips the cell too, its writes changing
+    /// no listing's digest; and goes whole with the version.
+    #[test]
+    fn versions_evidence_goes_past_each_tenants_newest_and_with_them() {
+        block_on(async {
+            let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+            let cell = test_cell(1);
+            lifecycle::create(&*bucket, cell, 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), cell, 10, 0).await.unwrap();
+            let cut = layout::NewVersion { id: 0xa, keep_last: None };
+            let cutting = SegmentBuilder::from(Commit { tag: 1, ..Commit::default() });
+            let at = writer
+                .add_segment(
+                    cutting.cut(cut, &mut writer.chain()).frame(writer.keys().encrypting()),
+                )
+                .unwrap();
+            writer.upload(at).await.unwrap();
+            writer.acknowledge().await.unwrap();
+            let of = |tenant| crate::evidence::Of { origin: Origin { parent: cell, at }, tenant };
+            let write = |tenant, count| {
+                let (bucket, writer) = (bucket.clone(), &writer);
+                async move {
+                    for _ in 0..count {
+                        let encrypting = writer.keys().encrypting_as(cell.id).unwrap();
+                        crate::evidence::write(&*bucket, of(tenant), &[], encrypting)
+                            .await
+                            .unwrap();
+                    }
+                }
+            };
+            let count = |tenant| {
+                let bucket = bucket.clone();
+                async move { crate::bucket::list(&*bucket, &of(tenant).prefix()).await.len() }
+            };
+            let kept = crate::evidence::KEPT;
+            let mut collector = Collector::new(Options { compact_below: 0.0, grace: 0 });
+            let mut sweep = 0;
+            let mut collect = async || {
+                sweep += 1;
+                collector.collect(&*bucket, sweep).await.unwrap()
+            };
+            collect().await;
+            assert_eq!(collect().await.skipped, 1);
+            write(5, kept + 2).await;
+            write(6, 1).await;
+            let report = collect().await;
+            assert_eq!((report.skipped, report.deleted), (1, 2), "{report:?}");
+            assert_eq!((count(5).await, count(6).await), (kept, 1));
+            assert_eq!(collect().await.skipped, 1);
+            writer.drop_versions(&BTreeSet::from([0xa])).await.unwrap();
+            let report = collect().await;
+            assert_eq!((report.skipped, report.deleted), (0, kept + 1), "{report:?}");
+            assert_eq!((count(5).await, count(6).await), (0, 0));
+        });
     }
 
     /// TASK-476: a pass over a cell of many versions reads each segment's footer twice at most,

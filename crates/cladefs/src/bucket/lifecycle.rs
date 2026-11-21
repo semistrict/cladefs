@@ -677,6 +677,10 @@ fn bucket_lifecycle_by_phase() {
 /// open, reading its head twice, 22 in 4; a fork, its child's head made whole a round later and the
 /// heads it reads read whole, 33 in 7. The child's open, its head taken from what the fork left, 1
 /// in 1 still.
+///
+/// cladefs: since TASK-702.2 the host's first open of a fork of the version reads its tenant's read
+/// evidence of it behind the open, a listing of none here, waited for: 2 in 2; the second's, the
+/// evidence read once for both, 1 in 1.
 #[test]
 fn restores_ask_the_bucket_what_the_protocol_needs() {
     let (objects, mut run) = recorded(memory(), 64, Duration::from_millis(5));
@@ -689,7 +693,11 @@ fn restores_ask_the_bucket_what_the_protocol_needs() {
     run.phase("cold fork", || {
         local_cell::upload::wait_on(taken.fork(at("cold"), DEFAULT_TENANT)).unwrap()
     });
-    let cold = run.phase("cold fork-open", || open(&at("cold")));
+    let cold = run.phase("cold fork-open", || {
+        let cold = open(&at("cold"));
+        futures::executor::block_on(cold.predicted().unwrap()).unwrap();
+        cold
+    });
     run.phase("warm fork", || {
         local_cell::upload::wait_on(taken.fork(at("vm"), DEFAULT_TENANT)).unwrap()
     });
@@ -702,7 +710,7 @@ fn restores_ask_the_bucket_what_the_protocol_needs() {
         [
             ("cold copy-open", (22, 4)),
             ("cold fork", (33, 7)),
-            ("cold fork-open", (1, 1)),
+            ("cold fork-open", (2, 2)),
             ("warm fork", (33, 7)),
             ("warm fork-open", (1, 1)),
         ]
