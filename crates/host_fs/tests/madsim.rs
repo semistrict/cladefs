@@ -125,3 +125,71 @@ fn what_a_crash_keeps_is_the_seeds() {
     assert!(runs.contains(&true) && runs.contains(&false), "every seed kept the same: {runs:?}");
     assert_eq!(runs, (1..=16).map(kept).collect::<Vec<_>>());
 }
+
+/// Board 5654: calls changing a host's disk fail as the faults say, before they change anything,
+/// with EIO, or, those adding data, ENOSPC; calls that read never; and once healed, none.
+#[test]
+fn calls_changing_a_disk_fail_as_its_faults_say() {
+    let runtime = madsim::runtime::Runtime::new();
+    runtime.add_simulator::<node_local::Plugin>();
+    let handle = runtime.create_node().name("host").ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+    let node = handle.build();
+    runtime
+        .block_on(node.spawn(async {
+            let errno = |result: std::io::Result<()>| result.unwrap_err().raw_os_error().unwrap();
+            host_fs::create_dir_all("/disk/d").unwrap();
+            let file = host_fs::File::create("/disk/d/f").unwrap();
+            file.write_all_at(b"kept", 0).unwrap();
+
+            host_fs::faults::set(host_fs::faults::Odds { fail: 1.0 });
+            assert!([libc::EIO, libc::ENOSPC].contains(&errno(file.write_all_at(b"gone", 0))));
+            assert_eq!(errno(file.sync_all()), libc::EIO);
+            assert_eq!(errno(host_fs::rename("/disk/d/f", "/disk/d/g")), libc::EIO);
+            assert_eq!(errno(host_fs::remove_file("/disk/d/f")), libc::EIO);
+            assert!([libc::EIO, libc::ENOSPC].contains(&errno(host_fs::create_dir("/disk/e"))));
+            let created = host_fs::File::create_new("/disk/d/new").map(drop);
+            assert!([libc::EIO, libc::ENOSPC].contains(&errno(created)));
+            // Nothing changed; and what reads reads.
+            assert_eq!(host_fs::read("/disk/d/f").unwrap(), b"kept");
+            let names: Vec<_> = host_fs::read_dir("/disk/d")
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert_eq!(names, ["f"]);
+
+            host_fs::faults::set(host_fs::faults::Odds::NONE);
+            file.write_all_at(b"made", 0).unwrap();
+            file.sync_all().unwrap();
+            host_fs::rename("/disk/d/f", "/disk/d/g").unwrap();
+            assert_eq!(host_fs::read("/disk/d/g").unwrap(), b"made");
+        }))
+        .unwrap();
+}
+
+/// Board 5654: which calls fail is the seed's: the same twice, other seeds otherwise.
+#[test]
+fn which_calls_fail_is_the_seeds() {
+    let failed = |seed: u64| {
+        std::thread::spawn(move || {
+            let runtime = madsim::runtime::Runtime::with_seed_and_config(seed, Default::default());
+            runtime.add_simulator::<node_local::Plugin>();
+            let node =
+                runtime.create_node().name("host").ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+            let node = node.build();
+            runtime
+                .block_on(node.spawn(async {
+                    host_fs::create_dir_all("/disk").unwrap();
+                    let file = host_fs::File::create("/disk/f").unwrap();
+                    host_fs::faults::set(host_fs::faults::Odds { fail: 0.5 });
+                    (0..32u64).map(|at| file.write_all_at(b"x", at).is_err()).collect::<Vec<_>>()
+                }))
+                .unwrap()
+        })
+        .join()
+        .unwrap()
+    };
+    let (one, again, other) = (failed(1), failed(1), failed(2));
+    assert_eq!(one, again);
+    assert!(one.contains(&true) && one.contains(&false), "{one:?}");
+    assert_ne!(one, other);
+}

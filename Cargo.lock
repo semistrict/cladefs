@@ -2493,6 +2493,7 @@ name = "host_fs"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "log",
  "madsim",
  "node_local",
  "tempfile",
