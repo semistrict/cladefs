@@ -102,7 +102,10 @@ pub fn format_bucket(url: &str, details: Details, asked: Asked) -> Result<Identi
 /// root's registry, which then goes to every bucket's root. Its identity: refused if it is a
 /// bucket already (`EEXIST`), or the root is another bucket (`EINVAL`), or no number is left
 /// (`ENOSPC`), or it is a memory bucket, its process's alone (`EINVAL`). cladefs: its settings the
-/// root's, but those `asked` (TASK-691); refused out of range (`EINVAL`).
+/// root's, but those `asked` (TASK-691); refused out of range (`EINVAL`). cladefs: each bucket
+/// opened with its own number's options, its credentials (`CLADEFSD_BUCKET_<N>_*`), the new one
+/// with the number it is to get (board 5550); `EAGAIN` if another addition took that number
+/// first, added under the next, which an addition again finishes.
 pub fn add_bucket(
     root_url: &str,
     url: &str,
@@ -116,13 +119,27 @@ pub fn add_bucket(
         let refused = anyhow::anyhow!("{url}: a memory bucket is one process's, none to add");
         return Err(crate::Error::new(refused.context(Errno::EINVAL)));
     }
-    let open = |url: &str| crate::host_cell::bucket(url).map_err(crate::Error::new);
-    let (root, new) = (open(root_url)?, open(url)?);
+    use bucket_cell::identity::{self, ROOT};
+    let open =
+        |url: &str, number| crate::host_cell::bucket_of(url, number).map_err(crate::Error::new);
+    let root = open(root_url, ROOT)?;
+    let found = on_buckets(identity::registry(&*root))?;
+    let number = identity::number_for(found.as_ref(), url).map_err(Failure::from)?;
+    let new = open(url, number)?;
     let (identity, registry) =
-        on_buckets(bucket_cell::identity::add(&*root, &root_details, &*new, details, asked))?;
+        on_buckets(identity::add(&*root, &root_details, &*new, details, asked))?;
+    if identity.number != number {
+        let raced = anyhow::anyhow!(
+            "{url}: added as bucket {}, another addition taking {number} first: give it its \
+             CLADEFSD_BUCKET_{}_* and add it again, which finishes it",
+            identity.number,
+            identity.number
+        );
+        return Err(crate::Error::new(raced.context(Errno::EAGAIN)));
+    }
     for entry in &registry.buckets {
         if let Some(url) = &entry.details.url {
-            on_buckets(bucket_cell::identity::spread(&registry, &*open(url)?))?;
+            on_buckets(identity::spread(&registry, &*open(url, entry.number)?))?;
         }
     }
     Ok(identity)
@@ -3641,6 +3658,50 @@ mod tests {
         let pieces: Vec<&[u8]> = written[..2].iter().map(|data| &data[..64]).collect();
         let held = crate::testing::files_holding(dir.path(), &pieces);
         assert_eq!(held, Vec::<String>::new(), "files holding a cell's data");
+    }
+
+    /// board 5550: an addition of a bucket opens each bucket with its own number's options: the
+    /// environment's own, an endpoint refusing every request (`403`, as credentials no bucket
+    /// takes), of no use to any; each bucket's, its number's (`CLADEFSD_BUCKET_<N>_AWS_ENDPOINT`),
+    /// the server holding it. Buckets 2 and 3 added, numbered so, each bucket's registry the
+    /// root's, of all three.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn additions_open_each_bucket_with_its_own_numbers_options() {
+        use bucket_cell::identity::Details;
+        use bucket_cell::s3_server::{BUCKET, S3Server};
+        let (serving, refusing) = (S3Server::start(None), S3Server::start(None));
+        refusing.answering(Some(403));
+        let endpoint = |server: &S3Server| {
+            let options = server.options().into_iter();
+            options.into_iter().find(|(name, _)| name == "aws_endpoint").unwrap().1
+        };
+        let mut vars: Vec<(String, String)> = (refusing.options().into_iter())
+            .map(|(name, value)| (name.to_ascii_uppercase(), value))
+            .collect();
+        let numbered =
+            |number| (format!("CLADEFSD_BUCKET_{number}_AWS_ENDPOINT"), endpoint(&serving));
+        vars.extend((1..=3).map(numbered));
+        for (name, value) in vars {
+            // SAFETY: nextest runs each test in a process of its own, whose other threads don't
+            // read the environment yet.
+            unsafe { std::env::set_var(name, value) };
+        }
+        let url = |name: &str| format!("s3://{BUCKET}/{name}");
+        let add = |new: &str| {
+            let added =
+                super::add_bucket(&url("one"), &url(new), Details::default(), Default::default());
+            added.unwrap().number
+        };
+        assert_eq!((add("two"), add("three")), (2, 3));
+        let registry = |name: &str| {
+            let bucket = ObjectBucket::new(serving.objects(), name);
+            let read = local_cell::upload::block_on(bucket_cell::identity::registry(&bucket));
+            read.unwrap().unwrap().unwrap()
+        };
+        let root = registry("one");
+        let numbers: Vec<u16> = root.buckets.iter().map(|entry| entry.number).collect();
+        assert_eq!(numbers, [1, 2, 3]);
+        assert_eq!((registry("two"), registry("three")), (root.clone(), root));
     }
 
     /// TASK-411.27: a host given a master key (`CLADEFS_MASTER_KEY`) and no `CLADEFS_KMS` keeps its

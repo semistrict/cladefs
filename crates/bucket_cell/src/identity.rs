@@ -175,6 +175,33 @@ impl Registry {
     pub fn bucket(&self, number: u16) -> Option<&Entry> {
         self.buckets.iter().find(|entry| entry.number == number)
     }
+
+    /// The number an addition gives the next bucket: one past the last's, if one is left.
+    fn next(&self) -> Result<u16, Error> {
+        let last = self.buckets.iter().map(|entry| entry.number).max().unwrap_or(ROOT);
+        last.checked_add(1).filter(|number| given(*number)).ok_or(Error::NoNumbers)
+    }
+
+    /// The entry an addition of the bucket at `url` made, if one did: by its URL, never the root's.
+    fn added(&self, url: Option<&str>) -> Option<&Entry> {
+        let url = url?;
+        let added =
+            |entry: &&Entry| entry.number != ROOT && entry.details.url.as_deref() == Some(url);
+        self.buckets.iter().find(added)
+    }
+}
+
+/// cladefs: the number [`add`] gives the bucket at `url`, the root's registry `registry`, if it
+/// has one, as it is now: the number an addition of it gave it, if one did, else the next one
+/// (board 5550). Its caller opens the bucket with that number's options, its own credentials,
+/// before [`add`] reads it; another addition coming first takes that number, and [`add`] gives it
+/// the next one.
+pub fn number_for(registry: Option<&Registry>, url: &str) -> Result<u16, Error> {
+    let Some(registry) = registry else { return Ok(ROOT + 1) };
+    match registry.added(Some(url)) {
+        Some(entry) => Ok(entry.number),
+        None => registry.next(),
+    }
 }
 
 /// Decodes an identity or a registry, refusing another format than this one's.
@@ -282,20 +309,18 @@ pub async fn add(
             .await?
             .ok_or_else(|| Error::Lost(layout::BUCKETS.to_owned()))?;
         // Added before: by this identity, or by an addition of its URL that stopped short of it.
-        let added = (registry.buckets.iter()).find(|entry| match found {
-            Some(found) => (entry.number, entry.id) == (found.number, found.id),
-            None => {
-                entry.number != ROOT && details.url.is_some() && entry.details.url == details.url
-            }
-        });
+        let added = match found {
+            Some(found) => (registry.buckets.iter())
+                .find(|entry| (entry.number, entry.id) == (found.number, found.id)),
+            None => registry.added(details.url.as_deref()),
+        };
         if let Some(entry) = added {
             break (entry.clone(), registry);
         }
         if let Some(found) = found {
             return Err(Error::Formatted(found.number));
         }
-        let last = registry.buckets.iter().map(|entry| entry.number).max().unwrap_or(ROOT);
-        let number = last.checked_add(1).filter(|number| given(*number)).ok_or(Error::NoNumbers)?;
+        let number = registry.next()?;
         let entry = Entry { number, id: rand::random(), details: details.clone(), settings };
         let mut changed = registry.clone();
         changed.version += 1;

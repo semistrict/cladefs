@@ -175,6 +175,12 @@ CLADEFSD_BUCKET_2_AWS_REGION=eu-west-1                # bucket 2's
 CLADEFSD_BUCKET_3_GOOGLE_SERVICE_ACCOUNT=/etc/cladefs/gcs-3.json
 ```
 
+`add-bucket` opens each bucket so too, the root as bucket 1, the one added as the number it is to
+get, so give its variables before adding it. If another addition takes that number first, it is
+added under the next and refused (`EAGAIN`): give it that number's variables and add it again,
+which finishes it. A bucket that refuses a request for good, credentials it does not take or a key
+too long, fails it at once (`EACCES`, `EIO`), naming the key, rather than retrying it.
+
 The cells of another bucket are under that bucket's KMS (TASK-633.6): the one its record names
 (`--kms`), else the one its variables name (`CLADEFSD_BUCKET_<N>_CLADEFS_KMS`, or `CLADEFS_KMS`),
 else, given a master key (`CLADEFSD_BUCKET_<N>_CLADEFS_MASTER_KEY`, or `CLADEFS_MASTER_KEY`), the

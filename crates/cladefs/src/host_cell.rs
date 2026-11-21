@@ -135,13 +135,29 @@ node_local::node_local! {
 
 /// The bucket at `url` ([`ObjectBucket::from_url`]): this process's, made if it has none yet.
 pub(crate) fn bucket(url: &str) -> anyhow::Result<Arc<ObjectBucket>> {
+    bucket_opened(url, ObjectBucket::from_url)
+}
+
+/// cladefs: the bucket numbered `number` at `url`, as [`bucket`] has it: opened with that bucket's
+/// own options, its credentials (`CLADEFSD_BUCKET_<number>_*`,
+/// [`bucket_cell::object_bucket::numbered_options`]), unless this process opened it already
+/// (board 5550).
+pub(crate) fn bucket_of(url: &str, number: u16) -> anyhow::Result<Arc<ObjectBucket>> {
+    bucket_opened(url, |url| ObjectBucket::from_url_numbered(url, number))
+}
+
+/// This process's bucket at `url`, `open` opening it if it has none yet.
+fn bucket_opened(
+    url: &str,
+    open: impl FnOnce(&str) -> Result<ObjectBucket, String>,
+) -> anyhow::Result<Arc<ObjectBucket>> {
     let mut buckets = BUCKETS.get().lock().unwrap();
     if let Some(bucket) = buckets.get(url) {
         return Ok(bucket.clone());
     }
     // Its requests of other buckets' cells go there, by the registry of buckets (TASK-633.4).
     let resolve = Arc::new(bucket_cell::object_bucket::Registered::from_env());
-    let bucket = ObjectBucket::from_url(url).map_err(anyhow::Error::msg)?.routed(resolve);
+    let bucket = open(url).map_err(anyhow::Error::msg)?.routed(resolve);
     let bucket = Arc::new(bucket);
     buckets.insert(url.to_owned(), bucket.clone());
     Ok(bucket)
