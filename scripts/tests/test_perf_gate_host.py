@@ -92,7 +92,7 @@ class PerfGateHost(unittest.TestCase):
         self.root = Path(tempfile.mkdtemp())
         scripts = self.root / "scripts"
         scripts.mkdir()
-        for name in ["perf-gate-host.sh", "pgbench-gate.py", "pgbench-steps.py"]:
+        for name in ["perf-gate-host.sh", "pgbench-gate.py", "pgbench-steps.py", "guest_results.py"]:
             shutil.copy2(script.SCRIPTS / name, scripts / name)
         fake = scripts / "test-host.sh"
         fake.write_text(FAKE_TEST_HOST)

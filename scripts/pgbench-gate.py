@@ -87,6 +87,9 @@ import statistics
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from guest_results import case_lines, case_logs  # noqa: E402
+
 # The pgbench cases, by the name the JSON gives them.
 CASES = {
     "fxfs-guest-pgbench": "no-dax",
@@ -232,37 +235,10 @@ def results(lines):
             for line in lines if (match := RESULT.match(line.strip()))}
 
 
-def logs(results_dir, case):
-    """The logs of `case` in `results_dir`, a test-host.sh results directory: each repeat's, in
-    order: its artifacts' (repeat-K/CASE/log.txt), or, of a repeat that passed, whose artifacts
-    aren't kept, its whole log (repeat-K.log), which has its console and its guest's output
-    both."""
-    root = Path(results_dir) / "e2e" / case
-    single = root / case / "log.txt"
-    if single.exists():
-        return [single]
-    repeats = {}
-    for path in root.glob("repeat-*.log"):
-        repeats[int(path.stem.split("-")[1])] = path
-    for path in root.glob(f"repeat-*/{case}/log.txt"):
-        repeats[int(path.parent.parent.name.split("-")[1])] = path
-    return [repeats[at] for at in sorted(repeats)]
-
-
-def said(log):
-    """The lines of a case's `log`, its console, where pgbench says its tps, then of its guest's
-    output beside it (stdout.txt), where the guest says how many runs a VM made."""
-    lines = log.read_text(errors="replace").splitlines()
-    stdout = log.with_name("stdout.txt")
-    if stdout.exists():
-        lines += stdout.read_text(errors="replace").splitlines()
-    return lines
-
-
 def repeats_of(directories, case):
     """The lines of each repeat's log of `case` in the results `directories`, each directory's
     repeats after the last's."""
-    return [said(log) for directory in directories for log in logs(directory, case)]
+    return [case_lines(log) for directory in directories for log in case_logs(directory, case)]
 
 
 def measure(*directories):

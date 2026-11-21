@@ -61,6 +61,33 @@ def repeats_of(results, case):
     return [json.loads(f.read_text()) for _, f in numbered]
 
 
+def case_logs(results_dir, case):
+    """The logs of `case` in `results_dir`, a test-host.sh results directory: each repeat's, in
+    order: its artifacts' (repeat-K/CASE/log.txt), or, of a repeat that passed, whose artifacts
+    aren't kept, its whole log (repeat-K.log), which has its console and its guest's output
+    both. What scripts/pgbench-gate.py and scripts/cells-per-host.py read of a case."""
+    root = Path(results_dir) / "e2e" / case
+    single = root / case / "log.txt"
+    if single.exists():
+        return [single]
+    repeats = {}
+    for path in root.glob("repeat-*.log"):
+        repeats[int(path.stem.split("-")[1])] = path
+    for path in root.glob(f"repeat-*/{case}/log.txt"):
+        repeats[int(path.parent.parent.name.split("-")[1])] = path
+    return [repeats[at] for at in sorted(repeats)]
+
+
+def case_lines(log):
+    """The lines of a case's `log`, its console and its host's standard error, then of its guest's
+    output beside it (stdout.txt)."""
+    lines = log.read_text(errors="replace").splitlines()
+    stdout = log.with_name("stdout.txt")
+    if stdout.exists():
+        lines += stdout.read_text(errors="replace").splitlines()
+    return lines
+
+
 def daemon_bytes(path):
     """What the extent daemon whose stats file is `path` downloaded from its bucket against what it
     read, as its last counts say (`object-store:`'s `down`, `daemon:`'s `fetched-bytes`, page-ins of

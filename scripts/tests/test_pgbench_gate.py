@@ -114,9 +114,9 @@ class PgbenchGate(unittest.TestCase):
         console, stdout = log([1, 2], [3, 4])
         place = self.results({"fxfs-guest-pgbench-dax": (console, stdout)})
         log_txt = place / "e2e" / "fxfs-guest-pgbench-dax" / "fxfs-guest-pgbench-dax" / "log.txt"
-        self.assertEqual(gate.runs(gate.said(log_txt)), [[1.0, 2.0], [3.0, 4.0]])
+        self.assertEqual(gate.runs(gate.case_lines(log_txt)), [[1.0, 2.0], [3.0, 4.0]])
         log_txt.with_name("stdout.txt").unlink()
-        self.assertEqual(gate.runs(gate.said(log_txt)), [[1.0, 2.0, 3.0, 4.0]])
+        self.assertEqual(gate.runs(gate.case_lines(log_txt)), [[1.0, 2.0, 3.0, 4.0]])
 
     def test_each_repeats_runs_are_measured_in_order(self):
         results = self.results({"fxfs-guest-pgbench-dax": [log([1, 2]), log([3, 4])] * 5},
