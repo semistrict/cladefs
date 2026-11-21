@@ -1,15 +1,5 @@
 # Open questions
 
-## Is balloon free page reporting in scope? (board 5649, 2026-11-21)
-
-Needed: your call on giving each VM a Firecracker balloon with free page reporting. Why: no VM
-has one today, so a guest keeps on the host every page it ever touched (a 1 GiB dax-density guest
-held 921–998 MiB with about 447 MB of it free); reporting returns a guest's own freed pages and
-shares nothing between VMs, but your scope note (disk image only, no guest memory sharing) may
-mean you want it left to the VM manager. Recommend: in scope as a measured option of
-cells-per-host, its default left to the VM manager. Until answered: board 5649 tries the other
-items first and leaves this one out of what lands.
-
 ## Is herdtools7 (CeCILL-B) acceptable? (TASK-444.2, 2026-11-15)
 
 Needed: your call on herdtools7's licence, CeCILL-B (BSD-like, French law; GitHub reports
