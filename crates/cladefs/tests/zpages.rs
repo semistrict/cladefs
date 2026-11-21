@@ -33,7 +33,7 @@ fn get(address: std::net::SocketAddr, path: &str) -> String {
 /// bucket, under the read, whose stack names the bring-in that waited.
 #[test]
 fn page_ins_from_the_bucket_show_on_tracez_with_the_stack_that_waited() {
-    cladefs::cladefsd::otel::install(None);
+    cladefs::cladefsd::otel::install(opentelemetry_sdk::trace::Sampler::AlwaysOn, None);
     let dir = tempfile::tempdir().unwrap();
     let host = |name: &str| {
         let acme = dir.path().join(name).join("acme");

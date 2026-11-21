@@ -1179,6 +1179,7 @@ dependencies = [
  "local_cell",
  "madsim-tokio",
  "object_store",
+ "opentelemetry_sdk",
  "storage_device",
  "tempfile",
 ]
