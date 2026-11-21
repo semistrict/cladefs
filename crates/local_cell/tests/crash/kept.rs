@@ -18,11 +18,12 @@
 //! leave nothing they should have collected (TASK-390).
 
 use super::host_runtime::HostRuntime;
-use super::rounds::{BLOCK, CELL, Model, OPTIONS, workload};
+use super::rounds::{BLOCK, CELL, Model, OPTIONS, Uploading, workload_uploading};
 use bucket_cell::bucket::{ByteRange, Error as BucketError, Meta, Object, PutMode, Version};
 use bucket_cell::collector;
 use bucket_cell::fetch::{Budget, Limits};
 use bucket_cell::object_bucket::ObjectBucket;
+use futures::FutureExt as _;
 use local_cell::upload::{self, Runtime, Uploader};
 use local_cell::{BucketData, Description, LocalCell, MemDir, Recovering};
 use object_store::memory::InMemory;
@@ -282,7 +283,17 @@ async fn crashed(host: &Host, round: u64, rng: &mut StdRng, interval: Duration) 
     let cut = Arc::new(Cut { bucket: host.bucket(), left: rng.random_range(0..most).into() });
     let passes = Passes::start(cut.clone(), interval);
     dir.fail_after(Some(rng.random_range(0..600)));
-    let (durable, _) = workload(rng, &store, &mut epochs, Model::default(), first).await;
+    // At a random step among its first: a burst, its commit spanning segments, and the uploader
+    // asked to upload it, waited for until it is acknowledged (board 1738, board 1852).
+    let at = rng.random_range(0..20);
+    let acknowledge = |epoch| {
+        let uploaded = uploader.uploaded(epoch);
+        async move { Ok(uploaded.await?) }.boxed()
+    };
+    let uploading: Uploading<'_> = (at, &acknowledge);
+    let (durable, _) =
+        workload_uploading(rng, &store, &mut epochs, (Model::default(), first), Some(uploading))
+            .await;
     let acknowledged = uploader.last_uploaded() as usize;
     let dir = dir.crash(round);
     let collected = passes.abort().unwrap_or_else(|err| panic!("round {round}: {err}"));

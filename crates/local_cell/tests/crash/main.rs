@@ -61,19 +61,19 @@ async fn recovers_from_its_bucket_with_and_without_its_disk() {
     }
     // The crashes hit uploads under way, and stores whose disks held more than the bucket; the
     // collector's cuts, passes under way; and its passes compacted and deleted what the stores
-    // had uploaded.
-    assert!(uploaded > KEPT_ROUNDS / 4, "{uploaded} rounds acknowledged a commit");
+    // had uploaded. cladefs: each round waits for an upload early in its workload, so that most
+    // acknowledge a commit whatever the build's speed (board 1738): 82 to 88 of 100 did on the
+    // Mac, debug or optimized.
+    assert!(uploaded > KEPT_ROUNDS / 2, "{uploaded} rounds acknowledged a commit");
     assert!(ahead > KEPT_ROUNDS / 10, "{ahead} rounds held commits the bucket lacked");
     assert!(cut > KEPT_ROUNDS / 4, "{cut} rounds cut a pass before the crash");
     assert!(compacted > KEPT_ROUNDS / 10, "{compacted} rounds' passes compacted");
     assert!(deleted > KEPT_ROUNDS / 3, "{deleted} rounds' passes deleted");
     // cladefs: and commits spanning segments uploaded, acknowledged with the segments ending them,
-    // and recovered (TASK-92.41).
+    // and recovered (TASK-92.41): each round's waited-for commit spans segments by construction,
+    // a burst's (board 1852), and its workload makes more: 188 to 211 in 100 rounds on the Mac.
     let spanning = local_cell::commits_spanning_segments();
-    assert!(
-        spanning > KEPT_ROUNDS / 5,
-        "{spanning} commits spanned segments in {KEPT_ROUNDS} rounds"
-    );
+    assert!(spanning > KEPT_ROUNDS, "{spanning} commits spanned segments in {KEPT_ROUNDS} rounds");
 }
 
 /// cladefs: a store's opening cut by a crash at each of its writes in turn leaves what opens again

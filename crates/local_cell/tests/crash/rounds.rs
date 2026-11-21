@@ -191,9 +191,40 @@ pub async fn workload(
     model: Model,
     durable: usize,
 ) -> (usize, Model) {
+    workload_uploading(rng, store, epochs, (model, durable), None).await
+}
+
+/// cladefs: what a workload waits for at a step of its: a burst at step `.0`, whose commit spans
+/// segments, then `.1` of that commit's epoch, which waits for it uploaded and acknowledged.
+pub type Uploading<'a> =
+    (usize, &'a dyn Fn(u64) -> futures::future::BoxFuture<'static, anyhow::Result<()>>);
+
+/// cladefs: runs a random workload as [`workload`] does, but at the step `uploading` names, if the
+/// store has not failed by then, a burst, then waiting as it says: so that the kept rounds' commits
+/// span segments and are acknowledged by the uploader in most rounds by what the round does, not
+/// by how fast a workload ran against the uploader's interval of real time (board 1738, board
+/// 1852): an optimized build's workloads ended before the uploader's first tick.
+pub async fn workload_uploading(
+    rng: &mut StdRng,
+    store: &LocalCell<MemDir>,
+    epochs: &mut Vec<Model>,
+    (model, durable): (Model, usize),
+    uploading: Option<Uploading<'_>>,
+) -> (usize, Model) {
     let next_sequence = store.info().unwrap().next_sequence;
     let mut run = Run { store, epochs, model, durable, open: Vec::new(), next_sequence };
-    for _ in 0..STEPS {
+    for step in 0..STEPS {
+        if let Some((_, wait)) = uploading.filter(|(at, _)| *at == step) {
+            let burst = run.burst(rng).await;
+            let epoch = burst.and_then(|()| Ok(store.last_commit()?));
+            let waited = match epoch {
+                Ok(epoch) => wait(epoch).await,
+                Err(err) => Err(err),
+            };
+            if waited.is_err() {
+                break;
+            }
+        }
         let result = match rng.random_range(0..15) {
             // A new extent, small or large.
             0..=3 => run.write_new(random_data(rng, 8)).await,
