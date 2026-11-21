@@ -3,8 +3,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Measure ranged GETs from object storage (cladefs-gets) on an x86-64
-# Linux host, as root, into RESULTS/gets.md (scripts/gets-host.sh).
+# Measure ranged GETs from object storage (cladefs-gets) on a
+# Linux host (x86-64 or arm64), as root, into RESULTS/gets.md (scripts/gets-host.sh).
 #
 # CLADEFS_TEST_HOST_PHASE (linux-host-setup.sh's host_phase) is what of it runs:
 # `build` builds cladefs-gets, as work; `measure` runs it, building nothing;

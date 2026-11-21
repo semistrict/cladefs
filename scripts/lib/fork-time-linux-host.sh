@@ -3,8 +3,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# How long a fork of a large base takes, on trees of cladefs's (TASK-165.7): on an x86-64
-# Linux host, as root, for each LABEL=TREE, builds TREE's extent daemon and cladefsctl, starts the
+# How long a fork of a large base takes, on trees of cladefs's (TASK-165.7): on a Linux host (x86-64
+# or arm64), as root, for each LABEL=TREE, builds TREE's extent daemon and cladefsctl, starts the
 # daemon on a file bucket and a part cache of its own, imports a base of CLADEFS_FORK_TIME_FILES
 # files (2,560) of CLADEFS_FORK_TIME_FILE_MIB MiB (4) of random bytes, 10 GiB, which compress no
 # smaller, waits for its uploads, then forks it CLADEFS_FORK_TIME_FORKS times (5), each fork timed,

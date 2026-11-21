@@ -9,13 +9,13 @@
 # migrate-host.sh; and through test-host.sh, perf-gate-host.sh, soak-host.sh,
 # soak-workloads-host.sh, guest-mutants-host.py and dax-gate.sh.
 #
-# The test host, CLADEFS_TEST_HOST as ssh names it (no default: which host is the caller's
-# choice), or `local`, this machine itself, reached without ssh (as the nightly runs, from cron:
-# scripts/nightly-host.sh), is an x86-64 Linux machine with KVM, set up once by its own setup, not
-# by a run (the packages scripts/lib/linux-host-setup.sh lists, and the user's Rust, in ~/.cargo,
-# with cargo-nextest; sudo without a password; an ext4 scratch disk, /mnt/fxdax-scratch; fxjob;
-# cargo-mutants, perf and bpftrace), and whose clone of cladefs, CLADEFS_TEST_HOST_REPO (a path
-# in its home, default src/fxdax), fetches from cladefs's origin. Others' runs share it.
+# The test host, CLADEFS_TEST_HOST as ssh names it (no default: which host is the caller's choice),
+# or `local`, this machine itself, reached without ssh (as the nightly runs, from cron:
+# scripts/nightly-host.sh), is an x86-64 or arm64 Linux machine with KVM, set up once by its own
+# setup, not by a run (the packages scripts/lib/linux-host-setup.sh lists, and the user's Rust, in
+# ~/.cargo, with cargo-nextest; sudo without a password; an ext4 scratch disk, /mnt/fxdax-scratch;
+# fxjob; cargo-mutants, perf and bpftrace), and whose clone of cladefs, CLADEFS_TEST_HOST_REPO (a
+# path in its home, default src/fxdax), fetches from cladefs's origin. Others' runs share it.
 #
 # A run is a directory on the test host, RUN under CLADEFS_TEST_HOST_SCRATCH (default
 # /mnt/fxdax-scratch/fxdax-host), RUN the run's name (host_run): a worktree of the commit run, which
@@ -41,7 +41,9 @@
 # counts runs (such as r1040), which its name carries. CLADEFS_TEST_HOST_COMMIT names the commit
 # run (default HEAD, of a tree that changes nothing it tracks), and CLADEFS_TEST_HOST_PATCH a patch
 # the run applies to it (as scripts/guest-mutants-host.py's mutants). CLADEFS_GUEST_KERNEL names a
-# guest kernel here, which the run copies to the test host and boots.
+# guest kernel here, which the run copies to the test host and boots. A driver whose run boots
+# guests calls host_need_arch x86_64 WHY before host_start, which then refuses another test host
+# before it makes anything there: the guest kernels the hosts build are x86-64's (host_kernel).
 #
 # The scratch disk is every job's on the host, and others' runs may fill it. A run that names the
 # room it needs there, in bytes, checks the disk has it before it builds, CLADEFS_TEST_HOST_ROOM (in
@@ -158,7 +160,7 @@ host_commit() {
 # source.txt, and LABEL/source.txt, with the run, the test host and the directory there (run.txt).
 # From here, the run's directory goes as the driver ends, whatever happens (host_exit).
 host_start() {
-    local main pairs=() pair sha label firecracker prepared out kernel patch
+    local main pairs=() pair sha label firecracker prepared out kernel patch arch=()
     main=$(host_commit) || return
     for pair in "$@"; do
         [[ $pair =~ ^[a-z0-9][a-z0-9-]*=.+$ ]] ||
@@ -180,8 +182,9 @@ host_start() {
         host_put "$CLADEFS_GUEST_KERNEL" "$host_dir/guest-kernel" || return
         kernel=$(shasum -a 256 < "$CLADEFS_GUEST_KERNEL") || return
     fi
-    prepared=$(host_side prepare "$host_dir" "$host_repo" "$main" ${pairs[@]+"${pairs[@]}"}) ||
-        return
+    if [[ -n $host_arch ]]; then arch=(--arch "$host_arch" "$host_arch_why"); fi
+    prepared=$(host_side prepare ${arch[@]+"${arch[@]}"} "$host_dir" "$host_repo" "$main" \
+        ${pairs[@]+"${pairs[@]}"}) || return
     printf 'run %s\nhost %s\ndirectory %s\n' "$host_run" "$host" "$host_dir" > "$results/run.txt" ||
         return
     while read -r label sha firecracker; do
@@ -197,6 +200,16 @@ host_start() {
             if [[ $label == . && -n ${kernel:-} ]]; then echo "guest kernel ${kernel%% *}"; fi
         } > "$out/source.txt" || return
     done <<< "$prepared"
+}
+
+# host_need_arch ARCH WHY... has host_start refuse a test host other than an ARCH one (uname -m's
+# word, such as x86_64), the run needing one for WHY (its words joined), before it makes anything
+# there.
+host_arch='' host_arch_why=''
+host_need_arch() {
+    host_arch=$1
+    shift
+    host_arch_why="$*"
 }
 
 # host_sweep removes the runs of earlier drivers of CLADEFS_TEST_HOST_RUN's name whose job is not

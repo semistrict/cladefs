@@ -89,6 +89,7 @@ if [[ $b_commit != same ]]; then
 fi
 
 status=0
+host_need_arch x86_64 "bench-ab-host.sh: its cases boot an x86-64 guest kernel"
 host_start "${sides[@]}"
 echo "Results: $results" >&2
 host_job bench-ab-linux-host.sh "$host_dir/trees/$a_name" "$b_source" "$rounds" "$a_name" \

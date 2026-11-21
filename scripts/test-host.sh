@@ -3,7 +3,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Qualify cladefs on the test host, an x86-64 Linux machine of one's own with KVM, over ssh
+# Qualify cladefs on the test host, a Linux machine of one's own with KVM, over ssh
 # (CLADEFS_TEST_HOST; scripts/lib/host.sh): a worktree there of the commit, which
 # origin has, runs the workspace's tests and cladefs's guest tests (guest/tests), in its
 # Firecracker, whose DAX window takes KVM's faults through userfaultfd
@@ -29,12 +29,13 @@
 # one if neither is set; CLADEFS_GUEST_CMDLINE adds to its arguments (such as
 # cladefs.follow_apply_delay_us=200). CLADEFS_TEST_HOST_LIMIT caps the run's time on the test host
 # (timeout's DURATION, default 6h). CLADEFS_WORKSPACE_TESTS=0 runs the guest tests alone,
-# CLADEFS_GUEST_TESTS=0 the workspace's alone, and CLADEFS_TEST_ARGS are cargo nextest's arguments
-# for the workspace's, such as a filter. CLADEFSD_BUCKET, if set, names a bucket the guest tests'
-# extent daemons keep their stores' cells in (an object store's URL the test host reaches), under
-# a prefix of the run's own. Every other CLADEFS_*, CLADEFSD_* and PJDFSTEST_* variable set here
-# reaches the test host too (scripts/lib/host.sh), such as CLADEFS_FOLLOW_SECONDS and
-# CLADEFS_PJDFSTEST_TESTS, and the run's CLADEFS_TEST_HOST_* settings are scripts/lib/host.sh's.
+# CLADEFS_GUEST_TESTS=0 the workspace's alone, as an arm64 test host runs them (the guest tests boot
+# an x86-64 guest kernel: host_need_arch), and CLADEFS_TEST_ARGS are cargo nextest's arguments for
+# the workspace's, such as a filter. CLADEFSD_BUCKET, if set, names a bucket the guest tests' extent
+# daemons keep their stores' cells in (an object store's URL the test host reaches), under a prefix
+# of the run's own. Every other CLADEFS_*, CLADEFSD_* and PJDFSTEST_* variable set here reaches the
+# test host too (scripts/lib/host.sh), such as CLADEFS_FOLLOW_SECONDS and CLADEFS_PJDFSTEST_TESTS,
+# and the run's CLADEFS_TEST_HOST_* settings are scripts/lib/host.sh's.
 set -euo pipefail
 [[ ${CLADEFS_E2E_TEST:-} =~ ^[a-z0-9\ -]*$ ]] || { echo "CLADEFS_E2E_TEST selects test cases" >&2; exit 2; }
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -55,6 +56,10 @@ host_actions "$@"
 results=${1:-$(mktemp -d "${TMPDIR:-/tmp}/cladefs-host.XXXXXX")}
 
 status=0
+if [[ ${CLADEFS_GUEST_TESTS:-1} != 0 ]]; then
+    host_need_arch x86_64 "test-host.sh: the guest tests boot an x86-64 guest kernel" \
+        "(CLADEFS_GUEST_TESTS=0 runs the workspace's tests alone)"
+fi
 host_start
 echo "Results: $results" >&2
 # The run's own prefix of the bucket, if one is named.

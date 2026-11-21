@@ -7,7 +7,7 @@
 # there over ssh on bash's standard input (host_side) and run as the user ssh logs in as, who may
 # sudo without a password:
 #
-#   bash -s -- prepare DIR REPO COMMIT [LABEL=COMMIT...]
+#   bash -s -- prepare [--arch ARCH WHY] DIR REPO COMMIT [LABEL=COMMIT...]
 #   bash -s -- launch DIR NAME BENCH MEMORY
 #   bash -s -- wait DIR
 #   bash -s -- log DIR
@@ -26,7 +26,9 @@
 # copied there (patch, guest-kernel); and job, the job's command, which the driver copied there
 # too, its log, its pid, its exit status and its lock, which the job holds as long as it runs.
 #
-# prepare makes the worktrees, fetching REPO's origin if a commit is not there yet, with
+# prepare, with --arch, first checks the test host is an ARCH machine (uname -m's word, such as
+# x86_64), the run needing one for WHY: on another it makes nothing and ends 2, saying so. Then it
+# makes the worktrees, fetching REPO's origin if a commit is not there yet, with
 # vendor/firecracker checked out in each and the patch, if any, applied to tree; the commit each
 # reports its builds of in its source-revision.txt (scripts/build-commit.sh), as the host scripts'
 # copies of the trees have no .git (host_tree); and prints a line for each tree, LABEL (`.` for
@@ -103,6 +105,15 @@ worktree() {
 }
 
 prepare() {
+    if [[ ${1:-} == --arch ]]; then
+        local have
+        have=$(uname -m)
+        if [[ $have != "$2" ]]; then
+            echo "$3: this test host is $have, the run needs $2" >&2
+            return 2
+        fi
+        shift 3
+    fi
     local dir=$1 repo=$2 pairs=(".=$3") pair label commit tree fetched=0 old
     shift 3
     pairs+=("$@")

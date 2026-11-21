@@ -72,6 +72,7 @@ migrate() {
     local side=$1 phase=$2 token=$3 status=0
     host=${hosts[$side]} results=$top/$(tr 01 ab <<< "$side")
     # host_start's trap is this script's.
+    host_need_arch x86_64 "migrate-host.sh: its VM boots an x86-64 guest kernel"
     host_start || status=$?
     trap cleanup EXIT
     (( status == 0 )) || return "$status"

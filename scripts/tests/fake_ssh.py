@@ -54,8 +54,14 @@ DU = r"""#!/bin/sh
 for last in "$@"; do :; done
 printf '%s\t%s\n' "$(cat "$HOME/du-size")" "$last"
 """
+# uname -m says the host's architecture, $HOME/arch if a test wrote one, else x86_64, as the test
+# hosts the drivers were written for; anything else is this machine's uname.
+UNAME = r"""#!/bin/sh
+if [ "$*" = -m ]; then cat "$HOME/arch" 2> /dev/null || echo x86_64; else exec /usr/bin/uname "$@"; fi
+"""
 TOOLS = {
     "df": DF,
+    "uname": UNAME,
     "du": DU,
     "sudo": '#!/bin/sh\nexec "$@"\n',
     "setsid": f'#!/bin/sh\nexec {sys.executable} -c '

@@ -3,7 +3,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# What the scripts that run cladefs on an x86-64 Linux KVM host, as
+# What the scripts that run cladefs on an x86-64 or arm64 Linux KVM host, as
 # root (scripts/lib/*-linux-host.sh), share, sourced by them: provisioning the
 # host (host_setup), the tree each builds in (host_tree), the tools it needs,
 # at the versions pinned here (host_need), the guest kernel it builds
@@ -44,7 +44,10 @@ host_setup() {
         { echo "CLADEFS_TEST_HOST_PHASE is build or measure, or unset for both" >&2; return 2; }
     mkdir -p "$work/tools" "$results"
     results=$(cd "$results" && pwd)
-    test "$(uname -m)" = x86_64
+    case $(uname -m) in
+        x86_64 | aarch64) ;;
+        *) echo "host_setup: cladefs's hosts are x86-64 or arm64, not $(uname -m)" >&2; return 1 ;;
+    esac
     test -c /dev/kvm
 
     host_network
@@ -105,7 +108,7 @@ host_rust() {
         done
         rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
     fi
-    rustup target add x86_64-unknown-linux-musl
+    rustup target add "$(uname -m)-unknown-linux-musl"
     # scripts/test.sh checks clippy's rules first (TASK-44.20).
     rustup component add clippy
 }
@@ -223,7 +226,8 @@ host_tree() {
 # $work/guest-kernel-KIND), its log host_kernel_log (default RESULTS/guest-kernel.log), and
 # refuses to inside a measurement (measurement.sh), and versions host_kernel_image at the
 # kernel and host_kernel_work at where it was built. The kernel's Rust builds on guest/rust's own
-# toolchain, not the host's.
+# toolchain, not the host's. On an x86-64 host alone: the guests' kernel is x86-64's (a driver
+# whose run boots guests refuses another host first, scripts/lib/host.sh's host_need_arch).
 #
 # With CLADEFS_TEST_HOST_KERNELS naming a cache of kernels, as on a test host whose runs' work
 # directories come and go (scripts/lib/host.sh), it takes the kernel of KIND built from the same
@@ -244,6 +248,10 @@ host_kernel() {
         rust-checks) rust_checks=1 ;;
         *) echo "host_kernel: a kernel is release, debug, kasan, coverage or rust-checks" >&2; return 2 ;;
     esac
+    if [[ $(uname -m) != x86_64 ]]; then
+        echo "host_kernel: the guest kernel is x86-64's, and this host is $(uname -m)" >&2
+        return 2
+    fi
     channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$repo/guest/rust/rust-toolchain.toml")
     rustup toolchain install "$channel" --component rust-src --profile minimal > /dev/null || return
     if [[ -z ${CLADEFS_TEST_HOST_KERNELS:-} || $kind == coverage ]]; then

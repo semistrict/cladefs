@@ -417,6 +417,12 @@ echo "cargo-nextest 0.0.1"
         self.assertIn("cargo: install cargo-nextest --version 0.9.143 --locked", done.stderr)
 
 
+# uname as a test host has it: -m says $FAKE_ARCH (default x86_64), the rest is this machine's.
+UNAME = """#!/bin/sh
+if [ "$*" = -m ]; then echo "${FAKE_ARCH:-x86_64}"; else exec /usr/bin/uname "$@"; fi
+"""
+
+
 class Rust(unittest.TestCase):
     """host_rust: the toolchain the hosts build with, installed unless there and working. A job
     killed as rustup installed it, with its SSH session, left a toolchain with no manifest, and
@@ -454,7 +460,8 @@ fi
         cargo, rustup = home / "cargo", home / "rustup"
         tools = cargo / "bin"
         tools.mkdir(parents=True)
-        for name, text in (("rustc", self.RUSTC), ("rustup", self.RUSTUP), ("cargo", "")):
+        for name, text in (("rustc", self.RUSTC), ("rustup", self.RUSTUP), ("cargo", ""),
+                           ("uname", UNAME)):
             (tools / name).write_text(text)
             (tools / name).chmod(0o755)
         for name in toolchain_files:
@@ -557,6 +564,7 @@ echo '{"packages": [{"source": null, "manifest_path": "'"$PWD"'/guest/rust/clade
         for name, text in {
             "cargo": self.CARGO,
             "rustup": "#!/bin/sh\n",
+            "uname": UNAME,
             "flock": f'#!/bin/sh\nexec {sys.executable} {SCRIPTS / "tests" / "fake_flock.py"} "$@"\n',
         }.items():
             (tools / name).write_text(text)
@@ -564,6 +572,18 @@ echo '{"packages": [{"source": null, "manifest_path": "'"$PWD"'/guest/rust/clade
         self.calls = self.directory / "calls"
         self.calls.write_text("")
         self.cache = self.directory / "kernels"
+
+    def test_an_arm64_host_builds_no_guest_kernel(self):
+        done = subprocess.run(
+            ["/bin/bash", "-c", 'source "$0"; repo=$1 results=$PWD/results; host_kernel release',
+             LIBRARY, self.repo],
+            env={"PATH": f"{self.directory / 'bin'}:/usr/bin:/bin:/sbin", "CALLS": str(self.calls),
+                 "CLADEFS_TEST_HOST_WORK": str(self.directory / "work"), "FAKE_ARCH": "aarch64"},
+            capture_output=True, text=True, cwd=self.directory,
+        )
+        self.assertEqual((done.returncode, done.stderr),
+                         (2, "host_kernel: the guest kernel is x86-64's, and this host is aarch64\n"))
+        self.assertEqual(self.calls.read_text(), "")
 
     def kernel(self, kind, work, cached=True):
         """host_kernel KIND's builds, a run's work directory `work`, with the cache if `cached`:

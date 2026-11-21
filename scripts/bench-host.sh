@@ -63,6 +63,7 @@ host_actions "$@"
 results=${1:-$repo/docs/measurements/$(host_label)-fs-bench-$(date -u +%Y-%m-%dT%H%MZ)-$host_mark}
 
 status=0
+host_need_arch x86_64 "bench-host.sh: its cases boot an x86-64 guest kernel"
 host_start
 echo "Results: $results" >&2
 host_job bench-linux-host.sh "$iterations" > "$results/remote.log" 2>&1 || status=$?

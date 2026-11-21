@@ -523,6 +523,37 @@ class Runs(unittest.TestCase):
         self.assertTrue((fleet.directory / "results" / "ran.txt").exists())
         self.assertEqual((fleet.runs(), fleet.worktrees()), ([], []))
 
+    def test_a_run_needing_another_architecture_makes_nothing_there(self):
+        fleet = Fleet()
+        (fleet.home("host1") / "arch").write_text("aarch64\n")
+        need = 'host_need_arch x86_64 "a driver: its guests boot" "an x86-64 kernel"\n'
+        self.assertEqual(
+            fleet.drive(need + RAN),
+            (2, "", "a driver: its guests boot an x86-64 kernel: this test host is aarch64, the run "
+                    "needs x86_64\n"))
+        self.assertEqual((fleet.runs(), fleet.worktrees()), ([], []))
+        self.assertFalse((fleet.home("host1") / "fxjob-calls").exists())
+        # A run that needs none runs there; one that needs the host's own runs too.
+        self.assertEqual(fleet.drive(RAN)[:2], (0, "status 0\n"))
+        self.assertEqual(fleet.drive('host_need_arch aarch64 "arm64"\n' + RAN)[:2],
+                         (0, "status 0\n"))
+
+    def test_test_host_runs_the_workspaces_tests_alone_on_an_arm64_host(self):
+        fleet = Fleet()
+        (fleet.home("host1") / "arch").write_text("aarch64\n")
+        results = fleet.directory / "results"
+        status, _, errors = fleet.run_driver("test-host.sh", str(results))
+        self.assertEqual(status, 2)
+        self.assertEqual(errors.splitlines()[-1],
+                         "test-host.sh: the guest tests boot an x86-64 guest kernel "
+                         "(CLADEFS_GUEST_TESTS=0 runs the workspace's tests alone): this test host "
+                         "is aarch64, the run needs x86_64")
+        self.assertEqual(fleet.runs(), [])
+        status, _, _ = fleet.run_driver("test-host.sh", str(results),
+                                        environment={"CLADEFS_GUEST_TESTS": "0"})
+        self.assertEqual(status, 0)
+        self.assertEqual((results / "remote.log").read_text(), "ran test-linux-host.sh \n")
+
     def test_a_driver_that_fails_leaves_nothing(self):
         fleet = Fleet()
         status, _, _ = fleet.drive("host_start\nfalse\necho unreached")

@@ -3,7 +3,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Qualify cladefs on an x86-64 Linux KVM host, as root. It runs the
+# Qualify cladefs on a Linux KVM host, as root (its guest tests on an x86-64 one). It runs the
 # workspace's tests (unless CLADEFS_WORKSPACE_TESTS=0; CLADEFS_TEST_ARGS, split at
 # spaces, are cargo nextest's arguments, such as a filter), then cladefs's guest
 # tests (unless CLADEFS_GUEST_TESTS=0; scripts/test-e2e.sh; TESTs name them),

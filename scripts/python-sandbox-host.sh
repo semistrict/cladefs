@@ -44,6 +44,7 @@ host_actions "$@"
 results=${1:-$repo/docs/measurements/$(host_label)-python-sandbox-$(date -u +%Y-%m-%dT%H%MZ)-$host_mark}
 
 status=0
+host_need_arch x86_64 "python-sandbox-host.sh: its sandboxes boot an x86-64 guest kernel"
 host_start
 echo "Results: $results" >&2
 host_job python-sandbox-linux-host.sh > "$results/remote.log" 2>&1 || status=$?
