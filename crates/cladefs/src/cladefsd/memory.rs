@@ -77,8 +77,14 @@ impl Registry {
     /// Limits every tenant's memory together to the least of the control API's limit and the
     /// governor's allowance.
     fn apply_total(&self) {
-        let cap = self.total.unwrap_or(u64::MAX).min(GOVERNED.get().load(Ordering::Relaxed));
+        let governed = GOVERNED.get().load(Ordering::Relaxed);
+        let cap = self.total.unwrap_or(u64::MAX).min(governed);
         physmem::set_total_cap((cap != u64::MAX).then_some(cap));
+        // cladefs: whose the cap is: the governor's, the host's memory, which page-ins finding no
+        // page wait out, or the control API's, which they fail past (board 5662).
+        crate::cache::set_total_is_the_hosts(
+            governed != u64::MAX && governed <= self.total.unwrap_or(u64::MAX),
+        );
     }
 }
 

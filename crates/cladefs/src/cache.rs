@@ -508,6 +508,38 @@ fn let_go_least_used(
     idle.into_iter().take(excess).filter_map(|(_, key)| extents.remove(&key)).collect()
 }
 
+/// cladefs: `count` pages of `arena` for a page-in, as `physmem::alloc_run` allocates them, waiting
+/// for relief if it must, off the pager's workers: a wait for relief is one for pages it evicted to
+/// come back from quarantine, as each VM process unmaps them, seconds on a full host, which the
+/// page-ins in flight on those workers, whose pages relief would free next, must not wait behind
+/// (board 5662). At once, with no wait, if it can be; under madsim, inline, as the simulated host's
+/// threads are its runtime's.
+async fn allocate(arena: ArenaId, count: usize) -> Result<Vec<physmem::Page>, physmem::NoMemory> {
+    if let Ok(frames) = physmem::alloc_run(arena, count, physmem::Wait::No) {
+        return Ok(frames);
+    }
+    #[cfg(not(madsim))]
+    return tokio::task::spawn_blocking(move || {
+        physmem::alloc_run(arena, count, physmem::Wait::Yes)
+    })
+    .await
+    .expect("a page-in's allocation panicked");
+    #[cfg(madsim)]
+    return physmem::alloc_run(arena, count, physmem::Wait::Yes);
+}
+
+/// cladefs: whether the cap on every arena's memory together is the memory governor's, the host's
+/// memory, not a limit the control API set: what a page-in finding no page waits out rather than
+/// fails (board 5662). Set as the cap is (`cladefsd::memory`); a daemon not governed has none.
+static TOTAL_IS_THE_HOSTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// cladefs: says whether the cap on every arena's memory together is the host's
+/// ([`TOTAL_IS_THE_HOSTS`]).
+pub(crate) fn set_total_is_the_hosts(is: bool) {
+    TOTAL_IS_THE_HOSTS.store(is, Ordering::Relaxed);
+}
+
 /// cladefs: how many times page-ins waited for memory ([`waiting_for_memory`]).
 static WAITS_FOR_MEMORY: AtomicU64 = AtomicU64::new(0);
 
@@ -983,15 +1015,16 @@ impl CachedExtent {
         let count = (pages.end - pages.start) as usize;
         // cladefs: with no page for it, relief having found none to free, the host's memory full,
         // it waits for one rather than fail the guest's fault, which killed its VM (board 5662),
-        // the governor telling the VM manager by refusing cells (`cladefsd::governor::full`). It
-        // waits off the pager's threads, which the page-ins in flight, whose pages relief may then
-        // free, need (blocked on them, it held every fault on the host). At its arena's own cap,
-        // its tenant's limit, it fails.
+        // the governor telling the VM manager by refusing cells (`cladefsd::governor::full`). At
+        // its arena's own cap, or past a limit the control API set, it fails, as before.
         let mut pause = RETRY_FIRST;
         let frames = loop {
-            match physmem::alloc_run(self.arena, count, physmem::Wait::Yes) {
+            match allocate(self.arena, count).await {
                 Ok(frames) => break frames,
-                Err(physmem::NoMemory) if physmem::room_may_come(self.arena) => {
+                Err(physmem::NoMemory)
+                    if physmem::room_may_come(self.arena)
+                        && TOTAL_IS_THE_HOSTS.load(Ordering::Relaxed) =>
+                {
                     waiting_for_memory();
                     tokio::time::sleep(pause).await;
                     pause = (pause * 2).min(RETRY_MOST);
@@ -1202,6 +1235,31 @@ mod full_host {
         }
     }
 
+    /// The extents of `count` parts each a page-in reads from `gate`, cached in the default arena.
+    fn gated(count: u64, gate: &tokio::sync::watch::Receiver<bool>) -> Vec<Arc<CachedExtent>> {
+        (0..count)
+            .map(|sequence| {
+                let extent = ExtentId { cell: 5662, sequence };
+                let contents = Box::new(Gated(gate.clone()));
+                let len = extent_frame::PART;
+                let cached = Arc::new(CachedExtent::new(ArenaId::DEFAULT, extent, contents, len));
+                let entry = Cached { extent: cached.clone(), holders: Arc::default() };
+                extent_cache().extents.with(Mutex::lock).insert((ArenaId::DEFAULT, extent), entry);
+                cached
+            })
+            .collect()
+    }
+
+    /// The process's memory, if no other test made it first, its arenas capped at `chunks`
+    /// chunks: the parts that many hold.
+    fn capped(chunks: u64) -> u64 {
+        let chunk = physmem::CHUNK_SIZE as u64;
+        let _ = physmem::configure(16 * chunk);
+        relieve_pressure();
+        physmem::set_total_cap(Some(chunks * chunk));
+        chunks * chunk / extent_frame::PART
+    }
+
     /// Page-ins finding no page, the host's memory full and what holds it in flight, wait for it
     /// off the pager's threads, more of them than it has: those in flight then end, and relief
     /// gives their pages to those waiting, every page-in ending. Blocked on its threads, they
@@ -1209,24 +1267,10 @@ mod full_host {
     /// stalled (the review of 024c3be89).
     #[test]
     fn page_ins_waiting_for_memory_leave_the_pager_to_those_in_flight() {
-        let chunk = physmem::CHUNK_SIZE as u64;
-        // The process's memory, if no other test made it first; capped at two chunks: two parts.
-        let _ = physmem::configure(16 * chunk);
-        relieve_pressure();
-        physmem::set_total_cap(Some(2 * chunk));
+        let held = capped(2);
+        set_total_is_the_hosts(true);
         let (open, gate) = tokio::sync::watch::channel(false);
-        let part = extent_frame::PART;
-        let held = 2 * chunk / part;
-        let extents: Vec<Arc<CachedExtent>> = (0..held + PAGER_THREADS as u64 + 2)
-            .map(|sequence| {
-                let extent = ExtentId { cell: 5662, sequence };
-                let gated = Box::new(Gated(gate.clone()));
-                let cached = Arc::new(CachedExtent::new(ArenaId::DEFAULT, extent, gated, part));
-                let entry = Cached { extent: cached.clone(), holders: Arc::default() };
-                extent_cache().extents.with(Mutex::lock).insert((ArenaId::DEFAULT, extent), entry);
-                cached
-            })
-            .collect();
+        let extents = gated(held + PAGER_THREADS as u64 + 2, &gate);
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
             let waits = WAITS_FOR_MEMORY.load(Ordering::Relaxed);
@@ -1243,5 +1287,38 @@ mod full_host {
             }
         });
         physmem::set_total_cap(None);
+    }
+
+    /// Past a limit the control API set on every arena's memory, not the host's, page-ins finding
+    /// no page fail with ENOMEM, as before board 5662, rather than wait.
+    #[test]
+    fn page_ins_past_a_limit_set_fail_rather_than_wait() {
+        let held = capped(2);
+        set_total_is_the_hosts(false);
+        let (open, gate) = tokio::sync::watch::channel(false);
+        let extents = gated(held + 3, &gate);
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let mut page_ins: Vec<_> =
+                extents.iter().map(|extent| tokio::spawn(extent.clone().bring_in(0))).collect();
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            while page_ins.iter().filter(|page_in| page_in.is_finished()).count() < 3 {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the page-ins past the limit waited"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            let (failed, in_flight): (Vec<_>, Vec<_>) =
+                page_ins.drain(..).partition(|page_in| page_in.is_finished());
+            for page_in in failed {
+                assert_eq!(page_in.await.unwrap(), Err(Errno::ENOMEM));
+            }
+            assert_eq!(in_flight.len() as u64, held);
+            open.send(true).unwrap();
+            for page_in in in_flight {
+                assert_eq!(page_in.await.unwrap(), Ok(true));
+            }
+        });
     }
 }
