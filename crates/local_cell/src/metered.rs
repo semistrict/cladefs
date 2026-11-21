@@ -16,7 +16,6 @@ use crate::pages::PageCache;
 use bucket_cell::host_disk::HostDisk;
 use std::io;
 use std::ops::Range;
-use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -200,18 +199,12 @@ impl<F: File> MeteredFile<CachedFile<F>> {
     }
 
     /// As [`CachedFile::settle_for_write`], counting the file as far as `range` goes: what the
-    /// caller writes there, on the file under it, by its descriptor ([`AsRawFd`]), as an image's
-    /// device does.
+    /// caller writes there, on the file under it ([`HostFile::host_file`](crate::HostFile)), as an
+    /// image's device does.
     pub fn settle_for_write(&self, range: Range<u64>) -> io::Result<()> {
         self.file.settle_for_write(range.clone())?;
         self.len.grow(&self.footprint, range.end);
         Ok(())
-    }
-}
-
-impl<F: File + AsRawFd> AsRawFd for MeteredFile<F> {
-    fn as_raw_fd(&self) -> RawFd {
-        self.file.as_raw_fd()
     }
 }
 

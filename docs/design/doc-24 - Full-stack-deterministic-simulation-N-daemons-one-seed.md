@@ -147,8 +147,13 @@ ephemeral journal, version directories and the part cache take a root `Dir` each
 - **Who goes through it**: local_cell and bucket_cell wholly (`DiskDir`, `DiskFile`, the part
   cache's files, `HostDisk::of`, which samples a terabyte under madsim), and cladefsd's serving
   files: `host_cell`, `open_cell`, `cell_dir`, `profile`, `ephemeral_host`, `cladefsd::{cells,
-  server, peers, boot, migration}`. A descriptor of a simulated host's file is none: what wants
-  one, FUSE's storage, panics, outside the simulation.
+  server, peers, boot, migration}`, and an image's device, which an import's storage and FUSE's
+  read and write through. A simulated host's file has no descriptor: the device's I/O, by its
+  files' descriptors on a real host (io_uring, `storage::io`), runs each operation in place on the
+  simulated disk instead, as it is submitted. And Fxfs, which an import fills the image's
+  filesystem with: its executor (`cladefs::executor`) is the simulated host's node, and
+  fuchsia-async's tasks and timers are madsim's; its executors, real tokio runtimes, stay outside
+  (board 5687).
 - **What stays on the real file system**, outside the simulation: FUSE, the VM sockets and a VM
   process's client, procfs, read traces and stats, the image an import reads, a `file://` bucket,
   the tools.
@@ -198,7 +203,7 @@ cladefsd starts its threads at 41 sites outside tests. They fall into four group
   - the page cache's flusher (`flush_pass`);
   - the replicators (`Replicator::idle`/`drive`).
 - **16 are outside** the simulation: the VM socket, FUSE, userfaultfd, signals and Fxfs, plus 3
-  sites in other binaries.
+  sites in other binaries. (Fxfs's executor has since moved in, for imports: board 5687.)
 
 **The hard part is blocking, not threads.** A request job is synchronous. On its pool thread it
 waits on:

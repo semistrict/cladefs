@@ -20,7 +20,6 @@ use crate::sync::Mutex;
 use std::collections::HashMap;
 use std::io;
 use std::ops::Range;
-use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -241,8 +240,8 @@ impl<F: File> CachedFile<F> {
     }
 
     /// Writes back the pages the cache holds dirty in `range`, if the file is cached: what an I/O
-    /// of a caller's own on the file under it ([`AsRawFd`]) is to be preceded by, as an image's
-    /// device's is, so that it reads what was written.
+    /// of a caller's own on the file under it ([`HostFile::host_file`](crate::HostFile)) is to be
+    /// preceded by, as an image's device's is, so that it reads what was written.
     pub fn settle(&self, range: Range<u64>) -> io::Result<()> {
         match self {
             Self::Raw(_) => Ok(()),
@@ -258,12 +257,6 @@ impl<F: File> CachedFile<F> {
             Self::Raw(_) => Ok(()),
             Self::Cached(cached) => cached.settle_for_write(range),
         }
-    }
-}
-
-impl<F: File + AsRawFd> AsRawFd for CachedFile<F> {
-    fn as_raw_fd(&self) -> RawFd {
-        self.under().as_raw_fd()
     }
 }
 

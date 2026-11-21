@@ -241,6 +241,64 @@ async fn two_daemons_boot_as_hosts_and_one_takes_the_others_cell() {
         .unwrap();
 }
 
+/// Board 5687: an image imported through the daemon's control API (`ImportImage`), a layer of a
+/// directory, a file and a symlink, makes a cell of the capacity asked for, whose filesystem holds
+/// the file as the layer had it, and the symlink: the image's device reading and writing its
+/// cell's files in place on the simulated host's disk (host_fs), not through threads of its own.
+#[madsim::test]
+async fn an_image_imported_through_the_control_api_reads_back() {
+    use cladefs::cladefsd::control::proto::ImportImageRequest;
+    use cladefs::import::testing::{Entry, Kind, layer};
+    const HOSTNAME: &[u8] = b"simulated\n";
+    let (dir, bucket, _) = world();
+    let (nodes, roots) = hosts(1, dir.path(), &bucket);
+    // The image, on the daemon's host, as its caller has it there: outside its disk (host_fs), as
+    // the import reads it.
+    let image = dir.path().join("image.tar");
+    let entries = [
+        Entry::new("etc", Kind::Dir),
+        Entry::new("etc/hostname", Kind::File(HOSTNAME)),
+        Entry::new("bin/sh", Kind::Symlink("busybox")),
+    ];
+    std::fs::write(&image, layer(&entries).unwrap()).unwrap();
+    let cell = roots[0].join("store");
+    let path = cell.display().to_string();
+    manager()
+        .spawn(async move {
+            let mut one = connect(1).await;
+            let made = one.import_image(ImportImageRequest {
+                path: path.clone(),
+                capacity: 64 << 20,
+                image: image.display().to_string(),
+                ..ImportImageRequest::default()
+            });
+            assert_ne!(made.await.unwrap().into_inner().cell, 0);
+            let stat = one.stat_cell(StatCellRequest { path });
+            assert_eq!(stat.await.unwrap().into_inner().capacity, 64 << 20);
+        })
+        .await
+        .unwrap();
+    let (hostname, target) = nodes[0]
+        .spawn(async move {
+            let storage = cladefs::Storage::open(&cell).await.unwrap();
+            let fs = cladefs::Filesystem::mount(storage).await.unwrap();
+            let (etc, _) = fs.root().lookup(b"etc").await.unwrap();
+            let (file, attr) = etc.lookup(b"hostname").await.unwrap();
+            let mut hostname = vec![0; attr.size as usize];
+            assert_eq!(file.read(0, &mut hostname).await.unwrap(), hostname.len());
+            let (bin, _) = fs.root().lookup(b"bin").await.unwrap();
+            let (sh, _) = bin.lookup(b"sh").await.unwrap();
+            let target = sh.readlink().await.unwrap();
+            drop((etc, file, bin, sh));
+            fs.close().await.unwrap().close().await;
+            (hostname, target)
+        })
+        .await
+        .unwrap();
+    assert_eq!(hostname, HOSTNAME);
+    assert_eq!(target, b"busybox");
+}
+
 /// TASK-685.6: a simulated guest of host 1's writes a block and commits it, uploaded; once it is
 /// gone and host 2 has taken its cell, a guest of host 2's reads the block as written: through the
 /// daemons' own handling of a VM process's requests, its connection in memory.

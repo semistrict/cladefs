@@ -4,31 +4,48 @@
 
 //! An executor of its own for Fxfs's futures, which callers await from their own executors, or
 //! threads.
+//!
+//! cladefs: under madsim, the simulated host's one thread, which the simulation runs every task on,
+//! Fxfs's among them, as fuchsia-async's tasks and timers are madsim's there (doc-24, board 5687).
 
-use futures::FutureExt;
 use futures::channel::oneshot;
 use std::cell::Cell;
 use std::future::Future;
-use std::pin::{Pin, pin};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::pin::Pin;
 use std::task::{Context, Poll};
+#[cfg(not(madsim))]
+use {
+    futures::FutureExt,
+    std::pin::pin,
+    std::sync::Arc,
+    std::sync::atomic::{AtomicUsize, Ordering},
+};
 
 /// Fxfs's executor: a fuchsia-async `SendExecutor` on threads of its own, which stops once it is
 /// dropped and the futures it is running complete. Futures are spawned straight onto its runtime,
-/// from whatever thread runs them, rather than handed to a task of its own to spawn.
+/// from whatever thread runs them, rather than handed to a task of its own to spawn. cladefs: under
+/// madsim, the simulated host's node, whose tasks run to their ends as it runs.
 pub(crate) struct Executor {
     /// The executor's runtime, which spawns futures from any thread.
     runtime: tokio::runtime::Handle,
     /// The futures running, which the executor finishes before it stops: its runtime would drop
     /// them unfinished.
+    #[cfg(not(madsim))]
     jobs: Arc<Jobs>,
     /// Dropped, stops the executor once its futures complete.
+    #[cfg(not(madsim))]
     _stop: oneshot::Sender<()>,
 }
 
 impl Executor {
+    /// The simulated host's node, as an executor: its threads, `threads`, the simulation's one.
+    #[cfg(madsim)]
+    pub fn new(_threads: u8) -> Self {
+        Self { runtime: tokio::runtime::Handle::current() }
+    }
+
     /// Starts an executor with `threads` threads.
+    #[cfg(not(madsim))]
     pub fn new(threads: u8) -> Self {
         let jobs = Arc::new(Jobs::default());
         let (stop, stopped) = oneshot::channel::<()>();
@@ -53,8 +70,12 @@ impl Executor {
 
     /// Runs `future` on the executor's threads.
     pub fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
-        let running = Running::new(self.jobs.clone());
-        self.runtime.spawn(OnExecutor(future.map(move |()| drop(running))));
+        #[cfg(not(madsim))]
+        let future = {
+            let running = Running::new(self.jobs.clone());
+            future.map(move |()| drop(running))
+        };
+        self.runtime.spawn(OnExecutor(future));
     }
 
     /// Runs `future` on the executor, and returns its output once it completes.
@@ -79,6 +100,7 @@ impl Executor {
         &self,
         future: impl Future<Output = T> + Send + 'static,
     ) -> T {
+        local_cell::blocks!("waiting for a future of Fxfs's executor, an outermost entry's");
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         self.spawn(async move {
             let _ = sender.send(future.await);
@@ -89,12 +111,14 @@ impl Executor {
 
 /// The number of an executor's futures running, which its thread waits to drop to zero before it
 /// stops.
+#[cfg(not(madsim))]
 #[derive(Default)]
 struct Jobs {
     running: AtomicUsize,
     idle: tokio::sync::Notify,
 }
 
+#[cfg(not(madsim))]
 impl Jobs {
     /// Waits until no future is running. None can start once the executor is dropped.
     async fn idle(&self) {
@@ -111,8 +135,10 @@ impl Jobs {
 
 /// One of an executor's futures running, until it is dropped, whether the future completes or
 /// panics.
+#[cfg(not(madsim))]
 struct Running(Arc<Jobs>);
 
+#[cfg(not(madsim))]
 impl Running {
     fn new(jobs: Arc<Jobs>) -> Self {
         jobs.running.fetch_add(1, Ordering::AcqRel);
@@ -120,6 +146,7 @@ impl Running {
     }
 }
 
+#[cfg(not(madsim))]
 impl Drop for Running {
     fn drop(&mut self) {
         if self.0.running.fetch_sub(1, Ordering::AcqRel) == 1 {

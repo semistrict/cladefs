@@ -1939,6 +1939,7 @@ dependencies = [
  "futures-lite",
  "futures-test",
  "linux-rt",
+ "madsim",
  "pin-project-lite",
  "rand 0.10.3",
  "shuttle",

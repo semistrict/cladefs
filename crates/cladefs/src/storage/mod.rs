@@ -69,7 +69,8 @@ impl Storage {
     /// its cell kept in the bucket its description names (see `kept`).
     ///
     /// Its I/O bypasses the host's page cache where the host filesystem allows, as the in-process
-    /// kernel caches files' pages already, and runs on threads of its own (io_uring on Linux).
+    /// kernel caches files' pages already, and runs on threads of its own (io_uring on Linux),
+    /// or, under madsim, in place on the simulated host's disk (board 5687).
     /// It fails for an image made by older code, which kept its cell in no bucket, and which
     /// nothing converts.
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, Error> {

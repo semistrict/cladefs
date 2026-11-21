@@ -6946,7 +6946,8 @@ fn failed_writeback_preserves_disk_admission() {
     let footprint = dir.footprint();
     let limit = disk.used() + footprint.reserved() + admitted;
     super::disk::set_limit(Some(tenant), Some(limit)).unwrap();
-    refuse_system_call(libc::SYS_pwrite64, &[(0, file.as_raw_fd() as u32)], libc::EIO as u16);
+    let fd = file.host_file().as_raw_fd() as u32;
+    refuse_system_call(libc::SYS_pwrite64, &[(0, fd)], libc::EIO as u16);
     let writing = footprint.admit(page, 0).unwrap();
     file.write_at(&vec![0x5a; page as usize], 0).unwrap();
     drop(writing);

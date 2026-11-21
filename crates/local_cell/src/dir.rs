@@ -9,7 +9,6 @@ use host_fs::OpenOptions;
 use host_fs::OpenOptionsExt as _;
 use std::collections::BTreeMap;
 use std::io;
-use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -638,16 +637,13 @@ pub struct DiskFile {
     tail: Mutex<bucket_cell::direct::Tail>,
 }
 
-impl AsRawFd for DiskFile {
-    fn as_raw_fd(&self) -> RawFd {
-        #[cfg(not(madsim))]
-        return self.file.as_raw_fd();
-        // cladefs: a simulated host's disk in memory has no descriptors; what wants one, FUSE's
-        // storage, is outside the simulation (doc-24, TASK-685.4).
-        #[cfg(madsim)]
-        panic!(
-            "a descriptor of a simulated host's file, which has none: FUSE is outside the simulation"
-        )
+impl HostFile {
+    /// cladefs: the host's file under the page cache and the counting, for I/O of a caller's own
+    /// beside them, as an image's device does, settled first (`settle`, `settle_for_write`): by its
+    /// descriptor on a real host, and in place on a simulated host's disk (host_fs, doc-24), which
+    /// has no descriptors (board 5687).
+    pub fn host_file(&self) -> &host_fs::File {
+        &self.under().under().file
     }
 }
 
