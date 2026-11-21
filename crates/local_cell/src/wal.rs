@@ -119,11 +119,13 @@ impl StartFile {
                 file
             }
         };
-        // A test's: its disk full, as a write of the record fails then.
-        fail::fail_point!("wal::start", |_| Err(Error::new(std::io::Error::from_raw_os_error(
-            libc::ENOSPC
-        ))
-        .context("writing the WAL's start")));
+        // A test's: its disk full, as a write of the record fails then; or, `return(eio)`, failing
+        // (board 5359).
+        fail::fail_point!("wal::start", |arg: Option<String>| {
+            let errno = if arg.as_deref() == Some("eio") { libc::EIO } else { libc::ENOSPC };
+            Err(Error::new(std::io::Error::from_raw_os_error(errno))
+                .context("writing the WAL's start"))
+        });
         let serial = self.serial + 1;
         let record = encode(&Slot { serial, start });
         assert!(record.len() as u64 <= SLOT, "a start's record fits its slot");

@@ -2544,7 +2544,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// then, and counts their commits uploaded: as many as its disk lets it, the rest kept for the
     /// next pass, as a full disk fails the record of an acknowledgement, which leaves the one before
     /// it whole (`wal::StartFile`), and the store goes on; any other failure is the uploader's
-    /// (TASK-539.12). Before, the store failed for it.
+    /// (TASK-539.12). Before, the store failed for it. A disk failing otherwise (EIO) is no full
+    /// one: tried again for ever, it left every wait on an upload hanging (board 5359).
     async fn acknowledge_pending(&self, in_flight: &mut InFlight) -> Result<(), Failure> {
         let mut epoch = None;
         let stored = async {
@@ -2558,7 +2559,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         .await;
         match stored {
             Ok(()) => in_flight.acknowledging_failed = false,
-            Err(err) if err.chain().any(|cause| cause.is::<std::io::Error>()) => {
+            Err(err) if full(&err) => {
                 if !std::mem::replace(&mut in_flight.acknowledging_failed, true) {
                     log::warn!(
                         "cladefs: cell {}'s store records no acknowledgement for now, tried again \
@@ -2727,6 +2728,14 @@ impl InFlight {
 
 #[cfg(test)]
 mod encrypted;
+
+/// cladefs: whether `err` is a full disk's: ENOSPC, or a quota's EDQUOT, which room made later
+/// lets pass (board 5359).
+fn full(err: &anyhow::Error) -> bool {
+    use std::io::ErrorKind::{QuotaExceeded, StorageFull};
+    let mut io = err.chain().filter_map(|cause| cause.downcast_ref::<std::io::Error>());
+    io.any(|io| matches!(io.kind(), StorageFull | QuotaExceeded))
+}
 
 #[cfg(test)]
 mod tests {
@@ -2909,6 +2918,41 @@ mod tests {
         fail::remove("wal::start");
         uploader.uploaded(store.last_commit().unwrap()).await.unwrap();
         assert_eq!(store.closed(usize::MAX).await.unwrap().len(), 0, "its segments left in it");
+        scenario.teardown();
+    }
+
+    /// board 5359: the store's disk failing the record of an acknowledgement otherwise than a full
+    /// disk does (EIO) fails the uploader with it, and a wait on the upload returns that failure:
+    /// before, the record was tried again for ever, as a full disk's is, and the wait never ended.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn acknowledgements_a_failing_disk_refuses_fail_the_uploader() {
+        let scenario = fail::FailScenario::setup();
+        let host = Runtime {
+            handle: tokio::runtime::Handle::current(),
+            uploads: Budget::new(Limits::UNBOUNDED),
+            keys: bucket_cell::keys::testing::host(),
+        };
+        let bucket =
+            Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
+        let dir = MemDir::new();
+        let description = Description { block_size: 4096, capacity: 1 << 30, cell: CELL };
+        LocalCell::make(&dir, description, Some("memory:///failing"), None).unwrap();
+        lifecycle::create(&*bucket, CELL, 1).await.unwrap();
+        let options = Options { interval: Duration::from_millis(20), ..Options::default() };
+        let recovering = LocalCell::recover_unmade(dir).unwrap();
+        let (store, uploader) =
+            open(recovering, crate::Options::default(), bucket.clone(), (1, options), &host)
+                .await
+                .unwrap();
+        store.made().unwrap();
+        fail::cfg("wal::start", "return(eio)").unwrap();
+        store.write(ExtentId::new(CELL.id, 1), 0, &[1; 4096]).await.unwrap();
+        store.commit(None).await.unwrap();
+        let waited = uploader.uploaded(store.last_commit().unwrap()).await;
+        let failure = format!("{:#}", waited.unwrap_err());
+        assert!(failure.contains("writing the WAL's start"), "{failure}");
+        assert_eq!(uploader.failed().map(|failed| format!("{failed:#}")), Some(failure));
+        fail::remove("wal::start");
         scenario.teardown();
     }
 
