@@ -21,6 +21,17 @@ the worktrees stay as they are, nothing in them is lost, and TASK-444.4–.11 wa
 
 # Decisions
 
+## Hosts of pages larger than 4 KiB: no windows of extents' blocks; no LSM labels on cladefs-mount (board 5230, 5232, 5234, 2026-11-21)
+
+The first arm64 test host (16 KiB pages, SELinux) failed three ways. A window maps a store's 4 KiB
+blocks, and mmap maps only whole host pages at whole-page offsets in an extent, so on such a host
+a memory cell's window is refused as it is made (`cladefs::pages::window_fits_host`), and
+sqlite_extents' daemon file set opens with no window, reading copies. Supporting it instead would
+mean blocks (or extents' layout) of the host's page size, a format change; arm64 servers mostly run
+4 KiB pages. cladefs-mount stores no SELinux label: the FUSE differential leaves the host's label
+out. Undoing: blocks of the host's page size for memory and SQLite cells, then drop the refusal; or
+store security.selinux in cladefs-mount and compare it.
+
 ## Explainer films: storylines picked without asking, in-progress parts shown marked (TASK-658, 2026-11-19)
 
 Five feature films (encryption, replication, regions, shared volumes, images) in the overview's look,
