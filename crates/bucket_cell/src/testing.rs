@@ -1183,11 +1183,14 @@ pub async fn uncollected_copies(
                 }
                 Kind::Reference { parent, at, child } => {
                     let marked = here.contains(&layout::retired(parent, at, child));
-                    let names = matches!(
-                        crate::head::get(bucket, child).await,
-                        Ok(Some(head)) if head.origin() == Some(Origin { parent, at })
-                    );
-                    if marked || !names {
+                    let head = crate::head::get(bucket, child).await.ok().flatten();
+                    let names = head
+                        .as_ref()
+                        .is_some_and(|head| head.origin() == Some(Origin { parent, at }));
+                    // Its child deleted and dead, as [`uncollected`] has it of an original: its
+                    // pass retires it here, as there (TASK-633.8).
+                    let deleted = head.as_ref().is_some_and(|head| head.deleted());
+                    if marked || !names || (deleted && dead(bucket, child).await) {
                         stray.push(key);
                     }
                 }
@@ -1238,6 +1241,19 @@ pub async fn uncollected_copies(
         }
     }
     left
+}
+
+/// cladefs: whether `cell` holds no reference of its children's, nor a hold of a mirror of one of
+/// its versions in another bucket, in its own bucket, where `bucket` routes it ([`uncollected`]'s
+/// dead cell, whose records are deleted).
+async fn dead(bucket: &impl Bucket, cell: CellId) -> bool {
+    let listed = crate::bucket::list(bucket, &cell.prefix()).await;
+    !listed.iter().any(|meta| {
+        matches!(
+            layout::kind(&meta.key),
+            Kind::Reference { parent, .. } | Kind::Hold { parent, .. } if parent == cell
+        )
+    })
 }
 
 /// cladefs: whether the copy in bucket `number`, whose own store is `own`, holding `here`, of

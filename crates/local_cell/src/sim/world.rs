@@ -725,6 +725,10 @@ struct Host {
     keys: bucket_cell::keys::Host,
     /// cladefs: its mirrors under way, by ID ([`World::spawn_mirror`]), which its crash stops.
     mirrors: BTreeMap<u64, AbortHandle>,
+    /// cladefs: what its process knows of the mirrors into its bucket, and their turns
+    /// (`bucket_cell::mirror::Mirrors`, as a routed `ObjectBucket` keeps them): its crash's to
+    /// forget.
+    known: bucket_cell::mirror::Mirrors,
 }
 
 impl Default for Host {
@@ -733,8 +737,8 @@ impl Default for Host {
         let (disks, sessions) = (HashMap::new(), BTreeMap::new());
         let held = crate::HeldParts::new();
         let keys = bucket_cell::keys::testing::host();
-        let mirrors = BTreeMap::new();
-        Self { disks, sessions, uploads: Budget::new(limits), held, keys, mirrors }
+        let (mirrors, known) = (BTreeMap::new(), Default::default());
+        Self { disks, sessions, uploads: Budget::new(limits), held, keys, mirrors, known }
     }
 }
 
@@ -2185,10 +2189,12 @@ impl World {
                 running.abort();
             }
         }
-        // cladefs: its mirrors, their pins left to go stale (TASK-633.8).
+        // cladefs: its mirrors, their pins left to go stale, and what its process knew of them
+        // (TASK-633.8).
         for (_, running) in std::mem::take(&mut self.hosts[host].mirrors) {
             running.abort();
         }
+        self.hosts[host].known = Default::default();
     }
 
     /// cladefs: a member of a live replicator's configuration takes a turn: sent what it lacks
@@ -2307,15 +2313,25 @@ impl World {
             child = Short(child)
         );
         let (bucket, events) = (self.host_bucket(host), self.events.clone());
+        // Its turn taken as it is asked for, a fork's, as `ObjectBucket::mirror_wanted` takes it;
+        // an opening's once it read the child's head, as `ObjectBucket::mirror_for` does.
+        let known = self.hosts[host].known.clone();
+        let taken = origin.map(|origin| (origin, known.turn(origin)));
         let running = self.spawn(async move {
             let child = sim_cell(child);
             let result = async {
-                let origin = match origin {
-                    Some(origin) => Some(origin),
-                    None => bucket_cell::head::get(&*bucket, child).await?.and_then(|h| h.origin()),
+                let (origin, turn) = match taken {
+                    Some(taken) => taken,
+                    None => {
+                        let head = bucket_cell::head::get(&*bucket, child).await?;
+                        let Some(origin) = head.and_then(|head| head.origin()) else {
+                            return Ok(None);
+                        };
+                        (origin, known.turn(origin))
+                    }
                 };
-                let Some(origin) = origin else { return Ok(None) };
-                bucket_cell::mirror::wanted(&*bucket, &*bucket.own(), number, child, origin).await
+                let Some(turn) = turn else { return Ok(None) };
+                turn.mirror(&*bucket, &*bucket.own(), number, child, origin).await
             };
             let result = result.await;
             events.borrow_mut().push(Event::Mirrored { host, id, result });
@@ -2815,13 +2831,16 @@ impl World {
         let retired = gone().filter(reference).count();
         let markers = gone().filter(|key| matches!(kind(key), layout::Kind::Mirror { .. }));
         *self.mirrored.entry("collected").or_default() += markers.count();
+        // A pass over a copy compacts nothing: the moves a mirror it begins again copies there are
+        // copies (TASK-633.8).
+        let compacting = |key: &&String| moves(key) && !copy(key);
         let expected = |reported: &collector::Report| collector::Report {
             deleted: gone().filter(|key| !reference(key)).count(),
-            compacted: made().filter(moves).count(),
+            compacted: made().filter(compacting).count(),
             retired: reported.retired.max(retired),
             deleted_bytes: gone().filter(|key| !reference(key)).map(|key| before[key]).sum(),
             // Each moves of what was there then, the object it is of.
-            compacted_bytes: (made().filter(moves))
+            compacted_bytes: (made().filter(compacting))
                 .filter_map(|moves| {
                     let of = layout::moved_from(key_of(moves))?;
                     before.get(&format!("{}{of}", &moves[..moves.len() - key_of(moves).len()]))

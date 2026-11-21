@@ -5,7 +5,7 @@
 --- a/crates/bucket_cell/src/collector.rs
 +++ b/crates/bucket_cell/src/collector.rs
 @@ -510,7 +510,7 @@
-                 report.retired += referred;
+                 report.retired += retired;
              }
          }
 -        if alive || pinned || !stale.is_empty() || standing {

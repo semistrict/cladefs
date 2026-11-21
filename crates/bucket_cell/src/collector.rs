@@ -505,9 +505,9 @@ impl Collector {
         for at in &stale {
             let resumed = crate::mirror::mirror(bucket, own, number, cell, *at).await?;
             log::info!("collector: {cell}'s mirror at {at:x}, its pin stale, again: {resumed:?}");
-            // The references it moved here, retired there, whether there or not.
-            if let crate::mirror::Mirrored::Done { referred, .. } = resumed {
-                report.retired += referred;
+            // The references it moved here and retired there, whether there or not.
+            if let crate::mirror::Mirrored::Done { retired, .. } = resumed {
+                report.retired += retired;
             }
         }
         if alive || pinned || !stale.is_empty() || standing {

@@ -58,10 +58,10 @@ use std::future::Future;
 /// What a mirror came to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mirrored {
-    /// Marked: the objects it copied (those there already counted too), and the references of
-    /// this bucket's children it wrote here, retired in the parent's bucket if its head named the
-    /// version still.
-    Done { copied: usize, referred: usize },
+    /// Marked: the objects it copied (those there already counted too), the references of this
+    /// bucket's children it wrote here, and how many of them it retired in the parent's bucket,
+    /// whether there or not: all, if its head named the version still, else none.
+    Done { copied: usize, referred: usize, retired: usize },
     /// Given up, its version named no more by its cell's head, or its cell deleted: no mirror of it
     /// is wanted again.
     Unnamed,
@@ -182,6 +182,97 @@ impl Pin {
 /// How many objects a mirror copies at once.
 const COPIES_AT_ONCE: usize = 8;
 
+/// A version, by its cell and the segment it ends.
+type Of = (CellId, u64);
+
+/// What a process knows of the mirrors into its bucket (doc-23, Mirrors): the versions marked
+/// here, or found named no more, of which it wants no mirror, and its mirrors' turns, its mirrors
+/// of one version made one after another, so that one asked for later finds the version marked
+/// rather than another mirror under way. Shared by its clones; a process's own, which its death
+/// takes with it.
+#[derive(Clone, Default)]
+pub struct Mirrors {
+    known: std::sync::Arc<std::sync::Mutex<Known>>,
+}
+
+#[derive(Default)]
+struct Known {
+    marked: std::collections::HashSet<Of>,
+    /// Those whose mirrors found them named no more: none of them is wanted again.
+    unnamed: std::collections::HashSet<Of>,
+    making: std::collections::HashMap<Of, std::sync::Arc<tokio::sync::Mutex<()>>>,
+}
+
+impl Mirrors {
+    /// Notes `parent`'s version at `at` marked here, as a read of its marker found it.
+    pub fn marked(&self, parent: CellId, at: u64) {
+        self.known.lock().unwrap().marked.insert((parent, at));
+    }
+
+    /// The turn of a mirror of `origin`'s version, taken as it is asked for, if free, else to be
+    /// waited for ([`Turn::mirror`]): none if the version is known marked or unnamed.
+    pub fn turn(&self, origin: layout::Origin) -> Option<Turn> {
+        let version = (origin.parent, origin.at);
+        let mut known = self.known.lock().unwrap();
+        if known.marked.contains(&version) || known.unnamed.contains(&version) {
+            return None;
+        }
+        let one = known.making.entry(version).or_default().clone();
+        let held = one.clone().try_lock_owned().ok();
+        Some(Turn { mirrors: self.clone(), version, one: Some(one), held })
+    }
+
+    /// Whether no mirror holds or waits for a turn.
+    pub fn idle(&self) -> bool {
+        self.known.lock().unwrap().making.is_empty()
+    }
+}
+
+/// A mirror's turn among its process's mirrors of one version ([`Mirrors::turn`]): let go as it
+/// drops, the version's lock with it once no other turn holds it.
+pub struct Turn {
+    mirrors: Mirrors,
+    version: Of,
+    one: Option<std::sync::Arc<tokio::sync::Mutex<()>>>,
+    held: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl Turn {
+    /// Waits for its turn, then the mirror its child `child` wants ([`wanted`]): the version found
+    /// unnamed noted so, wanted no more.
+    pub async fn mirror(
+        mut self,
+        bucket: &impl Bucket,
+        own: &impl Bucket,
+        number: u16,
+        child: CellId,
+        origin: layout::Origin,
+    ) -> Result<Option<Mirrored>, Error> {
+        if self.held.is_none()
+            && let Some(one) = &self.one
+        {
+            self.held = Some(one.clone().lock_owned().await);
+        }
+        let mirrored = wanted(bucket, own, number, child, origin).await?;
+        if mirrored == Some(Mirrored::Unnamed) {
+            self.mirrors.known.lock().unwrap().unnamed.insert(self.version);
+        }
+        Ok(mirrored)
+    }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        self.held = None;
+        let mut known = self.mirrors.known.lock().unwrap();
+        self.one = None;
+        if known.making.get(&self.version).is_some_and(|one| std::sync::Arc::strong_count(one) == 1)
+        {
+            known.making.remove(&self.version);
+        }
+    }
+}
+
 /// The mirror into this bucket, numbered `number`, whose own store is `own`, of the version
 /// `child` was forked from, `origin`, which the child's fork, or its store's opening, asks for
 /// (doc-23: the first fork of a version into a bucket starts its mirror there): none unless `child`
@@ -256,7 +347,8 @@ pub async fn mirror(
     let referred = refer_here(bucket, own, number, parent, at).await;
     failpoint!("mirror::referred");
     pin.release(own).await;
-    Ok(Mirrored::Done { copied, referred: referred? })
+    let (referred, retired) = referred?;
+    Ok(Mirrored::Done { copied, referred, retired })
 }
 
 /// Writes `hold`, then copies (`mirrorHolds`).
@@ -383,14 +475,14 @@ async fn copy_one(bucket: &impl Bucket, own: &impl Bucket, key: &str) -> bool {
 /// parent's head read again naming the version still (`mirrorRereadsBeforeRetiring`), retired
 /// there. A version dropped by then, they stay there too: B's collector, which reads the head
 /// before it lists the copy, may have listed it before they were written here, and goes on to
-/// delete it, its hold with it. How many it wrote here.
+/// delete it, its hold with it. How many it wrote here, and how many it retired there.
 async fn refer_here(
     bucket: &impl Bucket,
     own: &impl Bucket,
     number: u16,
     parent: CellId,
     at: u64,
-) -> Result<usize, Error> {
+) -> Result<(usize, usize), Error> {
     let listed = bucket::list(bucket, &layout::origin(parent, at)).await;
     let mut moved = Vec::new();
     for meta in listed {
@@ -405,13 +497,14 @@ async fn refer_here(
     // A crash with the references written here, still standing there (a test's).
     fail::fail_point!("mirror::moved");
     if moved.is_empty() {
-        return Ok(0);
+        return Ok((0, 0));
     }
     let head = head::get(bucket, parent).await?;
     let named = head.as_ref().filter(|head| !head.deleted());
     if named.is_some_and(|head| head.versions.iter().any(|version| version.at == at)) {
         let keys: Vec<&str> = moved.iter().map(String::as_str).collect();
         lifecycle::retire(bucket, &keys).await;
+        return Ok((moved.len(), moved.len()));
     }
-    Ok(moved.len())
+    Ok((moved.len(), 0))
 }

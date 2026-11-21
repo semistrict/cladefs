@@ -439,16 +439,16 @@ fn regions() -> Profile {
 test_holds!(cells_across_regions, regions(), [2325]);
 
 /// cladefs: versions mirrored across the buckets of three regions (TASK-633.10, TASK-633.8): restores
-/// as [`restores`] makes them, by hosts each of a region of its own, so that most land in another
+/// as [`restores`] makes them, by hosts of three regions, two each, so that most land in another
 /// bucket than their versions' cells', whose hosts begin their versions' mirrors there, as their
-/// children's openings do; hosts crashing midway, their pins left to go stale; versions dropped
+/// children's openings do, a host's mirrors of a version taking turns, two hosts' racing; hosts crashing midway, their pins left to go stale; versions dropped
 /// and bases deleted under them; collectors of each region passing over copies; and at its end every
 /// cell deleted, every copy collected with them.
 fn mirrors() -> Profile {
-    let mut profile = Profile { regions: 3, steps: 1000, teardown: true, ..restores() };
+    let mut profile = Profile { regions: 3, hosts: 6, steps: 1000, teardown: true, ..restores() };
     profile.weights.complete = 200;
     profile.weights.version = 8;
-    profile.weights.restore_version = 2;
+    profile.weights.restore_version = 4;
     profile.weights.drop_version = 2;
     profile.weights.crash = 1;
     profile.weights.write = 2;

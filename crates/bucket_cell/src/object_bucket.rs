@@ -82,7 +82,7 @@ pub struct ObjectBucket {
     /// cladefs: the versions of cells of other buckets whose mirrors here it found marked, and
     /// those this process mirrors ([`ObjectBucket::mirror_wanted`]), each by its cell and where it
     /// is.
-    mirrors: std::sync::Mutex<Mirrors>,
+    mirrors: crate::mirror::Mirrors,
     /// cladefs: how far apart its store takes writes of one key, and when it last wrote each
     /// (TASK-690): shared with its own store's twin ([`ObjectBucket::own`]).
     rewrites: Arc<Rewrites>,
@@ -149,53 +149,6 @@ impl Rewrites {
         }
         written.at.insert(path.clone(), now);
     }
-}
-
-/// cladefs: a mirror's turn among this process's mirrors of one version, by its cell and where it
-/// is ([`ObjectBucket::mirror_wanted`]): taken as it is asked for, if free, else waited for; let go
-/// as it drops, the version's lock with it once no other turn holds it.
-struct MirrorTurn {
-    bucket: Arc<ObjectBucket>,
-    version: (layout::CellId, u64),
-    one: Option<Arc<tokio::sync::Mutex<()>>>,
-    held: Option<tokio::sync::OwnedMutexGuard<()>>,
-}
-
-impl MirrorTurn {
-    fn take(bucket: &Arc<ObjectBucket>, version: (layout::CellId, u64)) -> Self {
-        let one = bucket.mirrors.lock().unwrap().making.entry(version).or_default().clone();
-        let held = one.clone().try_lock_owned().ok();
-        Self { bucket: bucket.clone(), version, one: Some(one), held }
-    }
-
-    async fn wait(&mut self) {
-        if self.held.is_none()
-            && let Some(one) = &self.one
-        {
-            self.held = Some(one.clone().lock_owned().await);
-        }
-    }
-}
-
-impl Drop for MirrorTurn {
-    fn drop(&mut self) {
-        self.held = None;
-        let mut mirrors = self.bucket.mirrors.lock().unwrap();
-        self.one = None;
-        if mirrors.making.get(&self.version).is_some_and(|one| Arc::strong_count(one) == 1) {
-            mirrors.making.remove(&self.version);
-        }
-    }
-}
-
-/// cladefs: the versions a bucket knows mirrored here, and what has this process's mirrors of a
-/// version made one after another ([`ObjectBucket::mirrors`]).
-#[derive(Default)]
-struct Mirrors {
-    marked: std::collections::HashSet<(layout::CellId, u64)>,
-    /// Those whose mirrors found them named no more: none of them is wanted again.
-    unnamed: std::collections::HashSet<(layout::CellId, u64)>,
-    making: std::collections::HashMap<(layout::CellId, u64), Arc<tokio::sync::Mutex<()>>>,
 }
 
 /// cladefs: how long a bucket goes by what it last listed of a cell's mirror markers here before it
@@ -771,27 +724,16 @@ impl ObjectBucket {
         origin: layout::Origin,
     ) -> impl Future<Output = Result<Option<crate::mirror::Mirrored>, crate::Error>> + Send + 'static
     {
-        let version = (origin.parent, origin.at);
-        let known = {
-            let mirrors = self.mirrors.lock().unwrap();
-            mirrors.marked.contains(&version) || mirrors.unnamed.contains(&version)
-        };
-        let turn = (self.route.is_some() && !known).then(|| MirrorTurn::take(self, version));
+        let turn = self.route.as_ref().and_then(|_| self.mirrors.turn(origin));
+        let bucket = self.clone();
         async move {
-            let Some(mut turn) = turn else { return Ok(None) };
-            turn.wait().await;
-            let bucket = &turn.bucket;
+            let Some(turn) = turn else { return Ok(None) };
             let route = bucket.route.as_ref().expect("routed");
             let number = bucket.own_number(route).await;
             let number =
                 number.map_err(|err| crate::Error::Read(format!("its identity: {err}")))?;
             let Some(number) = number else { return Ok(None) };
-            let own = bucket.twin();
-            let mirrored = crate::mirror::wanted(&**bucket, &**own, number, child, origin).await?;
-            if mirrored == Some(crate::mirror::Mirrored::Unnamed) {
-                bucket.mirrors.lock().unwrap().unnamed.insert(version);
-            }
-            Ok(mirrored)
+            turn.mirror(&*bucket, &**bucket.twin(), number, child, origin).await
         }
     }
 
@@ -1756,7 +1698,7 @@ impl crate::mirror::Here for ObjectBucket {
                 self.known.named(parent, at, marker.epoch);
             }
             self.mirrored.lock().unwrap().insert(parent, (true, std::time::Instant::now()));
-            self.mirrors.lock().unwrap().marked.insert((parent, at));
+            self.mirrors.marked(parent, at);
             true
         })
     }
@@ -1908,19 +1850,19 @@ pub(crate) mod tests {
             let own = bucket.own();
             let mirrored = mirror(&*bucket, &*own, 1, parent, at).await.unwrap();
             // The checkpoint at the version, and the segment holding its extent.
-            assert_eq!(mirrored, Mirrored::Done { copied: 2, referred: 1 });
+            assert_eq!(mirrored, Mirrored::Done { copied: 2, referred: 1, retired: 1 });
             let (hold, marker) = (layout::hold(parent, at, 1), layout::mirror(parent, at));
             assert!(two.other.store_get(&hold).await.is_ok(), "no hold");
             assert!(two.home.store_get(&marker).await.is_ok(), "no marker");
             assert!(two.home.store_get(&layout::pin(parent, at)).await.is_err(), "the pin stands");
             assert_eq!(two.refers(origin, child).await, (false, true, true));
             let again = mirror(&*bucket, &*own, 1, parent, at).await.unwrap();
-            assert_eq!(again, Mirrored::Done { copied: 0, referred: 0 });
+            assert_eq!(again, Mirrored::Done { copied: 0, referred: 0, retired: 0 });
             // Its hold deleted, as B's collector deletes it with the copy, the marker read before:
             // a mirror begun again, finding the marker, writes none (`mirrorHoldsUnmarked`).
             two.other.store_delete(&hold).await.unwrap();
             let again = mirror(&*bucket, &*own, 1, parent, at).await.unwrap();
-            assert_eq!(again, Mirrored::Done { copied: 0, referred: 0 });
+            assert_eq!(again, Mirrored::Done { copied: 0, referred: 0, retired: 0 });
             assert!(two.other.store_get(&hold).await.is_err(), "a hold written again");
             two.other
                 .store_put(
@@ -2320,7 +2262,7 @@ pub(crate) mod tests {
             fork_version_given(&*bucket, child, VERSION, origin, 7).await.unwrap();
             assert_eq!(bucket.clone().mirror_for(parent).await.unwrap(), None, "a root");
             let mirrored = bucket.clone().mirror_for(child).await.unwrap();
-            let named = Some((origin, Mirrored::Done { copied: 2, referred: 1 }));
+            let named = Some((origin, Mirrored::Done { copied: 2, referred: 1, retired: 1 }));
             assert_eq!(mirrored, named, "the version it was forked from");
             assert_eq!(bucket.clone().mirror_for(child).await.unwrap(), None, "mirrored again");
             assert_eq!(two.refers(origin, child).await, (false, true, true));
@@ -2349,7 +2291,7 @@ pub(crate) mod tests {
             let (second, first) = futures::join!(second, first);
             assert!(matches!(first.unwrap(), Some(Mirrored::Done { referred: 1, .. })));
             assert_eq!(second.unwrap(), None, "the second's turn");
-            assert!(bucket.mirrors.lock().unwrap().making.is_empty(), "turns left");
+            assert!(bucket.mirrors.idle(), "turns left");
             let own = Origin { parent: test_cell(1 << 48 | 9), at: 3 };
             assert_eq!(bucket.mirror_wanted(child, own).await.unwrap(), None);
         });
@@ -2505,7 +2447,7 @@ pub(crate) mod tests {
             two.home.store_put(&pin, another.clone().into(), PutMode::Overwrite).await.unwrap();
             let taken = Watched::new(own.clone(), PIN_STALE + 1, Some(2));
             let done = mirror(&*bucket, &taken, 1, parent, at).await.unwrap();
-            assert_eq!(done, Mirrored::Done { copied: 0, referred: 0 });
+            assert_eq!(done, Mirrored::Done { copied: 0, referred: 0, retired: 0 });
             assert_eq!(two.home.store_get(&pin).await.unwrap().bytes, another, "the other's pin");
         });
     }
@@ -2664,7 +2606,7 @@ pub(crate) mod tests {
             let again = block_on(mirror(&*bucket, &*own, 1, parent, at)).unwrap();
             // The reference left there written here again, and left there still.
             let expected = match marked {
-                true => Mirrored::Done { copied: 0, referred: usize::from(!retired) },
+                true => Mirrored::Done { copied: 0, referred: usize::from(!retired), retired: 0 },
                 false => Mirrored::Unnamed,
             };
             assert_eq!(again, expected, "{step}: begun again");
