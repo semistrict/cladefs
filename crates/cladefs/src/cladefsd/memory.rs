@@ -7,7 +7,10 @@
 //! API. Past a limit the daemon evicts the clean pages asked for longest ago, the tenant's own
 //! past the tenant's, any tenant's past the total; with none left to evict, what would take more
 //! fails with `ENOMEM` (physical memory's relief, with `crate::cache`'s evictor), and the daemon
-//! goes on. cladefs: the private pages of a window that copies on write are its VM process's
+//! goes on. cladefs: but for a page-in past the total, as the host's memory is full, which waits
+//! for a page rather than fail its guest's fault, which killed its VM (`physmem::Wait::
+//! UntilHostRoom`, board 5662); the governor keeps a floor and refuses cells meanwhile
+//! (`super::governor`). cladefs: the private pages of a window that copies on write are its VM process's
 //! memory, not the daemon's, and count against none of this (backlog doc-13, TASK-501). Its
 //! metrics name tenants by their IDs.
 

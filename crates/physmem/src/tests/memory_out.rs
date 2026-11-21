@@ -12,7 +12,8 @@
 use super::configure_chunks;
 use crate::{
     ArenaId, CHUNK_SIZE, NoMemory, Page, RELIEF_BYTES, Wait, alloc, count_free_pages, create_arena,
-    has_alloc_failed_no_mem, keep_spare_chunks, page_size, relieve_with, set_arena_cap,
+    has_alloc_failed_no_mem, keep_spare_chunks, page_size, relieve_with, remove_arena,
+    set_arena_cap,
 };
 use std::sync::{Arc, Mutex};
 
@@ -114,4 +115,44 @@ fn allocations_that_may_not_wait_ask_for_relief_for_those_after() {
     assert!(has_alloc_failed_no_mem(), "the failure was not recorded");
     assert_eq!(passes.recv().unwrap(), (None, RELIEF_BYTES));
     drop(alloc(ArenaId::DEFAULT, Wait::No).expect("the page relief freed"));
+}
+
+/// cladefs: board 5662: an allocation that waits for the host's room, finding memory out and
+/// relief freeing nothing, its arena exhausted, waits where one that waits fails, and takes the
+/// page freed later.
+#[test]
+fn allocations_that_wait_for_the_hosts_room_outwait_an_exhausted_arena() {
+    let mut pages = fill_memory();
+    relieve_with(|_, _| 0).unwrap();
+    assert_eq!(alloc(ArenaId::DEFAULT, Wait::Yes).err(), Some(NoMemory), "exhausted");
+    let (taken, took) = std::sync::mpsc::channel();
+    let waiting = std::thread::spawn(move || {
+        taken.send(alloc(ArenaId::DEFAULT, Wait::UntilHostRoom).map(|page| page.frame())).unwrap()
+    });
+    // Relief's passes free nothing: it waits still.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert!(took.try_recv().is_err(), "it gave up, or took a page none freed");
+    let freed = pages.pop().unwrap();
+    let frame = freed.frame();
+    drop(freed);
+    assert_eq!(took.recv().unwrap(), Ok(frame));
+    waiting.join().unwrap();
+}
+
+/// cladefs: board 5662: an allocation that waits for the host's room fails, as one that waits
+/// does, at its arena's own cap, which is its tenant's to keep to, and once its arena is removed.
+#[test]
+fn allocations_that_wait_for_the_hosts_room_fail_at_their_arenas_own_cap() {
+    configure_chunks(16);
+    keep_spare_chunks(false);
+    relieve_with(|_, _| 0).unwrap();
+    let arena = create_arena();
+    set_arena_cap(arena, Some(CHUNK_SIZE as u64));
+    let held: Vec<Page> =
+        (0..CHUNK_SIZE as u64 / page_size()).map(|_| alloc(arena, Wait::No).unwrap()).collect();
+    assert!(count_free_pages() > 0);
+    assert_eq!(alloc(arena, Wait::UntilHostRoom).err(), Some(NoMemory));
+    remove_arena(arena);
+    drop(held);
+    assert_eq!(alloc(arena, Wait::UntilHostRoom).err(), Some(NoMemory));
 }

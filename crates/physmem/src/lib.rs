@@ -195,6 +195,13 @@ impl Drop for Page {
 pub enum Wait {
     No,
     Yes,
+    /// cladefs: as `Yes`, and past what fails it as the host is full: the arenas' memory together
+    /// at its cap, or no chunk the host maps, relief having found nothing to free, it waits for
+    /// room (a page freed, a cap changed, a chunk going back) and tries again, for as long as that
+    /// takes. Its arena at its own cap, or removed, it fails as `Yes` does: a tenant's own limit is
+    /// its to keep to. A guest's DAX fault waiting so stalls its vCPU while the host is full, rather
+    /// than kill its VM (board 5662).
+    UntilHostRoom,
 }
 
 /// An allocation failed: nothing makes its arena room.

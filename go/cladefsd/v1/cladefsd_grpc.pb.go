@@ -128,7 +128,8 @@ const (
 // The extent daemon's control API.
 type CladefsdClient interface {
 	// Makes an empty store: of a new cell; or of a cell kept in the daemon's bucket, which the daemon
-	// takes once it opens the store (a VM on another host than the cell's).
+	// takes once it opens the store (a VM on another host than the cell's). RESOURCE_EXHAUSTED
+	// (ENOMEM) while the host's memory is full: the VMs here need what is left (board 5662).
 	CreateCell(ctx context.Context, in *CreateCellRequest, opts ...grpc.CallOption) (*CreateCellResponse, error)
 	// Makes a store holding an Fxfs filesystem of a container image: a base for VMs to fork.
 	ImportImage(ctx context.Context, in *ImportImageRequest, opts ...grpc.CallOption) (*ImportImageResponse, error)
@@ -136,7 +137,8 @@ type CladefsdClient interface {
 	// moment nothing is open on it (as with its guest's filesystem frozen), FAILED_PRECONDITION
 	// (EBUSY) otherwise. A fork of a store with a writer is a commit of its cell, made where that
 	// writer is, one host at a time; a fork of a version (`version`) is its child's record alone,
-	// made on any number of hosts at once.
+	// made on any number of hosts at once. RESOURCE_EXHAUSTED (ENOMEM) while the host's memory is
+	// full, as CreateCell.
 	ForkCell(ctx context.Context, in *ForkCellRequest, opts ...grpc.CallOption) (*ForkCellResponse, error)
 	// Deletes a store, or a fork, and its branch in the daemon's bucket: its data goes but for what
 	// other cells share of it, which stays until the last of them goes. What was forked from it
@@ -650,7 +652,8 @@ func (c *cladefsdClient) HandOverCell(ctx context.Context, in *HandOverCellReque
 // The extent daemon's control API.
 type CladefsdServer interface {
 	// Makes an empty store: of a new cell; or of a cell kept in the daemon's bucket, which the daemon
-	// takes once it opens the store (a VM on another host than the cell's).
+	// takes once it opens the store (a VM on another host than the cell's). RESOURCE_EXHAUSTED
+	// (ENOMEM) while the host's memory is full: the VMs here need what is left (board 5662).
 	CreateCell(context.Context, *CreateCellRequest) (*CreateCellResponse, error)
 	// Makes a store holding an Fxfs filesystem of a container image: a base for VMs to fork.
 	ImportImage(context.Context, *ImportImageRequest) (*ImportImageResponse, error)
@@ -658,7 +661,8 @@ type CladefsdServer interface {
 	// moment nothing is open on it (as with its guest's filesystem frozen), FAILED_PRECONDITION
 	// (EBUSY) otherwise. A fork of a store with a writer is a commit of its cell, made where that
 	// writer is, one host at a time; a fork of a version (`version`) is its child's record alone,
-	// made on any number of hosts at once.
+	// made on any number of hosts at once. RESOURCE_EXHAUSTED (ENOMEM) while the host's memory is
+	// full, as CreateCell.
 	ForkCell(context.Context, *ForkCellRequest) (*ForkCellResponse, error)
 	// Deletes a store, or a fork, and its branch in the daemon's bucket: its data goes but for what
 	// other cells share of it, which stays until the last of them goes. What was forked from it

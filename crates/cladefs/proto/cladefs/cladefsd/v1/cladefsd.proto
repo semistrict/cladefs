@@ -74,7 +74,8 @@ option go_package = "github.com/semistrict/cladefs/go/cladefsd/v1;cladefsdv1";
 // The extent daemon's control API.
 service Cladefsd {
   // Makes an empty store: of a new cell; or of a cell kept in the daemon's bucket, which the daemon
-  // takes once it opens the store (a VM on another host than the cell's).
+  // takes once it opens the store (a VM on another host than the cell's). RESOURCE_EXHAUSTED
+  // (ENOMEM) while the host's memory is full: the VMs here need what is left (board 5662).
   rpc CreateCell(CreateCellRequest) returns (CreateCellResponse);
   // Makes a store holding an Fxfs filesystem of a container image: a base for VMs to fork.
   rpc ImportImage(ImportImageRequest) returns (ImportImageResponse);
@@ -82,7 +83,8 @@ service Cladefsd {
   // moment nothing is open on it (as with its guest's filesystem frozen), FAILED_PRECONDITION
   // (EBUSY) otherwise. A fork of a store with a writer is a commit of its cell, made where that
   // writer is, one host at a time; a fork of a version (`version`) is its child's record alone,
-  // made on any number of hosts at once.
+  // made on any number of hosts at once. RESOURCE_EXHAUSTED (ENOMEM) while the host's memory is
+  // full, as CreateCell.
   rpc ForkCell(ForkCellRequest) returns (ForkCellResponse);
   // Deletes a store, or a fork, and its branch in the daemon's bucket: its data goes but for what
   // other cells share of it, which stays until the last of them goes. What was forked from it

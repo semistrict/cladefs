@@ -17,6 +17,15 @@
 //! held until their framings, which it lets go of first, before any tenant's page: derived, their
 //! framings read them back (`super::memory::held_parts`, TASK-400).
 //!
+//! cladefs: never less than a floor ([`floor`], board 5662). Under DAX the daemon's pages are its
+//! guests' page cache: squeezed below what their windows use, every fault evicts another's page,
+//! and at the last finds none, which killed the VMs faulting (cells-per-host-dax at 159 VMs, the
+//! daemon's limit down to a few chunks). So the governor keeps the floor whatever the host leaves,
+//! and says the host is full while the room for the daemon is under it ([`full`]): the daemon then
+//! refuses to make cells (`CreateCell`, `ForkCell`), so that the VM manager places no VM more here,
+//! and what more the guests already running take comes out of the host's own headroom. And a
+//! page-in finding no page waits for one rather than fails (`physmem::Wait::UntilHostRoom`).
+//!
 //! A daemon given its memory's size (`cladefsd SOCKET MEMORY_BYTES`) is not governed: its
 //! memory is that, as a test's daemon's may be.
 //!
@@ -45,6 +54,37 @@ pub fn headroom(total: u64) -> Result<u64, String> {
         }
         _ => Ok((total / 16).max(1 << 30)),
     }
+}
+
+/// cladefs: the least the governor leaves the daemon's memory, however little the host has left:
+/// `CLADEFSD_MEMORY_FLOOR` bytes, or a sixty-fourth of the host's memory, 256 MiB at least, in
+/// whole chunks: room for what the VMs' windows use, their guests' DAX faults' pages (board 5662;
+/// 176 small VMs on one base used about 40 MiB of it).
+pub fn floor(total: u64) -> Result<u64, String> {
+    let chunk = CHUNK_SIZE as u64;
+    let bytes = match node_local::env::var("CLADEFSD_MEMORY_FLOOR") {
+        Ok(bytes) if !bytes.is_empty() => {
+            bytes.parse().map_err(|_| format!("CLADEFSD_MEMORY_FLOOR is bytes, not {bytes:?}"))?
+        }
+        _ => (total / 64).max(256 << 20),
+    };
+    Ok((bytes / chunk * chunk).max(chunk))
+}
+
+/// cladefs: whether the host is full: the room the governor last found for the daemon's memory was
+/// under its floor ([`allowance`]), so that the daemon makes no cell more (board 5662).
+pub fn full() -> bool {
+    FULL.get().load(std::sync::atomic::Ordering::Relaxed)
+}
+
+node_local::node_local! {
+    static FULL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+}
+
+/// cladefs: says the host is full, or not, as the governor would: for tests of what refuses then.
+#[cfg(test)]
+pub(crate) fn set_full(full: bool) {
+    FULL.get().store(full, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The host's memory, as the daemon may use it.
@@ -154,11 +194,27 @@ pub fn room_of(max: &str, current: &str, stat: &str) -> Option<u64> {
     Some((max + inactive).saturating_sub(current))
 }
 
-/// What the daemon may hold, holding `held`, of `host`, leaving `headroom`: whole chunks, one at
-/// least.
-pub fn allowance(held: u64, host: HostMemory, headroom: u64) -> u64 {
+/// What the daemon may hold: its `bytes`, and whether the host is `full`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Allowance {
+    /// What the daemon may hold, its floor at least.
+    pub bytes: u64,
+    /// Whether the host is full: the room for the daemon under its floor.
+    pub full: bool,
+}
+
+/// What the daemon may hold, holding `held`, of `host`, leaving `headroom`, and `floor` at least
+/// ([`floor`]): whole chunks, one at least. cladefs: and whether the host is full, the room under
+/// the floor, `was` it as the last look found it: entered under the floor, left only past it and a
+/// quarter more, so that a host at its edge doesn't refuse and take cells by turns (board 5662).
+pub fn allowance(held: u64, host: HostMemory, headroom: u64, floor: u64, was: bool) -> Allowance {
     let chunk = CHUNK_SIZE as u64;
-    ((held + host.available).saturating_sub(headroom) / chunk * chunk).max(chunk)
+    let room = (held + host.available).saturating_sub(headroom);
+    let full = match was {
+        true => room < floor + floor / 4,
+        false => room < floor,
+    };
+    Allowance { bytes: (room.max(floor) / chunk * chunk).max(chunk), full }
 }
 
 /// Each tenant's share of `target` bytes by its weight, of `tenants`' (ID, weight): what it keeps
@@ -184,17 +240,30 @@ pub fn shares(target: u64, tenants: &[(u64, u64)]) -> Vec<(u64, u64)> {
 /// they evict holding no thread (board 2946).
 pub fn start() -> Result<(), String> {
     let host = host_memory().map_err(|err| format!("reading the host's memory: {err}"))?;
-    let headroom = headroom(host.total)?;
-    super::run::service("memory governor", 1, move || govern_every(headroom))
+    let (headroom, floor) = (headroom(host.total)?, floor(host.total)?);
+    super::run::service("memory governor", 1, move || govern_every(headroom, floor))
         .map_err(|err| format!("starting the memory governor: {err}"))
 }
 
 /// cladefs: governs the daemon's memory now and every [`INTERVAL`] after, leaving `headroom` free
-/// ([`start`]), for as long as the daemon runs.
-async fn govern_every(headroom: u64) {
+/// and keeping `floor` ([`start`]), for as long as the daemon runs.
+async fn govern_every(headroom: u64, floor: u64) {
+    use std::sync::atomic::Ordering;
     loop {
         match host_memory() {
-            Ok(host) => memory::govern(allowance(memory::governed_bytes(), host, headroom)).await,
+            Ok(host) => {
+                let was = FULL.get().load(Ordering::Relaxed);
+                let allowed = allowance(memory::governed_bytes(), host, headroom, floor, was);
+                if allowed.full != was {
+                    log::warn!(
+                        "cladefsd: the host's memory is {}: {} bytes available, the floor {floor}",
+                        if allowed.full { "full, making no cell more" } else { "no longer full" },
+                        host.available
+                    );
+                }
+                FULL.get().store(allowed.full, Ordering::Relaxed);
+                memory::govern(allowed.bytes).await
+            }
             Err(err) => log::error!("cladefsd: reading the host's memory: {err}"),
         }
         tokio::time::sleep(INTERVAL).await;
@@ -296,14 +365,43 @@ mod tests {
     fn the_allowance_is_whats_held_and_available_less_the_headroom() {
         const GIB: u64 = 1 << 30;
         let chunk = CHUNK_SIZE as u64;
+        let bytes = |held, host, headroom| allowance(held, host, headroom, 0, false).bytes;
         let host = HostMemory { total: 32 * GIB, available: 10 * GIB };
-        assert_eq!(allowance(4 * GIB, host, 2 * GIB), 12 * GIB);
+        assert_eq!(bytes(4 * GIB, host, 2 * GIB), 12 * GIB);
         // Squeezed past the headroom: what is held less what is missing.
         let squeezed = HostMemory { total: 32 * GIB, available: GIB };
-        assert_eq!(allowance(4 * GIB, squeezed, 2 * GIB), 3 * GIB);
+        assert_eq!(bytes(4 * GIB, squeezed, 2 * GIB), 3 * GIB);
         // A chunk at least, and whole chunks.
-        assert_eq!(allowance(0, squeezed, 2 * GIB), chunk);
-        assert_eq!(allowance(chunk + 1, HostMemory { total: GIB, available: 0 }, 0), chunk);
+        assert_eq!(bytes(0, squeezed, 2 * GIB), chunk);
+        assert_eq!(bytes(chunk + 1, HostMemory { total: GIB, available: 0 }, 0), chunk);
+    }
+
+    /// cladefs: board 5662: the allowance never goes under the floor, however little the host has
+    /// left; the host is full under it, and stays full until the room is past it and a quarter more.
+    #[test]
+    fn the_allowance_keeps_its_floor_and_says_the_host_full_under_it() {
+        const MIB: u64 = 1 << 20;
+        let host = |available| HostMemory { total: 32 << 30, available };
+        let floor = 256 * MIB;
+        // 40 MiB held, 30 MiB past the headroom available: the room is 70 MiB, the floor kept.
+        let squeezed = allowance(40 * MIB, host(1054 * MIB), 1024 * MIB, floor, false);
+        assert_eq!(squeezed, Allowance { bytes: floor, full: true });
+        // Past the floor, not past it and a quarter more: full still, if it was.
+        let between = allowance(40 * MIB, host(1284 * MIB), 1024 * MIB, floor, true);
+        assert_eq!(between, Allowance { bytes: 300 * MIB, full: true });
+        assert!(!allowance(40 * MIB, host(1284 * MIB), 1024 * MIB, floor, false).full);
+        let past = allowance(40 * MIB, host(1324 * MIB), 1024 * MIB, floor, true);
+        assert_eq!(past, Allowance { bytes: 340 * MIB, full: false });
+    }
+
+    /// cladefs: board 5662: the floor is a sixty-fourth of the host's memory, 256 MiB at least, in
+    /// whole chunks.
+    #[test]
+    fn the_floor_is_a_sixty_fourth_of_the_host_256_mib_at_least() {
+        const GIB: u64 = 1 << 30;
+        assert_eq!(floor(64 * GIB), Ok(GIB));
+        assert_eq!(floor(4 * GIB), Ok(256 << 20));
+        assert_eq!(floor(27 * GIB + 12345), Ok(432 << 20));
     }
 
     #[test]

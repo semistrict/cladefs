@@ -4,7 +4,8 @@
 
 //! TASK-50.3: the daemon's memory, limited at runtime through the control API, a tenant's and
 //! every tenant's together. Past a limit the daemon evicts the clean pages read longest ago; with
-//! none left to evict, what would take more fails with ENOMEM, and the daemon goes on. Its metrics
+//! none left to evict, what would take more fails with ENOMEM, and the daemon goes on; cladefs: but
+//! a page-in past every tenant's together, which waits for a page (board 5662). Its metrics
 //! show each tenant's memory by its ID.
 
 #![cfg(target_os = "linux")]

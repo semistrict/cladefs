@@ -2573,7 +2573,8 @@ type GetCountersResponse struct {
 	// Of those, the bytes read straight from local stores or object storage: of open extents, and
 	// followers'. Sealed extents' are read through the extent cache, whose page-ins count them.
 	ReadStoredBytes uint64 `protobuf:"varint,10,opt,name=read_stored_bytes,json=readStoredBytes,proto3" json:"read_stored_bytes,omitempty"`
-	// Units of boot profiles read into memory ahead of forks.
+	// Parts of extents fetched into the host's cache ahead of forks' guests, as their versions' read
+	// evidence predicted them, not found kept there.
 	Prefetches uint64 `protobuf:"varint,11,opt,name=prefetches,proto3" json:"prefetches,omitempty"`
 	// Parts of extents stored compressed, decompressed.
 	Unpacks uint64 `protobuf:"varint,12,opt,name=unpacks,proto3" json:"unpacks,omitempty"`

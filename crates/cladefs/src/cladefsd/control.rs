@@ -321,6 +321,19 @@ pub fn errno(status: &Status) -> Option<Errno> {
     errno.parse().ok().map(Errno::from_raw)
 }
 
+/// cladefs: refuses to make a cell while the host's memory is full (`super::governor::full`, board
+/// 5662): RESOURCE_EXHAUSTED (ENOMEM), so that the VM manager places its VM on another host, rather
+/// than this host's VMs lose to it the pages their windows use. A cell made already opens.
+fn room_for_a_cell() -> Result<(), Status> {
+    match super::governor::full() {
+        true => Err(saying(
+            Errno::ENOMEM,
+            "the host's memory is full: the daemon makes no cell more".to_owned(),
+        )),
+        false => Ok(()),
+    }
+}
+
 /// The status of a call that failed with `errno`.
 fn status(errno: Errno) -> Status {
     saying(errno, format!("{errno:?}"))
@@ -334,7 +347,8 @@ pub(crate) fn saying(errno: Errno, message: String) -> Status {
         Errno::EEXIST => Code::AlreadyExists,
         Errno::EACCES | Errno::EPERM => Code::PermissionDenied,
         Errno::EINVAL => Code::InvalidArgument,
-        Errno::ENOSPC => Code::ResourceExhausted,
+        // cladefs: ENOMEM, the host's memory full (board 5662).
+        Errno::ENOSPC | Errno::ENOMEM => Code::ResourceExhausted,
         Errno::ETIMEDOUT => Code::DeadlineExceeded,
         Errno::EBUSY | Errno::ESTALE | Errno::ENOTSUP | Errno::EROFS => Code::FailedPrecondition,
         _ => Code::Internal,
@@ -476,6 +490,7 @@ impl Cladefsd for Control {
             force,
         } = request.into_inner();
         let store = path(store)?;
+        room_for_a_cell()?;
         let replication = wish(replicas, fsync)?;
         // cladefs: a replicated cell's members are the daemon's peers, in their replica
         // directories (doc-21): without them, refused before anything is made.
@@ -522,6 +537,7 @@ impl Cladefsd for Control {
         let ForkCellRequest { from, to, version, tenant: of, cell, ephemeral } =
             request.into_inner();
         let to = path(to)?;
+        room_for_a_cell()?;
         let tenant = self.grants.tenant_at(&to);
         let of = crate::CellId { tenant: of, id: cell };
         let forked = match version {
@@ -1490,6 +1506,19 @@ mod tests {
                 Ok(http::Response::new(()))
             })
         }
+    }
+
+    /// cladefs: board 5662: while the host's memory is full, a cell is refused, RESOURCE_EXHAUSTED
+    /// with ENOMEM, which the client reads back; once it isn't, made.
+    #[test]
+    fn cells_are_refused_while_the_hosts_memory_is_full() {
+        super::super::governor::set_full(true);
+        let refused = room_for_a_cell().unwrap_err();
+        assert_eq!(refused.code(), Code::ResourceExhausted);
+        assert_eq!(errno(&refused), Some(Errno::ENOMEM));
+        assert_eq!(refused.message(), "the host's memory is full: the daemon makes no cell more");
+        super::super::governor::set_full(false);
+        assert!(room_for_a_cell().is_ok());
     }
 
     /// A call of the API whose caller gives up, dropping what awaits its answer, runs to its end,

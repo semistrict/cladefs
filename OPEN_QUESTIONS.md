@@ -21,6 +21,21 @@ the worktrees stay as they are, nothing in them is lost, and TASK-444.4–.11 wa
 
 # Decisions
 
+## A full host: the daemon's floor, cells refused, page-ins waiting (board 5662, 2026-11-21)
+
+You chose floor + refuse + wait. Decided without you:
+- **The floor defaults to a sixty-fourth of the host's memory, 256 MiB at least**
+  (`CLADEFSD_MEMORY_FLOOR` overrides it): 432 MiB on ubu1, where 176 small DAX VMs used about
+  40 MiB. That is about 4 VMs of density given up for a margin over bigger bases' working sets.
+  *Undo:* `governor::floor`'s default.
+- **"Full" is entered under the floor and left only past it and a quarter more**, so that a host
+  at the edge doesn't refuse and accept cells by turns.
+- **Only CreateCell and ForkCell are refused** (RESOURCE_EXHAUSTED, ENOMEM). Opening a cell that
+  already exists, as a VM restarting does, is not, nor is ImportImage.
+- **Page-ins wait only when the host is full** (every arena's memory at the governor's cap, or no
+  chunk the host maps). A tenant at its own memory limit still fails with ENOMEM, as its limit is
+  its own to keep to (`physmem::Wait::UntilHostRoom`).
+
 ## Cells per host: what a cell is and what stops the count (board 5581, 5583, 2026-11-21)
 
 Decided without you:

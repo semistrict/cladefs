@@ -22,13 +22,15 @@
 //! one at least; the first is one, its cost not known yet ([`Ramp::next`]). The room is what the
 //! daemon's governor finds available, the host's or its cgroups' (`governor::host_memory`), with
 //! what the daemon's memory holds, which it gives back as VMs need it (a page a window maps
-//! unmapped first, `crate::cache`), less the governor's headroom ([`room`]). Once a step's VMs
+//! unmapped first, `crate::cache`), less the governor's headroom and the floor it keeps the
+//! daemon's memory at (`governor::floor`, board 5662) ([`room`]). Once a step's VMs
 //! are ready, the host lets one window of CLADEFS_CELLS_WINDOW_SECS (10) go by and judges each
 //! probe's p99 over it, every VM's samples together, and the step's boots', against its budget
 //! ([`PROBES`], [`BOOT_BUDGET_MS`]). A window past a budget is judged again, a window later and no
 //! VM added: two in a row stop the ramp ([`Ramp::judged`]). It stops at:
 //!
 //! - **memory**: the room holds less than one VM more;
+//! - **full**: the daemon refused a fork, the host's memory full (`governor::full`, board 5662);
 //! - **latency**: a probe's p99, or the step's boots', past its budget two windows in a row, the
 //!   VMs held those of the step before;
 //! - **max**: CLADEFS_CELLS_MAX (1000) VMs held.
@@ -167,6 +169,8 @@ mod host {
     enum Limit {
         /// The room left holds less than one VM more.
         Memory,
+        /// The daemon refused a fork, the host's memory full (board 5662).
+        Full,
         /// A probe's p99, or the step's boots' (`boot`), past its budget, by its name.
         Latency(&'static str),
         /// As many VMs as it was told to hold at most.
@@ -177,6 +181,7 @@ mod host {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
                 Limit::Memory => write!(f, "memory"),
+                Limit::Full => write!(f, "full"),
                 Limit::Latency(probe) => write!(f, "latency:{probe}"),
                 Limit::Max => write!(f, "max"),
             }
@@ -256,9 +261,10 @@ mod host {
     }
 
     /// The room for VMs: what the governor finds `available`, with the daemon's memory, `cached`,
-    /// which it gives back as they need it, less the governor's `headroom`.
-    fn room(available: u64, cached: u64, headroom: u64) -> u64 {
-        (available + cached).saturating_sub(headroom)
+    /// which it gives back as they need it down to its floor, `kept`, less the governor's
+    /// `headroom`.
+    fn room(available: u64, cached: u64, headroom: u64, kept: u64) -> u64 {
+        (available + cached).saturating_sub(headroom + kept)
     }
 
     /// The `p`th percentile of `values` (nearest rank), 0 of none.
@@ -408,20 +414,25 @@ mod host {
         fn room(&self) -> anyhow::Result<u64> {
             let host = governor::host_memory().context("the host's memory")?;
             let headroom = governor::headroom(host.total).map_err(anyhow::Error::msg)?;
+            let kept = governor::floor(host.total).map_err(anyhow::Error::msg)?;
             let gauges = self.memory.gauges()?;
             let cached =
                 *gauges.get("cladefsd_memory_bytes").context("no cladefsd_memory_bytes")?;
-            Ok(room(host.available, cached, headroom))
+            Ok(room(host.available, cached, headroom, kept))
         }
 
         /// Boots VM `vm` on a fork of the base of its own, and returns it with the socket its
-        /// guest connects to.
-        fn boot(&self, vm: usize) -> anyhow::Result<(String, Firecracker, Listening)> {
+        /// guest connects to: none if the daemon refused the fork, the host's memory full.
+        fn boot(&self, vm: usize) -> anyhow::Result<Option<(String, Firecracker, Listening)>> {
             let name = format!("cell-{vm}");
             let fork = self.test_setup.tmp_dir.join(format!("{name}.root"));
-            control(&self.socket)?
-                .fork_cell(&self.base, &fork)
-                .with_context(|| format!("forking the base for {name}"))?;
+            match control(&self.socket)?.fork_cell(&self.base, &fork) {
+                Err(err) if err.errno() == Some(cladefs::Errno::ENOMEM) => {
+                    eprintln!("cells-per-host: {name}'s fork refused: {err:#}");
+                    return Ok(None);
+                }
+                forked => forked.with_context(|| format!("forking the base for {name}"))?,
+            };
             let listening = Listening::new(&name)?;
             let mut machine = Vm::new(1, self.settings.vm_mib)?;
             machine.guest_kernel()?;
@@ -431,7 +442,7 @@ mod host {
             let firecracker = machine
                 .spawn_api(&self.root, &self.test_setup.test_case, &name, &Vm::api_socket(&name))
                 .with_context(|| format!("booting {name}"))?;
-            Ok((name, firecracker, listening))
+            Ok(Some((name, firecracker, listening)))
         }
 
         /// Whether the daemon let a VM process go, as its log says.
@@ -557,8 +568,11 @@ mod host {
             let mut cells = Cells::default();
             host.memory.say(0, "base", None, "")?;
             let mut ramp = Ramp::new(settings, host.room()?);
-            let (mut step, mut last) = (0, None);
+            let (mut step, mut last, mut full) = (0, None, false);
             let limit = loop {
+                if full {
+                    break Limit::Full;
+                }
                 let room = host.room()?;
                 let added = match ramp.next(room) {
                     Next::Stop(limit) => break limit,
@@ -571,7 +585,14 @@ mod host {
                 let mut booting = Vec::new();
                 let spawned = Instant::now();
                 for vm in first..first + added {
-                    booting.push(host.boot(vm)?);
+                    match host.boot(vm)? {
+                        Some(booted) => booting.push(booted),
+                        // The VMs booted are judged, then the ramp stops.
+                        None => {
+                            full = true;
+                            break;
+                        }
+                    }
                 }
                 let spawn_secs = spawned.elapsed().as_secs_f64();
                 let within = Duration::from_secs(settings.ready_secs);
@@ -795,14 +816,16 @@ mod host {
             assert_eq!(ramp.judged(49, Some("echo")), Verdict::Stop(Limit::Latency("echo")));
             assert_eq!(ramp.held, 33);
             assert_eq!(Limit::Latency("echo").to_string(), "latency:echo");
+            assert_eq!(Limit::Full.to_string(), "full");
         }
 
-        /// The room is what is available and the daemon's memory, less the headroom, none if
-        /// that is more.
+        /// The room is what is available and the daemon's memory, less the headroom and the floor
+        /// the daemon keeps, none if that is more.
         #[test]
         fn the_room_counts_the_daemons_memory_and_leaves_the_headroom() {
-            assert_eq!(room(4 * GIB, 6 * GIB, GIB), 9 * GIB);
-            assert_eq!(room(GIB / 2, 0, GIB), 0);
+            assert_eq!(room(4 * GIB, 6 * GIB, GIB, 0), 9 * GIB);
+            assert_eq!(room(4 * GIB, 6 * GIB, GIB, GIB / 2), 8 * GIB + GIB / 2);
+            assert_eq!(room(GIB / 2, 0, GIB, 0), 0);
         }
 
         /// The nearest-rank percentile: of 100 values, the 99th; of 10, the largest.

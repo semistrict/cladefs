@@ -500,6 +500,24 @@ fn let_go_least_used(
     idle.into_iter().take(excess).filter_map(|(_, key)| extents.remove(&key)).collect()
 }
 
+/// cladefs: says a page-in waits for memory, its arena's relief having found nothing to free: at
+/// most once every 10 s, with how many waited since, as a full host makes many wait (board 5662).
+fn waiting_for_memory() {
+    use std::sync::atomic::AtomicU64;
+    static WAITED: AtomicU64 = AtomicU64::new(0);
+    static SAID_AT: AtomicU64 = AtomicU64::new(0);
+    let waited = WAITED.fetch_add(1, Ordering::Relaxed) + 1;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let said = SAID_AT.load(Ordering::Relaxed);
+    if now >= said + 10
+        && SAID_AT.compare_exchange(said, now, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+    {
+        log::warn!("cladefs: page-ins wait for memory, none left to evict: {waited} so far");
+    }
+}
+
 /// A page-in found no pages of its arena to read into.
 #[derive(Debug, thiserror::Error)]
 #[error("no pages to read into")]
@@ -954,8 +972,17 @@ impl CachedExtent {
     ) -> std::result::Result<Vec<physmem::Page>, anyhow::Error> {
         let ps = page_size();
         let count = (pages.end - pages.start) as usize;
-        let frames = physmem::alloc_run(self.arena, count, physmem::Wait::Yes)
-            .map_err(|_| anyhow::Error::new(NoPages))?;
+        // cladefs: with no page for it, relief having found none to free, it waits for one rather
+        // than fail the guest's fault, which killed its VM (board 5662): the host is full, which
+        // the governor tells the VM manager by refusing cells (`cladefsd::governor::full`).
+        let frames = match physmem::alloc_run(self.arena, count, physmem::Wait::Yes) {
+            Ok(frames) => frames,
+            Err(physmem::NoMemory) => {
+                waiting_for_memory();
+                physmem::alloc_run(self.arena, count, physmem::Wait::UntilHostRoom)
+                    .map_err(|_| anyhow::Error::new(NoPages))?
+            }
+        };
         let offset = pages.start * ps;
         let len = count * ps as usize;
         // What of it the extent holds; past it, zeros.
