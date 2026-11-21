@@ -1153,7 +1153,17 @@ async fn with_store<T>(
         release(store).await;
         return done;
     }
-    let here = Here::open(path, hold(path).await?).await?;
+    let held = hold(path).await?;
+    // A store its connection let go of may live on a while, its last reference dropped on a
+    // blocking thread: worked on as it is, under the hold, never opened a second time beside it,
+    // as sync does (board 2730, board 2922).
+    if let Some((store, _)) = held.instance() {
+        let done = work(&store).await;
+        // Closed here, if this was its last reference, holding no thread.
+        release(store).await;
+        return done;
+    }
+    let here = Here::open(path, held).await?;
     let done = work(&here.store().store).await;
     here.close().await;
     done

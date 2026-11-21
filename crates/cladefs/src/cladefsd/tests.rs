@@ -4845,6 +4845,38 @@ fn forks_of_a_version_wait_for_the_close_of_the_store_that_made_it() {
     assert_eq!(read(&ours, extent, 0, BLOCK), Ok(pattern(6, BLOCK)));
 }
 
+/// board 2922: a version shared right after its writer's connection went, the store still open in
+/// this process as its last reference is dropped, is shared through that store as it is, as a
+/// fork's sync does (board 2730): before, the control's work opened it again beside it. Here the
+/// store lingers by a reference the test keeps, as a close on a blocking thread, or a busy host,
+/// would.
+#[test]
+fn versions_shared_right_after_their_writer_went_use_the_store_still_closing() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let store = dir.path().join("store");
+    let made = CellClient::connect(&socket, &store, 1 << 24).unwrap();
+    let extent = minted(&made);
+    write(&made, extent, 0, &pattern(5, BLOCK)).unwrap();
+    made.commit(Some(b"root")).unwrap();
+    let version = made.make_version().unwrap();
+    let key = super::cells::store_key(&store);
+    let lingering = super::cells::table().instance(&key).map(|(store, _)| store);
+    assert!(lingering.is_some(), "the store is not open");
+    drop(made);
+    let shared = control(super::cells::share_version(store.clone(), version.version, true));
+    assert_eq!(shared, Ok(()));
+    let versions = control(super::cells::versions(store.clone())).unwrap();
+    drop(lingering);
+    assert_eq!(
+        versions.iter().map(|each| (each.id, each.shared)).collect::<Vec<_>>(),
+        vec![(version.version, true)]
+    );
+}
+
 /// TASK-44.10: a restore, a fork of a version, which commits nothing, failing once its child's record
 /// is made, its cleanup failing with it, leaves nothing at the restore's path, and in the bucket an
 /// orphan, the child's record live (doc-14): a restore there forks anew. Before, it left a handle
