@@ -8,17 +8,18 @@
 #   fxjob [--name NAME] [--mem SIZE] [--cpus N] [--] COMMAND...
 #                                  a build, test or VM run (default 8G, 4 CPUs): best effort
 #   fxjob --bench [--name NAME] [--mem SIZE] [--] COMMAND...
-#                                  a measurement: waits for any other to finish, then has
-#                                  cores 4-7, most of the L3, memory bandwidth and protected
-#                                  memory to itself (fxjob-isolate), and work's IO on the
+#                                  a measurement: waits for any other to finish, then has the
+#                                  host's measurement CPUs (/etc/fxjob.conf's BENCH_CPUS) to
+#                                  itself, and, where the host has them, most of the L3 and
+#                                  memory bandwidth (fxjob-isolate), and work's IO on the
 #                                  scratch disk capped, whatever work runs
 #   fxjob ps                       running jobs, their reservations, memory, swap and CPU time;
 #                                  waiting jobs; what is reserved of the budget
 #
-# A job reserves its --mem and --cpus (a measurement: its 8 CPUs, cores 4-7) and starts once
-# they fit beside every running job's within the budget, /etc/fxjob.conf's MEM_BUDGET and
-# CPU_BUDGET (22G and the host's CPUs without it), jobs waiting their turn first come, first
-# served. A request past the whole budget fails at once. The command runs as the calling user,
+# A job reserves its --mem and --cpus (a measurement: its BENCH_CPUS, whatever its --cpus) and
+# starts once they fit beside every running job's within the budget, /etc/fxjob.conf's
+# MEM_BUDGET and CPU_BUDGET (22G and the host's CPUs without it), jobs waiting their turn first
+# come, first served. A host whose conf names no BENCH_CPUS takes no measurements. A request past the whole budget fails at once. The command runs as the calling user,
 # in the current directory, with the caller's environment; `sudo` inside it stays in its cgroup.
 # Once it ends, what is left in its cgroup is killed, root's processes too. fxjob exits with the
 # command's status; a job killed for passing its memory limit exits 137 and the kernel log says
@@ -31,8 +32,8 @@
 # `sudo env TMPDIR="$TMPDIR" ...`, expanded inside the job.
 #
 # The source is the cladefs repo's scripts/fxjob; the host's setup (~/docs/system-setup.d/
-# 146-fxdax_cgroups.sh on ubu1) installs it as /usr/local/bin/fxjob, and its slices, and
-# fxjob-isolate, and gives the reasons for them. scripts/fxjob-check.sh tests it on such a host.
+# 146-fxdax_cgroups.sh on ubu1, ~/setup/scripts/81-fxjob.sh on asahimbp) installs it as
+# /usr/local/bin/fxjob, and its slices, and scripts/fxjob-isolate, and gives the reasons for them. scripts/fxjob-check.sh tests it on such a host.
 set -euo pipefail
 
 uid=$(id -u)
@@ -58,10 +59,6 @@ cgroups=/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/fxdax.slice
 scratch=/mnt/fxdax-scratch
 work_io=(IOReadBandwidthMax="$scratch 64M" IOWriteBandwidthMax="$scratch 32M"
   IOReadIOPSMax="$scratch 2000" IOWriteIOPSMax="$scratch 1000")
-# A measurement's CPUs (fxjob-isolate's), which it reserves whatever its --cpus: no work runs on
-# them while it does.
-bench_cpus=4-7,12-15
-bench_share=8
 user() { systemctl --user "$@"; }
 # now: the time, in seconds, to the microsecond (EPOCHREALTIME has the locale's decimal point).
 now() { local t=$EPOCHREALTIME; echo "${t/,/.}"; }
@@ -91,10 +88,12 @@ human() {
 }
 
 # The budget, all jobs' reservations together: /etc/fxjob.conf's MEM_BUDGET and CPU_BUDGET,
-# KEY=VALUE words, # comments. 22G leaves the desktop and the user's shells 2G of the user's 24G
-# (user-<uid>.slice's MemoryMax). CPUs are logical CPUs, as nproc, cargo -j and a measurement's
-# 4-7,12-15 count them.
-mem_budget=22G cpu_budget=$(nproc)
+# KEY=VALUE words, # comments (ubu1's 22G leaves the desktop and the user's shells 2G of the
+# user's 24G, user-<uid>.slice's MemoryMax). CPUs are logical CPUs, as nproc, cargo -j and
+# BENCH_CPUS count them. BENCH_CPUS, a cpulist (4-7,12-15), are a measurement's (fxjob-isolate's,
+# which reads the conf's other BENCH_ and WORK_ words), which it reserves whatever its --cpus: no
+# work runs on them while it does.
+mem_budget=22G cpu_budget=$(nproc) bench_cpus=''
 if [[ -r $conf ]]; then
   while read -r line; do
     read -ra words <<< "${line%%#*}"
@@ -102,6 +101,7 @@ if [[ -r $conf ]]; then
       case $word in
         MEM_BUDGET=*) mem_budget=${word#*=} ;;
         CPU_BUDGET=*) cpu_budget=${word#*=} ;;
+        BENCH_CPUS=*) bench_cpus=${word#*=} ;;
       esac
     done
   done < "$conf"
@@ -110,6 +110,19 @@ mem_budget_bytes=$(bytes "$mem_budget") ||
   { echo "fxjob: MEM_BUDGET ($conf) is a size, such as 22G: $mem_budget" >&2; exit 2; }
 [[ $cpu_budget =~ ^[1-9][0-9]*$ ]] ||
   { echo "fxjob: CPU_BUDGET ($conf) is a count of CPUs: $cpu_budget" >&2; exit 2; }
+# bench_share: how many CPUs BENCH_CPUS names, 0 for none.
+bench_share=0
+if [[ -n $bench_cpus ]]; then
+  [[ $bench_cpus =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]] ||
+    { echo "fxjob: BENCH_CPUS ($conf) is a cpulist, such as 4-7,12-15: $bench_cpus" >&2; exit 2; }
+  for part in ${bench_cpus//,/ }; do
+    if [[ $part == *-* ]]; then
+      bench_share=$((bench_share + ${part#*-} - ${part%-*} + 1))
+    else
+      bench_share=$((bench_share + 1))
+    fi
+  done
+fi
 
 # reserved: what the running jobs reserve, "BYTES CPUS JOBS". A running job is its scope, live
 # in work's or the measurements' slice: what systemd holds, not a ledger of fxjob's, so a job
@@ -196,18 +209,21 @@ if [[ ${1:-} == ps ]]; then
     done
   fi
   echo
-  # A slice's cpuset files are there only while systemd has the cpuset controller in its
-  # parent's subtree, which it has only while a unit of it sets AllowedCPUs, as a measurement
-  # does (TASK-376): without them it has its parent's CPUs.
+  # A slice's cpuset and io files are there only while systemd has the controller in its
+  # parent's subtree, which it has only while a unit of it needs it: sets AllowedCPUs, as a
+  # measurement does (TASK-376), or IO limits, as a measurement sets on work's slice, or weights,
+  # in a slice with a job running (TASK-720). Without its cpuset files a slice has its nearest
+  # ancestor's CPUs; without io.max, no IO limits.
   effective_cpus() {
     local dir=$1
-    while [[ ! -r $dir/cpuset.cpus.effective && $dir == "$cgroups"/* ]]; do dir=${dir%/*}; done
-    cat "$dir/cpuset.cpus.effective" 2> /dev/null || echo '?'
+    while [[ ! -r $dir/cpuset.cpus.effective && $dir == /sys/fs/cgroup/* ]]; do dir=${dir%/*}; done
+    cat "$dir/cpuset.cpus.effective"
   }
   for slice in fxdax.slice "$work" "$bench"; do
     dir=$cgroups; [[ $slice == fxdax.slice ]] || dir=$cgroups/$slice
     [[ -d $dir ]] || continue
-    io=$(paste -sd ' ' "$dir/io.max")
+    io=''
+    if [[ -r $dir/io.max ]]; then io=$(paste -sd ' ' "$dir/io.max"); fi
     printf '%-40s %7s %4s %8dM %9s %8dM  cpus=%s io.max=%s\n' "$slice" '' '' \
       $(( $(cat "$dir/memory.current") >> 20 )) '' $(( $(cat "$dir/memory.swap.current") >> 20 )) \
       "$(effective_cpus "$dir")" "${io:-none}"
@@ -243,7 +259,13 @@ unit=fxjob-$name-$$.scope
 mem_bytes=$(bytes "$mem") ||
   { echo "fxjob: --mem is a size, such as 8G or 512M: $mem" >&2; exit 2; }
 [[ $cpus =~ ^[1-9][0-9]*$ ]] || { echo "fxjob: --cpus is a count of CPUs: $cpus" >&2; exit 2; }
-if [[ -n $measuring ]]; then cpus=$bench_share; fi
+if [[ -n $measuring ]]; then
+  if (( bench_share == 0 )); then
+    echo "fxjob: this host takes no measurements: $conf names no BENCH_CPUS" >&2
+    exit 2
+  fi
+  cpus=$bench_share
+fi
 # A request the whole budget can't hold would wait forever: it fails now.
 if (( mem_bytes > mem_budget_bytes )); then
   echo "fxjob: --mem $mem is more than all jobs together may reserve, MEM_BUDGET=$mem_budget" \
@@ -388,7 +410,7 @@ isolate() {
   # Work's IO caps, the manager's own (io.max), stay set if fxjob is killed outright, as the
   # partition does, until the next measurement ends.
   user start "$bench"
-  user set-property --runtime "$bench" AllowedCPUs=$bench_cpus
+  user set-property --runtime "$bench" AllowedCPUs="$bench_cpus"
   isolated=1
   sudo -n /usr/local/libexec/fxjob-isolate on
   user set-property --runtime "$work" "${work_io[@]}"
@@ -459,6 +481,12 @@ mkdir -m 1777 "$tmp_root/$$"
 tmp=$tmp_root/$$
 printf 'started=%s\nscope=%s\n' "$started" "$cgroups/$slice/$unit" > "$tmp_root/job-$$"
 export TMPDIR=$tmp
+# The host's podman settings for jobs, unless the caller gave its own: asahimbp's (its setup's
+# 81-fxjob.sh) run a job's rootless containers in its scope, not in cgroups of their own outside
+# it, past its memory limit and its reap.
+if [[ -r /etc/fxjob-containers.conf && -z ${CONTAINERS_CONF_OVERRIDE:-} ]]; then
+  export CONTAINERS_CONF_OVERRIDE=/etc/fxjob-containers.conf
+fi
 
 # kill_rest kills what is left in the job's scope once its command ended, root's processes among
 # it (sudo's), which the user's manager can neither stop nor kill: a scope an OOM kill or a stop
@@ -466,12 +494,15 @@ export TMPDIR=$tmp
 # cgroup.kill takes the scope's descendants too, and what they fork as it kills. It succeeds
 # once the scope holds no process, giving up after 30 s.
 kill_rest() {
-  local scope=$cgroups/$slice/$unit events tries
+  local scope=$cgroups/$slice/$unit events tries said
   for (( tries = 0; tries < 300; tries++ )); do
     events=$(cat "$scope/cgroup.events" 2> /dev/null) || return 0
     [[ $events != *'populated 1'* ]] && return 0
-    if (( tries == 0 )); then
-      echo 1 | sudo -n tee "$scope/cgroup.kill" > /dev/null || [[ ! -e $scope ]] || return 1
+    # A scope that ends as it is killed (podman's last process leaving) is no failure.
+    if (( tries == 0 )) && ! said=$(echo 1 | sudo -n tee "$scope/cgroup.kill" 2>&1 > /dev/null) &&
+      [[ -e $scope ]]; then
+      echo "$said" >&2
+      return 1
     fi
     sleep 0.1
   done
@@ -507,16 +538,17 @@ exec 8>&-
 
 # The command runs under a shell of the scope's own, which, once it ended, reads what the job
 # took from the scope's cgroup for the history: systemd forgets a scope, its peaks and CPU time
-# with it, as soon as it has ended. It waits out a signal as fxjob does, the command getting it
+# with it, as soon as it has ended. The scope's, not the shell's own cgroup: podman with
+# cgroups = "split" (/etc/fxjob-containers.conf) moves the scope's processes, this shell among
+# them, into a child of it, runtime, beside its containers'. It waits out a signal as fxjob does, the command getting it
 # too, so a stop of systemd's after an OOM kill ends the command, not it.
 stats=$run/stats-$$
 # shellcheck disable=SC2016 # For that shell.
 measure='trap : HUP INT TERM
-stats=$1
-shift
+stats=$1 cgroup=$2
+shift 2
 "$@"
 status=$?
-cgroup=/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)
 {
   cat "$cgroup/memory.peak" "$cgroup/memory.swap.peak"
   sed -n "s/^usage_usec //p" "$cgroup/cpu.stat"
@@ -536,7 +568,7 @@ status=0
 # The command as it was given: systemd-run would expand $VAR and ${VAR} in it, and $$ to $
 # (TASK-408).
 systemd-run --user --scope --quiet --collect --expand-environment=no --slice="$slice" \
-  --unit="$unit" "${props[@]}" -- bash -c "$measure" fxjob "$stats" "$@" || status=$?
+  --unit="$unit" "${props[@]}" -- bash -c "$measure" fxjob "$stats" "$cgroups/$slice/$unit" "$@" || status=$?
 : > "$ran"
 wait "$watcher" || true
 rm -f "$ran"

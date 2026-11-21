@@ -3,10 +3,10 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Checks fxjob's admission (scripts/fxjob) on a host set up for it (ubu1, its user's systemd
-# manager with fxdax.slice), beside whatever jobs the host runs, which it neither counts nor
-# touches: its jobs run in slices of its own under fxdax.slice, on a budget of their own (300M,
-# 10 CPUs), with a queue, history, measurements' lock and jobs' temporary directories of their own
+# Checks fxjob's admission (scripts/fxjob) on a host set up for it (ubu1 or asahimbp, its user's
+# systemd manager with fxdax.slice), beside whatever jobs the host runs, which it neither counts
+# nor touches: its jobs run in slices of its own under fxdax.slice, on a budget of their own (300M,
+# 10 CPUs, a measurement's 8), with a queue, history, measurements' lock and jobs' temporary directories of their own
 # in a temporary directory, and their measurements isolate nothing (FXJOB_ISOLATION=0). Each job
 # is a sleep of a few seconds, memory reserved, none used, but those that check what a job's
 # temporary directory leaves: they mount file systems in it, which needs `sudo -n`, as reap does.
@@ -19,7 +19,8 @@
 #                                     checks a job past its limit too: an OOM kill of 64M, which
 #                                     the desktop reports as the system out of memory
 #
-# What it checks: a request past the budget fails at once; jobs past the budget wait and start
+# What it checks: a request past the budget fails at once, and a measurement on a host that takes
+# none; jobs past the budget wait and start
 # first come, first served, a small one never passing a large one ahead of it, as many at once
 # as the budget holds, in memory and in CPUs; a job killed outright (kill -9) frees its
 # reservation, and a waiting fxjob killed outright its place; a signal ends a waiting fxjob; a
@@ -38,7 +39,7 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/fxjob-check.XXXXXX")
 export FXJOB_CONF=$tmp/fxjob.conf FXJOB_RUNTIME=$tmp/run FXJOB_HISTORY=$tmp/jobs.jsonl
 export FXJOB_WORK_SLICE=fxdax-fxjobcheck.slice FXJOB_BENCH_SLICE=fxdax-fxjobcheckbench.slice
 export FXJOB_BENCH_LOCK=$tmp/bench.lock FXJOB_ISOLATION=0 FXJOB_TMP=$tmp/jobs
-printf 'MEM_BUDGET=300M\nCPU_BUDGET=10 # logical CPUs\n' > "$FXJOB_CONF"
+printf 'MEM_BUDGET=300M\nCPU_BUDGET=10 # logical CPUs\nBENCH_CPUS=0-3,5,7-9\n' > "$FXJOB_CONF"
 log=$tmp/log
 : > "$log"
 
@@ -118,8 +119,14 @@ check "--mem 400M of 300M fails, status 2" test $rc -eq 2
 check "saying it would never start" grep -q 'never start' "$tmp/err"
 rc=0; "$fxjob" --cpus 11 -- true 2> "$tmp/err" || rc=$?
 check "--cpus 11 of 10 fails, status 2" test $rc -eq 2
-rc=0; FXJOB_CONF=<(echo CPU_BUDGET=4) "$fxjob" --bench --mem 1M -- true 2> "$tmp/err" || rc=$?
-check "a measurement's 8 CPUs of 4 fails, status 2" test $rc -eq 2
+printf 'CPU_BUDGET=4\nBENCH_CPUS=0-3,5,7-9\n' > "$tmp/small.conf"
+rc=0; FXJOB_CONF=$tmp/small.conf "$fxjob" --bench --mem 1M -- true 2> "$tmp/err" || rc=$?
+check "a measurement's 8 CPUs of 4 fails, status 2" test $rc -eq 2 -a "$(< "$tmp/err")" == \
+  "fxjob: 8 CPUs, a measurement's, are more than all jobs together may reserve, CPU_BUDGET=4 ($tmp/small.conf): it would never start"
+echo CPU_BUDGET=4 > "$tmp/nobench.conf"
+rc=0; FXJOB_CONF=$tmp/nobench.conf "$fxjob" --bench --mem 1M -- true 2> "$tmp/err" || rc=$?
+check "a measurement where the conf names no BENCH_CPUS fails, status 2" test $rc -eq 2 -a \
+  "$(< "$tmp/err")" == "fxjob: this host takes no measurements: $tmp/nobench.conf names no BENCH_CPUS"
 check "at once, no place taken in the queue" test $((EPOCHSECONDS - started)) -le 2 -a "$(entries)" -eq 0
 
 echo "== six jobs of 100M on 300M"
