@@ -967,7 +967,8 @@ fn an_encrypted_store_served_reads_back_and_holds_nothing_in_the_clear() {
     let data = noise(3 * pages::page_size() as usize + 5);
     let served = Client::of;
     block_on(async {
-        let fs = Filesystem::format(Storage::create(&path, 256 << 20).unwrap()).await.unwrap();
+        let fs =
+            Filesystem::format(Storage::create(&path, 256 << 20).await.unwrap()).await.unwrap();
         let mut client = served(fs);
         client.init().await;
         let (file, _) = client.create(ROOT, b"file", 0o644).await;
@@ -976,7 +977,7 @@ fn an_encrypted_store_served_reads_back_and_holds_nothing_in_the_clear() {
         assert!(client.read(file, 0, data.len() as u32).await == data, "read back otherwise");
         drop(client.server.into_filesystem().close().await.unwrap());
 
-        let fs = Filesystem::mount(Storage::open(&path).unwrap()).await.unwrap();
+        let fs = Filesystem::mount(Storage::open(&path).await.unwrap()).await.unwrap();
         let mut client = served(fs);
         client.init().await;
         let (file, attr) = entry(&client.lookup(ROOT, b"file").await.ok());

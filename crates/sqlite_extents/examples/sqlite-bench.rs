@@ -225,7 +225,8 @@ fn main() {
     let mut sizes = Vec::new();
     {
         let image = root.join("extents");
-        let device = Storage::create(&image, 64 << 30).unwrap().into_device();
+        let device =
+            local_cell::upload::wait_on(Storage::create(&image, 64 << 30)).unwrap().into_device();
         let file_set = FileSet::open(device, Options::default()).unwrap();
         on_file_set("extents", file_set, "", scale);
         // The image, and what the bucket its cell is kept in holds (CLADEFSD_BUCKET).

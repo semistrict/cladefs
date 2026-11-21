@@ -152,7 +152,7 @@ fn name(file: usize) -> Vec<u8> {
 impl Images {
     fn new(dir: &Path) -> Self {
         let path = dir.join("image");
-        let storage = Storage::create(&path, SIZE).unwrap();
+        let storage = local_cell::upload::wait_on(Storage::create(&path, SIZE)).unwrap();
         let super::Kind::Image { image, .. } = &storage.kind else { panic!("memory") };
         let collecting = image.collecting().expect("its own bucket's").clone();
         let fs = block_on(Filesystem::format(storage)).unwrap();
@@ -264,7 +264,10 @@ impl Images {
         assert_eq!(collecting.collected_alone(), Vec::<String>::new(), "collected alone");
         drop(collecting);
         for (path, files) in closed {
-            let fs = block_on(Filesystem::mount(Storage::open(&path).unwrap())).unwrap();
+            let fs = block_on(Filesystem::mount(
+                local_cell::upload::wait_on(Storage::open(&path)).unwrap(),
+            ))
+            .unwrap();
             block_on(holds(&fs, &files, &format!("{} opened anew", path.display())));
             drop(block_on(fs.close()).unwrap());
         }

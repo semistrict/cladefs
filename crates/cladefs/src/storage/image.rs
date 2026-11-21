@@ -48,19 +48,20 @@ impl ImageDevice {
     /// Makes a new image at `dir`, which must not exist, holding at most `capacity` bytes, of
     /// `cell`, whole if `whole`, its cell kept as `keeping` says ([`KeptImage::create`]), and
     /// its device, whose writes, frees and commits go through `writes`.
-    pub fn create(
+    pub async fn create(
         dir: &Path,
         made: (u64, crate::host_cell::CellOf, bool),
         keeping: local_cell::upload::Options,
         writes: Arc<WriteGate>,
     ) -> Result<Self, Error> {
-        Self::new(KeptImage::create(dir, made, keeping)?, writes)
+        Self::new(KeptImage::create(dir, made, keeping).await?, writes)
     }
 
     /// The device of the image at `dir`, an image's or a fork's, whose writes, frees and commits
     /// go through `writes`.
-    pub fn open(dir: &Path, writes: Arc<WriteGate>) -> Result<Self, Error> {
-        let image = KeptImage::open(dir).with_context(|| format!("opening {}", dir.display()))?;
+    pub async fn open(dir: &Path, writes: Arc<WriteGate>) -> Result<Self, Error> {
+        let image = KeptImage::open(dir).await;
+        let image = image.with_context(|| format!("opening {}", dir.display()))?;
         Self::new(image, writes)
     }
 
@@ -342,12 +343,12 @@ mod tests {
     /// that order, so that a test's bindings of them drop the device before the directory, as a
     /// pass of its bucket's collector may run as it drops, which waits for it, and which would
     /// retry for ever the requests of a bucket gone (TASK-428).
-    fn device(capacity: u64) -> (tempfile::TempDir, ImageDevice, PathBuf) {
+    async fn device(capacity: u64) -> (tempfile::TempDir, ImageDevice, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let image = dir.path().join("image");
         let made = (capacity, crate::host_cell::CellOf::Named(CELL), true);
         let keeping = crate::host_cell::keeping().unwrap();
-        (dir, ImageDevice::create(&image, made, keeping, Default::default()).unwrap(), image)
+        (dir, ImageDevice::create(&image, made, keeping, Default::default()).await.unwrap(), image)
     }
 
     fn extent(sequence: u64) -> ExtentId {
@@ -377,9 +378,9 @@ mod tests {
         data
     }
 
-    #[test]
-    fn reads_what_was_written() {
-        let (_dir, device, _) = device(64 * MIB as u64);
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reads_what_was_written() {
+        let (_dir, device, _) = device(64 * MIB as u64).await;
         assert_eq!(device.block_count(), 64 * MIB as u64 / BLOCK as u64);
         assert_eq!(device.cell(), CELL.id);
         block_on(async {
@@ -418,9 +419,9 @@ mod tests {
     /// cladefs: a byte the host's disk damaged in a sealed extent's file, in a part stored compressed
     /// or raw, fails the device's reads of the part, as imports and host tools read an image,
     /// rather than giving another byte; its other parts read as written (TASK-153.11).
-    #[test]
-    fn flipped_bytes_fail_reads() {
-        let (_dir, device, image) = device(64 * MIB as u64);
+    #[tokio::test(flavor = "multi_thread")]
+    async fn flipped_bytes_fail_reads() {
+        let (_dir, device, image) = device(64 * MIB as u64).await;
         block_on(async {
             // Large enough to be stored on their own, in five parts: compressed, and raw.
             let contents = [
@@ -467,7 +468,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     #[allow(clippy::disallowed_methods, reason = "a write in progress, as a commit waits for")]
     async fn writes_held_back_by_a_commit_leave_the_executor_running() {
-        let (_dir, device, _) = device(16 * MIB as u64);
+        let (_dir, device, _) = device(16 * MIB as u64).await;
         let store = device.store.clone();
         let device = Arc::new(device);
         let executor = crate::executor::Executor::new(1);
@@ -508,7 +509,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     #[allow(clippy::disallowed_methods, reason = "a write in progress, as a commit waits for")]
     async fn writes_held_back_by_a_commit_leave_their_own_task_running() {
-        let (_dir, device, _) = device(16 * MIB as u64);
+        let (_dir, device, _) = device(16 * MIB as u64).await;
         let store = device.store.clone();
         let device = Arc::new(device);
         let executor = crate::executor::Executor::new(1);
@@ -553,9 +554,9 @@ mod tests {
     }
 
     /// An image holds what was flushed when it is opened again, and what wasn't is gone.
-    #[test]
-    fn extents_survive_reopening() {
-        let (_dir, device, image) = device(16 * MIB as u64);
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extents_survive_reopening() {
+        let (_dir, device, image) = device(16 * MIB as u64).await;
         block_on(async {
             write(&device, extent(3), 0, &pattern(0, MIB)).await;
             write(&device, extent(259), 0, &pattern(1, 2 * BLOCK as usize)).await;
@@ -563,7 +564,7 @@ mod tests {
             write(&device, extent(260), 0, &pattern(2, BLOCK as usize)).await;
         });
         drop(device);
-        let device = ImageDevice::open(&image, Default::default()).unwrap();
+        let device = ImageDevice::open(&image, Default::default()).await.unwrap();
         block_on(async {
             assert_eq!(read(&device, extent(3), 0, MIB).await, pattern(0, MIB));
             assert_eq!(
@@ -592,7 +593,7 @@ mod tests {
         let image = dir.path().join("image");
         let made = (64 * MIB as u64, crate::host_cell::CellOf::New(5), true);
         let keeping = crate::host_cell::keeping().unwrap();
-        let device = ImageDevice::create(&image, made, keeping, Default::default()).unwrap();
+        let device = ImageDevice::create(&image, made, keeping, Default::default()).await.unwrap();
         assert!(device.store.keys().encrypts());
         let cell = device.cell();
         let (small, large) = (ExtentId::new(cell, 1), ExtentId::new(cell, 2));
@@ -621,7 +622,7 @@ mod tests {
         reads(&device);
         assert_eq!(in_the_clear(&device).await, Vec::<String>::new(), "flushed");
         drop(device);
-        let device = ImageDevice::open(&image, Default::default()).unwrap();
+        let device = ImageDevice::open(&image, Default::default()).await.unwrap();
         reads(&device);
         assert_eq!(in_the_clear(&device).await, Vec::<String>::new(), "reopened");
     }
@@ -642,9 +643,9 @@ mod tests {
     }
 
     /// Freeing an extent gives back the capacity it took.
-    #[test]
-    fn frees_make_room() {
-        let (_dir, device, _) = device(4 * MIB as u64);
+    #[tokio::test(flavor = "multi_thread")]
+    async fn frees_make_room() {
+        let (_dir, device, _) = device(4 * MIB as u64).await;
         block_on(async {
             write(&device, extent(1), 0, &pattern(0, 3 * MIB)).await;
             device.flush().await.unwrap();
@@ -662,9 +663,9 @@ mod tests {
     }
 
     /// The root is set durably, and kept across opening the image again.
-    #[test]
-    fn roots() {
-        let (_dir, device, image) = device(MIB as u64);
+    #[tokio::test(flavor = "multi_thread")]
+    async fn roots() {
+        let (_dir, device, image) = device(MIB as u64).await;
         block_on(async {
             assert_eq!(device.root().await.unwrap(), Vec::<u8>::new());
             write(&device, extent(1), 0, &pattern(0, BLOCK as usize)).await;
@@ -673,7 +674,7 @@ mod tests {
             assert_eq!(device.root().await.unwrap(), b"second");
         });
         drop(device);
-        let device = ImageDevice::open(&image, Default::default()).unwrap();
+        let device = ImageDevice::open(&image, Default::default()).await.unwrap();
         assert_eq!(block_on(device.root()).unwrap(), b"second");
         assert_eq!(
             block_on(read(&device, extent(1), 0, BLOCK as usize)),

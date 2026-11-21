@@ -19,7 +19,7 @@ use futures::executor::block_on;
 fn main() -> anyhow::Result<()> {
     let path = std::env::args().nth(1).ok_or_else(|| anyhow::anyhow!("usage: cell-tree STORE"))?;
     block_on(async {
-        let fs = Filesystem::mount(Storage::open(&path)?).await?;
+        let fs = Filesystem::mount(Storage::open(&path).await?).await?;
         let mut lines = Vec::new();
         let mut dirs = vec![(String::new(), fs.root().clone())];
         while let Some((dir_path, dir)) = dirs.pop() {

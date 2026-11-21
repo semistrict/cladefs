@@ -15,22 +15,22 @@ use std::sync::Arc;
 
 /// A database on an image survives closing; and, every store encrypted (TASK-411.28), under the
 /// tests' KMS here, no file of the image, its store's nor its bucket's, holds its data in the clear.
-#[test]
-fn a_database_on_an_image_survives_closing() {
-    assert_eq!(survives_closing("plain"), Vec::<String>::new());
+#[tokio::test(flavor = "multi_thread")]
+async fn a_database_on_an_image_survives_closing() {
+    assert_eq!(survives_closing("plain").await, Vec::<String>::new());
 }
 
 /// TASK-411.7 (TASK-411's AC #3): a database on an image of a cell whose tenant's KEK is in the
 /// KMS the host names survives closing, and no file of the image, its store's nor its bucket's,
 /// holds its data in the clear.
-#[test]
-fn an_encrypted_database_on_an_image_survives_closing() {
+#[tokio::test(flavor = "multi_thread")]
+async fn an_encrypted_database_on_an_image_survives_closing() {
     let keys = tempfile::tempdir().unwrap();
     let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
     // The tenant of the images `Storage` makes: the default tenant's, 0.
     kms.create(0).unwrap();
     cladefs::bucket::set_kms(Arc::new(kms)).unwrap();
-    assert_eq!(survives_closing("encrypted"), Vec::<String>::new());
+    assert_eq!(survives_closing("encrypted").await, Vec::<String>::new());
 }
 
 /// Data that compresses not, which a file holding it in the clear holds as it is.
@@ -48,7 +48,7 @@ fn noise(len: usize) -> Vec<u8> {
 
 /// Writes a database on a new image, closes it, opens it again and checks it, its VFSs named after
 /// `name`: returns the files of the image holding the data of a row of [`noise`] in the clear.
-fn survives_closing(name: &str) -> Vec<String> {
+async fn survives_closing(name: &str) -> Vec<String> {
     // Under the build's temporary directory, where direct I/O works, as cladefs's image tests have.
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let path = dir.path().join("image");
@@ -57,7 +57,7 @@ fn survives_closing(name: &str) -> Vec<String> {
         (format!("cladefs-image-write-{name}"), format!("cladefs-image-read-{name}"));
     {
         let file_set = FileSet::open(
-            Storage::create(&path, 256 << 20).unwrap().into_device(),
+            Storage::create(&path, 256 << 20).await.unwrap().into_device(),
             Options::default(),
         )
         .unwrap();
@@ -85,7 +85,8 @@ fn survives_closing(name: &str) -> Vec<String> {
     }
 
     let file_set =
-        FileSet::open(Storage::open(&path).unwrap().into_device(), Options::default()).unwrap();
+        FileSet::open(Storage::open(&path).await.unwrap().into_device(), Options::default())
+            .unwrap();
     assert_eq!(file_set.files().unwrap(), vec!["app.db".to_owned()]);
     let registration = register(&read, file_set.clone()).unwrap();
     let connection =
@@ -140,23 +141,23 @@ fn held(file_set: &FileSet) {
     }
 }
 
-fn open(path: &Path) -> Storage {
-    Storage::open(path).unwrap()
+async fn open(path: &Path) -> Storage {
+    Storage::open(path).await.unwrap()
 }
 
 /// A fork of an image, its cell forked in its bucket, holds the image's database as it was,
 /// inheriting its extents; the two then change apart, the fork rewriting and so freeing all it
 /// inherited, and each reads its own, before and after opening again.
-#[test]
-fn a_fork_and_its_image_go_their_own_ways() {
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fork_and_its_image_go_their_own_ways() {
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let (path, fork_path) = (dir.path().join("image"), dir.path().join("fork"));
-    let mounted = mount(Storage::create(&path, 256 << 20).unwrap(), "cladefs-fork-fill");
+    let mounted = mount(Storage::create(&path, 256 << 20).await.unwrap(), "cladefs-fork-fill");
     let mut parent_rows = common::fill(&mounted.2);
     unmount(mounted);
 
-    let forked = futures::executor::block_on(open(&path).fork_to(&fork_path)).unwrap();
-    let parent = mount(open(&path), "cladefs-fork-parent");
+    let forked = futures::executor::block_on(open(&path).await.fork_to(&fork_path)).unwrap();
+    let parent = mount(open(&path).await, "cladefs-fork-parent");
     let fork = mount(forked, "cladefs-fork-child");
     let mut fork_rows = parent_rows.clone();
     common::check(&fork.2, &fork_rows);
@@ -168,7 +169,7 @@ fn a_fork_and_its_image_go_their_own_ways() {
     unmount(parent);
 
     for (path, rows) in [(&path, parent_rows), (&fork_path, fork_rows)] {
-        let mounted = mount(open(path), "cladefs-fork-reopened");
+        let mounted = mount(open(path).await, "cladefs-fork-reopened");
         common::check(&mounted.2, &rows);
         unmount(mounted);
     }

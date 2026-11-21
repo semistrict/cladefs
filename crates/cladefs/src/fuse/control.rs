@@ -138,7 +138,8 @@ fn mount_cell(
         std::fs::create_dir_all(tenant)
             .map_err(|err| Error::new(err).context(format!("making {}", tenant.display())))?;
     }
-    let storage = Storage::take(path, (of, capacity), url, token)?;
+    // An outermost entry, a FUSE call's: waits on the bucket runtime (board 2948).
+    let storage = local_cell::upload::wait_on(Storage::take(path, (of, capacity), url, token))?;
     let mounting = async {
         if !new {
             return Filesystem::mount(storage).await;

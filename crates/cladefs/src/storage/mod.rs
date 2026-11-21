@@ -72,11 +72,14 @@ impl Storage {
     /// kernel caches files' pages already, and runs on threads of its own (io_uring on Linux).
     /// It fails for an image made by older code, which kept its cell in no bucket, and which
     /// nothing converts.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
+    pub async fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         let dir = path.as_ref().to_owned();
-        let writes = Arc::new(WriteGate::default());
-        let device = ImageDevice::open(&dir, writes.clone()).map_err(Error::new)?;
-        Ok(Self::image(dir, writes, device))
+        on_bucket_runtime(async move {
+            let writes = Arc::new(WriteGate::default());
+            let device = ImageDevice::open(&dir, writes.clone()).await.map_err(Error::new)?;
+            Ok(Self::image(dir, writes, device))
+        })
+        .await
     }
 
     /// A new image at `path`, which must not exist, holding at most `size` bytes. It holds nothing
@@ -84,8 +87,8 @@ impl Storage {
     /// is kept in a file bucket of its own, beside its directory (`<image>.bucket`), which its
     /// forks share and which outlives it; or, on a host of cladefs's system, in the host's bucket
     /// (`CLADEFSD_BUCKET`).
-    pub fn create(path: impl AsRef<Path>, size: u64) -> Result<Self, Error> {
-        Self::make(path.as_ref(), (size, host_cell::DEFAULT_TENANT), true, Self::keeping()?)
+    pub async fn create(path: impl AsRef<Path>, size: u64) -> Result<Self, Error> {
+        Self::make(path.as_ref(), (size, host_cell::DEFAULT_TENANT), true, Self::keeping()?).await
     }
 
     /// cladefs: the image at `path` of the cell `of` says, kept in the bucket at `bucket`
@@ -97,13 +100,24 @@ impl Storage {
     /// which it is placed at, if given, as `Storage::open` takes heads otherwise. If an image is at
     /// `path`, it is opened as [`Storage::open`] opens it, and must be of the cell taken:
     /// `EEXIST` otherwise, and for a new cell.
-    pub fn take(
+    pub async fn take(
         path: impl AsRef<Path>,
         (of, capacity): (host_cell::CellOf, u64),
         bucket: &str,
         token: Option<u64>,
     ) -> Result<Self, Error> {
-        let path = path.as_ref();
+        let (path, bucket) = (path.as_ref().to_owned(), bucket.to_owned());
+        on_bucket_runtime(Self::taken(path, (of, capacity), bucket, token)).await
+    }
+
+    /// [`Storage::take`]'s, on the bucket runtime.
+    async fn taken(
+        path: PathBuf,
+        (of, capacity): (host_cell::CellOf, u64),
+        bucket: String,
+        token: Option<u64>,
+    ) -> Result<Self, Error> {
+        let (path, bucket) = (path.as_path(), bucket.as_str());
         // What a making that died part way left is no store: its directory goes, not the cell,
         // which may be another's, as the extent daemon's `CreateCell` has it (TASK-196).
         if host_cell::unmade(path) {
@@ -117,10 +131,10 @@ impl Storage {
                 local_cell::upload::Options { token: token.unwrap_or(keeping.token), ..keeping };
             let kept = (bucket_cell::cell::Kind::Fxfs, Some(bucket), keeping);
             let making = host_cell::create_unmade(path, capacity, of, kept.0, kept.1, kept.2);
-            let opened = local_cell::upload::wait_on(making)?;
+            let opened = making.await?;
             opened.made().map_err(Error::new)?;
             // Closed before it is placed, as `CreateCell` places a store, and opened again.
-            local_cell::upload::wait_on(opened.close());
+            opened.close().await;
             if let Some(token) = token {
                 local_cell::place_host(path, token, false).map_err(Error::new)?;
             }
@@ -136,26 +150,26 @@ impl Storage {
                 return Err(Error::new(error.context(crate::Errno::EEXIST)));
             }
         }
-        Self::open(path)
+        Self::open(path).await
     }
 
     /// cladefs: a new image at `path`, as [`Storage::create`] makes it, unmade until its maker says
     /// it is whole ([`Storage::made`]): what opens it before, or after its maker died part way,
     /// finds no store (TASK-196). As an import makes one, filling it first.
-    pub fn create_unmade(path: impl AsRef<Path>, size: u64) -> Result<Self, Error> {
-        Self::make(path.as_ref(), (size, host_cell::DEFAULT_TENANT), false, Self::keeping()?)
+    pub async fn create_unmade(path: impl AsRef<Path>, size: u64) -> Result<Self, Error> {
+        Self::make(path.as_ref(), (size, host_cell::DEFAULT_TENANT), false, Self::keeping()?).await
     }
 
     /// cladefs: a new image at `path`, as [`Storage::create_unmade`] makes it, the one cell of a
     /// new cell of `tenant`'s (TASK-364), its cell kept as `keeping` says: as the extent daemon's
     /// stores keep theirs, with the host's cache of the bucket's objects, for an import the daemon
     /// makes (TASK-237).
-    pub(crate) fn create_unmade_keeping(
+    pub(crate) async fn create_unmade_keeping(
         path: impl AsRef<Path>,
         (size, tenant): (u64, u64),
         keeping: local_cell::upload::Options,
     ) -> Result<Self, Error> {
-        Self::make(path.as_ref(), (size, tenant), false, keeping)
+        Self::make(path.as_ref(), (size, tenant), false, keeping).await
     }
 
     /// How an image this process makes, where no host's daemon serves it, keeps its cell
@@ -177,7 +191,7 @@ impl Storage {
 
     /// A new image at `path`, as [`Storage::create`] makes it, a new cell of
     /// `tenant`'s, whole if `whole`, its cell kept as `keeping` says.
-    fn make(
+    async fn make(
         path: &Path,
         (size, tenant): (u64, u64),
         whole: bool,
@@ -186,11 +200,15 @@ impl Storage {
         if size < Self::BLOCK_SIZE as u64 {
             return Err(Error::msg("the image is smaller than a block"));
         }
-        let writes = Arc::new(WriteGate::default());
-        let made = (size, host_cell::CellOf::New(tenant), whole);
-        let device =
-            ImageDevice::create(path, made, keeping, writes.clone()).map_err(Error::new)?;
-        Ok(Self::image(path.to_owned(), writes, device))
+        let path = path.to_owned();
+        on_bucket_runtime(async move {
+            let writes = Arc::new(WriteGate::default());
+            let made = (size, host_cell::CellOf::New(tenant), whole);
+            let device = ImageDevice::create(&path, made, keeping, writes.clone()).await;
+            let device = device.map_err(Error::new)?;
+            Ok(Self::image(path, writes, device))
+        })
+        .await
     }
 
     /// The storage of the image at `dir` whose device is `device`, its writes going through
@@ -239,8 +257,20 @@ impl Storage {
     /// its directory. Its forks live on: their cells are the bucket's, which an image's own
     /// keeps beside its directory, not in it (TASK-165.7). Fails with `ENOENT` if there is none
     /// at `path`.
-    pub fn delete(path: impl AsRef<Path>) -> Result<(), Error> {
-        kept::delete(path.as_ref())
+    pub async fn delete(path: impl AsRef<Path>) -> Result<(), Error> {
+        let path = path.as_ref().to_owned();
+        on_bucket_runtime(async move { kept::delete(&path).await }).await
+    }
+
+    /// cladefs: lets go of the storage, which nothing mounts: an image's uploader stopped first,
+    /// its store's open segment closed and what it made durable uploaded, holding no thread
+    /// meanwhile, where dropping it waits on the dropping thread (board 5614).
+    pub async fn close(self) {
+        if let Kind::Image { image, .. } = &self.kind {
+            let image = image.clone();
+            drop(self);
+            image.close().await;
+        }
     }
 
     /// The most bytes the storage holds.
@@ -320,18 +350,22 @@ pub(crate) async fn fork_image(
     path: &Path,
 ) -> Result<Storage, Error> {
     let path = path.to_owned();
-    let (done, forked) = futures::channel::oneshot::channel();
-    std::thread::Builder::new()
-        .name("cladefs fork".into())
-        .spawn(move || {
-            // cladefs: outside the simulation: FUSE's storage, on a thread of its own, which awaits
-            // the store's fork there, its outermost entry (board 2944).
-            let forked = futures::executor::block_on(image.fork(&path, writes.pause()));
-            let forked =
-                forked.map_err(|error| error.context(format!("forking to {}", path.display())));
-            let _ = done.send(forked.map(|()| path));
-        })
-        .map_err(Error::new)?;
-    let path = forked.await.map_err(Error::new)??;
-    Storage::open(path)
+    let forking = async move {
+        let forked = image.fork(&path, writes.pause()).await;
+        let context = format!("forking to {}", path.display());
+        forked.map(|()| path).map_err(|error| error.context(context))
+    };
+    let path = on_bucket_runtime(forking).await?;
+    Storage::open(path).await
+}
+
+/// cladefs: `work`, a task of the bucket runtime's ([`local_cell::upload::bucket_runtime`]): what
+/// makes, opens, forks and deletes images awaits the store's timers and the bucket's
+/// connections, which that runtime drives, whatever executor awaits it, FUSE's or a test's; as
+/// sync calls of theirs did, waiting on it (board 5614).
+async fn on_bucket_runtime<T: Send + 'static>(
+    work: impl Future<Output = Result<T, Error>> + Send + 'static,
+) -> Result<T, Error> {
+    let runtime = local_cell::upload::bucket_runtime().map_err(Error::new)?;
+    runtime.spawn(work).await.map_err(Error::new)?
 }

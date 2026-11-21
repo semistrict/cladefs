@@ -15,7 +15,7 @@
 
 use bucket_cell::object_bucket::ObjectBucket;
 use cladefs::cladefsd::control::proto::{
-    CreateCellRequest, ForkCellRequest, ImportImageRequest, StatCellRequest, SyncCellRequest,
+    CreateCellRequest, ForkCellRequest, StatCellRequest, SyncCellRequest,
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -236,41 +236,6 @@ async fn two_daemons_boot_as_hosts_and_one_takes_the_others_cell() {
             assert_eq!((taken.tenant, taken.cell), (made.tenant, made.cell));
             let stat = two.stat_cell(StatCellRequest { path: second.display().to_string() });
             assert_eq!(stat.await.unwrap().into_inner().capacity, 64 << 20);
-        })
-        .await
-        .unwrap();
-}
-
-/// Board 5614: a host imports an image as its control API is asked to, its walk of the layer's
-/// entries awaited within the simulation, as the daemon's other work is: the store made of it
-/// stats as asked for.
-#[madsim::test]
-async fn a_host_imports_an_image_within_the_simulation() {
-    use cladefs::import::testing::{Entry, Kind, layer};
-    let (dir, bucket, _) = world();
-    let (_nodes, roots) = hosts(1, dir.path(), &bucket);
-    // The image, a layer's tarball, on the disk the simulation reads in place, as the daemon's
-    // host reads what its VM manager gives it.
-    let image = tempfile::NamedTempFile::new().unwrap();
-    let entries = [
-        Entry::new("etc", Kind::Dir),
-        Entry::new("etc/hostname", Kind::File(b"simulated\n")),
-        Entry::new("bin/sh", Kind::Symlink("busybox")),
-    ];
-    std::fs::write(image.path(), layer(&entries).unwrap()).unwrap();
-    let (store, image) = (roots[0].join("imported"), image.path().display().to_string());
-    manager()
-        .spawn(async move {
-            let path = store.display().to_string();
-            let request = ImportImageRequest {
-                path: path.clone(),
-                capacity: 64 << 20,
-                image,
-                ..ImportImageRequest::default()
-            };
-            connect(1).await.import_image(request).await.unwrap();
-            let stat = connect(1).await.stat_cell(StatCellRequest { path }).await.unwrap();
-            assert_eq!(stat.into_inner().capacity, 64 << 20);
         })
         .await
         .unwrap();

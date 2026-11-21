@@ -43,15 +43,14 @@ impl KeptImage {
     /// keeps its cell as `keeping` says: in a host's daemon, with the host's cache of the
     /// bucket's objects, which what the bucket acknowledged goes into, and its extents are read
     /// from (TASK-237); elsewhere, with none ([`host_cell::keeping`]).
-    pub fn create(
+    pub async fn create(
         dir: &Path,
         (capacity, of, whole): (u64, CellOf, bool),
         keeping: upload::Options,
     ) -> anyhow::Result<Self> {
         let cache = keeping.cache.clone();
-        // FUSE storage, outside the daemon, blocks on the store's making (TASK-685.3).
         let opened = host_cell::create_unmade(dir, capacity, of, Kind::Fxfs, None, keeping);
-        let opened = local_cell::upload::wait_on(opened).map_err(anyhow_of)?;
+        let opened = opened.await.map_err(anyhow_of)?;
         if whole {
             opened.made()?;
         }
@@ -61,9 +60,9 @@ impl KeptImage {
     /// The image at `dir`, or the fork at `dir`, a store of its own holding its cell alone
     /// (TASK-165.7): its uploader takes its cell's head as a copy never placed takes it where
     /// this process is no host's daemon ([`host_cell::keeping`]).
-    pub fn open(dir: &Path) -> anyhow::Result<Self> {
+    pub async fn open(dir: &Path) -> anyhow::Result<Self> {
         let keeping = host_cell::keeping().map_err(anyhow_of)?;
-        let opened = local_cell::upload::wait_on(host_cell::open(dir, keeping));
+        let opened = host_cell::open(dir, keeping).await;
         Self::opened(opened.map_err(anyhow_of)?, None)
     }
 
@@ -102,6 +101,12 @@ impl KeptImage {
         Ok(())
     }
 
+    /// Stops its uploader, once its store is done with, so that dropping it waits for nothing
+    /// (board 5614): the store's open segment closed, what it made durable uploaded.
+    pub async fn close(&self) {
+        self.uploader.stop().await;
+    }
+
     /// Waits until the store's commits are uploaded: so a closed image's cell is whole in its
     /// bucket.
     pub async fn wait_uploaded(&self) -> anyhow::Result<()> {
@@ -113,17 +118,17 @@ impl KeptImage {
     /// commit ([`host_cell::fork_through`]): `held` is let go of once the version's commit is made.
     pub async fn fork<H>(&self, path: &Path, held: H) -> Result<(), Error> {
         let tenant = self.store.description().cell.tenant;
-        let cell = local_cell::upload::wait_on(host_cell::new_cell(self.uploader.bucket(), tenant))
-            .map_err(Error::from)?;
+        let cell =
+            host_cell::new_cell(self.uploader.bucket(), tenant).await.map_err(Error::from)?;
         let child = Child { cell, owner: rand::random() };
         let id = rand::random::<u64>().max(1);
         let version = bucket_cell::layout::NewVersion { id, keep_last: None };
         let epoch = self.store.commit_version(version, false).await.map_err(Error::new)?;
         drop(held);
-        local_cell::upload::wait_on(self.uploader.uploaded(epoch)).map_err(Error::from)?;
+        self.uploader.uploaded(epoch).await.map_err(Error::from)?;
         let forking =
             host_cell::fork_through(&self.store, &self.uploader, id, path, child, |_| Ok(()));
-        local_cell::upload::wait_on(forking)
+        forking.await
     }
 
     /// The bucket's collector in this process, if it is the image's own.
@@ -136,9 +141,9 @@ impl KeptImage {
 /// Deletes the image at `path`, or the fork at `path`, which nothing in this process has open
 /// ([`host_cell::delete`]): its cell, in the bucket its description names, first, as
 /// a copy never placed deletes it where this process is no host's daemon ([`host_cell::token`]).
-pub(crate) fn delete(path: &Path) -> Result<(), Error> {
+pub(crate) async fn delete(path: &Path) -> Result<(), Error> {
     let bucket = host_cell::bucket_at(path).map_err(Error::new)?;
-    local_cell::upload::wait_on(host_cell::delete(path, bucket.as_deref(), host_cell::token))
+    host_cell::delete(path, bucket.as_deref(), host_cell::token).await
 }
 
 #[cfg(test)]
@@ -168,7 +173,7 @@ mod tests {
 
     /// A formatted image at `path`, holding `file` with `contents`, closed.
     async fn image_with(path: &Path, file: &[u8], contents: &[u8]) -> Storage {
-        let fs = Filesystem::format(Storage::create(path, SIZE).unwrap()).await.unwrap();
+        let fs = Filesystem::format(Storage::create(path, SIZE).await.unwrap()).await.unwrap();
         let (node, _) = fs.root().create(file, 0o644, OWNER).await.unwrap();
         node.write(0, contents).await.unwrap();
         fs.close().await.unwrap()
@@ -269,7 +274,7 @@ mod tests {
             let bucket = bucket_of(&path);
             let record = |cell| bucket_cell::head::get(&*bucket, cell);
             assert!(!record(child).await.unwrap().unwrap().deleted());
-            Storage::delete(&fork_path).unwrap();
+            Storage::delete(&fork_path).await.unwrap();
             assert!(record(child).await.unwrap().unwrap().deleted());
         })
     }
@@ -281,7 +286,7 @@ mod tests {
         block_on(async {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("image");
-            let storage = Storage::create(&path, SIZE).unwrap();
+            let storage = Storage::create(&path, SIZE).await.unwrap();
             let collecting = image(&storage).collecting().expect("its own bucket's").clone();
             assert_eq!(collecting.passes(), 0);
             let fs = Filesystem::format(storage).await.unwrap();
@@ -306,7 +311,7 @@ mod tests {
         let path = dir.path().join("image");
         let scenario = fail::FailScenario::setup();
         fail::cfg("upload::stopped", "sleep(500)").unwrap();
-        drop(Storage::create(&path, SIZE).unwrap());
+        drop(Storage::create(&path, SIZE).await.unwrap());
         let reopened = host_cell::open(&path, host_cell::keeping().unwrap())
             .await
             .map(|opened| opened.store.description().cell);
@@ -332,7 +337,7 @@ mod tests {
         )
         .await;
         made.unwrap().made().unwrap();
-        let image = KeptImage::open(&path).unwrap();
+        let image = KeptImage::open(&path).await.unwrap();
         assert!(image.collecting().is_none());
         image.store().write(ExtentId::new(7, 1), 0, &[1; 4096]).await.unwrap();
         image.store().commit(None).await.unwrap();
@@ -355,6 +360,7 @@ mod tests {
             (SIZE, CellOf::Named(bucket_cell::layout::test_cell(7)), true),
             host_cell::keeping().unwrap(),
         )
+        .await
         .unwrap();
         let extent = |sequence| ExtentId::new(7, sequence);
         // Each stored on its own, in its bucket: 5 MiB, past the size for it.
@@ -378,7 +384,7 @@ mod tests {
         let own = dir.path().join("image.bucket");
         let before = bucket_bytes(&own);
         assert!(before >= 20 * MIB as u64, "{before} bytes");
-        let image = KeptImage::open(&path).unwrap();
+        let image = KeptImage::open(&path).await.unwrap();
         let report = image.collecting().unwrap().pass_now();
         assert!(report.deleted >= 3, "{report:?}");
         let after = bucket_bytes(&own);
@@ -434,12 +440,12 @@ mod tests {
     /// passes of their bucket's collector start after their commits, as often as one ends, and
     /// compact and delete at once: after each round each holds what was written to it, the fork
     /// what it inherited too; and opened again, after a pass alone, the same.
-    #[test]
-    fn passes_run_among_an_image_and_its_forks_commits() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn passes_run_among_an_image_and_its_forks_commits() {
         quicken(BUSY);
         let dir = tempfile::tempdir().unwrap();
         let (path, fork_path) = (dir.path().join("image"), dir.path().join("fork"));
-        let storage = Storage::create(&path, SIZE).unwrap();
+        let storage = Storage::create(&path, SIZE).await.unwrap();
         let collecting = image(&storage).collecting().unwrap().clone();
         let mut files = Files::new();
         let (fs, fork) = block_on(async {
@@ -462,11 +468,11 @@ mod tests {
         assert!(passes > 4, "{passes} passes");
         assert!(collected.compacted > 0 && collected.deleted > 0, "{collected:?}, {passes} passes");
         drop(collecting);
-        let report = image(&Storage::open(&path).unwrap()).collecting().unwrap().pass_now();
+        let report = image(&Storage::open(&path).await.unwrap()).collecting().unwrap().pass_now();
         assert!(report.deleted > 0, "{report:?}");
         block_on(async {
             for (path, files) in [(&path, &files), (&fork_path, &forked)] {
-                let fs = Filesystem::mount(Storage::open(path).unwrap()).await.unwrap();
+                let fs = Filesystem::mount(Storage::open(path).await.unwrap()).await.unwrap();
                 holds(&fs, files, &format!("{} opened again", path.display())).await;
                 drop(fs.close().await.unwrap());
             }
@@ -487,7 +493,7 @@ mod tests {
         let scenario = fail::FailScenario::setup();
         let (mut files, mut forked) = (Files::new(), Files::new());
         block_on(async {
-            let fs = Filesystem::format(Storage::create(&path, SIZE).unwrap()).await.unwrap();
+            let fs = Filesystem::format(Storage::create(&path, SIZE).await.unwrap()).await.unwrap();
             churn(&fs, &mut files, 1, 2).await;
             let fork = Filesystem::mount(fs.fork_storage_to(&fork_path).await.unwrap());
             let fork = fork.await.unwrap();
@@ -504,7 +510,7 @@ mod tests {
         let mut collecting = None;
         block_on(async {
             for (path, files) in [(&path, &files), (&fork_path, &forked)] {
-                let storage = Storage::open(path).unwrap();
+                let storage = Storage::open(path).await.unwrap();
                 collecting.get_or_insert_with(|| image(&storage).collecting().unwrap().clone());
                 let fs = Filesystem::mount(storage).await.unwrap();
                 holds(&fs, files, &format!("{} opened again", path.display())).await;
@@ -518,7 +524,7 @@ mod tests {
         assert_eq!(collecting.collected_alone(), Vec::<String>::new(), "collected alone");
         drop(collecting);
         block_on(async {
-            let fs = Filesystem::mount(Storage::open(&fork_path).unwrap()).await.unwrap();
+            let fs = Filesystem::mount(Storage::open(&fork_path).await.unwrap()).await.unwrap();
             holds(&fs, &forked, "the fork after the pass").await;
             drop(fs.close().await.unwrap());
         });

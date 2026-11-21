@@ -33,7 +33,8 @@ const STORE_SIZE: u64 = 256 << 20;
 /// A new store at `path`, formatted, its root directory the test's user's, as a store made for
 /// them would be: mounted by them, the kernel checks their permissions.
 fn format(path: &Path) -> Filesystem {
-    let fs = block_on(Filesystem::format(Storage::create(path, STORE_SIZE).unwrap())).unwrap();
+    let storage = local_cell::upload::wait_on(Storage::create(path, STORE_SIZE)).unwrap();
+    let fs = block_on(Filesystem::format(storage)).unwrap();
     // SAFETY: Plain calls returning the process's IDs.
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
     let owner = SetAttr { uid: Some(uid), gid: Some(gid), ..Default::default() };
@@ -221,7 +222,8 @@ fn a_mount_dropped_unmounts_and_closes() {
     drop(mount);
     assert_eq!(names(&m), Vec::<String>::new(), "still mounted");
     block_on(async {
-        let storage = Storage::open(&store).unwrap().check().await.unwrap();
+        let storage =
+            local_cell::upload::wait_on(Storage::open(&store)).unwrap().check().await.unwrap();
         let fs = Filesystem::mount(storage).await.unwrap();
         assert_eq!(contents(fs.root(), b"file").await, b"written");
         fs.close().await.unwrap();
@@ -255,7 +257,8 @@ fn an_encrypted_store_mounted_holds_nothing_in_the_clear() {
     assert!(std::fs::read(m.join("file")).unwrap() == data, "read back otherwise");
     drop(mount);
     block_on(async {
-        let storage = Storage::open(&store).unwrap().check().await.unwrap();
+        let storage =
+            local_cell::upload::wait_on(Storage::open(&store)).unwrap().check().await.unwrap();
         let fs = Filesystem::mount(storage).await.unwrap();
         assert!(contents(fs.root(), b"file").await == data, "reopened, read otherwise");
         fs.close().await.unwrap();
@@ -308,7 +311,8 @@ fn cladefs_mount_serves_a_store_until_sigterm() {
     std::fs::write(m.join("dir/file"), "through cladefs-mount").unwrap();
     terminate(child, &m);
     block_on(async {
-        let storage = Storage::open(&store).unwrap().check().await.unwrap();
+        let storage =
+            local_cell::upload::wait_on(Storage::open(&store)).unwrap().check().await.unwrap();
         let fs = Filesystem::mount(storage).await.unwrap();
         let (dir, _) = fs.root().lookup(b"dir").await.unwrap();
         assert_eq!(contents(&dir, b"file").await, b"through cladefs-mount");
@@ -341,7 +345,8 @@ fn cladefs_mount_makes_a_new_store() {
     assert_eq!((root.mode() & 0o7777, root.uid(), root.gid()), (0o755, 0, 0));
     terminate(child, &m);
     block_on(async {
-        let storage = Storage::open(&store).unwrap().check().await.unwrap();
+        let storage =
+            local_cell::upload::wait_on(Storage::open(&store)).unwrap().check().await.unwrap();
         let fs = Filesystem::mount(storage).await.unwrap();
         assert_eq!(fs.statfs().await.unwrap().blocks, 67108864 / 4096);
         fs.close().await.unwrap();
@@ -675,7 +680,8 @@ fn one_mount_attaches_and_detaches_many_stores() {
             (stores.join(one).join(&c), "in c"),
             (stores.join(two).join(&b), "in b"),
         ] {
-            let storage = Storage::open(&store).unwrap().check().await.unwrap();
+            let storage =
+                local_cell::upload::wait_on(Storage::open(&store)).unwrap().check().await.unwrap();
             let fs = Filesystem::mount(storage).await.unwrap();
             assert_eq!(contents(fs.root(), b"file").await, file.as_bytes());
             fs.close().await.unwrap();

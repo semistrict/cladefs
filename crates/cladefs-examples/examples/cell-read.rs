@@ -22,7 +22,7 @@ fn main() -> anyhow::Result<()> {
     let number = |text: &str| u64::from_str_radix(text.trim_start_matches("0x"), 16);
     let (offset, len) = (number(offset).context("OFFSET")?, number(len).context("LEN")?);
     block_on(async {
-        let fs = Filesystem::mount(Storage::open(store)?.check().await?).await?;
+        let fs = Filesystem::mount(Storage::open(store).await?.check().await?).await?;
         let (mut file, mut attr) = (None, None);
         for part in name.split('/') {
             let dir = file.as_ref().unwrap_or(fs.root());

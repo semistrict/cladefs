@@ -728,7 +728,7 @@ fn deep_images_make_stores_on_a_daemons_thread() {
         made.unwrap().join().unwrap().expect("making the store failed");
     });
     block_on(async {
-        let fs = Filesystem::mount(Storage::open(&store).unwrap()).await.unwrap();
+        let fs = Filesystem::mount(Storage::open(&store).await.unwrap()).await.unwrap();
         assert_eq!(names(&fs, "").await, ["kept"]);
         let (file, _) = at(&fs, &format!("kept/{deep}/file")).await.unwrap();
         assert_eq!(contents(&file).await, b"kept");
@@ -770,7 +770,7 @@ fn cladefsctl(args: &[&str]) -> (bool, String) {
 /// The manifest of the filesystem in the store at `dir`.
 fn store_manifest(dir: &Path) -> Vec<String> {
     block_on(async {
-        let fs = Filesystem::mount(Storage::open(dir).unwrap()).await.unwrap();
+        let fs = Filesystem::mount(Storage::open(dir).await.unwrap()).await.unwrap();
         let manifest = manifest(&fs).await;
         close(fs).await;
         manifest

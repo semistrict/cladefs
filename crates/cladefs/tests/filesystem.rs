@@ -936,21 +936,23 @@ fn images_opened_again_take_synced_writes() {
     block_on(async {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("image");
-        let fs = Filesystem::format(Storage::create(&path, 64 << 20).unwrap()).await.unwrap();
+        let fs = Filesystem::format(Storage::create(&path, 64 << 20).await.unwrap()).await.unwrap();
         let (file, _) = fs.root().create(b"file", 0o644, OWNER).await.unwrap();
         file.write(0, b"formatted").await.unwrap();
         drop(file);
         drop(fs.close().await.expect("close failed"));
 
         for round in 0..3u8 {
-            let fs = Filesystem::mount(Storage::open(&path).unwrap()).await.expect("mount failed");
+            let fs =
+                Filesystem::mount(Storage::open(&path).await.unwrap()).await.expect("mount failed");
             let (file, _) = fs.root().lookup(b"file").await.unwrap();
             file.write(0, &[round; 8192]).await.unwrap();
             file.fsync().await.expect("fsync failed");
             drop(file);
             drop(fs.close().await.expect("close failed"));
         }
-        let fs = Filesystem::mount(Storage::open(&path).unwrap()).await.expect("mount failed");
+        let fs =
+            Filesystem::mount(Storage::open(&path).await.unwrap()).await.expect("mount failed");
         let (file, _) = fs.root().lookup(b"file").await.unwrap();
         assert!(read_all(&file).await == [2; 8192], "the file holds other data");
         drop(file);
@@ -963,9 +965,9 @@ fn contents_survive_remount_of_an_image() {
     block_on(async {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("image");
-        let storage = Storage::create(&path, 64 << 20).expect("create failed");
+        let storage = Storage::create(&path, 64 << 20).await.expect("create failed");
         assert_eq!(storage.size(), 64 << 20);
-        assert!(Storage::create(&path, 64 << 20).is_err(), "created an image over another");
+        assert!(Storage::create(&path, 64 << 20).await.is_err(), "created an image over another");
 
         let fs = Filesystem::format(storage).await.expect("format failed");
         let (file, _) = fs.root().create(b"file", 0o644, OWNER).await.unwrap();
@@ -975,7 +977,7 @@ fn contents_survive_remount_of_an_image() {
         drop(fs);
         assert_eq!(errno(file.getattr().await), Errno::ENOTCONN);
         let storage =
-            Storage::open(&path).expect("open failed").check().await.expect("check failed");
+            Storage::open(&path).await.expect("open failed").check().await.expect("check failed");
         drop(file);
 
         // The storage a filesystem gives back can be mounted again.
@@ -1021,10 +1023,10 @@ fn storage_errors() {
     block_on(async {
         let dir = tempfile::tempdir().unwrap();
         let missing =
-            Storage::open(dir.path().join("missing")).expect_err("opened a missing image");
+            Storage::open(dir.path().join("missing")).await.expect_err("opened a missing image");
         assert!(format!("{missing:#}").contains("missing"), "{missing:#}");
         let empty =
-            Storage::create(dir.path().join("empty"), 0).expect_err("created an empty image");
+            Storage::create(dir.path().join("empty"), 0).await.expect_err("created an empty image");
         assert_eq!(empty.to_string(), "the image is smaller than a block");
         assert!(!dir.path().join("empty").exists(), "left an empty image behind");
         let unformatted = Filesystem::mount(Storage::memory(STORAGE_SIZE)).await;

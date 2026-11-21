@@ -1068,9 +1068,9 @@ mod tests {
         let refused = open(&path, keeping().unwrap()).await.err().unwrap();
         let Failure::Local(refused) = refused else { panic!("{refused}") };
         assert_eq!(refused.downcast_ref::<local_cell::Format>(), Some(&format), "{refused:#}");
-        let refused = crate::Storage::open(&path).err().unwrap();
+        let refused = crate::Storage::open(&path).await.err().unwrap();
         assert_eq!(refused.errno(), Some(Errno::ENOTSUP), "{refused:#}");
-        let refused = crate::Storage::delete(&path).err().unwrap();
+        let refused = crate::Storage::delete(&path).await.err().unwrap();
         assert_eq!(refused.errno(), Some(Errno::ENOTSUP), "{refused:#}");
         assert!(host_fs::exists(&path.join("store")));
     }

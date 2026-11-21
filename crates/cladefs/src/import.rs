@@ -101,34 +101,59 @@ async fn make_store<F: Future<Output = anyhow::Result<()>>>(
 ) -> Result<(), Error> {
     // cladefs: what an import its process died in left, unmade, is no store: made anew (TASK-196).
     if Storage::is_unmade(path) {
-        Storage::delete(path)?;
+        Storage::delete(path).await?;
     }
-    let storage = Storage::create_unmade_keeping(path, (capacity, tenant), keeping)?;
-    let unfinished = Unfinished(path);
-    fill(storage).await.map_err(Error::new)?;
+    let storage = Storage::create_unmade_keeping(path, (capacity, tenant), keeping).await?;
+    let unfinished = Unfinished(Some(path.to_owned()));
+    // The future filling it, which owns its storage, closes it as it ends, failed or not, before
+    // the deletion, which needs it closed.
+    if let Err(err) = fill(storage).await {
+        unfinished.delete().await;
+        return Err(Error::new(err));
+    }
     // Whole once filled, and closed: until then, its making's dying leaves no store.
     Storage::made(path)?;
     unfinished.finish();
     Ok(())
 }
 
-/// A store being made, at the path it holds, which is deleted as this drops unless it is
-/// [`finish`](Self::finish)ed: as filling it fails, or panics, or the future making it is dropped.
-/// The future filling it, which owns its storage, is made after this, so it is dropped first,
-/// closing the storage, which [`Storage::delete`] needs closed.
-struct Unfinished<'a>(&'a Path);
+/// A store being made, at the path it holds, which is deleted unless it is
+/// [`finish`](Self::finish)ed: as filling it fails ([`delete`](Self::delete)), or panics, or the
+/// future making it is dropped, as this drops. The future filling it, which owns its storage, is
+/// made after this, so it is dropped first, closing the storage, which [`Storage::delete`] needs
+/// closed.
+struct Unfinished(Option<PathBuf>);
 
-impl Unfinished<'_> {
+impl Unfinished {
     /// Keeps the store, made whole.
-    fn finish(self) {
-        std::mem::forget(self);
+    fn finish(mut self) {
+        self.0 = None;
+    }
+
+    /// Deletes the store, half made.
+    async fn delete(mut self) {
+        delete_half_made(self.0.take().expect("a store being made")).await;
     }
 }
 
-impl Drop for Unfinished<'_> {
+/// Deletes the store half made at `path` ([`Unfinished`]).
+async fn delete_half_made(path: PathBuf) {
+    if let Err(err) = Storage::delete(&path).await {
+        log::error!("cladefs: deleting the store half made at {}: {err:#}", path.display());
+    }
+}
+
+impl Drop for Unfinished {
+    /// cladefs: given up on, or panicking: deleted by a task of the runtime the making ran on, its
+    /// own; or, on a thread no runtime runs, waiting here, an outermost entry's (board 5614). A
+    /// task its host dies before leaves the store unmade, which its next making deletes
+    /// (TASK-196).
     fn drop(&mut self) {
-        if let Err(err) = Storage::delete(self.0) {
-            log::error!("cladefs: deleting the store half made at {}: {err:#}", self.0.display());
+        let Some(path) = self.0.take() else { return };
+        let deleting = delete_half_made(path);
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => drop(runtime.spawn(deleting)),
+            Err(_) => local_cell::upload::wait_on(deleting),
         }
     }
 }
@@ -149,8 +174,11 @@ async fn fill(storage: Storage, image: &Path, reference: Option<&str>) -> anyhow
     }
     .await;
     let storage = fs.close().await?;
-    imported?;
-    storage.check().await?;
+    if let Err(err) = imported {
+        storage.close().await;
+        return Err(err);
+    }
+    storage.check().await?.close().await;
     Ok(())
 }
 
@@ -1084,7 +1112,7 @@ mod tests {
         child.wait().unwrap();
         assert!(filled, "the child's import never filled the store");
 
-        let opened = block_on(async { Filesystem::mount(Storage::open(&path)?).await });
+        let opened = block_on(async { Filesystem::mount(Storage::open(&path).await?).await });
         assert!(opened.is_err(), "the store half made opens");
         drop(opened);
         let image = dir.path().join("whole.tar");
@@ -1092,7 +1120,7 @@ mod tests {
         std::fs::write(&image, whole).unwrap();
         block_on(store(&path, 64 << 20, &image, None)).unwrap();
         let names = block_on(async {
-            let fs = Filesystem::mount(Storage::open(&path).unwrap()).await.unwrap();
+            let fs = Filesystem::mount(Storage::open(&path).await.unwrap()).await.unwrap();
             let entries = fs.root().entries().await.unwrap();
             fs.close().await.unwrap();
             entries.into_iter().map(|entry| entry.name).collect::<Vec<_>>()

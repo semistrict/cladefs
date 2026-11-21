@@ -72,13 +72,14 @@ fn main() -> anyhow::Result<()> {
     let [store, at] = <[_; 2]>::try_from(paths).map_err(|_| anyhow::anyhow!(USAGE))?;
     let fs = match new {
         Some(capacity) => {
-            let storage = cladefs::Storage::create(&store, capacity)
+            // The bin's outermost entry: waits on the bucket runtime (board 2948).
+            let storage = local_cell::upload::wait_on(cladefs::Storage::create(&store, capacity))
                 .with_context(|| format!("making {}", store.display()))?;
             futures::executor::block_on(cladefs::Filesystem::format(storage))
                 .with_context(|| format!("formatting {}", store.display()))?
         }
         None => {
-            let storage = cladefs::Storage::open(&store)
+            let storage = local_cell::upload::wait_on(cladefs::Storage::open(&store))
                 .with_context(|| format!("opening {}", store.display()))?;
             futures::executor::block_on(cladefs::Filesystem::mount(storage))
                 .with_context(|| format!("mounting {}'s filesystem", store.display()))?

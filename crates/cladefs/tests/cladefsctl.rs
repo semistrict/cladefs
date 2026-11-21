@@ -374,7 +374,7 @@ async fn images_imported_where_no_daemon_is_fork_there() {
     // The file `hello` of the store at `path`, as its filesystem has it.
     let hello = |path: &Path| {
         block_on(async {
-            let fs = Filesystem::mount(Storage::open(path).unwrap()).await.unwrap();
+            let fs = Filesystem::mount(Storage::open(path).await.unwrap()).await.unwrap();
             let (file, _) = fs.root().lookup(b"hello").await.unwrap();
             let mut read = vec![0; 16];
             let len = file.read(0, &mut read).await.unwrap();

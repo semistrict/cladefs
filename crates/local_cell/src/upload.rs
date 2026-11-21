@@ -1218,6 +1218,15 @@ impl<D: Dir> Uploader<D> {
             stopped.stopped().await;
         }
     }
+
+    /// cladefs: stops it, as [`Uploader::close`] does, and returns once it stopped, for an owner
+    /// that holds it shared: dropped after, it waits for nothing (board 5614).
+    pub async fn stop(&self) {
+        self.shared.stop();
+        if let Some(stopped) = &self.stopped {
+            stopped.stopped().await;
+        }
+    }
 }
 
 impl<D: Dir> Drop for Uploader<D> {

@@ -286,7 +286,9 @@ fn main() {
         summary("wal-full", &mut times);
     }
     {
-        let device = Storage::create(root.join("image"), 64 << 30).unwrap().into_device();
+        let device = local_cell::upload::wait_on(Storage::create(root.join("image"), 64 << 30))
+            .unwrap()
+            .into_device();
         let file_set =
             FileSet::open(DeviceHolder::new(Timing(device)), Options::default()).unwrap();
         on_file_set("image", file_set, count);
