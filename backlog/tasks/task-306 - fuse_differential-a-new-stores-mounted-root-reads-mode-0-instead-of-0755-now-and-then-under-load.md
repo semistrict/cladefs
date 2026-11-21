@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-09 13:04'
-updated_date: '2026-11-20 21:09'
+updated_date: '2026-11-20 22:50'
 labels:
   - fuse
   - flaky
@@ -36,10 +36,18 @@ Seen 2026-11-09 on ubu1 (x86_64, non-root, fusermount3), TASK-302's branch d6818
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Test the root's mode after format + setattr, many at once, without a kernel and through it. 2. Name the cause. 3. Keep host processes from statting the tests' mounts as the tests read them.
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 Seen again 2026-11-17 on ubu1 (fxjob, test-threads 4), random_calls_on_a_mount_come_to_what_they_do_on_tmpfs at call 0: mount root perm 0 uid 0 against 0755 uid 1000; tree 073feb370 + TASK-512/433.9/433.10 (page cache frames).
 
 2026-11-20 seen again on ubu1 (TASK-495's verification, fuse_differential --stress-count 10): 'call 0: the roots differ: . differs: reference perm 493, mount perm 0', 1 of 10 rounds.
+
+Cause (2026-11-20, ubu1): a desktop session's trash monitor, gvfsd-trash (user ramon's GNOME session on ubu1), looks into every new mount: access(2) of its root, an inotify watch on it, .Trash and .Trash-1000 looked up; strace of the gvfs processes during the mount tests showed 76 such calls on the tests' mounts. Cause of the mode 0: Linux's FUSE client (7.1 fs/fuse/inode.c fuse_change_attributes_common) marks the cache valid (inval_mask cleared, i_time set) before it writes the fields, under fi->lock, while a stat answered from the cache (fuse_update_get_attr's generic_fillattr, stat->mode = fi->orig_i_mode) reads them without it: a stat racing another process's reply to a new root reads the server's uid and nlink with the placeholder's orig_i_mode (rootmode=40000, perm 0), exactly this task's 'perm 0, uid 1000, nlink 2'. The other process: gvfsd-trash's access(2) of each new mount's root. The server is right: new_roots_given_owners_keep_their_permissions (filesystem.rs, 8 threads formatting and setting owners) passes. Fix: the tests mount at a directory named .gvfs, which GLib takes for system-internal (g_unix_is_mount_path_system_internal: a path ending /.gvfs) and gvfs's trash watcher ignores; strace showed no gvfs call on them after (76 before). Test: fuse_mount new_roots_read_their_permissions_through_the_kernel (200 mounts by 8 threads, mode/uid/gid/nlink each). Verified on ubu1: fuse_mount 12/12, fuse_differential 30/30 stress rounds (3 of 30 failed in each of three runs before, across the three tasks).
 <!-- SECTION:NOTES:END -->

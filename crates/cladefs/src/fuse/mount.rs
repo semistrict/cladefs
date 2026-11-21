@@ -444,7 +444,42 @@ fn umount(mountpoint: &Path, lazily: bool) -> anyhow::Result<()> {
     // SAFETY: umount2(2), with a NUL-terminated string that outlives the call.
     match unsafe { libc::umount2(target.as_ptr(), flags) } {
         0 => Ok(()),
-        _ => Err(io::Error::last_os_error().into()),
+        _ => {
+            let error = io::Error::last_os_error();
+            let busy = error.raw_os_error() == Some(libc::EBUSY);
+            let error = anyhow::Error::new(error);
+            Err(if busy { error.context(holders(mountpoint)) } else { error })
+        }
+    }
+}
+
+/// What holds the filesystem mounted at `mountpoint` busy, as far as this process may read
+/// /proc: each process with a file under it open, or a directory under it its current or root
+/// one, by ID and command (TASK-705). Others' processes this one may not read are not among them,
+/// nor a call under way that holds a path in it, as a desktop's trash monitor's looking into each
+/// new mount (`gvfsd-trash`) does: a strict unmount coming then fails, busy, which a lazy one
+/// doesn't.
+fn holders(mountpoint: &Path) -> String {
+    let mut holders = Vec::new();
+    for process in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let pid = process.file_name();
+        if !pid.as_bytes().iter().all(u8::is_ascii_digit) {
+            continue;
+        }
+        let at = process.path();
+        let command = std::fs::read_to_string(at.join("comm")).unwrap_or_default();
+        let links = ["cwd", "root"].map(|link| (link.to_owned(), at.join(link)));
+        let fds = std::fs::read_dir(at.join("fd")).into_iter().flatten().flatten();
+        let fds = fds.map(|fd| (format!("fd {}", fd.file_name().display()), fd.path()));
+        for (what, link) in links.into_iter().chain(fds) {
+            if std::fs::read_link(&link).is_ok_and(|target| target.starts_with(mountpoint)) {
+                holders.push(format!("{} ({}) {what}", pid.display(), command.trim()));
+            }
+        }
+    }
+    match holders.is_empty() {
+        true => "held by no process this one may see, maybe by a call under way".to_owned(),
+        false => format!("held by {}", holders.join(", ")),
     }
 }
 
@@ -462,7 +497,11 @@ fn fusermount_unmount(mountpoint: &Path, lazily: bool) -> anyhow::Result<()> {
         .with_context(|| format!("running {FUSERMOUNT}"))?;
     if !output.status.success() {
         let said = String::from_utf8_lossy(&output.stderr);
-        bail!("{FUSERMOUNT} -u failed, {}: {}", output.status, said.trim());
+        let held = match said.contains("Device or resource busy") {
+            true => format!(" ({})", holders(mountpoint)),
+            false => String::new(),
+        };
+        bail!("{FUSERMOUNT} -u failed, {}: {}{held}", output.status, said.trim());
     }
     Ok(())
 }

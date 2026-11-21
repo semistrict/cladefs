@@ -9,6 +9,12 @@
 //! A test run by root mounts with mount(2); any other user's, through `fusermount3`, which the
 //! hosts the tests run on have (libfuse 3's `fuse3`: .github/workflows/ci.yml,
 //! scripts/lib/linux-host-setup.sh, scripts/lima-setup.sh).
+//!
+//! Each test unmounts lazily, as the daemon and `cladefs-mount` do, and joins the mount, which
+//! waits until the kernel is done with it: other processes of the host may look into a new mount
+//! at any time, as a desktop session's trash monitor does every one (`gvfsd-trash`: the root's
+//! access, an inotify watch, `.Trash` and `.Trash-1000` looked up), and an unmount that comes
+//! during one of their calls fails, busy (TASK-705).
 
 #![cfg(target_os = "linux")]
 
@@ -35,9 +41,13 @@ fn format(path: &Path) -> Filesystem {
     fs
 }
 
-/// The store and mount point of a test, in `dir`.
+/// The store and mount point of a test, in `dir`: a `.gvfs`, which GIO takes for its own and
+/// leaves alone (GLib's `g_unix_is_mount_path_system_internal`), as a desktop session's trash
+/// monitor (`gvfsd-trash`) looks into every other new mount and stats its root as it changes,
+/// which Linux's FUSE client answers the test's own stats from its cache half updated by
+/// (TASK-306, TASK-706).
 fn paths(dir: &Path) -> (PathBuf, PathBuf) {
-    let mountpoint = dir.join("mnt");
+    let mountpoint = dir.join(".gvfs");
     std::fs::create_dir(&mountpoint).unwrap();
     (dir.join("store"), mountpoint)
 }
@@ -174,7 +184,7 @@ fn a_store_mounted_through_the_kernel_is_used_as_any_filesystem() {
     assert_eq!(std::fs::remove_dir(m.join("a")).unwrap_err().kind(), ErrorKind::DirectoryNotEmpty);
     std::fs::File::open(m.join("renamed")).unwrap().sync_all().unwrap();
 
-    mount.unmount(false).expect("unmount failed");
+    mount.unmount(true).expect("unmount failed");
     let storage = mount.join().expect("closing failed");
     let storage = block_on(storage.check()).expect("the store is not whole");
 
@@ -370,8 +380,33 @@ fn a_store_mounted_is_not_mounted_again() {
     assert!(stderr.contains(&format!("opening {}", store.display())), "{stderr}");
     assert!(stderr.contains("another process has the store's cells open"), "{stderr}");
     assert_eq!(names(&other), Vec::<String>::new());
-    mount.unmount(false).unwrap();
+    mount.unmount(true).unwrap();
     block_on(mount.join().unwrap().check()).unwrap();
+}
+
+/// TASK-306: a new store's root, given the user for its owner and mounted, reads 0755 through the
+/// kernel, the user's, as it did before it was mounted: many mounted at once, each by a thread of
+/// its own.
+#[test]
+fn new_roots_read_their_permissions_through_the_kernel() {
+    // SAFETY: Plain calls returning the process's IDs.
+    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    std::thread::scope(|scope| {
+        for thread in 0..8 {
+            scope.spawn(move || {
+                for round in 0..25 {
+                    let dir = tempfile::tempdir().unwrap();
+                    let (store, m) = paths(dir.path());
+                    let mount = MountOptions::new().mount(format(&store), &m).unwrap();
+                    let meta = std::fs::metadata(&m).unwrap();
+                    let got = (meta.mode() & 0o7777, meta.uid(), meta.gid(), meta.nlink());
+                    assert_eq!(got, (0o755, uid, gid, 2), "thread {thread}, round {round}");
+                    mount.unmount(true).unwrap();
+                    block_on(mount.join().unwrap().check()).unwrap();
+                }
+            });
+        }
+    });
 }
 
 /// TASK-495: the times a change gives a node are the ones the kernel shows next, though others stat
@@ -461,11 +496,23 @@ fn changes_show_their_times_though_others_stat_the_nodes_meanwhile() {
             if !both(before, times(&m)) {
                 stale.push(format!("{round}: symlink left the root's times {before:?}"));
             }
+            // A file made in the root, then a directory: TASK-706's cases.
+            let before = times(&m);
+            drop(std::fs::File::create(m.join(format!("f{round}"))).unwrap());
+            let made = times(&m);
+            if !both(before, made) {
+                stale.push(format!("{round}: create left the root's times {before:?}, {made:?}"));
+            }
+            std::fs::create_dir(m.join(format!("d{round}"))).unwrap();
+            let after = times(&m);
+            if !both(made, after) {
+                stale.push(format!("{round}: mkdir left the root's times {made:?}, {after:?}"));
+            }
         }
         done.store(true, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(stale, Vec::<String>::new(), "of {round} rounds");
     });
-    mount.unmount(false).unwrap();
+    mount.unmount(true).unwrap();
     block_on(mount.join().unwrap().check()).unwrap();
 }
 

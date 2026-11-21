@@ -1044,6 +1044,28 @@ impl Side {
         }
     }
 
+    /// TASK-706: the modification and change times of `path` as the filesystem has them, asked of
+    /// it whatever the kernel holds (statx's `AT_STATX_FORCE_SYNC`).
+    fn times_asked(&self, path: &str) -> std::io::Result<(Nanos, Nanos)> {
+        let whole = match path {
+            "." => self.root.clone(),
+            path => self.root.join(path),
+        };
+        let whole = cstring(whole.as_os_str().as_bytes());
+        // SAFETY: A statx buffer, all integers, which the call fills.
+        let mut stat: libc::statx = unsafe { std::mem::zeroed() };
+        let flags = libc::AT_STATX_FORCE_SYNC | libc::AT_SYMLINK_NOFOLLOW;
+        let mask = libc::STATX_MTIME | libc::STATX_CTIME;
+        // SAFETY: statx(2) of a NUL-terminated path, into a buffer that outlives the call.
+        if unsafe { libc::statx(libc::AT_FDCWD, whole.as_ptr(), flags, mask, &mut stat) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let nanos = |time: libc::statx_timestamp| {
+            time.tv_sec as Nanos * 1_000_000_000 + time.tv_nsec as Nanos
+        };
+        Ok((nanos(stat.stx_mtime), nanos(stat.stx_ctime)))
+    }
+
     /// The tree as it is, read through the kernel.
     fn tree(&self) -> Tree {
         let mut found = BTreeMap::new();
@@ -1343,6 +1365,20 @@ impl<'a> Case<'a> {
                 tempfile::Builder::new().prefix("subject").tempdir_in(&references.dir).unwrap()
             }
         };
+        // The mount's at a `.gvfs` of its own, which GIO takes for its own and leaves alone
+        // (GLib's `g_unix_is_mount_path_system_internal`): a desktop session's trash monitor
+        // (`gvfsd-trash`) looks into every other new mount, and watches its root, stating it as
+        // it changes. Linux's FUSE client then shows a stat made of the cache as it is half
+        // updated by another's reply: a new root's placeholder mode with the server's owner
+        // (TASK-306), a directory's old ctime with its new mtime (TASK-706).
+        let subject_root = match subject {
+            Subject::Mount => {
+                let root = subject_dir.path().join(".gvfs");
+                std::fs::create_dir(&root).unwrap();
+                root
+            }
+            Subject::Tmpfs => subject_dir.path().to_owned(),
+        };
         // SAFETY: Plain calls setting the process's umask.
         unsafe { libc::umask(0o022) };
         let mount = (subject == Subject::Mount).then(|| {
@@ -1353,7 +1389,7 @@ impl<'a> Case<'a> {
                 let owner = SetAttr { uid: Some(me.uid), gid: Some(me.gid), ..Default::default() };
                 block_on(fs.root().setattr(&owner)).unwrap();
             }
-            MountOptions::new().mount(fs, subject_dir.path()).expect("mounting failed")
+            MountOptions::new().mount(fs, &subject_root).expect("mounting failed")
         });
         // The other roots alike: 0755, the run's own.
         let roots = match subject {
@@ -1371,7 +1407,7 @@ impl<'a> Case<'a> {
         Self {
             run,
             reference: Side::new(reference_dir.path()),
-            subject: Side::new(subject_dir.path()),
+            subject: Side::new(&subject_root),
             mount,
             _subject_dir: subject_dir,
             reference_dir,
@@ -1468,11 +1504,15 @@ impl<'a> Case<'a> {
                 let says = |(mtime, ctime): (bool, bool)| {
                     format!("mtime {}, ctime {}", changes(mtime), changes(ctime))
                 };
+                // What the mount's kernel showed, before and after, and what its filesystem has.
+                let shown = (ours.times.get(path), subject.times.get(path));
                 let ours = ours_changed.get(path).copied().unwrap();
+                let asked = self.subject.times_asked(path);
                 return Err(self.failed(
                     index,
                     format!(
-                        "{op:?}: of {path}, on the reference it {}; on the mount, {}",
+                        "{op:?}: of {path}, on the reference it {}; on the mount, {} (shown \
+                         before and after {shown:?}, asked of the filesystem {asked:?})",
                         says(*flags),
                         says(ours)
                     ),
@@ -1488,7 +1528,10 @@ impl<'a> Case<'a> {
         self.reference.close();
         self.subject.close();
         let Some(mount) = self.mount.take() else { return Ok(()) };
-        mount.unmount(false).map_err(|error| format!("unmounting: {error:#}"))?;
+        // Lazily, as the daemon unmounts: a process of the host's looking into the mount as this
+        // unmounts it, as a desktop's trash monitor does a new mount, would leave it busy
+        // (TASK-705). Joining waits until the kernel is done with it.
+        mount.unmount(true).map_err(|error| format!("unmounting: {error:#}"))?;
         let storage = mount.join().map_err(|error| format!("closing: {error:#}"))?;
         let storage = block_on(storage.check())
             .map_err(|error| format!("the store is not whole: {error:#}"))?;

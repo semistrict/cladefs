@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-20 20:33'
-updated_date: '2026-11-20 21:09'
+updated_date: '2026-11-20 22:50'
 labels:
   - bug
   - fuse
@@ -34,3 +34,15 @@ Seen on ubu1 2026-11-20 in TASK-495's first verification run (its fix to stale c
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Have the time failure say what the kernel showed and what the filesystem has (statx AT_STATX_FORCE_SYNC). 2. Check the server alone. 3. Name the cause and keep host processes off the tests' mounts.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Cause (2026-11-20, ubu1): a desktop session's trash monitor, gvfsd-trash (user ramon's GNOME session on ubu1), looks into every new mount: access(2) of its root, an inotify watch on it, .Trash and .Trash-1000 looked up; strace of the gvfs processes during the mount tests showed 76 such calls on the tests' mounts. With the diagnostic: 'shown before and after (old, old), asked of the filesystem Ok(new)': the server had the new times; the kernel's cache showed old ones, or (before) the new mtime with the old ctime. The server alone changes both times on every entry change (filesystem.rs every_change_of_entries_changes_both_times, 200 rounds). Cause: the same FUSE-client race as TASK-306: another process's GETATTR reply being applied (fuse_change_attributes_common sets mtime, then ctime, after marking the cache valid) while the test's stat reads the cache unlocked; the other process gvfsd-trash, whose inotify watch on the mount's root has it stat the root as each change lands there, hence the root alone. Fix: tests mount at .gvfs, which gvfs ignores (TASK-306's notes). Verified: fuse_differential 30/30 stress rounds on ubu1 (3/30 in each run before); the reproduction test changes_show_their_times_though_others_stat_the_nodes_meanwhile gained root create-then-mkdir checks. The forced-statx diagnostic stays in the differential's time failures.
+<!-- SECTION:NOTES:END -->

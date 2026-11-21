@@ -2269,11 +2269,16 @@ impl OpenCell {
         Ok(dropped?)
     }
 
-    /// cladefs: shares the uploaded version `id`, if `shared`, or no longer: forks of it into other
-    /// tenants' cells are made while it is shared (`EACCES` otherwise), those made living on.
+    /// cladefs: shares the version `id`, if `shared`, or no longer: forks of it into other tenants'
+    /// cells are made while it is shared (`EACCES` otherwise), those made living on. Once every
+    /// commit ordered so far is uploaded: a version made is named by the cell's head only once its
+    /// segment is (`make_version`), by this store's writer or by the one a store let go of and
+    /// opened again took the cell with, so that a version just made is shared, not refused as
+    /// unknown (`ENOENT`).
     pub async fn share_version(&self, id: u64, shared: bool) -> Result<(), Error> {
         self.admit(Changing::Cell)?;
         let uploader = self.uploader.as_ref().ok_or(Errno::ENOTSUP)?;
+        self.make_uploaded().await?;
         Ok(uploader.share_version(id, shared).await.map_err(upload_errno)?)
     }
 

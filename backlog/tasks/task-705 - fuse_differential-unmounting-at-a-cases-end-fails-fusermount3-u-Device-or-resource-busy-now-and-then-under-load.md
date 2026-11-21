@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-20 20:33'
-updated_date: '2026-11-20 21:09'
+updated_date: '2026-11-20 22:50'
 labels:
   - bug
   - fuse
@@ -35,3 +35,15 @@ Seen on ubu1 2026-11-20 (TASK-495's verification, fuse_differential under nextes
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Have a busy unmount say what holds it. 2. Find the holder (strace of the host's daemons). 3. Unmount the tests lazily, as production does.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Cause (2026-11-20, ubu1): a desktop session's trash monitor, gvfsd-trash (user ramon's GNOME session on ubu1), looks into every new mount: access(2) of its root, an inotify watch on it, .Trash and .Trash-1000 looked up; strace of the gvfs processes during the mount tests showed 76 such calls on the tests' mounts. A strict unmount coming during one of those calls fails EBUSY (fusermount3 -u 'Device or resource busy'), held by no process's fd or cwd: the call under way holds a path in the mount for its duration. Reproduced at once by new_roots_read_their_permissions_through_the_kernel (8 threads mounting and unmounting): every thread's unmount failed busy. Fix: the tests unmount lazily (unmount(true)), as cladefsd, cladefs-mount and Mount's Drop already do; join still waits until the kernel is done, and the store is checked after. A busy unmount's error now names what holds it as far as /proc shows (mount.rs holders()), saying a call under way may. Their mounts now at .gvfs too (TASK-306): gvfs leaves them alone. Verified: fuse_mount 12/12 and fuse_differential 30/30 stress rounds on ubu1; workspaces below.
+<!-- SECTION:NOTES:END -->

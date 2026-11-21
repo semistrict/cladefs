@@ -65,6 +65,56 @@ fn root_is_a_directory() {
     })
 }
 
+/// TASK-306: a new filesystem's root, given an owner alone, keeps the 0755 it had, however many
+/// are formatted and given owners at once, each beside the others' work.
+#[test]
+fn new_roots_given_owners_keep_their_permissions() {
+    let threads: Vec<_> = (0..8)
+        .map(|thread| {
+            std::thread::spawn(move || {
+                for round in 0..25 {
+                    block_on(async {
+                        let fs = format().await;
+                        let owner =
+                            SetAttr { uid: Some(1000), gid: Some(1000), ..SetAttr::default() };
+                        let attr = fs.root().setattr(&owner).await.unwrap();
+                        let attr = (attr.perm, attr.uid, attr.gid, fs.root().getattr().await);
+                        let got = (attr.0, attr.1, attr.2, attr.3.unwrap().perm);
+                        assert_eq!(got, (0o755, 1000, 1000, 0o755), "thread {thread}, {round}");
+                        close_and_check(fs).await;
+                    })
+                }
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+}
+
+/// TASK-706: each change of a directory's entries changes both its modification and its change
+/// times, a mkdir's after a symlink's or a file's made just before it too.
+#[test]
+fn every_change_of_entries_changes_both_times() {
+    with_fs(async |fs| {
+        let root = fs.root();
+        let times = async || {
+            let attr = root.getattr().await.unwrap();
+            (attr.mtime, attr.ctime)
+        };
+        for round in 0..200 {
+            let before = times().await;
+            match round % 3 {
+                0 => drop(root.symlink(format!("s{round}").as_bytes(), b"x", OWNER).await.unwrap()),
+                1 => drop(root.create(format!("f{round}").as_bytes(), 0o644, OWNER).await.unwrap()),
+                _ => drop(root.mkdir(format!("d{round}").as_bytes(), 0o755, OWNER).await.unwrap()),
+            }
+            let after = times().await;
+            assert!(after.0 != before.0 && after.1 != before.1, "{round}: {before:?} {after:?}");
+        }
+    })
+}
+
 #[test]
 fn create_then_lookup() {
     with_fs(async |fs| {
