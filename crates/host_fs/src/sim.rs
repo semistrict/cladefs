@@ -11,8 +11,8 @@
 //! changed since, files' writes, and directories' entries made, removed or renamed, each in order,
 //! are kept beside. A crash ([`Disk::crashed`]) keeps what was
 //! durable and any of what changed since, as the seed says, each change kept or not in order, each
-//! block of each write whole, not at all, garbage, or torn; what no directory's entry names after
-//! goes. No symbolic links; paths are absolute, a relative one taken from the root.
+//! block of each write whole, not at all, garbage, or torn, its garbage in the bytes it changes
+//! alone (powersafe overwrite: [`garbled`]); what no directory's entry names after goes. No symbolic links; paths are absolute, a relative one taken from the root.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -23,6 +23,22 @@ use std::time::SystemTime;
 
 /// The granularity of a crash: a write survives it in blocks of this size, each whole or not.
 const BLOCK: usize = 512;
+
+/// `on`, the disk's bytes of a block a crash cut `written` short in, as garbage: those `written`
+/// changes, at random; those it writes as they were, as they were. A crash damages no byte a
+/// write leaves as it is, the sector's others included: powersafe overwrite, as SQLite assumes
+/// of Linux's disks by default (`SQLITE_IOCAP_POWERSAFE_OVERWRITE`), and cladefs too (board 5890,
+/// decision-3): a log's append, its page cache writing back whole pages, writes again the
+/// sector holding the end of the last record synced.
+fn garbled(on: &mut [u8], written: &[u8], rng: &mut Rng) {
+    let mut noise = vec![0; on.len()];
+    rng.fill(&mut noise);
+    for ((byte, &new), noise) in on.iter_mut().zip(written).zip(noise) {
+        if *byte != new {
+            *byte = noise;
+        }
+    }
+}
 
 /// The blocks a file gives back ([`punch_hole`](crate::punch_hole)), and counts allocated.
 const HOLE: u64 = 4096;
@@ -364,7 +380,7 @@ impl Fs {
                                     let into = &mut data[start..start + block.len()];
                                     match fate {
                                         1 => into.copy_from_slice(block),
-                                        2 => rng.fill(into),
+                                        2 => garbled(into, block, rng),
                                         _ => {
                                             let half = block.len() / 2;
                                             into[..half].copy_from_slice(&block[..half]);

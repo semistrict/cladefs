@@ -310,12 +310,25 @@ impl MemDisk {
     }
 
     /// cladefs: the directory as a crash would leave it, as [`MemDisk::crash`] says, each block
-    /// written since its file's last sync also garbage, or torn, at random (TASK-680).
+    /// written since its file's last sync also garbage, or torn, at random (TASK-680): garbage in
+    /// the bytes its write changes alone, as powersafe overwrite has it (board 5890, decision-3).
     pub fn crash_corrupting(&self, seed: u64) -> MemDisk {
         self.crash_with(seed, true)
     }
 
     fn crash_with(&self, seed: u64, corrupting: bool) -> MemDisk {
+        // cladefs: a block a crash cut short as garbage: the bytes its write changes, at random;
+        // those it writes as they were, as they were: powersafe overwrite, which cladefs assumes of
+        // its disks, as SQLite does of Linux's by default (board 5890, decision-3).
+        fn garbled(on: &mut [u8], written: &[u8], rng: &mut StdRng) {
+            let mut noise = vec![0; on.len()];
+            rng.fill(&mut noise[..]);
+            for ((byte, &new), noise) in on.iter_mut().zip(written).zip(noise) {
+                if *byte != new {
+                    *byte = noise;
+                }
+            }
+        }
         let mut rng = StdRng::seed_from_u64(seed);
         let fs = self.fs.lock().unwrap();
         let mut dirs = BTreeMap::new();
@@ -367,7 +380,7 @@ impl MemDisk {
                     let at = &mut data[start..start + block.len()];
                     match fate {
                         1 => at.copy_from_slice(block),
-                        2 => rng.fill(at),
+                        2 => garbled(at, block, &mut rng),
                         _ => {
                             let half = block.len() / 2;
                             at[..half].copy_from_slice(&block[..half]);
@@ -794,6 +807,30 @@ mod tests {
             }
         }
         assert_eq!((whole, torn, garbage), ([true, true], true, true));
+    }
+
+    /// cladefs: a corrupting crash damages no byte a write leaves as it was, the block's others
+    /// included (powersafe overwrite, board 5890, decision-3): a log's append, written back a page
+    /// at a time, writes again the end of the record synced before it, which every crash keeps,
+    /// whatever it makes of the bytes after.
+    #[test]
+    fn corrupting_crashes_damage_no_byte_written_as_it_was() {
+        const SYNCED: usize = BLOCK + 188;
+        let dir = MemDisk::new();
+        let file = dir.create("f", true).unwrap();
+        file.write_at(&[1; SYNCED], 0).unwrap();
+        file.sync().unwrap();
+        dir.sync_dir("").unwrap();
+        let mut page = vec![1; SYNCED];
+        page.resize(2 * BLOCK, 3);
+        file.write_at(&page, 0).unwrap();
+        let mut garbage = false;
+        for seed in 0..64 {
+            let data = read(&dir.crash_corrupting(seed).open("f", true).unwrap());
+            assert_eq!(data[..SYNCED], [1; SYNCED], "seed {seed} damaged what was synced");
+            garbage |= data.len() == 2 * BLOCK && data[SYNCED..].iter().any(|&byte| byte != 3);
+        }
+        assert!(garbage, "no crash made garbage of the new bytes");
     }
 
     /// Creating a file where one is fails, as a host's `create_new` does, leaving the one there as

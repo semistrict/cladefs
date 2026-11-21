@@ -142,8 +142,9 @@ ephemeral journal, version directories and the part cache take a root `Dir` each
   directories once made (`local_cell::MemDir`'s model, which the cells' own crash tests are
   written to, and ext4's with the next fsync); what changed since kept in order. A host started
   again finds its disk crashed at its first call: what was durable, each change since kept or not
-  as the seed says, in order, each block of each write whole, not at all, garbage, or torn. A host's
-  locks of files are its disk's, gone with the crash.
+  as the seed says, in order, each block of each write whole, not at all, garbage, or torn, its
+  garbage in the bytes the write changes alone: powersafe overwrite, which cladefs assumes of its
+  disks (decision-3, board 5890). A host's locks of files are its disk's, gone with the crash.
 - **Who goes through it**: local_cell and bucket_cell wholly (`DiskDir`, `DiskFile`, the part
   cache's files, `HostDisk::of`, which samples a terabyte under madsim), and cladefsd's serving
   files: `host_cell`, `open_cell`, `cell_dir`, `profile`, `ephemeral_host`, `cladefsd::{cells,

@@ -193,3 +193,62 @@ fn which_calls_fail_is_the_seeds() {
     assert!(one.contains(&true) && one.contains(&false), "{one:?}");
     assert_ne!(one, other);
 }
+
+/// Board 5890: a crash damages no byte a write leaves as it was, the sector's others included
+/// (powersafe overwrite, decision-3). A log's append writes back whole pages, writing again the
+/// bytes of the record synced before it, which a crash must keep, whatever it makes of the rest:
+/// over many seeds, the bytes written again are always kept, and the new ones are now and then
+/// garbage.
+#[test]
+fn a_crash_damages_no_byte_a_write_leaves_as_it_was() {
+    const SYNCED: usize = 700;
+    let crashed = |seed: u64| {
+        std::thread::spawn(move || {
+            let runtime = madsim::runtime::Runtime::with_seed_and_config(seed, Default::default());
+            runtime.add_simulator::<node_local::Plugin>();
+            runtime.block_on(async {
+                let handle = madsim::runtime::Handle::current();
+                let read = Arc::new(Mutex::new(Vec::new()));
+                let read2 = read.clone();
+                let node = handle
+                    .create_node()
+                    .name("host")
+                    .ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
+                    .init(move || {
+                        node_local::starting();
+                        let read = read2.clone();
+                        async move {
+                            if host_fs::exists("/log") {
+                                read.lock().unwrap().push(host_fs::read("/log").unwrap());
+                            } else {
+                                let log = host_fs::File::create("/log").unwrap();
+                                log.write_all_at(&[b'a'; SYNCED], 0).unwrap();
+                                log.sync_all().unwrap();
+                                host_fs::sync_dir("/").unwrap();
+                                // The record synced, written again, and the next after it.
+                                let mut page = vec![b'a'; SYNCED];
+                                page.resize(1024, b'b');
+                                log.write_all_at(&page, 0).unwrap();
+                            }
+                            std::future::pending::<()>().await
+                        }
+                    })
+                    .build();
+                madsim::time::sleep(Duration::from_secs(1)).await;
+                handle.kill(node.id());
+                handle.restart(node.id());
+                madsim::time::sleep(Duration::from_secs(1)).await;
+                let read = read.lock().unwrap().clone();
+                read.into_iter().next().expect("the boot after the crash read the log")
+            })
+        })
+        .join()
+        .unwrap()
+    };
+    let logs: Vec<Vec<u8>> = (1..=64).map(crashed).collect();
+    for (seed, log) in (1..=64).zip(&logs) {
+        assert_eq!(&log[..SYNCED], &[b'a'; SYNCED][..], "seed {seed} damaged what was synced");
+    }
+    let garbage = |log: &Vec<u8>| log.len() == 1024 && log[SYNCED..].iter().any(|&b| b != b'b');
+    assert!(logs.iter().any(garbage), "no seed's crash made garbage of the new bytes");
+}
