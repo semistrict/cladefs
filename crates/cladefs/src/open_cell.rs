@@ -1284,19 +1284,26 @@ impl OpenCell {
             local_cell::upload::Options { token: token.unwrap_or(keeping.token), ..keeping };
         let force = keeping.force;
         let opened = Self::creating(path, async |span| {
-            let opened = host_cell::create(path, capacity, of, kind, keeping).await?;
+            let opened = host_cell::create_unmade(path, capacity, of, kind, None, keeping).await?;
             span.set_cell(opened.store.description().cell);
             Ok(opened)
         })
         .await?;
-        // cladefs: a forced taking's placement forced from then on (TASK-681).
-        let placed = local_cell::upload::blocking(|| match (token, force) {
-            (Some(token), true) => Self::place_forced(path, token),
-            (Some(token), false) => Self::place(path, token),
-            (None, _) => Ok(()),
+        // cladefs: placed, then made whole, and removed if either fails: made first, a placement
+        // failing left a store no placement had placed, which every making after refused
+        // (`EEXIST`, board 5668); and the making's last step failing may leave the store looking
+        // made. A forced taking's placement forced from then on (TASK-681).
+        let placed = local_cell::upload::blocking(|| {
+            match (token, force) {
+                (Some(token), true) => Self::place_forced(path, token),
+                (Some(token), false) => Self::place(path, token),
+                (None, _) => Ok(()),
+            }?;
+            opened.made().map_err(Error::new)
         });
         if let Err(err) = placed {
             opened.close().await;
+            local_cell::upload::blocking(|| host_cell::discard(path));
             return Err(err);
         }
         Ok(opened)

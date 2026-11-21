@@ -306,6 +306,9 @@ pub(crate) async fn create(
     let opened = create_unmade(path, capacity, of, kind, None, keeping).await?;
     if let Err(err) = upload::blocking(|| opened.made()) {
         opened.close().await;
+        // Its making's last step failing may have left it looking made (`UNMADE` gone, not
+        // durably): no store whose making failed is left behind (board 5668).
+        upload::blocking(|| discard(path));
         return Err(err.into());
     }
     Ok(opened)
