@@ -4,6 +4,7 @@ title: 'zpages pprof: profiles_say_what_ran saw an empty profile once on a loade
 status: To Do
 assignee: []
 created_date: '2026-11-20 22:21'
+updated_date: '2026-11-21 06:03'
 labels:
   - testing
 dependencies: []
@@ -29,3 +30,9 @@ TASK-702.1's Linux workspace run on ubu1 (two other jobs running) failed crates/
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Again 2026-11-21 on ubu1 (TASK-702.2's workspace run, another job beside it): pprof.rs:159, samples [].
+<!-- SECTION:NOTES:END -->
