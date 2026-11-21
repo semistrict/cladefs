@@ -179,19 +179,26 @@ pub fn shares(target: u64, tenants: &[(u64, u64)]) -> Vec<(u64, u64)> {
 
 /// Starts the governor, on a thread of its own, for the rest of the daemon's life. Fails if the
 /// host's memory can't be read, or the headroom is malformed: a daemon that can't see the host's
-/// memory doesn't start rather than run without its cache.
+/// memory doesn't start rather than run without its cache. cladefs: a service of its own
+/// ([`super::run::service`]), one worker's runtime on its thread, as its shrinks wait for the pages
+/// they evict holding no thread (board 2946).
 pub fn start() -> Result<(), String> {
     let host = host_memory().map_err(|err| format!("reading the host's memory: {err}"))?;
     let headroom = headroom(host.total)?;
-    let governing = move || {
+    super::run::service("memory governor", 1, move || govern_every(headroom))
+        .map_err(|err| format!("starting the memory governor: {err}"))
+}
+
+/// cladefs: governs the daemon's memory now and every [`INTERVAL`] after, leaving `headroom` free
+/// ([`start`]), for as long as the daemon runs.
+async fn govern_every(headroom: u64) {
+    loop {
         match host_memory() {
-            Ok(host) => memory::govern(allowance(memory::governed_bytes(), host, headroom)),
+            Ok(host) => memory::govern(allowance(memory::governed_bytes(), host, headroom)).await,
             Err(err) => log::error!("cladefsd: reading the host's memory: {err}"),
         }
-        true
-    };
-    super::run::every("memory governor", INTERVAL, std::thread::sleep, governing)
-        .map_err(|err| format!("starting the memory governor: {err}"))
+        tokio::time::sleep(INTERVAL).await;
+    }
 }
 
 /// cladefs: what the disk governor leaves free of a filesystem, as `CLADEFSD_DISK_HEADROOM` says.

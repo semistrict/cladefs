@@ -24,7 +24,7 @@ use std::os::fd::AsFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError, Weak, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak, mpsc};
 
 /// How many of a connection's requests the daemon serves at once: a VM's device queues', and
 /// faults waiting for the pager. Each on the thread that received it ([`receive`]); those waiting
@@ -2171,7 +2171,7 @@ async fn tell_commits(
     use tokio::sync::oneshot::error::TryRecvError;
     while let Err(TryRecvError::Empty) = stopped.try_recv() {
         let committed = store.commits();
-        let Some(latest) = store.newer(commit, std::time::Duration::ZERO) else {
+        let Some(latest) = store.newer(commit, std::time::Duration::ZERO).await else {
             let _ = tokio::time::timeout(COMMITS_POLL, committed).await;
             continue;
         };
@@ -2702,7 +2702,7 @@ mod refusal_tests {
 fn quarantine(pages: physmem::Quarantined) {
     let waiting = PARKING.with_borrow(Clone::clone);
     if let Some(waiting) = &waiting {
-        *waiting.parked.lock().unwrap() += 1;
+        waiting.parked.fetch_add(1, Ordering::SeqCst);
     }
     let pages: Arc<dyn Send + Sync> = Arc::new(Parked { pages: Some(pages), waiting });
     for peer in PEERS.get().lock().unwrap().iter() {
@@ -2711,7 +2711,7 @@ fn quarantine(pages: physmem::Quarantined) {
 }
 
 /// cladefs: pages quarantined ([`quarantine`]), freed as they are dropped; and, if they were freed
-/// on a thread waiting for what it frees, what it waits on ([`Parking`]).
+/// by what counts what it frees, what it waits on ([`Parking`]).
 struct Parked {
     pages: Option<physmem::Quarantined>,
     waiting: Option<Arc<Waiting>>,
@@ -2721,53 +2721,71 @@ impl Drop for Parked {
     fn drop(&mut self) {
         drop(self.pages.take());
         if let Some(waiting) = &self.waiting {
-            *waiting.parked.lock().unwrap() -= 1;
-            waiting.freed.notify_all();
+            waiting.parked.fetch_sub(1, Ordering::SeqCst);
+            waiting.freed.notify(usize::MAX);
         }
     }
 }
 
-/// cladefs: how many batches of the pages a thread freed are quarantined still ([`Parking`]).
+/// cladefs: how many batches of the pages a shrink freed are quarantined still ([`Parking`]), and
+/// what says one of them is free.
 #[derive(Default)]
 struct Waiting {
-    parked: Mutex<usize>,
-    freed: Condvar,
+    parked: std::sync::atomic::AtomicUsize,
+    freed: event_listener::Event,
 }
 
 thread_local! {
-    /// cladefs: while this thread waits for the pages it frees ([`Parking`]), what it waits on.
+    /// cladefs: while this thread frees pages for a shrink ([`Parking::counting`]), what counts
+    /// them.
     static PARKING: std::cell::RefCell<Option<Arc<Waiting>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// cladefs: while held, has the pages this thread frees, quarantined ([`quarantine`]), counted until
-/// they are free, which [`Parking::wait`] waits for (TASK-79.9): as a shrink of the daemon's
-/// memory, which evicts until it holds no more than it is asked to, finds what it holds once what
-/// it evicted is free, rather than at once, the pages a window mapped waiting for its VM process.
+/// cladefs: has the pages a shrink frees, quarantined ([`quarantine`]), counted until they are
+/// free, which [`Parking::wait`] waits for (TASK-79.9): as a shrink of the daemon's memory, which
+/// evicts until it holds no more than it is asked to, finds what it holds once what it evicted is
+/// free, rather than at once, the pages a window mapped waiting for its VM process.
 pub(super) struct Parking(Arc<Waiting>);
 
 impl Parking {
-    /// Counts what this thread frees from now on, until dropped.
-    pub(super) fn start() -> Self {
-        let waiting = Arc::new(Waiting::default());
-        PARKING.set(Some(waiting.clone()));
-        Self(waiting)
+    /// Counts nothing yet: what is freed in [`Parking::counting`] alone.
+    pub(super) fn new() -> Self {
+        Self(Arc::default())
     }
 
-    /// Waits until the pages this thread freed are free: once every VM process that may reach
-    /// them has made the stage operations taking them away, or the daemon let it go, which it does
-    /// once it has stopped answering ([`Peer::unresponsive`]).
-    pub(super) fn wait(&self) {
-        let mut parked = self.0.parked.lock().unwrap();
-        while *parked > 0 {
-            local_cell::blocks!("a shrink, waiting for pages VM processes reach to be freed");
-            parked = self.0.freed.wait(parked).unwrap();
+    /// cladefs: `free`'s output, counting the pages it frees, on this thread, as it runs (board
+    /// 2946): the thread is what [`quarantine`] knows them by, and a task awaiting
+    /// [`Parking::wait`] may go on on another, so what frees runs whole, synchronously, on the
+    /// thread that counts it, and the waiting is the task's.
+    pub(super) fn counting<T>(&self, free: impl FnOnce() -> T) -> T {
+        /// What this thread counted for before, given back as `free` returns or unwinds.
+        struct Restore(Option<Arc<Waiting>>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                PARKING.set(self.0.take());
+            }
         }
+        let _restore = Restore(PARKING.replace(Some(self.0.clone())));
+        free()
     }
-}
 
-impl Drop for Parking {
-    fn drop(&mut self) {
-        PARKING.set(None);
+    /// Whether pages it counted are quarantined still.
+    pub(super) fn parked(&self) -> bool {
+        self.0.parked.load(Ordering::SeqCst) > 0
+    }
+
+    /// Waits until the pages it counted are free: once every VM process that may reach them has
+    /// made the stage operations taking them away, or the daemon let it go, which it does once it
+    /// has stopped answering ([`Peer::unresponsive`]). cladefs: holding no thread (board 2946): it
+    /// listens before it looks again, so that a batch freed between the two wakes it.
+    pub(super) async fn wait(&self) {
+        while self.parked() {
+            let freed = self.0.freed.listen();
+            if !self.parked() {
+                return;
+            }
+            freed.await;
+        }
     }
 }
 

@@ -169,9 +169,10 @@ impl<T> Drop for AsyncMutexGuard<'_, T> {
 pub(crate) use std::thread;
 
 /// cladefs: std's threads, under madsim, which runs one thread: the simulated host refuses every
-/// thread the store would start (`Builder`'s return the refusal), and the store does that work on
-/// its caller's thread, as on a host short of threads, which its Shuttle tests run (TASK-79.80,
-/// doc-24).
+/// scoped thread the store would start (`Builder::spawn_scoped` returns the refusal), and the
+/// store does that work on its caller's thread, as on a host short of threads, which its Shuttle
+/// tests run (TASK-79.80, doc-24). The work it hands a thread of its own is a simulated task
+/// ([`spawn_or_return`], board 2944).
 #[cfg(all(not(feature = "shuttle"), madsim))]
 pub(crate) mod thread {
     pub(crate) use std::thread::*;
@@ -182,18 +183,6 @@ pub(crate) mod thread {
     impl Builder {
         pub(crate) fn new() -> Self {
             Self
-        }
-
-        pub(crate) fn name(self, _name: String) -> Self {
-            self
-        }
-
-        pub(crate) fn spawn<F, T>(self, _f: F) -> std::io::Result<JoinHandle<T>>
-        where
-            F: FnOnce() -> T + Send + 'static,
-            T: Send + 'static,
-        {
-            Err(refused())
         }
 
         pub(crate) fn spawn_scoped<'scope, F, T>(
@@ -288,20 +277,30 @@ pub(crate) fn spawn_or_return<T: Send + 'static>(
     work: T,
     run: impl FnOnce(T) + Send + 'static,
 ) -> Option<T> {
+    // cladefs: under madsim, a task of the simulated host's, which the simulation runs at a later
+    // turn, as it chooses: so the store's waits for this work find it pending, and await it, as
+    // they do for a thread's built normally, rather than finding it done, as when it ran on the
+    // caller's thread (board 2944, doc-24).
+    #[cfg(madsim)]
+    {
+        let _ = name;
+        drop(tokio::spawn(async move { run(work) }));
+        return None;
+    }
     // A thread the host refuses drops what it was to run: so `work` is the thread's to take, and,
     // if there is none, the caller's.
-    let job = Arc::new(Mutex::new(Some(work)));
-    let theirs = job.clone();
-    let spawned = thread::Builder::new().name(name.to_owned()).spawn(move || {
-        let work = theirs.lock().unwrap().take();
-        run(work.expect("a thread runs what its caller has not"));
-    });
-    let error = spawned.err()?;
-    // cladefs: under madsim, every time, as it should (`thread`).
-    if !cfg!(madsim) {
+    #[cfg(not(madsim))]
+    {
+        let job = Arc::new(Mutex::new(Some(work)));
+        let theirs = job.clone();
+        let spawned = thread::Builder::new().name(name.to_owned()).spawn(move || {
+            let work = theirs.lock().unwrap().take();
+            run(work.expect("a thread runs what its caller has not"));
+        });
+        let error = spawned.err()?;
         log::warn!("extent store: running on the caller's thread, the host refusing one: {error}");
+        Some(job.lock().unwrap().take().expect("no thread ran it"))
     }
-    Some(job.lock().unwrap().take().expect("no thread ran it"))
 }
 
 /// The host's refusal of a thread, `EAGAIN`, if a test has it refuse them (`refuse_threads`).

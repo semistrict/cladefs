@@ -572,9 +572,10 @@ pub struct Forked {
     pub ring: Arc<Ring>,
 }
 
-/// cladefs: what says an uploader stopped (TASK-685.3): awaited by [`Uploader::close`], waited for,
-/// blocking, by its drop, which may come anywhere, a panic unwinding through an executor among them,
-/// where blocking on a future would nest executors.
+/// cladefs: what says an uploader stopped (TASK-685.3): awaited by [`Uploader::close`], and by its
+/// drop, polled once, then waited for on the dropping thread if it must be (board 2946). The drop
+/// may come anywhere, a panic unwinding through an executor among them, so it waits parking the
+/// thread ([`crate::sync::block_on`]), which nests no executor.
 #[derive(Default)]
 struct Stopped {
     stopped: std::sync::atomic::AtomicBool,
@@ -602,18 +603,6 @@ impl Stopped {
             said.await;
         }
     }
-
-    /// Waits, blocking, until the uploader stopped.
-    fn wait(&self) {
-        use event_listener::Listener as _;
-        while !self.is_stopped() {
-            let said = self.said.listen();
-            if self.is_stopped() {
-                return;
-            }
-            said.wait();
-        }
-    }
 }
 
 /// A store's uploader (see the module's docs). Dropping it closes the store's open segment, if its
@@ -622,7 +611,8 @@ pub struct Uploader<D: Dir> {
     shared: Arc<Shared<D>>,
     /// The bucket the store's cell is kept in.
     bucket: Arc<ObjectBucket>,
-    /// Says the uploader stopped, once it has: taken by [`Uploader::close`], which waits for it.
+    /// Says the uploader stopped, once it has: taken by [`Uploader::close`], or its drop, which
+    /// wait for it.
     stopped: Option<Arc<Stopped>>,
     /// The store's directory, held taken for this process until the uploader stopped, last of its
     /// fields to go (TASK-129).
@@ -1220,7 +1210,8 @@ impl<D: Dir> Uploader<D> {
     /// cladefs: stops it, as dropping it does, and returns once it stopped: its store's open segment
     /// closed, if its store is open still, what the store made durable uploaded, and nothing of it
     /// holding the store open, which may be opened again at once (TASK-685.3). Holds no thread
-    /// while it waits, as the daemon closes its stores: dropping it, unclosed, blocks.
+    /// while it waits, as the daemon closes its stores: dropping it, unclosed, blocks, unless its
+    /// task stopped already.
     pub async fn close(mut self) {
         self.shared.stop();
         if let Some(stopped) = self.stopped.take() {
@@ -1237,11 +1228,17 @@ impl<D: Dir> Drop for Uploader<D> {
         if node_local::dying() {
             return;
         }
-        if let Some(stopped) = self.stopped.take() {
+        let Some(stopped) = self.stopped.take() else { return };
+        // cladefs: dropped unclosed, its stop waited for here: at once, if its task stopped
+        // already; or blocking the dropping thread, an outermost entry's, while its task stops
+        // (board 2946).
+        let mut stopping = std::pin::pin!(stopped.stopped());
+        let waker = std::task::Waker::noop();
+        if let Poll::Pending = stopping.as_mut().poll(&mut std::task::Context::from_waker(waker)) {
             crate::blocks!(
                 "an uploader dropped unclosed, waiting for it to stop (Uploader::close)"
             );
-            stopped.wait();
+            crate::sync::block_on(stopping);
         }
     }
 }

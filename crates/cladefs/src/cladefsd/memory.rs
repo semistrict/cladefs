@@ -167,8 +167,9 @@ pub fn governed_bytes() -> u64 {
 /// (`local_cell::pages`, TASK-433) as the parts held are, its clean pages evicted, its dirty
 /// ones written back to be: what it holds counted as the process's, where the host's page cache
 /// was counted free; and sized to what is left it ([`local_cell::pages::PageCache::size_to`]),
-/// as Linux sizes its page cache to the memory free.
-pub fn govern(allowance: u64) {
+/// as Linux sizes its page cache to the memory free. cladefs: its shrinks wait for the pages they
+/// evict holding no thread ([`shrink`], board 2946).
+pub async fn govern(allowance: u64) {
     GOVERNED.get().store(allowance, Ordering::Relaxed);
     let parts = held_parts();
     let room = allowance.saturating_sub(physmem::arenas_bytes());
@@ -202,14 +203,14 @@ pub fn govern(allowance: u64) {
     };
     for (id, share) in super::governor::shares(allowance, &weighted) {
         if held_by(id) > share
-            && let Err(err) = shrink(Some(id), share)
+            && let Err(err) = shrink(Some(id), share).await
             && err != Errno::ENOENT
         {
             log::error!("cladefsd: shrinking a tenant's memory to its share: {err}");
         }
     }
     if physmem::arenas_bytes() > allowance
-        && let Err(err) = shrink(None, allowance)
+        && let Err(err) = shrink(None, allowance).await
     {
         log::error!("cladefsd: shrinking the daemon's memory to the host's: {err}");
     }
@@ -231,17 +232,14 @@ fn held_by(id: u64) -> u64 {
 /// back once the last of their pages does. cladefs: a page a VM process's window maps, evicted, is
 /// free once the VM process has unmapped it, or the daemon let it go (TASK-79.9): each extent's
 /// pages free before what is held is looked at again ([`Parking`]), so that it evicts no more than
-/// it must, and returns what is held once they are, not before.
-pub fn shrink(tenant: Option<u64>, target: u64) -> Result<u64, Errno> {
-    let parking = Parking::start();
+/// it must, and returns what is held once they are, not before; waiting for them holding no thread
+/// (board 2946).
+pub async fn shrink(tenant: Option<u64>, target: u64) -> Result<u64, Errno> {
+    let parking = Parking::new();
     let Some(id) = tenant else {
         // Free memory first: the arenas' spare chunks.
-        physmem::release_spares(None);
-        crate::cache::evict_least_used(None, |_| {
-            parking.wait();
-            physmem::arenas_bytes() <= target
-        });
-        parking.wait();
+        parking.counting(|| physmem::release_spares(None));
+        evict_until(&parking, None, || physmem::arenas_bytes() <= target).await;
         return Ok(physmem::arenas_bytes());
     };
     let arenas: Vec<_> = (REGISTRY.get().lock().unwrap().alive())
@@ -253,14 +251,31 @@ pub fn shrink(tenant: Option<u64>, target: u64) -> Result<u64, Errno> {
     }
     let held = || arenas.iter().map(|arena| physmem::arena_bytes(*arena)).sum::<u64>();
     for arena in &arenas {
-        physmem::release_spares(Some(*arena));
-        crate::cache::evict_least_used(Some(*arena), |_| {
-            parking.wait();
-            held() <= target
-        });
+        parking.counting(|| physmem::release_spares(Some(*arena)));
+        evict_until(&parking, Some(*arena), || held() <= target).await;
     }
-    parking.wait();
     Ok(held())
+}
+
+/// cladefs: evicts the pages of `arena`'s cached extents, or of every arena's, as
+/// `crate::cache::evict_least_used` orders them, until `enough` says so, looked at once the pages
+/// evicted so far are free, or none is left to evict; and returns once those it evicted are free
+/// ([`Parking`]). Each pass of the cache's is synchronous, and ends at the first extent whose
+/// pages it left quarantined, a window's, which it waits for between passes, holding no thread
+/// (board 2946); the next pass orders what is left anew.
+async fn evict_until(
+    parking: &Parking,
+    arena: Option<physmem::ArenaId>,
+    enough: impl Fn() -> bool,
+) {
+    loop {
+        let stop = |_: u64| parking.parked() || enough();
+        parking.counting(|| crate::cache::evict_least_used(arena, stop));
+        if !parking.parked() {
+            return;
+        }
+        parking.wait().await;
+    }
 }
 
 /// A tenant's memory, as the metrics show it.

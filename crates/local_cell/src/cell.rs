@@ -3812,10 +3812,11 @@ impl<D: Dir> LocalCell<D> {
         self.views.open()
     }
 
-    /// cladefs: waits at most `timeout` for a commit after the commit of `epoch`, returning the
-    /// latest commit's epoch, if one came: what tells the cell's followers.
-    pub fn newer(&self, epoch: u64, timeout: Duration) -> Option<u64> {
-        self.views.newer(epoch, timeout)
+    /// cladefs: awaits, holding no thread, at most `timeout` for a commit after the commit of
+    /// `epoch`, returning the latest commit's epoch, if one came: what tells the cell's followers
+    /// (board 2944).
+    pub async fn newer(&self, epoch: u64, timeout: Duration) -> Option<u64> {
+        self.views.newer(epoch, timeout).await
     }
 
     /// cladefs: what the cell's live views are: how many, how far behind (TASK-42.7).

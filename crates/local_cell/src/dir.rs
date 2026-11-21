@@ -553,7 +553,11 @@ fn closed_in(
         fail::fail_point!("dir::claim_waits");
         // cladefs: never under madsim, where an opening of a store waits for its close first,
         // holding no thread ([`closed`]), then claims it, awaiting nothing between (doc-24,
-        // TASK-685.3).
+        // TASK-685.3). The wait stays for what claims from a thread of its own, an outermost
+        // entry's (board 2946): the sync openings, `LocalCell::recover` and what opens over it,
+        // which tests and tools call as they are, have no `closed` to await first; and off madsim
+        // a store another thread begins closing between an opening's `closed` and its claim is
+        // waited for here, rather than refused as one open.
         crate::blocks!("an opening, waiting for a store of its directory closing in the process");
         claimed = UNCLAIMED.get().wait_timeout(claimed, left).unwrap().0;
     }

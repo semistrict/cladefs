@@ -90,21 +90,25 @@ struct Control {
 /// detached, written back and closed, or failed to attach.
 type Holds = Arc<Mutex<BTreeMap<PathBuf, crate::cladefsd::cells::MountHold>>>;
 
-/// Opens the store at `path` as [`mount_cell`] does, held for the mount first ([`Holds`]): `open`
-/// opens it, given the hold, and keeps the hold in `holds` if it opens.
-fn held_open(
-    holds: &Holds,
-    path: &Path,
-    open: impl FnOnce() -> Result<Filesystem, Error>,
+/// Opens the store at `path` as [`mount_cell`] does, held for the mount first ([`Holds`]), the hold
+/// awaited, holding no thread (board 2946): `open` opens it, on a blocking thread, and the hold is
+/// kept in `holds` if it opens.
+async fn held_open(
+    holds: Holds,
+    path: PathBuf,
+    open: impl FnOnce(&Path) -> Result<Filesystem, Error> + Send + 'static,
 ) -> Result<Filesystem, Error> {
-    let hold = crate::cladefsd::cells::hold_mounted(path).map_err(|errno| {
+    let hold = crate::cladefsd::cells::hold_mounted(&path).await.map_err(|errno| {
         Error::new(
             anyhow::Error::new(errno).context(format!("holding {} for the mount", path.display())),
         )
     })?;
-    let fs = open()?;
-    holds.lock().unwrap().insert(path.to_owned(), hold);
-    Ok(fs)
+    let opened = tokio::task::spawn_blocking(move || {
+        let fs = open(&path)?;
+        holds.lock().unwrap().insert(path, hold);
+        Ok(fs)
+    });
+    opened.await.map_err(Error::new)?
 }
 
 /// The cell `cell` of `cells` as `reserving` finds it: marked `marked` if it says so, else left be.
@@ -181,12 +185,7 @@ impl Control {
         let shown = cell_path(cell);
         let path = self.stores.dir.join(&shown);
         let (url, holds, held) = (self.stores.bucket.clone(), self.holds.clone(), path.clone());
-        let open = async move {
-            let opened = tokio::task::spawn_blocking(move || {
-                held_open(&holds, &path, || mount_cell(&path, &url, of, token))
-            });
-            opened.await.map_err(Error::new)?
-        };
+        let open = held_open(holds, path, move |path| mount_cell(path, &url, of, token));
         if let Err(err) = server.attach(&shown, open).await {
             self.holds.lock().unwrap().remove(&held);
             return Err(err);

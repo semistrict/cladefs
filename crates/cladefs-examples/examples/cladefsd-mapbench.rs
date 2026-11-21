@@ -260,7 +260,7 @@ mod bench {
         for (extent, at) in &extents {
             store.map(*extent, 0, len, *at).unwrap();
         }
-        cladefsd::memory::shrink(None, 0).unwrap();
+        futures::executor::block_on(cladefsd::memory::shrink(None, 0)).unwrap();
         let mut loads = Timer::default();
         for (_, at) in &extents {
             loads.time(|| {

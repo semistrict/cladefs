@@ -842,8 +842,10 @@ impl Cladefsd for Control {
         request: Request<ShrinkMemoryRequest>,
     ) -> Result<Response<ShrinkMemoryResponse>, Status> {
         let ShrinkMemoryRequest { tenant, target_bytes } = request.into_inner();
-        let shrunk = cells::blocking(move || memory::shrink(tenant, target_bytes));
-        reply(shrunk.await.map(|bytes| ShrinkMemoryResponse { bytes }))
+        // cladefs: on the call's task: its evictions' passes are synchronous, and it waits for the
+        // pages they evict holding no thread (board 2946).
+        let shrunk = memory::shrink(tenant, target_bytes).await;
+        reply(shrunk.map(|bytes| ShrinkMemoryResponse { bytes }))
     }
 
     async fn set_disk_limit(

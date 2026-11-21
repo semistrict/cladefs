@@ -5567,8 +5567,8 @@ fn call(
 /// acknowledge their unmapping, or for the daemon to let go of it, as here of one that acknowledges
 /// nothing. Of two extents of a chunk each, read and mapped, it evicts the one asked for longest
 /// ago, which leaves the tenant the other's chunk alone.
-#[test]
-fn shrinks_return_once_the_pages_they_evict_are_free() {
+#[tokio::test(flavor = "multi_thread")]
+async fn shrinks_return_once_the_pages_they_evict_are_free() {
     use super::wire::*;
     const CHUNK: u64 = physmem::CHUNK_SIZE as u64;
     host();
@@ -5598,23 +5598,23 @@ fn shrinks_return_once_the_pages_they_evict_are_free() {
         let at = (sequence - 1) * CHUNK;
         served(Header::new(MAP, 6 + sequence).with_args(&[cell, sequence, 0, CHUNK, at]), &[]);
     }
-    assert_eq!(super::memory::shrink(Some(1), u64::MAX), Ok(2 * CHUNK));
+    assert_eq!(super::memory::shrink(Some(1), u64::MAX).await, Ok(2 * CHUNK));
 
-    let shrinking = std::thread::spawn(|| super::memory::shrink(Some(1), CHUNK));
+    let shrinking = tokio::spawn(super::memory::shrink(Some(1), CHUNK));
     // The unmaps it is sent, which it never acknowledges, until the daemon lets it go.
     let mut unmapped = Vec::new();
     while let Ok(Some(message)) = receiver.receive(|| 0) {
         assert_eq!(message.header.kind, STAGE_UNMAP, "{:?}", message.header);
         unmapped.push(message.header.args[..2].to_vec());
     }
-    assert_eq!((shrinking.join().unwrap(), unmapped), (Ok(CHUNK), vec![vec![0, CHUNK]]));
+    assert_eq!((shrinking.await.unwrap(), unmapped), (Ok(CHUNK), vec![vec![0, CHUNK]]));
 }
 
 /// TASK-358: the governor, the host's memory running low, evicts each tenant down to its share by
 /// weight of what it allows: of two tenants of 4 chunks each, weighing 3 and 1, allowed 4 chunks
 /// together, the heavier keeps 3, the lighter 1.
-#[test]
-fn the_governor_shares_memory_by_weight() {
+#[tokio::test(flavor = "multi_thread")]
+async fn the_governor_shares_memory_by_weight() {
     use super::wire::*;
     const CHUNK: u64 = physmem::CHUNK_SIZE as u64;
     host();
@@ -5644,19 +5644,19 @@ fn the_governor_shares_memory_by_weight() {
             let read = Header::new(READ, 5 + sequence).with_args(&[cell, sequence, 0, CHUNK]);
             assert_eq!(served(read, &[]).payload, pattern(sequence as u8, CHUNK as usize));
         }
-        assert_eq!(super::memory::shrink(Some(id), u64::MAX), Ok(4 * CHUNK), "{name}");
+        assert_eq!(super::memory::shrink(Some(id), u64::MAX).await, Ok(4 * CHUNK), "{name}");
         kept.push((sender, receiver, stream));
     }
-    super::memory::govern(4 * CHUNK);
-    let held = |id| super::memory::shrink(Some(id), u64::MAX).unwrap();
-    assert_eq!((held(1), held(2)), (3 * CHUNK, CHUNK));
+    super::memory::govern(4 * CHUNK).await;
+    let held = async |id| super::memory::shrink(Some(id), u64::MAX).await.unwrap();
+    assert_eq!((held(1).await, held(2).await), (3 * CHUNK, CHUNK));
 }
 
 /// TASK-400: the governor, the host's memory running low, lets go of the parts of segments the
 /// daemon's stores hold packed, newest first, before any tenant's pages: they are derived, their
 /// framings reading them back; then, none left, it evicts tenants' pages as before.
-#[test]
-fn the_governor_lets_parts_held_go_before_tenants_pages() {
+#[tokio::test(flavor = "multi_thread")]
+async fn the_governor_lets_parts_held_go_before_tenants_pages() {
     use super::wire::*;
     const CHUNK: u64 = physmem::CHUNK_SIZE as u64;
     host();
@@ -5694,17 +5694,17 @@ fn the_governor_lets_parts_held_go_before_tenants_pages() {
         let read = Header::new(READ, 5 + sequence).with_args(&[cell, sequence, 0, CHUNK]);
         assert!(served(read, &[]).payload == noise(sequence), "extent {sequence}");
     }
-    let cached = || super::memory::shrink(Some(1), u64::MAX).unwrap();
-    assert_eq!(cached(), 4 * CHUNK);
+    let cached = async || super::memory::shrink(Some(1), u64::MAX).await.unwrap();
+    assert_eq!(cached().await, 4 * CHUNK);
     let parts = super::memory::held_parts();
     let _held: Vec<_> = (0..4).map(|_| parts.hold_bytes(CHUNK as usize / 2)).collect();
     assert_eq!(super::memory::governed_bytes(), 4 * CHUNK + 2 * CHUNK);
-    super::memory::govern(4 * CHUNK + CHUNK);
-    assert_eq!((cached(), parts.bytes()), (4 * CHUNK, CHUNK), "the last two let go");
-    super::memory::govern(4 * CHUNK);
-    assert_eq!((cached(), parts.bytes()), (4 * CHUNK, 0), "every part let go, no page");
-    super::memory::govern(3 * CHUNK);
-    assert_eq!((cached(), parts.bytes()), (3 * CHUNK, 0), "then pages");
+    super::memory::govern(4 * CHUNK + CHUNK).await;
+    assert_eq!((cached().await, parts.bytes()), (4 * CHUNK, CHUNK), "the last two let go");
+    super::memory::govern(4 * CHUNK).await;
+    assert_eq!((cached().await, parts.bytes()), (4 * CHUNK, 0), "every part let go, no page");
+    super::memory::govern(3 * CHUNK).await;
+    assert_eq!((cached().await, parts.bytes()), (3 * CHUNK, 0), "then pages");
 }
 
 /// TASK-79.35: the daemon's metrics are served on through a failure to accept a scrape's
@@ -6877,10 +6877,10 @@ fn durable_commits_through_the_daemon() {
 /// TASK-433.8: the governor sizes the stores' page cache to what it leaves it, as Linux sizes its
 /// page cache to the memory free: a tenth of it dirty before the flusher writes back, a fifth
 /// before writers wait, all of it held.
-#[test]
-fn the_stores_page_cache_is_sized_to_what_the_governor_leaves() {
+#[tokio::test(flavor = "multi_thread")]
+async fn the_stores_page_cache_is_sized_to_what_the_governor_leaves() {
     let allowance = 8 << 30;
-    super::memory::govern(allowance);
+    super::memory::govern(allowance).await;
     let sized = local_cell::pages::shared().options();
     assert_eq!(
         (sized.background, sized.hard, sized.most),

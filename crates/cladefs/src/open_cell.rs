@@ -1058,10 +1058,11 @@ impl OpenCell {
         Ok(())
     }
 
-    /// cladefs: waits at most `timeout` for a commit of the store after the one numbered
-    /// `commit`, returning the latest commit's number, if one came: what tells its followers.
-    pub fn newer(&self, commit: u64, timeout: std::time::Duration) -> Option<u64> {
-        self.store.newer(commit, timeout)
+    /// cladefs: awaits, holding no thread, at most `timeout` for a commit of the store after the
+    /// one numbered `commit`, returning the latest commit's number, if one came: what tells its
+    /// followers (board 2944).
+    pub async fn newer(&self, commit: u64, timeout: std::time::Duration) -> Option<u64> {
+        self.store.newer(commit, timeout).await
     }
 
     /// cladefs: what says when the store's writer next commits ([`OpenCell::newer`] then has it),
@@ -3301,10 +3302,10 @@ mod tests {
         store.commit(None).await.unwrap();
         let follower = store.follow();
         let commit = follower.view_commit().unwrap();
-        assert_eq!(follower.newer(commit, std::time::Duration::from_millis(10)), None);
+        assert_eq!(follower.newer(commit, std::time::Duration::from_millis(10)).await, None);
         write(&store, id(&store, 1), 0, &pattern(1, BLOCK)).await.unwrap();
         store.commit(None).await.unwrap();
-        let newer = follower.newer(commit, std::time::Duration::from_secs(10));
+        let newer = follower.newer(commit, std::time::Duration::from_secs(10)).await;
         assert_eq!(newer, Some(follower.advance().unwrap()));
     }
 

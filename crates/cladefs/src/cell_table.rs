@@ -103,7 +103,9 @@ pub(crate) async fn within<F: std::future::Future>(wait: Duration, future: F) ->
 
 /// Waits for `released`, on this thread, until `deadline` (for ever, if none): whether it came.
 /// Under Shuttle, where time doesn't pass, it waits for ever, as [`within`] does, the scheduler's
-/// thread blocked on Shuttle's terms.
+/// thread blocked on Shuttle's terms. cladefs: the table's tests' claims alone, on their threads
+/// ([`CellTable::hold`]); the daemon's and the FUSE mount's await theirs ([`within`], board 2946).
+#[cfg(test)]
 fn wait_blocking(released: EventListener, deadline: Option<Instant>) -> bool {
     #[cfg(feature = "shuttle")]
     {
@@ -542,14 +544,13 @@ impl<C: Writer, S, P> CellTable<C, S, P> {
     /// connection not going writes it, followers have it open, or the mount has it already. With
     /// the store kept open of it, if one was, to close. Until the hold is dropped, every claim of
     /// it fails with `EBUSY` at once, waiting for nothing: the mount lets it go only as it
-    /// detaches its cell. It blocks.
-    pub fn hold_mounted(
+    /// detaches its cell. Awaited, holding no thread (board 2946).
+    pub async fn hold_mounted(
         &self,
         key: &Path,
         wait: Duration,
     ) -> Result<HeldTaking<'_, C, S, P>, Errno> {
-        let deadline = Instant::now().checked_add(wait);
-        match self.claim_blocking(key, &Claim::Mount, deadline)? {
+        match self.claim_async(key, Claim::Mount, wait).await? {
             Claimed::Held { kept, .. } => Ok((self.held(key), kept)),
             Claimed::Writer(_) => unreachable!("the mount's claim got a writer"),
         }
@@ -599,7 +600,8 @@ impl<C: Writer, S, P> CellTable<C, S, P> {
     }
 
     /// Claims the store `key` names, waiting on this thread, until `deadline` at most (for ever,
-    /// if none): `EBUSY` then.
+    /// if none): `EBUSY` then. The tests' ([`CellTable::hold`]).
+    #[cfg(test)]
     fn claim_blocking(
         &self,
         key: &Path,
@@ -1513,7 +1515,7 @@ mod tests {
     fn stores_mounted_are_the_mounts_alone() {
         let table = Table::new();
         let key = Path::new("store");
-        let (held, kept) = table.hold_mounted(key, Duration::ZERO).unwrap();
+        let (held, kept) = block_on(table.hold_mounted(key, Duration::ZERO)).unwrap();
         assert_eq!(kept, None);
         let writer = connection(false);
         let wait = Duration::from_secs(60);
@@ -1523,7 +1525,7 @@ mod tests {
         assert_eq!(written.err(), Some(Errno::EBUSY));
         assert_eq!(table.hold(key, Some(wait)).err(), Some(Errno::EBUSY));
         assert_eq!(table.writer_or_hold(key).err(), Some(Errno::EBUSY));
-        assert_eq!(table.hold_mounted(key, wait).err(), Some(Errno::EBUSY));
+        assert_eq!(runtime.block_on(table.hold_mounted(key, wait)).err(), Some(Errno::EBUSY));
         assert!(started.elapsed() < Duration::from_secs(5), "waited {:?}", started.elapsed());
         drop(held);
         assert!(write(&table, key, &writer).is_ok());
@@ -1537,18 +1539,18 @@ mod tests {
         let key = Path::new("store");
         let writer = connection(false);
         let written = write(&table, key, &writer).unwrap().0;
-        assert_eq!(table.hold_mounted(key, Duration::ZERO).err(), Some(Errno::EBUSY));
+        assert_eq!(block_on(table.hold_mounted(key, Duration::ZERO)).err(), Some(Errno::EBUSY));
         let store = Arc::new("store");
         written.open(&store).unwrap();
         drop(written);
-        assert_eq!(table.hold_mounted(key, Duration::ZERO).err(), Some(Errno::EBUSY));
+        assert_eq!(block_on(table.hold_mounted(key, Duration::ZERO)).err(), Some(Errno::EBUSY));
         drop(store);
         let other = Path::new("other");
         let held = table.hold(other, None).unwrap();
         held.keep("kept").unwrap();
         drop(held);
-        let (_mounted, kept) = table.hold_mounted(other, Duration::ZERO).unwrap();
+        let (_mounted, kept) = block_on(table.hold_mounted(other, Duration::ZERO)).unwrap();
         assert_eq!(kept, Some("kept"));
-        assert!(table.hold_mounted(key, Duration::ZERO).is_ok());
+        assert!(block_on(table.hold_mounted(key, Duration::ZERO)).is_ok());
     }
 }

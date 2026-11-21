@@ -3177,10 +3177,10 @@ async fn newer_commits_are_heard_of() {
         store.commit(None).await.unwrap();
     }
     let epoch = store.last_commit().unwrap();
-    assert_eq!(store.newer(epoch, std::time::Duration::ZERO), None);
+    assert_eq!(store.newer(epoch, std::time::Duration::ZERO).await, None);
     store.commit(None).await.unwrap();
     store.commit(None).await.unwrap();
-    assert_eq!(store.newer(epoch, std::time::Duration::ZERO), Some(epoch + 2));
+    assert_eq!(store.newer(epoch, std::time::Duration::ZERO).await, Some(epoch + 2));
 }
 
 /// cladefs: ordered commits wait for a flush to make them durable, and say so.

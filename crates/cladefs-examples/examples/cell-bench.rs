@@ -693,7 +693,9 @@ fn govern() {
     use cladefs::cladefsd::{governor, memory};
     let host = governor::host_memory().expect("reading the host's memory");
     let headroom = governor::headroom(host.total).expect("the daemon's headroom");
-    memory::govern(governor::allowance(memory::governed_bytes(), host, headroom));
+    // The bench's outermost entry, before its runtime: what the governor's turn awaits, here.
+    let allowance = governor::allowance(memory::governed_bytes(), host, headroom);
+    futures::executor::block_on(memory::govern(allowance));
 }
 
 /// cladefs: elsewhere, no governor: the stores' page cache goes by its defaults, as a process's

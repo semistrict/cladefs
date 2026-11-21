@@ -156,10 +156,11 @@ pub(super) fn store_key(path: &Path) -> PathBuf {
 /// (TASK-475.3): until what it returns is dropped, as the mount detaches it, a VM process opening
 /// it, or the control API working on it, fails with `EBUSY` at once. `EBUSY` if a connection not
 /// going writes it, or followers have it open; waits for one going, or the daemon's work, at most
-/// [`CLOSING_WAIT`]. The store kept open of it for forks, if any, closed. It blocks.
-pub(crate) fn hold_mounted(path: &Path) -> Result<MountHold, Errno> {
-    let (hold, kept) = table().hold_mounted(&store_key(path), CLOSING_WAIT)?;
-    close_kept_blocking(kept);
+/// [`CLOSING_WAIT`]. The store kept open of it for forks, if any, closed. Awaited, holding no
+/// thread (board 2946).
+pub(crate) async fn hold_mounted(path: &Path) -> Result<MountHold, Errno> {
+    let (hold, kept) = table().hold_mounted(&store_key(path), CLOSING_WAIT).await?;
+    close_kept(kept).await;
     Ok(MountHold(hold))
 }
 
@@ -381,16 +382,7 @@ fn keep(hold: &Hold, store: OpenCell) -> Arc<HeldCell> {
 }
 
 /// cladefs: closes `kept`, if given, a store kept open its holder took, and returns once it is
-/// closed: once the forks forking it are done. It blocks.
-fn close_kept_blocking(kept: Option<Kept>) {
-    let Some(Kept { store, closed, .. }) = kept else { return };
-    drop(release_held_behind(store));
-    local_cell::blocks!("a kept store's close, waiting for the forks forking it");
-    // cladefs: outside the simulation: the FUSE mount's hold, and its blocking thread.
-    let _ = futures::executor::block_on(closed);
-}
-
-/// cladefs: closes `kept`, as [`close_kept_blocking`] does, holding no thread while it waits.
+/// closed: once the forks forking it are done, holding no thread while it waits.
 async fn close_kept(kept: Option<Kept>) {
     let Some(Kept { store, closed, .. }) = kept else { return };
     drop(release_held_behind(store));

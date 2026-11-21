@@ -378,7 +378,7 @@ async fn views_wait_for_newer_commits() {
     write(&store, 1, 1).await;
     store.commit(None).await.unwrap();
     let mut view = store.view();
-    assert_eq!(view.newer(Duration::from_millis(10)).unwrap(), None);
+    assert_eq!(view.newer(Duration::from_millis(10)).await.unwrap(), None);
     let committing = {
         let store = store.clone();
         tokio::spawn(async move {
@@ -387,11 +387,11 @@ async fn views_wait_for_newer_commits() {
             store.last_commit().unwrap()
         })
     };
-    let newer = view.newer(Duration::from_secs(60)).unwrap();
+    let newer = view.newer(Duration::from_secs(60)).await.unwrap();
     let epoch = committing.await.unwrap();
     assert_eq!(newer, Some(epoch));
     view.advance().unwrap();
-    assert_eq!(view.newer(Duration::from_millis(10)).unwrap(), None);
+    assert_eq!(view.newer(Duration::from_millis(10)).await.unwrap(), None);
 }
 
 /// A pinned extent is kept, whatever commit its view advances to, until unpinned.
@@ -473,12 +473,12 @@ async fn views_cut_off_by_the_store_fail() {
     error_is(read(&store, &view, 1, 1), CutOff);
     error_is(view.advance(), CutOff);
     error_is(view.pin(extent(1)), CutOff);
-    error_is(view.newer(Duration::ZERO), CutOff);
+    error_is(view.newer(Duration::ZERO).await, CutOff);
     store.commit(None).await.unwrap();
     assert_eq!(kept(&store), 0);
     let fresh = store.view();
     assert_eq!(fresh.commit(), 2);
-    assert_eq!(fresh.newer(Duration::ZERO).unwrap(), None);
+    assert_eq!(fresh.newer(Duration::ZERO).await.unwrap(), None);
 }
 
 /// Views keeping more than `view_kept_bytes` of frees are cut off, the oldest first, until those

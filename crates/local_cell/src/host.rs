@@ -122,6 +122,9 @@ pub async fn delete_host(
         dir.take().context("taking the store's directory")?;
         Ok((cell, dir))
     })?;
+    // cladefs: once no store of the directory is closing in the process, holding no thread, as an
+    // opening awaits it before its claim, which then waits for none (board 2946).
+    crate::closed(path).await.context("waiting for the store's close")?;
     let removed = match blocking(|| dir.claim().context("taking the store's directory")) {
         Err(err) => Err(err),
         Ok(()) => {

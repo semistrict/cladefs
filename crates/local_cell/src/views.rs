@@ -22,7 +22,7 @@
 //! than `Options::view_kept_bytes` of frees as the oldest view, is cut off: it keeps nothing, and
 //! its reads, advances and pins fail with [`CutOff`] (doc-8, decision 7).
 
-use crate::sync::{Condvar, Mutex, rules};
+use crate::sync::{Event, Mutex, rules};
 use anyhow::{Error, bail};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -171,10 +171,11 @@ impl View {
         self.views.inner.lock().unwrap().live[&self.id].pins.contains(&extent)
     }
 
-    /// Waits at most `timeout` for a commit after its own, returning the latest commit's epoch,
-    /// if one came: what tells a follower to advance. Fails with [`CutOff`] if it was cut off.
-    pub fn newer(&self, timeout: Duration) -> Result<Option<u64>, Error> {
-        let newer = self.views.newer(self.epoch, timeout);
+    /// Awaits, holding no thread, at most `timeout` for a commit after its own, returning the
+    /// latest commit's epoch, if one came: what tells a follower to advance. Fails with
+    /// [`CutOff`] if it was cut off.
+    pub async fn newer(&self, timeout: Duration) -> Result<Option<u64>, Error> {
+        let newer = self.views.newer(self.epoch, timeout).await;
         self.views.check(self)?;
         Ok(newer)
     }
@@ -195,8 +196,8 @@ impl std::fmt::Debug for View {
 /// A cell's views, shared with them.
 pub(crate) struct Views {
     inner: Mutex<Inner>,
-    /// Notified as each commit is published.
-    published: Condvar,
+    /// Notified as each commit is published, and as the views are cut off.
+    published: Event,
 }
 
 struct Inner {
@@ -332,7 +333,7 @@ impl Views {
     /// The views of a cell as of `epoch`, its root `root`.
     pub fn new(epoch: u64, root: &[u8]) -> Arc<Self> {
         let inner = Inner { epoch, root: root.into(), next_id: 0, live: HashMap::new() };
-        Arc::new(Self { inner: Mutex::new(inner), published: Condvar::new() })
+        Arc::new(Self { inner: Mutex::new(inner), published: Event::new() })
     }
 
     /// A view as of the latest commit.
@@ -346,20 +347,33 @@ impl Views {
         View { id, epoch, since: epoch, root, views: self.clone() }
     }
 
-    /// Waits at most `timeout` for a commit after `epoch`'s, returning the latest commit's epoch,
-    /// if one came.
-    pub fn newer(&self, epoch: u64, timeout: Duration) -> Option<u64> {
-        let views = self.inner.lock().unwrap();
-        let older = |views: &mut Inner| views.epoch <= epoch;
-        let (views, _) = self.published.wait_timeout_while(views, timeout, older).unwrap();
-        (views.epoch > epoch).then_some(views.epoch)
+    /// Awaits at most `timeout` for a commit after `epoch`'s, returning the latest commit's epoch,
+    /// if one came. cladefs: holding no thread meanwhile (board 2944): it listens, then looks,
+    /// then awaits the listener, its lock let go, so that a commit published after its look wakes
+    /// it. Its time up, it looks once more, as a commit may have come as it ran out.
+    pub async fn newer(&self, epoch: u64, timeout: Duration) -> Option<u64> {
+        // The lock, taken and let go within the look: held across no await.
+        let latest = || {
+            let latest = self.inner.lock().unwrap().epoch;
+            (latest > epoch).then_some(latest)
+        };
+        let came = async {
+            loop {
+                let published = self.published.listen();
+                if let Some(latest) = latest() {
+                    return latest;
+                }
+                published.await;
+            }
+        };
+        within(timeout, came).await.or_else(latest)
     }
 
     /// Cuts every view off: they keep nothing, and fail with [`CutOff`] from now on.
     pub fn cut_all(&self) {
         let mut views = self.inner.lock().unwrap();
         views.live.values_mut().for_each(|follower| follower.cut = true);
-        self.published.notify_all();
+        self.published.notify(usize::MAX);
     }
 
     /// What the live views are, not cut off.
@@ -426,7 +440,7 @@ impl Views {
             oldest.min_by_key(|follower| follower.since).unwrap().cut = true;
             keeping = Self::keeping_of(&views);
         }
-        self.published.notify_all();
+        self.published.notify(usize::MAX);
         keeping
     }
 
@@ -436,6 +450,21 @@ impl Views {
             oldest: live().map(|follower| follower.since).min(),
             pins: live().flat_map(|follower| follower.pins.iter().copied()).collect(),
         }
+    }
+}
+
+/// `future`'s output, unless `wait` passes first (`None`). Under Shuttle, where time doesn't pass,
+/// it awaits for ever: what never wakes it is a deadlock, which Shuttle reports. cladefs: as
+/// `cell_table::within` does, in cladefs (board 2944).
+async fn within<F: std::future::Future>(wait: Duration, future: F) -> Option<F::Output> {
+    #[cfg(feature = "shuttle")]
+    {
+        let _ = wait;
+        Some(future.await)
+    }
+    #[cfg(not(feature = "shuttle"))]
+    {
+        tokio::time::timeout(wait, future).await.ok()
     }
 }
 
