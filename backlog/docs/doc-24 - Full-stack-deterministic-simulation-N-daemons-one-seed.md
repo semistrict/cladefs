@@ -3,7 +3,7 @@ id: doc-24
 title: 'Full-stack deterministic simulation: N daemons, one seed'
 type: specification
 created_date: '2026-11-20 03:31'
-updated_date: '2026-11-20 10:11'
+updated_date: '2026-11-21 02:17'
 ---
 # Full-stack deterministic simulation
 
@@ -37,7 +37,7 @@ simulation can't run, replaced at the protocol the daemon already speaks.
 | Control API (tonic over a Unix socket) | tonic over the simulated network (TCP); the socket is a deployment detail |
 | VM processes (the VM socket, memfds, `SCM_RIGHTS`, userfaultfd, the DAX window, KVM) | a simulated guest calling the daemon's request handling (`cell_requests`, `wire`'s requests) in process: READ, WRITE, COMMIT at each level, FREE, versions; no window, no stage operations |
 | Peers (tonic over TCP) | as is, over the simulated network |
-| The host's disk (`HostDir`, `std::fs`) | `MemDir` per daemon, crashed with `MemDir::crash_corrupting` on a kill |
+| The host's disk (`HostDir`, `std::fs`) | `host_fs`: a disk in memory per daemon, crashed at its restart, unsynced changes kept, lost, garbage or torn (TASK-685.4) |
 | Object storage (`object_store` over HTTP) | an in-process bucket, shared by the daemons, its requests delayed, failed before or after landing, and out of reach as the seed says |
 | Time, randomness | simulated (below) |
 | FUSE mounts, the guest kernel | not simulated: TLA+ (`specs/dax-cow`, `specs/journal`), Shuttle, loom and ubu1's guest suites keep them |
@@ -125,6 +125,39 @@ what was Replicated; every host lost, what was Uploaded.
   that finds its violation, as today's simulation has (`test_needs!`). This is FoundationDB's
   negative tests and `SimBugInjector`, real bugs put in to show the checker catches them. It is not
   their BUGGIFY, which we have no equivalent of yet (below).
+
+## The disk as built (TASK-685.4, 2026-11-20)
+
+Not `Dir` threaded through every caller, which would have made the store roots, replica roots, the
+ephemeral journal, version directories and the part cache take a root `Dir` each, and given `Dir`
+`exists`, `remove_dir`, identities and holes: a seam beneath, path-based, `host_fs`.
+
+- **`host_fs` is `std::fs`** built normally, re-exported, with what the daemon does on a file's
+  descriptor beside it: `punch_hole`, `data_ranges` (`SEEK_DATA`/`SEEK_HOLE`), `sync_with`
+  (macOS's barrier and full syncs), `Flock`, `FileExt`/`MetadataExt`/`OpenOptionsExt`,
+  `create_dir_all_durably`, and what `Path` asks the file system (`exists`, `is_dir`). Production
+  pays nothing.
+- **Under madsim, each simulated host's disk is in memory**, of the same calls: a tree of inodes;
+  files' bytes durable as of their last sync, directories' entries of files as of theirs, and
+  directories once made (`local_cell::MemDir`'s model, which the stores' own crash tests are
+  written to, and ext4's with the next fsync); what changed since kept in order. A host started
+  again finds its disk crashed at its first call: what was durable, each change since kept or not
+  as the seed says, in order, each block of each write whole, not at all, garbage, or torn. A host's
+  locks of files are its disk's, gone with the crash.
+- **Who goes through it**: local_cell and bucket_cell wholly (`DiskDir`, `DiskFile`, the part
+  cache's files, `HostDisk::of`, which samples a terabyte under madsim), and cladefsd's serving
+  files: `host_cell`, `open_cell`, `cell_dir`, `profile`, `ephemeral_host`, `cladefsd::{cells,
+  server, peers, boot, migration}`. A descriptor of a simulated host's file is none: what wants
+  one, FUSE's storage, panics, outside the simulation.
+- **What stays on the real file system**, outside the simulation: FUSE, the VM sockets and a VM
+  process's client, procfs, read traces and stats, the image an import reads, a `file://` bucket,
+  the tools.
+- **The lint** `off-host-fs` (scripts/rust-rules.py) refuses `std::fs`, its traits, and
+  `Path::exists`/`canonicalize` in those crates outside `host_fs`, unless the line says why it is
+  outside the simulation or its file is.
+- **What it found**: the seeds ran several times faster (no real syncs); the ephemeral profile's
+  new schedules found TASK-713, TASK-714 and TASK-715 (live migration's lost messages); strict
+  POSIX hardening for directories the daemon makes (TASK-708).
 
 ## What the spike found (TASK-685.1, 2026-11-20)
 
@@ -293,8 +326,8 @@ Before the decision, the steps that served any of the three went on:
    `main` did.
 3. **Per-node statics** (`node_local!`), crate by crate.
 4. **Threads and runtimes** through one seam (tasks under madsim), `blocking()` inline.
-5. **Disk through `Dir`** everywhere cladefsd writes (its stores, replica directories, the part
-   cache, z-pages' files, its state files).
+5. **Disk through `host_fs`** everywhere cladefsd writes (its stores, replica directories, the part
+   cache, its state files): see "The disk as built" below.
 6. **The in-process bucket** with faults, and the control API on TCP under madsim.
 7. **The simulated guest and the checker**, one profile (attrition alone), seed replay checked.
 8. **Fault profiles**, then a rule search per rule.
