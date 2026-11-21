@@ -2303,10 +2303,13 @@ mod tests {
         runtime.block_on(kms.filled(tenant));
         assert_eq!(kms.in_pool(tenant), 3);
         counted.inner().inner().destroy(tenant).unwrap();
-        for left in [2, 1] {
-            new(TEST_CELL).unwrap();
-            assert_eq!(kms.in_pool(tenant), left);
-        }
+        // Takes from the pool: the KMS, which forgot the KEK, would refuse a wrap now. The first
+        // leaves the pool at its low mark, refilling nothing; the second leaves it under, and its
+        // refill, on the pool's runtime, may have heard the KMS and dropped the pool by the time
+        // this looks (board 2360): its count is looked at once the refill is done.
+        new(TEST_CELL).unwrap();
+        assert_eq!(kms.in_pool(tenant), 2);
+        new(TEST_CELL).unwrap();
         runtime.block_on(kms.filled(tenant));
         assert_eq!(kms.in_pool(tenant), 0);
         let forgotten = Error::Kms("tenant 1: no KEK in the KMS".into());
