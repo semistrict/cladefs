@@ -17,7 +17,6 @@ describe("where code comes from", () => {
       "diagnostics-log",
       "fidl",
       "fidl-fuchsia-diagnostics-types",
-      "fidl-fuchsia-fs",
       "fidl-fuchsia-fxfs",
       "fidl-fuchsia-io",
       "fuchsia-inspect",

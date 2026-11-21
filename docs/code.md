@@ -75,7 +75,7 @@ of these stands in with the items the code copied from Fuchsia uses:
 | Crate | Stands in for | How |
 |---|---|---|
 | `fidl` | FIDL runtime | No channels or wire format: the types the generated bindings use. |
-| `fidl-fuchsia-io`, `-fs`, `-fxfs`, `-diagnostics-types` | generated FIDL bindings | Written to the shape of the generated types, for the types Fxfs uses. |
+| `fidl-fuchsia-io`, `-fxfs`, `-diagnostics-types` | generated FIDL bindings | Written to the shape of the generated types, for the types Fxfs uses. |
 | `fuchsia-inspect`, `diagnostics-log` | diagnostics | No-ops, and stderr logging. |
 | `bssl-crypto`, `mundane` | BoringSSL bindings | SHA-256/512 on the `sha2` crate. |
 | `fxfs-unicode-gen` | build-time generated tables | Tables generated once from UCD 12.1.0 by Fxfs's own generator (`scripts/generate-unicode-tables.sh`). |

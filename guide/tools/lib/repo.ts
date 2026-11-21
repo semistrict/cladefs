@@ -49,7 +49,7 @@ export function standIns(repo = REPO): Set<string> {
   const names = new Set<string>();
   for (const row of table.split("\n").slice(2)) {
     const cell = row.split("|")[1] ?? "";
-    // `fidl-fuchsia-io`, `-fs`, `-fxfs`: a suffix names a crate of the first's prefix.
+    // `fidl-fuchsia-io`, `-fxfs`: a suffix names a crate of the first's prefix.
     let prefix = "";
     for (const [, name] of cell.matchAll(/`([^`]+)`/g)) {
       if (name.startsWith("-") && prefix) names.add(prefix + name.slice(1));

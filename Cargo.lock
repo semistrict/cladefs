@@ -1737,10 +1737,6 @@ name = "fidl-fuchsia-diagnostics-types"
 version = "0.1.0"
 
 [[package]]
-name = "fidl-fuchsia-fs"
-version = "0.1.0"
-
-[[package]]
 name = "fidl-fuchsia-fxfs"
 version = "0.1.0"
 

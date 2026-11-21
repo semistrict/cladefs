@@ -19,6 +19,15 @@ unasked. Available: Claude Sonnet 5.5, a second Claude instance (claudeAgent_cla
 and Codex. Recommend: the second Claude instance on Opus, else wait for the reset. Until answered:
 the worktrees stay as they are, nothing in them is lost, and TASK-444.4–.11 wait too.
 
+## Delete the dead crates `name` and `test_util`? (board 5762, 2026-11-21)
+
+Needed: your OK to delete two workspace members nothing depends on, with their tests:
+`crates/name` (the vfs library's names, 22 tests) and `crates/test_util` (18 tests), both copied
+from Fuchsia for code since removed (last touched by 7f8d6b69e). Why: your instructions reserve
+deleting tests to you; they build and run in every workspace run for nothing. Recommend: delete
+both. Until answered: they stay; their `[workspace.dependencies]` entries, which nothing took and
+Cargo warned of, are gone, as is `crates/fidl-fuchsia-fs`, dead with no tests.
+
 # Decisions
 
 ## "store" retired for a cell on a host: cell directory and open cell (board 5622, 2026-11-21)
