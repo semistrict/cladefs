@@ -942,7 +942,10 @@ fn traced(span: &trace::Span, request: &Request<'_>) {
         Request::Write { data: Data::Transfer { len, .. }, .. } => (Some(*len), None),
         Request::Map(mapping) => (Some(mapping.len), Some(1)),
         Request::MapMany(mappings) => {
-            (Some(mappings.iter().map(|mapping| mapping.len).sum()), Some(mappings.len() as u64))
+            // Each within a window, as decoding has them: summed so that no count of them wraps
+            // (board 2776).
+            let bytes = mappings.iter().fold(0u64, |sum, mapping| sum.saturating_add(mapping.len));
+            (Some(bytes), Some(mappings.len() as u64))
         }
         Request::Unmap { len, .. } | Request::Private { len, .. } => (Some(*len), None),
         Request::Free(_) => (None, Some(1)),

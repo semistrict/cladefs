@@ -490,7 +490,15 @@ fn message() -> BoxedStrategy<Said> {
     ];
     let page = move || (0u64..WINDOW_BYTES / ps).prop_map(move |page| Is(page * ps));
     let pages = move || (1u64..16).prop_map(move |pages| Is(pages * ps));
-    let sequence = || (1u64..16).prop_map(Is);
+    // cladefs: and the last sequences, the last of which has no successor (board 2762): drawn
+    // from 1 to 16 alone, no request ever named it.
+    let sequence = || {
+        prop_oneof![
+            8 => (1u64..16).prop_map(Is),
+            1 => Just(Is(u64::MAX)),
+            1 => Just(Is(u64::MAX - 1)),
+        ]
+    };
     let theirs = || prop_oneof![Just(Alice), Just(Bob)];
     let transferred =
         || prop_oneof![Just(Is(0)), Just(Is(ps)), Just(Is(1 << 20)), Just(Is(MAX_TRANSFER_AREA))];
@@ -730,6 +738,15 @@ fn hostile() -> impl Strategy<Value = Hostile> {
         Just(LastWords::Nothing),
         Just(LastWords::PartOfAHeader),
         any::<u64>().prop_map(LastWords::MissingPayload),
+        // cladefs: and lengths the daemon admits, as any u64 almost never is (board 2492): at and
+        // around the most a payload holds, and small.
+        prop_oneof![
+            Just(MAX_PAYLOAD),
+            Just(MAX_PAYLOAD + 64),
+            Just(MAX_PAYLOAD + 65),
+            1u64..=4096,
+        ]
+        .prop_map(LastWords::MissingPayload),
         (1u32..4).prop_map(LastWords::MissingDescriptors),
     ];
     (
