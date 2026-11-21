@@ -414,7 +414,7 @@ mod host {
         fn room(&self) -> anyhow::Result<u64> {
             let host = governor::host_memory().context("the host's memory")?;
             let headroom = governor::headroom(host.total).map_err(anyhow::Error::msg)?;
-            let kept = governor::floor(host.total).map_err(anyhow::Error::msg)?;
+            let kept = governor::floor(governor::limit(host.total)).map_err(anyhow::Error::msg)?;
             let gauges = self.memory.gauges()?;
             let cached =
                 *gauges.get("cladefsd_memory_bytes").context("no cladefsd_memory_bytes")?;

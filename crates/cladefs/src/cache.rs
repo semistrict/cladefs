@@ -168,6 +168,12 @@ node_local::node_local! {
 /// decompression of a part, keep one busy, while page-ins of other extents wait for theirs.
 pub(crate) const PAGER_THREADS: usize = 6;
 
+/// cladefs: how long a page-in that found no page, the host's memory full, waits before it tries
+/// again, at first, then twice as long each time, [`RETRY_MOST`] at most: the memory governor's
+/// look, after which its cap may have changed (board 5662).
+const RETRY_FIRST: std::time::Duration = std::time::Duration::from_millis(1);
+const RETRY_MOST: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// How many parts after those a reader reading on asks for are read ahead of its requests.
 pub(crate) const PARTS_AHEAD: u64 = 2;
 
@@ -180,6 +186,8 @@ fn extent_cache() -> &'static ExtentCache {
         let pager = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(PAGER_THREADS)
             .thread_name("cladefs pager")
+            // cladefs: for page-ins waiting for memory (`CachedExtent::read_pages`, board 5662).
+            .enable_all()
             .build()
             .expect("the extent cache's pager");
         ExtentCache {
@@ -500,13 +508,14 @@ fn let_go_least_used(
     idle.into_iter().take(excess).filter_map(|(_, key)| extents.remove(&key)).collect()
 }
 
-/// cladefs: says a page-in waits for memory, its arena's relief having found nothing to free: at
-/// most once every 10 s, with how many waited since, as a full host makes many wait (board 5662).
+/// cladefs: how many times page-ins waited for memory ([`waiting_for_memory`]).
+static WAITS_FOR_MEMORY: AtomicU64 = AtomicU64::new(0);
+
+/// cladefs: says a page-in waits for memory, the host's full and relief having found nothing to
+/// free: at most once every 10 s, with how many waits since, as a full host makes many (board 5662).
 fn waiting_for_memory() {
-    use std::sync::atomic::AtomicU64;
-    static WAITED: AtomicU64 = AtomicU64::new(0);
     static SAID_AT: AtomicU64 = AtomicU64::new(0);
-    let waited = WAITED.fetch_add(1, Ordering::Relaxed) + 1;
+    let waited = WAITS_FOR_MEMORY.fetch_add(1, Ordering::Relaxed) + 1;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
@@ -514,7 +523,7 @@ fn waiting_for_memory() {
     if now >= said + 10
         && SAID_AT.compare_exchange(said, now, Ordering::Relaxed, Ordering::Relaxed).is_ok()
     {
-        log::warn!("cladefs: page-ins wait for memory, none left to evict: {waited} so far");
+        log::warn!("cladefs: page-ins wait for memory, the host's full: {waited} waits so far");
     }
 }
 
@@ -972,15 +981,22 @@ impl CachedExtent {
     ) -> std::result::Result<Vec<physmem::Page>, anyhow::Error> {
         let ps = page_size();
         let count = (pages.end - pages.start) as usize;
-        // cladefs: with no page for it, relief having found none to free, it waits for one rather
-        // than fail the guest's fault, which killed its VM (board 5662): the host is full, which
-        // the governor tells the VM manager by refusing cells (`cladefsd::governor::full`).
-        let frames = match physmem::alloc_run(self.arena, count, physmem::Wait::Yes) {
-            Ok(frames) => frames,
-            Err(physmem::NoMemory) => {
-                waiting_for_memory();
-                physmem::alloc_run(self.arena, count, physmem::Wait::UntilHostRoom)
-                    .map_err(|_| anyhow::Error::new(NoPages))?
+        // cladefs: with no page for it, relief having found none to free, the host's memory full,
+        // it waits for one rather than fail the guest's fault, which killed its VM (board 5662),
+        // the governor telling the VM manager by refusing cells (`cladefsd::governor::full`). It
+        // waits off the pager's threads, which the page-ins in flight, whose pages relief may then
+        // free, need (blocked on them, it held every fault on the host). At its arena's own cap,
+        // its tenant's limit, it fails.
+        let mut pause = RETRY_FIRST;
+        let frames = loop {
+            match physmem::alloc_run(self.arena, count, physmem::Wait::Yes) {
+                Ok(frames) => break frames,
+                Err(physmem::NoMemory) if physmem::room_may_come(self.arena) => {
+                    waiting_for_memory();
+                    tokio::time::sleep(pause).await;
+                    pause = (pause * 2).min(RETRY_MOST);
+                }
+                Err(physmem::NoMemory) => return Err(anyhow::Error::new(NoPages)),
             }
         };
         let offset = pages.start * ps;
@@ -1162,4 +1178,70 @@ pub(crate) fn zeros() -> Result<Arc<dyn Source>> {
     // SAFETY: The page is allocated, and only this one's, never written after.
     unsafe { std::ptr::write_bytes(page.as_ptr(), 0, page_size() as usize) };
     Ok(ZEROS.get_or_init(|| Arc::new(Zeros(page))).clone())
+}
+
+/// cladefs: board 5662: page-ins of a host whose memory is full.
+#[cfg(test)]
+mod full_host {
+    use super::*;
+
+    /// Contents read once a gate opens: what page-ins in flight wait on, holding their pages.
+    struct Gated(tokio::sync::watch::Receiver<bool>);
+
+    impl Contents for Gated {
+        fn read<'a>(
+            &'a self,
+            _offset: u64,
+            buf: &'a mut [u8],
+        ) -> BoxFuture<'a, std::result::Result<(), anyhow::Error>> {
+            Box::pin(async move {
+                self.0.clone().wait_for(|open| *open).await?;
+                buf.fill(0x56);
+                Ok(())
+            })
+        }
+    }
+
+    /// Page-ins finding no page, the host's memory full and what holds it in flight, wait for it
+    /// off the pager's threads, more of them than it has: those in flight then end, and relief
+    /// gives their pages to those waiting, every page-in ending. Blocked on its threads, they
+    /// waited for pages those in flight, never polled, never let go of: every fault on the host
+    /// stalled (the review of 024c3be89).
+    #[test]
+    fn page_ins_waiting_for_memory_leave_the_pager_to_those_in_flight() {
+        let chunk = physmem::CHUNK_SIZE as u64;
+        // The process's memory, if no other test made it first; capped at two chunks: two parts.
+        let _ = physmem::configure(16 * chunk);
+        relieve_pressure();
+        physmem::set_total_cap(Some(2 * chunk));
+        let (open, gate) = tokio::sync::watch::channel(false);
+        let part = extent_frame::PART;
+        let held = 2 * chunk / part;
+        let extents: Vec<Arc<CachedExtent>> = (0..held + PAGER_THREADS as u64 + 2)
+            .map(|sequence| {
+                let extent = ExtentId { cell: 5662, sequence };
+                let gated = Box::new(Gated(gate.clone()));
+                let cached = Arc::new(CachedExtent::new(ArenaId::DEFAULT, extent, gated, part));
+                let entry = Cached { extent: cached.clone(), holders: Arc::default() };
+                extent_cache().extents.with(Mutex::lock).insert((ArenaId::DEFAULT, extent), entry);
+                cached
+            })
+            .collect();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let waits = WAITS_FOR_MEMORY.load(Ordering::Relaxed);
+            let page_ins: Vec<_> =
+                extents.iter().map(|extent| tokio::spawn(extent.clone().bring_in(0))).collect();
+            // Once more page-ins wait for memory than the pager has threads.
+            while WAITS_FOR_MEMORY.load(Ordering::Relaxed) < waits + PAGER_THREADS as u64 {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            open.send(true).unwrap();
+            for page_in in page_ins {
+                let ended = tokio::time::timeout(std::time::Duration::from_secs(30), page_in);
+                assert_eq!(ended.await.expect("a page-in stalled").unwrap(), Ok(true));
+            }
+        });
+        physmem::set_total_cap(None);
+    }
 }

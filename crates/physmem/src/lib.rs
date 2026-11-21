@@ -195,13 +195,15 @@ impl Drop for Page {
 pub enum Wait {
     No,
     Yes,
-    /// cladefs: as `Yes`, and past what fails it as the host is full: the arenas' memory together
-    /// at its cap, or no chunk the host maps, relief having found nothing to free, it waits for
-    /// room (a page freed, a cap changed, a chunk going back) and tries again, for as long as that
-    /// takes. Its arena at its own cap, or removed, it fails as `Yes` does: a tenant's own limit is
-    /// its to keep to. A guest's DAX fault waiting so stalls its vCPU while the host is full, rather
-    /// than kill its VM (board 5662).
-    UntilHostRoom,
+}
+
+/// cladefs: whether an allocation of `arena` that failed may find room later without its arena's
+/// own cap changing: what it went without is the host's (every arena's memory together at its cap,
+/// or no chunk to take), or room has come since; not its own cap, nor its removal, which are its
+/// tenant's to keep to. A page-in failed so tries again later, rather than fail its guest's DAX
+/// fault, which killed its VM (board 5662).
+pub fn room_may_come(arena: ArenaId) -> bool {
+    pmm::node().room_may_come(arena)
 }
 
 /// An allocation failed: nothing makes its arena room.

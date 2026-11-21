@@ -20,7 +20,8 @@
 //! private pages, which copy-on-write DAX gives a VM's stores, are of the VM's memory, not of it
 //! (backlog doc-13). Out of it, or past a limit the control API sets, the daemon evicts the cached
 //! extents asked for longest ago, and fails what it cannot make room for with ENOMEM, rather than
-//! stop (TASK-50.3). A VMM's extent device
+//! stop (TASK-50.3); cladefs: but a page-in while the host's memory is full, which waits for room
+//! (board 5662). A VMM's extent device
 //! connects to the socket its configuration names (cladefs's Firecracker's `cladefsd_socket`).
 //!
 //! It runs as a host of cladefs's multi-node system: `CLADEFSD_BUCKET` names the bucket its

@@ -195,11 +195,6 @@ impl PmmNode {
             let room = self.room.count();
             match self.try_alloc_run(arena, count - frames.len(), wait) {
                 Ok(run) => frames.extend(run),
-                // cladefs: one that waits for the host's room waits past what fails it as the host
-                // is full, but not past its arena's own cap, nor its arena removed (board 5662).
-                Err(Failed::NoMemory) if wait == Wait::UntilHostRoom && self.host_full(arena) => {
-                    self.room.wait_past(room);
-                }
                 Err(Failed::NoMemory) => {
                     for frame in frames {
                         self.free(frame);
@@ -270,10 +265,9 @@ impl PmmNode {
         self.locked().starved(arena).is_some()
     }
 
-    /// cladefs: whether what starves `arena` is the host's: every arena's memory together at its
-    /// cap, or no chunk to take; not its own cap, nor its removal (board 5662). Not starved now, it
-    /// tries again.
-    fn host_full(&self, arena: ArenaId) -> bool {
+    /// cladefs: whether room may come for `arena` but for its own cap ([`crate::room_may_come`],
+    /// board 5662).
+    pub(crate) fn room_may_come(&self, arena: ArenaId) -> bool {
         matches!(self.locked().starved(arena), None | Some(arenas::Starved::Total))
     }
 

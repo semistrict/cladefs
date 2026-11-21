@@ -13,7 +13,7 @@ use super::configure_chunks;
 use crate::{
     ArenaId, CHUNK_SIZE, NoMemory, Page, RELIEF_BYTES, Wait, alloc, count_free_pages, create_arena,
     has_alloc_failed_no_mem, keep_spare_chunks, page_size, relieve_with, remove_arena,
-    set_arena_cap,
+    room_may_come, set_arena_cap,
 };
 use std::sync::{Arc, Mutex};
 
@@ -117,32 +117,22 @@ fn allocations_that_may_not_wait_ask_for_relief_for_those_after() {
     drop(alloc(ArenaId::DEFAULT, Wait::No).expect("the page relief freed"));
 }
 
-/// cladefs: board 5662: an allocation that waits for the host's room, finding memory out and
-/// relief freeing nothing, its arena exhausted, waits where one that waits fails, and takes the
-/// page freed later.
+/// cladefs: board 5662: an allocation that failed with memory out, relief freeing nothing, may
+/// find room later, the host's; and does, once a page is freed.
 #[test]
-fn allocations_that_wait_for_the_hosts_room_outwait_an_exhausted_arena() {
+fn room_may_come_for_memory_out() {
     let mut pages = fill_memory();
     relieve_with(|_, _| 0).unwrap();
     assert_eq!(alloc(ArenaId::DEFAULT, Wait::Yes).err(), Some(NoMemory), "exhausted");
-    let (taken, took) = std::sync::mpsc::channel();
-    let waiting = std::thread::spawn(move || {
-        taken.send(alloc(ArenaId::DEFAULT, Wait::UntilHostRoom).map(|page| page.frame())).unwrap()
-    });
-    // Relief's passes free nothing: it waits still.
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    assert!(took.try_recv().is_err(), "it gave up, or took a page none freed");
-    let freed = pages.pop().unwrap();
-    let frame = freed.frame();
-    drop(freed);
-    assert_eq!(took.recv().unwrap(), Ok(frame));
-    waiting.join().unwrap();
+    assert!(room_may_come(ArenaId::DEFAULT));
+    drop(pages.pop());
+    drop(alloc(ArenaId::DEFAULT, Wait::Yes).expect("the page freed"));
 }
 
-/// cladefs: board 5662: an allocation that waits for the host's room fails, as one that waits
-/// does, at its arena's own cap, which is its tenant's to keep to, and once its arena is removed.
+/// cladefs: board 5662: no room comes for an arena at its own cap, nor for one removed: its
+/// tenant's limit is its own to keep to.
 #[test]
-fn allocations_that_wait_for_the_hosts_room_fail_at_their_arenas_own_cap() {
+fn no_room_comes_for_an_arena_at_its_own_cap() {
     configure_chunks(16);
     keep_spare_chunks(false);
     relieve_with(|_, _| 0).unwrap();
@@ -151,8 +141,9 @@ fn allocations_that_wait_for_the_hosts_room_fail_at_their_arenas_own_cap() {
     let held: Vec<Page> =
         (0..CHUNK_SIZE as u64 / page_size()).map(|_| alloc(arena, Wait::No).unwrap()).collect();
     assert!(count_free_pages() > 0);
-    assert_eq!(alloc(arena, Wait::UntilHostRoom).err(), Some(NoMemory));
+    assert_eq!(alloc(arena, Wait::Yes).err(), Some(NoMemory));
+    assert!(!room_may_come(arena));
     remove_arena(arena);
     drop(held);
-    assert_eq!(alloc(arena, Wait::UntilHostRoom).err(), Some(NoMemory));
+    assert!(!room_may_come(arena));
 }

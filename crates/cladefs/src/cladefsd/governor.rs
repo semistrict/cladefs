@@ -24,7 +24,7 @@
 //! and says the host is full while the room for the daemon is under it ([`full`]): the daemon then
 //! refuses to make cells (`CreateCell`, `ForkCell`), so that the VM manager places no VM more here,
 //! and what more the guests already running take comes out of the host's own headroom. And a
-//! page-in finding no page waits for one rather than fails (`physmem::Wait::UntilHostRoom`).
+//! page-in finding no page waits for one rather than fails (`crate::cache`, `physmem::room_may_come`).
 //!
 //! A daemon given its memory's size (`cladefsd SOCKET MEMORY_BYTES`) is not governed: its
 //! memory is that, as a test's daemon's may be.
@@ -57,18 +57,47 @@ pub fn headroom(total: u64) -> Result<u64, String> {
 }
 
 /// cladefs: the least the governor leaves the daemon's memory, however little the host has left:
-/// `CLADEFSD_MEMORY_FLOOR` bytes, or a sixty-fourth of the host's memory, 256 MiB at least, in
-/// whole chunks: room for what the VMs' windows use, their guests' DAX faults' pages (board 5662;
-/// 176 small VMs on one base used about 40 MiB of it).
-pub fn floor(total: u64) -> Result<u64, String> {
+/// `CLADEFSD_MEMORY_FLOOR` bytes, or a sixty-fourth of the memory the daemon may have, `limit`
+/// ([`limit`]), 256 MiB at least and an eighth of it at most, in whole chunks: room for what the
+/// VMs' windows use, their guests' DAX faults' pages (board 5662; 176 small VMs on one base used
+/// about 40 MiB of it). Of the cgroup's limit, not the host's, where that is less: a floor past
+/// what the cgroup holds would have its OOM killer end what relief would have shrunk.
+pub fn floor(limit: u64) -> Result<u64, String> {
     let chunk = CHUNK_SIZE as u64;
     let bytes = match node_local::env::var("CLADEFSD_MEMORY_FLOOR") {
         Ok(bytes) if !bytes.is_empty() => {
             bytes.parse().map_err(|_| format!("CLADEFSD_MEMORY_FLOOR is bytes, not {bytes:?}"))?
         }
-        _ => (total / 64).max(256 << 20),
+        _ => (limit / 64).max(256 << 20).min(limit / 8),
     };
     Ok((bytes / chunk * chunk).max(chunk))
+}
+
+/// cladefs: the memory the daemon may have: the host's, `total`, or, if less, the least limit of
+/// its cgroups (memory.max, its own and each ancestor's).
+#[cfg(target_os = "linux")]
+pub fn limit(total: u64) -> u64 {
+    let Ok(cgroups) = std::fs::read_to_string("/proc/self/cgroup") else { return total };
+    let Some(path) = cgroups.lines().find_map(|line| line.strip_prefix("0::")) else {
+        return total;
+    };
+    let mut dir = std::path::Path::new("/sys/fs/cgroup").join(path.trim_start_matches('/'));
+    let mut limit = total;
+    loop {
+        let max = std::fs::read_to_string(dir.join("memory.max")).ok();
+        if let Some(max) = max.and_then(|max| max.trim().parse::<u64>().ok()) {
+            limit = limit.min(max);
+        }
+        if !dir.pop() || dir == std::path::Path::new("/sys/fs") {
+            return limit;
+        }
+    }
+}
+
+/// cladefs: the memory the daemon may have: the host's (macOS has no cgroups).
+#[cfg(target_os = "macos")]
+pub fn limit(total: u64) -> u64 {
+    total
 }
 
 /// cladefs: whether the host is full: the room the governor last found for the daemon's memory was
@@ -240,7 +269,7 @@ pub fn shares(target: u64, tenants: &[(u64, u64)]) -> Vec<(u64, u64)> {
 /// they evict holding no thread (board 2946).
 pub fn start() -> Result<(), String> {
     let host = host_memory().map_err(|err| format!("reading the host's memory: {err}"))?;
-    let (headroom, floor) = (headroom(host.total)?, floor(host.total)?);
+    let (headroom, floor) = (headroom(host.total)?, floor(limit(host.total))?);
     super::run::service("memory governor", 1, move || govern_every(headroom, floor))
         .map_err(|err| format!("starting the memory governor: {err}"))
 }
@@ -394,14 +423,24 @@ mod tests {
         assert_eq!(past, Allowance { bytes: 340 * MIB, full: false });
     }
 
-    /// cladefs: board 5662: the floor is a sixty-fourth of the host's memory, 256 MiB at least, in
-    /// whole chunks.
+    /// cladefs: board 5662: the floor is a sixty-fourth of the daemon's memory, 256 MiB at least
+    /// and an eighth of it at most, in whole chunks.
     #[test]
-    fn the_floor_is_a_sixty_fourth_of_the_host_256_mib_at_least() {
+    fn the_floor_is_a_sixty_fourth_of_the_memory_256_mib_at_least_an_eighth_at_most() {
         const GIB: u64 = 1 << 30;
         assert_eq!(floor(64 * GIB), Ok(GIB));
         assert_eq!(floor(4 * GIB), Ok(256 << 20));
         assert_eq!(floor(27 * GIB + 12345), Ok(432 << 20));
+        assert_eq!(floor(GIB), Ok(128 << 20));
+        assert_eq!(floor(1 << 20), Ok(CHUNK_SIZE as u64));
+    }
+
+    /// cladefs: board 5662: the daemon's memory is the host's, or less: a host's smaller than every
+    /// cgroup's limit is its.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_limit_is_the_hosts_when_less_than_the_cgroups() {
+        assert_eq!(limit(1 << 20), 1 << 20);
     }
 
     #[test]
