@@ -608,16 +608,12 @@ pub(super) mod target {
             return Err(Status::not_found(format!("migration {migration:x} given up")));
         }
         // A directory, empty or not, its path ending with `/`.
+        let left = || Status::invalid_argument(format!("{path:?} leaves the cell"));
         if let Some(dir) = path.strip_suffix('/') {
-            if dir.split('/').any(|part| part == ".." || part.is_empty()) {
-                return Err(Status::invalid_argument(format!("{path:?} leaves the cell")));
-            }
-            return host_fs::create_dir_all(staged.join(dir)).map_err(|err| status(&path, err));
+            let dir = within(&staged, dir).ok_or_else(left)?;
+            return host_fs::create_dir_all(dir).map_err(|err| status(&path, err));
         }
-        if path.split('/').any(|part| part == ".." || part.is_empty()) {
-            return Err(Status::invalid_argument(format!("{path:?} leaves the cell")));
-        }
-        let file_path = staged.join(&path);
+        let file_path = within(&staged, &path).ok_or_else(left)?;
         if let Some(dir) = file_path.parent() {
             host_fs::create_dir_all(dir).map_err(|err| status(&path, err))?;
         }
@@ -700,7 +696,9 @@ pub(super) mod target {
             return Some("the hand-over names no file".to_owned());
         }
         files.iter().find_map(|FileDigest { path, len, crc }| {
-            let at = staged.join(path);
+            let Some(at) = within(staged, path) else {
+                return Some(format!("{path:?} leaves the cell"));
+            };
             let found = host_fs::metadata(&at).map(|metadata| metadata.len());
             if found.as_ref().ok() != Some(len) {
                 return Some(format!("{path}: {found:?} bytes, not {len}"));
@@ -708,6 +706,15 @@ pub(super) mod target {
             let found = crc.and_then(|_| crc_of(&at).ok());
             (crc.is_some() && found != *crc).then(|| format!("{path}: CRC {found:?}, not {crc:?}"))
         })
+    }
+
+    /// cladefs: the path in `staged` a peer's `path` names, if it names one in it: of names, each
+    /// neither empty nor `.` nor `..`, joined by `/` (board 5374). A peer's paths are untrusted
+    /// (AGENTS.md, Trust boundaries): an absolute one joined replaced `staged`, and one through
+    /// `..` left it, which every use of a peer's path checks here, never by itself.
+    fn within(staged: &Path, path: &str) -> Option<PathBuf> {
+        let normal = |name: &str| !matches!(name, "" | "." | "..");
+        (!path.is_empty() && path.split('/').all(normal)).then(|| staged.join(path))
     }
 
     /// Syncs every file and directory under `dir`, and it.
@@ -726,5 +733,35 @@ pub(super) mod target {
     /// Gives back the `len` bytes at `offset` of `file`, keeping its size.
     fn punch(file: &host_fs::File, offset: u64, len: u64) -> std::io::Result<()> {
         host_fs::punch_hole(file, offset, len)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Board 5374: a peer's path names a file in the staging directory only as names joined by
+        /// `/`; an absolute one, one through `..` or `.`, an empty one or one with an empty name, none.
+        #[test]
+        fn peers_paths_stay_in_their_staging_directory() {
+            let staged = Path::new("/cells/.cell.migrating-1");
+            assert_eq!(within(staged, "segments/a.0"), Some(staged.join("segments/a.0")));
+            for path in ["", "/etc/passwd", "../x", "a/../../x", "a//b", "./a", "a/.", "a/"] {
+                assert_eq!(within(staged, path), None, "{path:?}");
+            }
+        }
+
+        /// Board 5374: a hand-over naming a file outside its staging directory lacks it, as named,
+        /// rather than reading what is there: `/dev/zero` of 0 bytes, read to its end, had no end.
+        #[test]
+        fn hand_overs_naming_files_outside_lack_them() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("kept"), b"x").unwrap();
+            let digest = |path: &str, len| FileDigest { path: path.to_owned(), len, crc: None };
+            assert_eq!(lacking(dir.path(), &[digest("kept", 1)]), None);
+            assert_eq!(
+                lacking(dir.path(), &[digest("kept", 1), digest("/dev/zero", 0)]),
+                Some("\"/dev/zero\" leaves the cell".to_owned())
+            );
+        }
     }
 }
