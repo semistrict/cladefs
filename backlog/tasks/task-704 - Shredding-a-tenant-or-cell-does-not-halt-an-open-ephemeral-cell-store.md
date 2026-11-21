@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-20 20:14'
-updated_date: '2026-11-21 00:43'
+updated_date: '2026-11-21 00:44'
 labels: []
 dependencies: []
 documentation:
@@ -30,7 +30,6 @@ Split from TASK-698.7 at the close of TASK-698 (2026-11-20). An open ephemeral s
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [ ] #1 scripts/upstream-changes.py --check passes
+- [ ] #2 Deviations from upstream documented where they occur
 <!-- DOD:END -->

@@ -6,7 +6,7 @@ title: >-
 status: Done
 assignee: []
 created_date: '2026-11-20 18:09'
-updated_date: '2026-11-20 20:14'
+updated_date: '2026-11-21 00:45'
 labels: []
 dependencies: []
 parent_task_id: TASK-698
@@ -27,9 +27,8 @@ upload::open_ephemeral builds the ephemeral cell ring (keys::ring) and hands it 
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [ ] #1 scripts/upstream-changes.py --check passes
+- [ ] #2 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Notes

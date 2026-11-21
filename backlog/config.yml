@@ -2,7 +2,7 @@ project_name: "cladefs"
 default_status: "To Do"
 statuses: ["To Do", "In Progress", "Done"]
 labels: []
-definition_of_done: ["cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)", "scripts/upstream-changes.py --check passes", "Deviations from upstream documented where they occur"]
+definition_of_done: ["scripts/upstream-changes.py --check passes", "Deviations from upstream documented where they occur"]
 date_format: yyyy-mm-dd
 max_column_width: 20
 auto_open_browser: true

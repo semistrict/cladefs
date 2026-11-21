@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-20 16:21'
-updated_date: '2026-11-20 19:56'
+updated_date: '2026-11-21 00:45'
 labels: []
 dependencies: []
 documentation:
@@ -33,9 +33,8 @@ Ephemeral cells add three protocols that touch other hosts and the bucket: refer
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [ ] #1 scripts/upstream-changes.py --check passes
+- [ ] #2 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Notes

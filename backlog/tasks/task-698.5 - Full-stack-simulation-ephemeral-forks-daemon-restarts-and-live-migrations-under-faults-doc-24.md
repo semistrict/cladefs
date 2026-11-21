@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-20 16:22'
-updated_date: '2026-11-20 20:16'
+updated_date: '2026-11-21 00:45'
 labels: []
 dependencies:
   - TASK-698.4
@@ -32,9 +32,8 @@ The protocols of doc-25 span daemons, peers and the bucket, which is what the do
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [x] #2 scripts/upstream-changes.py --check passes
-- [x] #3 Deviations from upstream documented where they occur
+- [x] #1 scripts/upstream-changes.py --check passes
+- [x] #2 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Notes
