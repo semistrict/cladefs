@@ -39,7 +39,7 @@ use crate::{CellId, Errno};
 use bucket_cell::layout::Origin;
 use host_fs::FileExt as _;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -118,6 +118,15 @@ impl Outgoing {
     fn marker(&self) -> Marker {
         Marker { migration: self.migration, peer: self.peer.clone(), incarnation: self.incarnation }
     }
+}
+
+node_local::node_local! {
+    /// cladefs: the migrations this daemon, since it started, prepared to take, the only ones it
+    /// takes on with (board 5721): what a migration staged before is written but not synced, which
+    /// its host's restart may have lost part of, so that a migration being taken does not outlive
+    /// its daemon (specs/ephemeral: `Crash` makes a cell being received none), whether or not its
+    /// start, giving it up, could retire its entry.
+    static PREPARED: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
 }
 
 node_local::node_local! {
@@ -340,13 +349,17 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
     let _held = super::cells::hold_cell_alone(&path).await?;
     // Handed over before, and asked again: what is left of letting it go.
     let handed = handed_over(&path);
-    if let Ok(bytes) = host_fs::read(&handed) {
-        let noted: HandedOver = serde_json::from_slice(&bytes).map_err(|err| {
-            log::error!("cladefsd: {}: {err}", handed.display());
-            Errno::EIO
-        })?;
-        log::info!("cladefsd: migration {:x} handed over: letting it go", noted.migration);
-        return let_go(&host, &path, &handed, &noted).await;
+    let noted =
+        host_fs::read(&handed).ok().map(|bytes| serde_json::from_slice::<HandedOver>(&bytes));
+    match noted {
+        Some(Ok(noted)) => {
+            log::info!("cladefsd: migration {:x} handed over: letting it go", noted.migration);
+            return let_go(&host, &path, &handed, &noted).await;
+        }
+        // Not whole, its writing failed: no note, the marker there still, which asks the target
+        // again, which answers yes again (`remembersAccepted`), noting it anew (board 5721).
+        Some(Err(err)) => log::warn!("cladefsd: {} is no whole note: {err}", handed.display()),
+        None => {}
     }
     let marker_path = path.join(MARKER);
     let marked: Option<Marker> =
@@ -367,7 +380,12 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
         }
         // Given up before: asked again, the marker naming the migration.
         (Some(marker), Some(outgoing)) if outgoing.migration == marker.migration => outgoing,
-        (Some(marker), _) => Arc::new(Outgoing::resumed(marker)?),
+        // Under way again, after a restart too, until its marker goes durably (board 5721).
+        (Some(marker), _) => {
+            let resumed = Arc::new(Outgoing::resumed(marker)?);
+            OUTGOING.get().lock().unwrap().insert(path.clone(), resumed.clone());
+            resumed
+        }
         (None, None) => return Err(Errno::ENOENT),
     };
     let migration = outgoing.migration;
@@ -425,10 +443,9 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
 /// Lets go of the cell at `path`, handed over as `noted` says, noted at `handed`: its cell
 /// directory goes, then this host's reference (`sourceRetiresLast`), then the note. `EIO` if the
 /// directory, the reference or the note does not go, the note left, from which asking again goes
-/// on. The note
-/// gone, its directory's sync failing answers `Ok` all the same (board 5721): the cell is handed
-/// over and let go of, and asking again would find nothing to go on from (`ENOENT`); a crash may
-/// bring the note back, of a cell directory gone and a reference retired.
+/// on. The note gone, its directory's sync failing answers `Ok` all the same (board 5721): the cell
+/// is handed over and let go of, and asking again would find nothing to go on from (`ENOENT`); a
+/// crash may bring the note back, of a cell directory gone and a reference retired.
 async fn let_go(
     host: &ephemeral_host::Host,
     path: &Path,
@@ -439,7 +456,10 @@ async fn let_go(
         log::warn!("cladefsd: removing {}, handed over: {err:#}", path.display());
         Errno::EIO
     })?;
-    if let Some(entry) = &noted.entry
+    // Only the entry noted, as it is still (board 5721): the cell back here since, at another
+    // path, its entry and reference are its own now, which letting go of the one before retired.
+    let current = noted.entry.as_ref().and_then(|entry| host.entry(entry.child));
+    if let Some(entry) = noted.entry.as_ref().filter(|&entry| current.as_ref() == Some(entry))
         && let Err(err) = host.retire(entry).await
     {
         // The note kept, from which asking again retires it (board 5721).
@@ -515,9 +535,13 @@ fn named(path: &Path) -> std::io::Result<Vec<FileDigest>> {
     Ok(named)
 }
 
-/// Removes the file at `path`, durably.
+/// Removes the file at `path`, durably: gone already, its directory synced still, so that removing
+/// it again finishes a removal whose sync failed.
 fn remove_durably(path: &Path) -> std::io::Result<()> {
-    host_fs::remove_file(path)?;
+    match host_fs::remove_file(path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        removed => removed?,
+    }
     host_fs::sync_dir(path.parent().unwrap_or(Path::new(".")))
 }
 
@@ -583,11 +607,19 @@ pub(super) mod target {
         }
         let path = PathBuf::from(to);
         let entry = Entry { child, origin, path: path.clone(), bucket, migration: Some(migration) };
+        let mut superseded = None;
         match host.entry(child) {
             None => {}
             Some(found) if found == entry => {}
             Some(found) if found.migration.is_some_and(|older| !host.accepted(older)) => {
                 supersede(&host, &found, &entry).await?;
+                superseded = Some(found);
+            }
+            // Noted, but held here no more: its letting go stopped part way, its disk failing
+            // (board 5721). This host holds none of it, as the spec's `Prepare` asks.
+            Some(found) if found.migration.is_none() && matches!(host.holds(&found), Ok(false)) => {
+                log::info!("cladefsd: {child} noted here, held not: its entry retired");
+                host.retire(&found).await.map_err(|err| status("retiring its entry", err))?;
             }
             Some(_) => return Err(Status::already_exists(format!("cell {child} is here"))),
         }
@@ -595,16 +627,31 @@ pub(super) mod target {
             return Err(Status::already_exists(format!("{} is there", path.display())));
         }
         host.note(&entry).map_err(|err| status("noting the cell", err))?;
+        // The older migration's files dropped once no entry names it: dropped part way, a staging
+        // an entry names is one a retry of its migration may take for whole (board 5721).
+        if let Some(found) = superseded {
+            let older = staging(&found.path, found.migration.expect("an entry being taken"));
+            if let Err(err) = drop_staged(&older) {
+                log::warn!("cladefsd: dropping {}, superseded: {err}", older.display());
+            }
+        }
         let bucket =
             crate::host_cell::bucket(&entry.bucket).map_err(|err| status("its bucket", err))?;
         bucket_cell::lifecycle::refer_ephemeral(&*bucket, origin, host.incarnation(), child).await;
-        host_fs::create_dir_all(staging(&path, migration)).map_err(|err| status("staging", err))?;
+        // Staged afresh but by this daemon: what a daemon before it staged, it may have lost part
+        // of, unsynced, at its host's restart (board 5721).
+        let staged = staging(&path, migration);
+        if !PREPARED.get().lock().unwrap().contains(&migration) {
+            drop_staged(&staged).map_err(|err| status("dropping a staging of before", err))?;
+        }
+        host_fs::create_dir_all(&staged).map_err(|err| status("staging", err))?;
+        PREPARED.get().lock().unwrap().insert(migration);
         log::info!("cladefsd: migration {migration:x} of {child} prepared, to {}", path.display());
         Ok(host.incarnation())
     }
 
-    /// Gives up the older migration of `found`, never accepted, for `entry`'s: what it staged
-    /// dropped, and its reference too unless `entry`'s is the same.
+    /// Gives up the older migration of `found`, never accepted, for `entry`'s: its reference,
+    /// unless `entry`'s is the same; what it staged goes once `entry` is noted in its place.
     async fn supersede(
         host: &ephemeral_host::Host,
         found: &Entry,
@@ -612,7 +659,6 @@ pub(super) mod target {
     ) -> Result<(), Status> {
         let older = found.migration.expect("an entry being taken");
         log::info!("cladefsd: migration {older:x} of {} superseded", found.child);
-        drop_staged(&staging(&found.path, older)).map_err(|err| status("dropping it", err))?;
         if (found.origin, &found.bucket) != (entry.origin, &entry.bucket) {
             host.retire(found).await.map_err(|err| status("retiring its reference", err))?;
         }
@@ -629,12 +675,35 @@ pub(super) mod target {
     }
 
     /// The staging directory of the migration `migration`, being taken here.
-    fn staged(host: &ephemeral_host::Host, migration: u64) -> Result<(Entry, PathBuf), Status> {
+    fn staged(
+        host: &Arc<ephemeral_host::Host>,
+        migration: u64,
+    ) -> Result<(Entry, PathBuf), Status> {
+        if !PREPARED.get().lock().unwrap().contains(&migration) {
+            given_up(host, migration);
+            return Err(Status::not_found(format!("no migration {migration:x} begun here")));
+        }
         let entry = host.receiving(migration).map_err(|err| status("the journal", err))?;
         let entry =
             entry.ok_or_else(|| Status::not_found(format!("no migration {migration:x}")))?;
         let staged = staging(&entry.path, migration);
         Ok((entry, staged))
+    }
+
+    /// Gives up the migration `migration`, prepared by a daemon before this one, if its entry is
+    /// here still: its start, giving it up, failed to retire it, its disk failing. Its entry and
+    /// reference retired, its files dropped, failures said.
+    fn given_up(host: &Arc<ephemeral_host::Host>, migration: u64) {
+        let Ok(Some(entry)) = host.receiving(migration) else { return };
+        let staged = staging(&entry.path, migration);
+        let host = host.clone();
+        drop(crate::bucket::bucket_runtime().map(|runtime| {
+            runtime.spawn(async move {
+                if let Err(err) = refuse(&host, &entry, &staged).await {
+                    log::warn!("cladefsd: giving migration {migration:x} up: {}", err.message());
+                }
+            })
+        }));
     }
 
     /// Writes the piece of a file `request` carries into its migration's staging directory.
@@ -678,6 +747,17 @@ pub(super) mod target {
         let host = host()?;
         let MigrateHandOverRequest { migration, incarnation, files } = request;
         if host.accepted(migration) {
+            // Accepted before: what is left of noting it so, as asking again finishes it (board
+            // 5721): its acceptance made durable again, and the cell noted taken if its entry says
+            // it is being taken still. A failure past the acceptance's writing left it there but
+            // not for good; answered yes at once, a crash then lost it, and its entry, its cell's
+            // source having let the cell go.
+            host.accept(migration).map_err(|err| status("remembering it accepted", err))?;
+            let receiving = host.receiving(migration).map_err(|err| status("the journal", err))?;
+            if let Some(entry) = receiving {
+                let taken = Entry { migration: None, ..entry };
+                host.note(&taken).map_err(|err| status("noting the cell", err))?;
+            }
             return Ok(true);
         }
         let (entry, staged) = match staged(&host, migration) {
@@ -687,23 +767,39 @@ pub(super) mod target {
                 return Ok(false);
             }
         };
-        let lacking = match incarnation == host.incarnation() {
-            true => lacking(&staged, &files),
-            false => Some(format!("asked of incarnation {incarnation:x}")),
-        };
-        if let Some(lacking) = lacking {
-            log::warn!("cladefsd: refusing migration {migration:x}: {lacking}");
-            refuse(&host, &entry, &staged).await?;
-            return Ok(false);
+        let taken = Entry { migration: None, ..entry.clone() };
+        // Taken into place before, what followed failing: what is left of taking it, as asking
+        // again finishes it (board 5721). Refused then, its staging gone, the cell was left in its
+        // directory with no entry and no reference, its source serving it again.
+        // A failure reading it says neither: answered so, asked again later (board 5721).
+        let moved_before = !host_fs::exists(&staged)
+            && host.holds(&taken).map_err(|err| status("reading the cell taken", err))?;
+        if !moved_before {
+            let lacking = match incarnation == host.incarnation() {
+                true => lacking(&staged, &files),
+                false => Some(format!("asked of incarnation {incarnation:x}")),
+            };
+            if let Some(lacking) = lacking {
+                log::warn!("cladefsd: refusing migration {migration:x}: {lacking}");
+                refuse(&host, &entry, &staged).await?;
+                return Ok(false);
+            }
         }
         let moved = || -> std::io::Result<()> {
-            sync_tree(&staged)?;
-            host_fs::rename(&staged, &entry.path)?;
+            if !moved_before {
+                sync_tree(&staged)?;
+                host_fs::rename(&staged, &entry.path)?;
+            }
             host_fs::File::open(entry.path.parent().unwrap_or(Path::new(".")))?.sync_all()
         };
         moved().map_err(|err| status("taking the cell", err))?;
+        // Its reference written again before it is accepted (`targetRefersFirst`): a restart since
+        // its prepare may have retired it, its entry's removal failing after (board 5721).
+        let bucket =
+            crate::host_cell::bucket(&taken.bucket).map_err(|err| status("its bucket", err))?;
+        let (origin, child) = (taken.origin, taken.child);
+        bucket_cell::lifecycle::refer_ephemeral(&*bucket, origin, host.incarnation(), child).await;
         host.accept(migration).map_err(|err| status("remembering it accepted", err))?;
-        let taken = Entry { migration: None, ..entry };
         host.note(&taken).map_err(|err| status("noting the cell", err))?;
         Ok(true)
     }
@@ -724,8 +820,14 @@ pub(super) mod target {
         entry: &Entry,
         staged: &Path,
     ) -> Result<(), Status> {
-        drop_staged(staged).map_err(|err| status("dropping it", err))?;
-        host.retire(entry).await.map_err(|err| status("retiring its reference", err))
+        // Its entry and reference first, then its files: dropped part way, a staging an entry
+        // names is one a retry of its migration may take for whole, a kept segment's file made
+        // again of holes alone (board 5721).
+        host.retire(entry).await.map_err(|err| status("retiring its reference", err))?;
+        if let Err(err) = drop_staged(staged) {
+            log::warn!("cladefsd: dropping {}, refused: {err}", staged.display());
+        }
+        Ok(())
     }
 
     /// What `staged` lacks of `files`, each of its length, of its CRC if named: the first file it

@@ -114,13 +114,15 @@ impl Host {
     /// Forgets `child`, its reference gone: durably, so that no crash brings its entry back
     /// (TASK-714). Failing, it says so (board 5721: an entry left, said nowhere, had this host
     /// refuse every later migration of the cell to it, the cell "here"), for its caller to try
-    /// again: forgetting an entry gone already does nothing.
+    /// again: forgetting an entry gone already syncs its directory still, finishing a removal whose
+    /// sync failed.
     pub fn forget(&self, child: CellId) -> Result<(), Error> {
         let path = self.entry_path(child);
         let forgotten = match host_fs::remove_file(&path) {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            removed => removed.and_then(|()| host_fs::sync_dir(self.dir.join(CELLS))),
+            removed => removed,
         };
+        let forgotten = forgotten.and_then(|()| host_fs::sync_dir(self.dir.join(CELLS)));
         forgotten.with_context(|| format!("forgetting {}", path.display()))
     }
 
@@ -169,55 +171,89 @@ impl Host {
     }
 
     /// Retires the references of the ephemeral cells its journal names that it holds no more: its
-    /// cell at its path gone, or not an ephemeral cell's of its cell. Returns how many.
+    /// cell at its path gone, or not an ephemeral cell's of its cell. Returns how many. An entry
+    /// whose retiring fails, its disk failing, is said and left: to the next start, or to a
+    /// migration's prepare here, which takes an entry of a cell this host holds not for none
+    /// (board 5721); the daemon starts whatever one entry's disk does.
     pub async fn retire_stale(&self) -> Result<usize, Error> {
         let mut retired = 0;
         for entry in self.entries()? {
-            // A migration it accepted, crashed before it noted the cell taken: taken, as the
-            // hand-over did (TASK-713); the cell its, as its source let it go.
-            if entry.migration.is_some_and(|migration| self.accepted(migration)) {
-                let taken = Entry { migration: None, ..entry };
-                self.note(&taken)?;
-                if local_cell::upload::blocking(|| held(&taken)) {
-                    continue;
-                }
-                self.retire(&taken).await?;
-                retired += 1;
-                continue;
+            let child = entry.child;
+            match self.retire_if_stale(entry).await {
+                Ok(gone) => retired += usize::from(gone),
+                Err(err) => log::warn!("cladefsd: retiring {child}, held no more: {err:#}"),
             }
-            // A migration being taken, which the daemon's going stopped: given up (TASK-698.4).
-            if let Some(migration) = entry.migration {
-                let staged = staging(&entry.path, migration);
-                if host_fs::exists(&staged) {
-                    host_fs::remove_dir_all(&staged)?;
-                }
-            } else if local_cell::upload::blocking(|| held(&entry)) {
-                continue;
-            }
-            self.retire(&entry).await?;
-            retired += 1;
         }
         Ok(retired)
     }
 
-    /// Retires `entry`'s reference, then the entry: failing if the entry does not go, which retiring
-    /// again finishes.
+    /// [`Host::retire_stale`]'s of `entry`: whether it retired it.
+    async fn retire_if_stale(&self, entry: Entry) -> Result<bool, Error> {
+        // A migration it accepted, crashed before it noted the cell taken: taken, as the
+        // hand-over did (TASK-713); the cell its, as its source let it go.
+        if entry.migration.is_some_and(|migration| self.accepted(migration)) {
+            let taken = Entry { migration: None, ..entry };
+            self.note(&taken)?;
+            if self.holds(&taken)? {
+                return Ok(false);
+            }
+            self.retire(&taken).await?;
+            return Ok(true);
+        }
+        // A migration being taken, which the daemon's going stopped: given up (TASK-698.4).
+        if let Some(migration) = entry.migration {
+            // Taken into place already, its acceptance not: given up too, as its source, letting
+            // the cell go only once it is accepted, holds it still (board 5721). Left, a retry took
+            // it after this retired its reference. Its removal no more held at its first step.
+            let taken = Entry { migration: None, ..entry.clone() };
+            if self.holds(&taken)? {
+                let path = entry.path.clone();
+                local_cell::upload::blocking(move || local_cell::remove_cell_dir(&path))?;
+            }
+            // Its entry and reference, then its files: dropped part way, a staging an entry names
+            // is one a retry of its migration may take for whole (board 5721).
+            self.retire(&entry).await?;
+            let staged = staging(&entry.path, migration);
+            if host_fs::exists(&staged)
+                && let Err(err) = host_fs::remove_dir_all(&staged)
+            {
+                log::warn!("cladefsd: dropping {}, given up: {err}", staged.display());
+            }
+            return Ok(true);
+        } else if self.holds(&entry)? {
+            return Ok(false);
+        }
+        self.retire(&entry).await?;
+        Ok(true)
+    }
+
+    /// Retires `entry`'s reference, then the entry: retiring it again, after either failed,
+    /// finishes it.
     pub async fn retire(&self, entry: &Entry) -> Result<(), Error> {
         let bucket = crate::host_cell::bucket(&entry.bucket)?;
         let (origin, child) = (entry.origin, entry.child);
         bucket_cell::lifecycle::unrefer_ephemeral(&*bucket, origin, self.incarnation, child).await;
         self.forget(child)
     }
+
+    /// Whether it holds `entry`'s cell: its cell directory there, whole, its ephemeral cell's.
+    /// Failing to read it says neither (board 5721): an entry retired as a reading of its cell
+    /// failed, its disk failing, left a cell this host held with no entry and no reference.
+    pub fn holds(&self, entry: &Entry) -> Result<bool, Error> {
+        local_cell::upload::blocking(|| held(entry))
+            .with_context(|| format!("reading {}", entry.path.display()))
+    }
 }
 
 /// Whether the cell directory at `entry`'s path is its ephemeral cell's, whole.
-fn held(entry: &Entry) -> bool {
+fn held(entry: &Entry) -> Result<bool, Error> {
     if !host_fs::exists(&entry.path) || local_cell::unmade_host(&entry.path) {
-        return false;
+        return Ok(false);
     }
-    let ephemeral =
-        local_cell::host_local_checkpoint(&entry.path).is_ok_and(|checkpoint| checkpoint.is_some());
-    ephemeral && local_cell::host_cell(&entry.path).is_ok_and(|cell| cell == entry.child)
+    if local_cell::host_local_checkpoint(&entry.path)?.is_none() {
+        return Ok(false);
+    }
+    Ok(local_cell::host_cell(&entry.path)? == entry.child)
 }
 
 /// Writes `bytes` to a file at `path`, whole, durably, over any there.

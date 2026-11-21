@@ -937,9 +937,12 @@ async fn ephemeral_attrition(disk: bool) -> Result<(), String> {
     faults.set(bucket_cell::faults::Odds::NONE);
     host_fs::faults::set(host_fs::faults::Odds::NONE);
     let expected = told.uploaded.lock().unwrap().clone();
-    let reading = at.clone();
-    let read = node(host)
-        .spawn(async move {
+    // Read on its host, again if the host's node starts anew meanwhile, as one whose boot failed on
+    // a disk fault does, 1 to 10 s after (board 5721): the read's task goes with it, cancelled.
+    let mut read = None;
+    for _ in 0..10 {
+        let (reading, expected) = (at.clone(), expected.clone());
+        let reading = node(host).spawn(async move {
             let guest = guest().await;
             let cell = guest.open(&reading, 64 << 20).await.unwrap();
             let inherited = cladefs::ExtentId { cell: parent, sequence: 1 };
@@ -950,9 +953,20 @@ async fn ephemeral_attrition(disk: bool) -> Result<(), String> {
                 read.push((sequence, guest.read(extent, 0, 4096).await));
             }
             (cell, inherited, read)
-        })
-        .await
-        .unwrap();
+        });
+        match reading.await {
+            Ok(done) => {
+                read = Some(done);
+                break;
+            }
+            Err(join) if join.is_cancelled() => {
+                log::info!("the read's host started anew: reading again");
+                madsim::time::sleep(Duration::from_secs(1)).await;
+            }
+            Err(join) => panic!("the read on host {host} failed: {join}"),
+        }
+    }
+    let read = read.expect("the read's host started anew ten times");
     let (cell, inherited, read) = read;
     assert_eq!(cell, child, "the cell read is the ephemeral one");
     if inherited.ok() != Some(block_of(99, 1)) {
