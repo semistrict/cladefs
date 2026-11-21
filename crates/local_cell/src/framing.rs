@@ -585,42 +585,47 @@ pub(crate) fn pack(parts: &mut [Read], key: &ObjectKey) -> u64 {
 }
 
 /// cladefs: `each` of `count` parts, on as many threads as the host has CPUs for this process, but
-/// no more than there are parts, each thread taking those after the last's, with a packer of its
-/// own, kept for the threads after ([`KEPT`]): their results, in order, or the first error; and the longest any of the threads waited to
-/// run, runnable, in nanoseconds ([`runnable_ns`]). On the calling thread, if one is all it takes.
+/// no more than there are parts: the caller's, and those of the pool's free (`crate::pool`, board
+/// 2944), each taking the next run of parts as it is done with one, with a packer of its own, kept
+/// for the threads after ([`KEPT`]): their results, in order, or the first error; and the longest any
+/// of the threads waited to run, runnable, in nanoseconds ([`runnable_ns`]). On the calling thread
+/// alone, if one is all it takes, or no other is free.
 fn on_threads<T: Send>(
     count: usize,
     each: impl Fn(usize, &mut PartPacker) -> io::Result<T> + Sync,
 ) -> (io::Result<Vec<T>>, u64) {
     let threads = std::thread::available_parallelism().map_or(1, |threads| threads.get());
     let per = count.div_ceil(threads.min(count).max(1));
-    let run = |parts: std::ops::Range<usize>| {
+    let runs = count.div_ceil(per.max(1));
+    // Each run's results, as its thread gives them, by the run.
+    let done: crate::sync::Mutex<Vec<Option<io::Result<Vec<T>>>>> =
+        crate::sync::Mutex::new((0..runs).map(|_| None).collect());
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let taking = || {
         let since = runnable_ns();
         let mut packer = PACKERS.take(PartPacker::new);
-        let done: io::Result<Vec<T>> = parts.map(|part| each(part, &mut packer)).collect();
-        PACKERS.give(packer);
-        (done, runnable_ns().saturating_sub(since))
-    };
-    // cladefs: on the calling thread under madsim, which has no other (doc-24).
-    if per >= count || cfg!(madsim) {
-        return run(0..count);
-    }
-    std::thread::scope(|scope| {
-        let running: Vec<_> = (0..count)
-            .step_by(per)
-            .map(|first| scope.spawn(move || run(first..(first + per).min(count))))
-            .collect();
-        let (mut all, mut waited) = (Ok(Vec::with_capacity(count)), 0);
-        for thread in running {
-            let (done, thread_waited) = thread.join().expect("a framing's thread panicked");
-            waited = waited.max(thread_waited);
-            all = all.and_then(|mut all: Vec<T>| {
-                all.extend(done?);
-                Ok(all)
-            });
+        loop {
+            let run = next.fetch_add(1, Ordering::Relaxed);
+            if run >= runs {
+                break;
+            }
+            let parts = run * per..((run + 1) * per).min(count);
+            let ran: io::Result<Vec<T>> = parts.map(|part| each(part, &mut packer)).collect();
+            done.lock().unwrap()[run] = Some(ran);
         }
-        (all, waited)
-    })
+        PACKERS.give(packer);
+        runnable_ns().saturating_sub(since)
+    };
+    let (mine, theirs) = crate::pool::help(runs.saturating_sub(1), &taking, &taking);
+    let waited = theirs.into_iter().fold(mine, u64::max);
+    let mut all = Vec::with_capacity(count);
+    for ran in done.into_inner().unwrap() {
+        match ran.expect("every run taken") {
+            Ok(ran) => all.extend(ran),
+            Err(error) => return (Err(error), waited),
+        }
+    }
+    (Ok(all), waited)
 }
 
 #[cfg(test)]

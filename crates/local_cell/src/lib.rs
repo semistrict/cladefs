@@ -186,6 +186,7 @@ pub use metered::{Metered, MeteredFile};
 pub mod footprint;
 mod on_disk;
 pub mod pages;
+pub mod pool;
 mod raw;
 pub mod replica;
 pub mod replicate;

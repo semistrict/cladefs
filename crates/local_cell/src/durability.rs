@@ -10,7 +10,7 @@
 //! durable commits, reads.
 
 use crate::dir::{Dir, File};
-use crate::sync::{Mutex, thread};
+use crate::sync::Mutex;
 use anyhow::{Context as _, Error};
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::io;
@@ -175,7 +175,8 @@ impl<T> Durability<T> {
 /// (345-1284 ms), and 175 ms (168-209 ms); `durable`'s flushes of fifteen files, each run's the
 /// mean of a hundred, 35.6 ms (34.8-36.6 ms), and 24.1 ms (23.2-25.5 ms), the load 5.7-18. On
 /// Linux, where each is an `fdatasync`, neither the gain nor the bound is measured yet. Each sync
-/// but the flush's own is on a thread the flush starts, of [`HELPERS`], which every flush shares.
+/// but the flush's own is on a thread of the pool's (`crate::pool`), of [`HELPERS`], which every
+/// flush shares.
 const AT_ONCE: usize = 16;
 
 /// cladefs: how many threads, beside the flushes' own, every flush of the process syncs on at once,
@@ -183,7 +184,7 @@ const AT_ONCE: usize = 16;
 /// alone gets, and flushes together share. Were they each flush's, the extent daemon's 32 threads
 /// of flushes would sync on as many as 512 threads at once, and its stores' commits wait behind as
 /// many syncs.
-const HELPERS: usize = AT_ONCE - 1;
+pub(crate) const HELPERS: usize = AT_ONCE - 1;
 
 /// cladefs: how many of [`HELPERS`] sync now: the process's; with the `shuttle` feature, each Shuttle
 /// execution's own, so that how many helpers an execution's flushes get is of its own flushes
@@ -373,9 +374,9 @@ impl<F: File> Syncs<F> {
 /// each taking the next as it is done with one; and returns once each is synced, or once one
 /// failed and those in flight returned, with that failure, logging any other. A failure empties the
 /// queue, so that no sync begins once it has, though other threads may take one before: what they
-/// sync then does no harm, as the flush fails. A thread the host refuses is one fewer: the
-/// caller's syncs whatever the others don't, so that a flush never fails for want of threads
-/// (TASK-92.42); as do those of [`HELPERS`] other flushes have (TASK-92.49).
+/// sync then does no harm, as the flush fails. The others are of [`HELPERS`], those other flushes
+/// have not (TASK-92.49), and of the pool's threads, those free (board 2944): the caller syncs
+/// whatever they don't, so that a flush never fails, nor waits, for want of threads (TASK-92.42).
 pub(crate) fn at_once<T: Sync>(
     items: &[T],
     most: usize,
@@ -393,30 +394,15 @@ pub(crate) fn at_once<T: Sync>(
         }
     };
     let helpers = Helpers::take(items.len().min(most).saturating_sub(1));
-    thread::scope(|scope| {
-        let others: Vec<_> = (0..helpers.0)
-            .map_while(|_| match thread::Builder::new().spawn_scoped(scope, syncing) {
-                Ok(other) => Some(other),
-                Err(error) => {
-                    // cladefs: under madsim, every time, as it should (`crate::sync::thread`).
-                    if !cfg!(madsim) {
-                        log::warn!("extent store: syncing on fewer threads: {error}");
-                    }
-                    None
-                }
-            })
-            .collect();
-        let mut synced = syncing();
-        for other in others {
-            let joined = other.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-            let Err(error) = joined else { continue };
-            match synced {
-                Ok(()) => synced = Err(error),
-                Err(_) => log::warn!("extent store: {error:#} too"),
-            }
+    let (mut synced, theirs) = crate::pool::help(helpers.count(), &syncing, &syncing);
+    for joined in theirs {
+        let Err(error) = joined else { continue };
+        match synced {
+            Ok(()) => synced = Err(error),
+            Err(_) => log::warn!("extent store: {error:#} too"),
         }
-        synced
-    })
+    }
+    synced
 }
 
 #[cfg(test)]
@@ -510,7 +496,7 @@ mod tests {
     #[cfg(feature = "shuttle")]
     mod shuttle_tests {
         use super::*;
-        use crate::sync::{Condvar, Mutex, refuse_threads};
+        use crate::sync::{Condvar, Mutex, refuse_threads, thread};
         use shuttle::scheduler::{PctScheduler, RandomScheduler};
         use shuttle::{Config, Runner};
         use std::collections::BTreeMap;

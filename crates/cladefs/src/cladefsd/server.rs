@@ -2143,7 +2143,7 @@ async fn flush_behind(store: Arc<OpenCell>, mut stopped: tokio::sync::oneshot::R
 /// thread of the runtime's for its syncs alone (board 2944): as many syncs at once as a host's disk
 /// takes, those past them waiting a few milliseconds for their turn, holding no thread; and the
 /// 15 a flush of many files syncs them on beside its own, which every flush shares
-/// (`local_cell`'s `HELPERS`), 47 threads at most at once, those 15 none once idle. A
+/// (`local_cell`'s `HELPERS`), threads of the store's pool, kept (`local_cell::pool`). A
 /// blocking thread each, for every store whose flush came due at its turn, hundreds of stores'
 /// guests committing together kept as many as their syncs' waits took, each idle 10 s after,
 /// and made no store durable sooner: on a GCE host's disk, 300 stores' guests committing at once
