@@ -331,21 +331,22 @@ pub(crate) async fn create_unmade(
     let made = async {
         let url = bucket.map_or_else(|| bucket_for(path), |bucket| Ok(bucket.to_owned()))?;
         let bucket = self::bucket(&url)?;
-        let cell = match of {
+        let (cell, initial_head) = match of {
             CellOf::New(tenant) => {
                 let cell = new_cell(&bucket, tenant).await?;
                 make_keys(&bucket, cell).await?;
-                cell
+                (cell, None)
             }
-            CellOf::Named(cell) => {
-                if !learn_taken(&bucket, cell).await? {
+            CellOf::Named(cell) => match learn_taken(&bucket, cell).await? {
+                Some(read) => (cell, Some(read)),
+                None => {
                     make_keys(&bucket, cell).await?;
+                    (cell, None)
                 }
-                cell
-            }
+            },
             CellOf::Taken(cell) => match learn_taken(&bucket, cell).await? {
-                true => cell,
-                false => return Err(bucket_cell::Error::NoCell.into()),
+                Some(read) => (cell, Some(read)),
+                None => return Err(bucket_cell::Error::NoCell.into()),
             },
         };
         let recovering = upload::blocking(|| -> Result<_, Failure> {
@@ -357,7 +358,7 @@ pub(crate) async fn create_unmade(
             synced.map_err(|err| Failure::local(err, "syncing a cell directory's parent"))?;
             Ok(LocalCell::recover_unmade(host_dir(path)?)?)
         })?;
-        opened(recovering, keeping).await
+        opened_with_head(recovering, keeping, initial_head).await
     };
     // Leave nothing half made behind.
     let made = made.await;
@@ -376,10 +377,14 @@ async fn make_keys(bucket: &RoutedBucket, cell: CellId) -> Result<(), Failure> {
     Ok(())
 }
 
-/// Whether the bucket has `cell`.
-async fn learn_taken(bucket: &RoutedBucket, cell: CellId) -> Result<bool, Failure> {
+/// Reads `cell`'s head to check whether the bucket holds it, returning the [`head::Read`] so the
+/// opening immediately after reuses it instead of issuing a second head GET (board 6017).
+async fn learn_taken(
+    bucket: &RoutedBucket,
+    cell: CellId,
+) -> Result<Option<bucket_cell::head::Read>, Failure> {
     let read = bucket_cell::head::read(bucket, cell).await;
-    Ok(read.head(cell)?.is_some())
+    Ok(read.head(cell)?.is_some().then_some(read))
 }
 
 /// Opens the cell directory at `path` as of its last commit, with the bucket it names: its
@@ -437,13 +442,29 @@ async fn opened(
     recovering: Recovering<HostDir>,
     keeping: upload::Options,
 ) -> Result<Opened, Failure> {
+    opened_with_head(recovering, keeping, None).await
+}
+
+/// Like [`opened`], passing an already-fetched [`bucket_cell::head::Read`] to the uploader.
+async fn opened_with_head(
+    recovering: Recovering<HostDir>,
+    keeping: upload::Options,
+    initial_head: Option<bucket_cell::head::Read>,
+) -> Result<Opened, Failure> {
     let url = recovering.bucket().map(str::to_owned);
     let path = || recovering_path(&recovering);
     let url = url.ok_or_else(|| Failure::msg(format!("{} names no bucket", path())))?;
     let bucket = bucket(&url).with_context(|| format!("opening the bucket {url}"))?;
     let runtime = crate::bucket::runtime()?;
     let holding = (rand::random(), keeping);
-    let opening = upload::open(recovering, options(), bucket.clone(), holding, &runtime);
+    let opening = upload::open_with_head(
+        recovering,
+        options(),
+        bucket.clone(),
+        holding,
+        &runtime,
+        initial_head,
+    );
     let (local, uploader) = opening.await?;
     Ok(Opened { local, bucket, uploader })
 }

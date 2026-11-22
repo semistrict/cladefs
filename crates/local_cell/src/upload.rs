@@ -478,6 +478,19 @@ pub async fn open<D: Dir>(
     (holder, options): (u64, Options),
     runtime: &Runtime,
 ) -> Result<(Arc<LocalCell<D>>, Uploader<D>), Failure> {
+    open_with_head(recovering, cell_options, bucket, (holder, options), runtime, None).await
+}
+
+/// Like [`open`], reusing an already-fetched [`head::Read`] from the caller (e.g. a pre-open
+/// existence check) so taking a cell costs one head GET instead of two (board 6017).
+pub async fn open_with_head<D: Dir>(
+    recovering: Recovering<D>,
+    cell_options: crate::Options,
+    bucket: Arc<RoutedBucket>,
+    (holder, options): (u64, Options),
+    runtime: &Runtime,
+    initial_head: Option<head::Read>,
+) -> Result<(Arc<LocalCell<D>>, Uploader<D>), Failure> {
     let sleep: Clock = Arc::new(|interval| tokio::time::sleep(interval).boxed());
     let handle = runtime.handle.clone();
     let spawn: Spawn = Arc::new(move |task| drop(handle.spawn(task)));
@@ -493,7 +506,9 @@ pub async fn open<D: Dir>(
     runtime.handle.spawn(async move {
         // Its conditional writes checked before any is relied on (doc-7, The head).
         match uploads.probed(holder).await {
-            Ok(()) => uploader.run(recovering, cell_options, uploads, holder, started).await,
+            Ok(()) => {
+                uploader.run(recovering, cell_options, uploads, holder, started, initial_head).await
+            }
             // Its opener gone or not, it says why it stopped to whoever listens.
             Err(err) => drop(started.send(Err(Failure::msg(err)))),
         }
@@ -1449,8 +1464,9 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         bucket: Arc<B>,
         holder: u64,
         started: futures::channel::oneshot::Sender<Result<Arc<LocalCell<D>>, Failure>>,
+        initial_head: Option<head::Read>,
     ) {
-        self.upload(recovering, options, bucket, holder, started).await;
+        self.upload(recovering, options, bucket, holder, started, initial_head).await;
         let kept = self.kept.lock().unwrap().take();
         if let Some(kept) = kept {
             // Said as the keeper's task ends, or goes, its sender with it.
@@ -1466,10 +1482,11 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         bucket: Arc<B>,
         holder: u64,
         started: futures::channel::oneshot::Sender<Result<Arc<LocalCell<D>>, Failure>>,
+        initial_head: Option<head::Read>,
     ) {
         let interval = self.options.interval;
         self.holders.lock().unwrap().0 = holder;
-        let writer = match self.start(recovering, options, &bucket, holder).await {
+        let writer = match self.start(recovering, options, &bucket, holder, initial_head).await {
             Ok(writer) => {
                 // cladefs: urged by its disk as it comes under pressure (doc-22, TASK-539.9).
                 if let Some(disk) = crate::dir::Dir::disk(self.cell().dir()) {
@@ -1659,12 +1676,13 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         options: crate::Options,
         bucket: &Arc<B>,
         holder: u64,
+        initial_head: Option<head::Read>,
     ) -> Result<Option<Arc<Writer<B>>>, Failure> {
         let cell = recovering.cell();
         let (cache, parts) = (self.options.cache.clone(), self.options.held.clone());
         let placement = recovering.token().unwrap_or(self.options.token);
         let kms = &self.keys.kms;
-        let read = first_read(&**bucket, cell).await?;
+        let read = first_read(&**bucket, cell, initial_head).await?;
         // A cell with no head is none: its maker makes it before its cell first opens.
         let Some(found) = read.head(cell)? else {
             return Err(match recovering.version() {
@@ -2598,8 +2616,12 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
 async fn first_read<B: bucket_cell::Bucket>(
     bucket: &B,
     cell: CellId,
+    initial_head: Option<head::Read>,
 ) -> Result<head::Read, Failure> {
-    let read = head::read(bucket, cell).await;
+    let read = match initial_head {
+        Some(read) => read,
+        None => head::read(bucket, cell).await,
+    };
     if read.head(cell)?.is_some_and(|head| !head.deleted() && head.forking().is_some()) {
         return Err(bucket_cell::Error::Unmade(cell).into());
     }
@@ -3256,7 +3278,7 @@ mod shuttle_tests {
             let running = {
                 let (uploader, bucket) = (uploader.clone(), bucket.clone());
                 shuttle::thread::spawn(move || {
-                    let running = uploader.run(recovering, OPTIONS, bucket, holder, started);
+                    let running = uploader.run(recovering, OPTIONS, bucket, holder, started, None);
                     shuttle::future::block_on(running)
                 })
             };
