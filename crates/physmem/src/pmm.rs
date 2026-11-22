@@ -434,11 +434,24 @@ impl PmmNode {
 /// Returns the PMM node, of physical memory's size ([`crate::memory_bytes`]), creating it on first
 /// use.
 pub(crate) fn node() -> &'static PmmNode {
-    node_local::node_local! {
-        /// cladefs: the process's, or, under madsim, the simulated host's (TASK-685.14).
-        static NODE: OnceLock<PmmNode> = OnceLock::new();
-    }
+    /// cladefs: the process's, or, under madsim, the simulated host's (TASK-685.14), whose memory
+    /// goes once its simulation ended (board 2890).
+    static NODE: node_local::NodeLocal<OnceLock<PmmNode>> =
+        node_local::NodeLocal::releasing(OnceLock::new, release);
     NODE.get().get_or_init(|| PmmNode::new(crate::memory_bytes() as usize))
+}
+
+/// cladefs: lets a simulated host's memory go once its simulation ended (board 2890): what
+/// [`node`]'s static gives its node values.
+fn release(node: &'static OnceLock<PmmNode>) {
+    #[cfg(madsim)]
+    if let Some(node) = node.get() {
+        // SAFETY: its simulation ended, its every task gone with its runtime: nothing uses the
+        // memory again (`node_local::NodeLocal::releasing`).
+        unsafe { node.phys_memory().release() };
+    }
+    #[cfg(not(madsim))]
+    let _ = node;
 }
 
 /// cladefs: `bytes` of memory, in whole chunks.

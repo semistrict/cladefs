@@ -188,6 +188,15 @@ The user's rule (2026-11-11): when the cheap way of doing something can't work, 
 
 The user's rule (2026-11-15, TASK-433): cladefs holds what it caches in memory of its own, under one budget, which the extent daemon's governor bounds (`cladefs::cladefsd::memory`, `governor`): the extent cache's arenas, held parts, fetches' parts and tails, uploads, and the open cells' page cache (`local_cell::pages`). The host's page cache is a second memory, counted as free by the governor, unbudgeted by cladefs, holding the same bytes again: two budgets of one memory end badly. So every file holding a cell's data, or a cache's, is read and written bypassing it (`O_DIRECT` on Linux, `F_NOCACHE` on macOS; `bucket_cell::direct`, `local_cell::HostDir`). What the host's page cache gave (write-behind, reads of what was just written, batching into large writes), get from `local_cell::pages`, which does it under the budget; a new data path that needs caching or buffering uses it, or a budgeted holder of its own the governor counts, never the host's. Small metadata (a lock file, a description) may go through it; data, never. A file system that can't bypass it fails the opening (`HostDir`, the part cache: `bucket_cell::direct::bypass` returns an error, and no read or write takes a `direct: bool`), never falling back; tests refuse it with the `direct::bypass` failpoint. Every directory a cell opens holds its data files in the page cache (`local_cell::CachedDir`: `HostDir` in the process's, `MemDir` in a small one of its own with no flusher), so that no test, crash rounds and Shuttle schedules included, runs a cell around it. Tests that read a cell's files behind its back write the page cache back first (`pages::shared().write_back_all()`, or a `MemDir`'s `files()`).
 
+## No trivial unit tests: an end-to-end or simulation test covers it, or nothing
+
+The user's rule (2026-11-21): no test is better than a trivial one. Behaviour an end-to-end test
+(a daemon, a control API, a mount) or a simulation test (tests/madsim.rs, Shuttle, TLA+) already
+exercises gets no unit test of its own: that is the default. A unit test earns its place only by
+reaching what those can't reach, or reach only by luck: a pure function's edge cases, a parser's
+malformed inputs, an interleaving. A unit test restating its code (a map's insert and remove, a
+getter, a constant) is never written; one found is deleted, saying so in a `Weakens-tests:` line.
+
 ## Never write a test around a bug
 
 The user's rule (2026-11-12): when a test only passes by steering clear of what the code under test

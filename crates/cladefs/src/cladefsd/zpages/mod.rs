@@ -101,22 +101,3 @@ fn escape(text: &str) -> String {
     }
     escaped
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_index_lists_every_page() {
-        let response = serve("/", "");
-        assert_eq!((response.status, response.content_type), ("200 OK", HTML));
-        let html = String::from_utf8(response.body).unwrap();
-        assert!(html.contains("<a href=\"/z/tracez\">/z/tracez</a>"), "{html}");
-        assert_eq!(serve("/nothing", "").status, "404 Not Found");
-    }
-
-    #[test]
-    fn text_is_escaped() {
-        assert_eq!(escape("<a href=\"x\">&'"), "&lt;a href=&quot;x&quot;&gt;&amp;&#39;");
-    }
-}

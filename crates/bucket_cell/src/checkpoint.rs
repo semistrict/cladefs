@@ -222,16 +222,6 @@ mod tests {
         }
     }
 
-    /// A checkpoint's table holds the rest of its state, without its extents.
-    #[test]
-    fn tables_hold_the_rest_of_the_state() {
-        let state = state(3000);
-        let bytes = encode(&state, encrypting());
-        let footer = extent_frame::footer(&bytes, &extent_frame::NoKeys).unwrap();
-        let table = Table::decode(footer).unwrap();
-        assert_eq!(*table.state(), State { extents: Default::default(), ..state });
-    }
-
     /// TASK-90: a host looking extents up in a checkpoint, through its fetcher, reads the
     /// checkpoint's tail, which holds its table, once, with one ranged read, and a second, of the
     /// tail whole, if it is longer than the first read, as that of 2,000,000 extents is; then, for

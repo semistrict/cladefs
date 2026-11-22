@@ -1303,22 +1303,3 @@ pub(super) mod target {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Board 5732: a migration of a cell reserves its path from before its prepare is asked, so
-    /// that a second at once is refused rather than prepared beside it; one that never began lets
-    /// the path go.
-    #[test]
-    fn migrations_of_a_cell_reserve_its_path_before_they_prepare() {
-        let path = Path::new("/cells/a");
-        let first = Reserved::new(path).unwrap();
-        assert_eq!(Reserved::new(path).err(), Some(Errno::EBUSY));
-        assert!(Reserved::new(Path::new("/cells/b")).is_ok(), "another cell's path is free");
-        drop(first);
-        drop(Reserved::new(path).unwrap());
-        assert!(OUTGOING.get().lock().unwrap().is_empty());
-    }
-}

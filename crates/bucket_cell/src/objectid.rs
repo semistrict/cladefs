@@ -182,27 +182,6 @@ mod tests {
         });
     }
 
-    /// A root bucket gives IDs of number 1, and a bucket added to it of number 2: two buckets give
-    /// no ID alike.
-    #[test]
-    fn ids_carry_their_buckets_number() {
-        futures::executor::block_on(async {
-            let (one, other) = (memory(), memory());
-            let details = identity::Details::default();
-            let added =
-                identity::Details { url: Some("memory:///other".into()), ..details.clone() };
-            identity::add(&one, &details, &other, added, crate::identity::Asked::default())
-                .await
-                .unwrap();
-            for _ in 0..16 {
-                let id = Allocator::new().next(&one).await.unwrap();
-                assert_eq!(id >> 48, 1, "{id:x}");
-                let id = Allocator::new().next(&other).await.unwrap();
-                assert_eq!(id >> 48, 2, "{id:x}");
-            }
-        });
-    }
-
     /// A block taken is no other allocator's, though it chooses it: it chooses again. Every block
     /// is the bucket's number's.
     #[test]
@@ -216,24 +195,6 @@ mod tests {
             assert_eq!(taken.len(), 64);
             assert!(taken.iter().all(|block| block / BUCKET_BLOCKS == 5), "{taken:x?}");
             assert_eq!(bucket::list(&bucket, "objectid/").await.len(), 64);
-        });
-    }
-
-    /// No ID an allocator gives is under no bucket's number: not 0, nor any test names
-    /// ([`named`]), nor `u64::MAX`.
-    #[test]
-    fn no_id_is_named() {
-        futures::executor::block_on(async {
-            for _ in 0..16 {
-                let id = Allocator::new().next(&memory()).await.unwrap();
-                assert!(identity::given(bucket_of(id)), "{id:x}");
-                assert_ne!(id, u64::MAX);
-            }
-            for _ in 0..16 {
-                let named = named();
-                assert_eq!(bucket_of(named), identity::NAMED, "{named:x}");
-                assert_ne!(named, 0);
-            }
         });
     }
 

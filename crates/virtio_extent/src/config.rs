@@ -171,20 +171,6 @@ mod tests {
         }
     }
 
-    /// cladefs: a device's cache is Writeback unless its configuration says Unsafe (TASK-363).
-    #[test]
-    fn caches_are_writeback_unless_unsafe() {
-        let json =
-            r#"{"id":"a","tag":"fxfs","path_on_host":"/s","capacity":1,"cladefsd_socket":"/e"}"#;
-        let config: Config = serde_json::from_str(json).unwrap();
-        assert_eq!(config.cache_type, CacheType::Writeback);
-        assert_eq!(serde_json::to_string(&config).unwrap(), json);
-        let unsafe_json = json.replace('}', r#","cache_type":"Unsafe"}"#);
-        let config: Config = serde_json::from_str(&unsafe_json).unwrap();
-        assert_eq!(config.cache_type, CacheType::Unsafe);
-        assert_eq!(serde_json::to_string(&config).unwrap(), unsafe_json);
-    }
-
     #[test]
     fn configurations_deserialize() {
         let json = r#"{
@@ -238,34 +224,5 @@ mod tests {
         none.validate().unwrap();
         let private = Config { dax_private_max_bytes: Some(page), ..none };
         assert_eq!(private.validate(), Err(ConfigError::InvalidDaxPrivateMaxBytes(page)));
-    }
-
-    /// A writer's features and a follower's, with a window and without.
-    #[test]
-    fn features_are_as_configured() {
-        let writer = config("a");
-        assert_eq!(writer.features(), 0b1001_1101_1101);
-        let follower = Config { read_only: true, ..config("a") };
-        assert_eq!(follower.features(), 0b1001_1011_0001);
-        assert_eq!(Config { dax_window_size: None, ..writer }.features(), 0b1000_0101_1100);
-        assert_eq!(Config { dax_window_size: None, ..follower }.features(), 0b1000_0011_0000);
-    }
-
-    /// cladefs TASK-227: a writer's window holds 1 GiB of private pages at most unless configured
-    /// otherwise, whatever its size: the window is address space, as large as the data, and its
-    /// private pages are memory, the VM process's. Half a 64 GiB window's pages, as TASK-164.11's
-    /// default had it, would have let a VM hold 32 GiB of them. A window smaller than the default
-    /// holds as many as it has pages; one of a page, one. Configured, its bytes are as many pages
-    /// (TASK-502).
-    #[test]
-    fn a_windows_private_pages_are_not_its_size() {
-        let page = cladefs::pages::page_size();
-        let gib = (1 << 30) / page;
-        assert_eq!(private_max(64 << 30, None), gib);
-        assert_eq!(private_max(2 << 30, None), gib);
-        assert_eq!(private_max(512 << 20, None), (512 << 20) / page);
-        assert_eq!(private_max(64 << 30, Some(16 * page)), 16);
-        assert_eq!(private_max(64 << 30, Some(4 << 30)), 4 * gib);
-        assert_eq!(private_max(page, None), 1);
     }
 }

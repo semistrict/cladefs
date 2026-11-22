@@ -98,15 +98,17 @@ if part madsim; then
         -p physmem -p bucket_cell -p local_cell -p cladefs
     # Each test over CLADEFS_MADSIM_SEEDS seeds, 20 unless said, from MADSIM_TEST_SEED's, 1 unless
     # said, after the regression seeds, those that once failed (crates/cladefs/tests/madsim-seeds,
-    # TASK-685.8): each seed a process of its own, as what a simulation's hosts held, leaked as
-    # their node-local values are, stays in its process for the next to find (TASK-685.15). Every
-    # seed runs; failures of open bugs (crates/cladefs/tests/madsim-known) are said as known, and
-    # any other fails the part (scripts/madsim-seeds.py, board 2912). On macOS as on Linux.
+    # TASK-685.8): each seed a process of its own, as what a simulation's hosts held in memory,
+    # leaked as their node-local values are, stays in its process (their physical memory's mappings
+    # and descriptors let go as each ends, board 2890). Every seed runs; failures of open bugs
+    # (crates/cladefs/tests/madsim-known) are said as known, and any other fails the part
+    # (scripts/madsim-seeds.py, board 2912). On macOS as on Linux.
     "${madsim[@]}" "$root/scripts/madsim-seeds.py" --first "${MADSIM_TEST_SEED:-1}" \
         --count "${CLADEFS_MADSIM_SEEDS:-20}" "$@"
     # A rule search, `*_needs_*`, runs its own seeds, once.
     "${madsim[@]}" cargo nextest run --manifest-path "$root/Cargo.toml" -p node_local -p host_fs \
-        -p bucket_cell -p local_cell -p cladefs --test madsim -E 'test(/_needs_/)' --no-tests=pass "$@"
+        -p physmem -p bucket_cell -p local_cell -p cladefs --test madsim -E 'test(/_needs_/)' \
+        --no-tests=pass "$@"
 fi
 # The concurrency tests under Shuttle, built with each crate's `shuttle` feature, which only they
 # can run (TASK-44).

@@ -371,42 +371,9 @@ pub fn memory_bytes() -> Result<u64, String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn meminfo_gives_total_and_available() {
-        let meminfo = "MemTotal:       28311740 kB\nMemFree:          512000 kB\n\
-                       MemAvailable:   20000000 kB\nBuffers: 1 kB\n";
-        assert_eq!(meminfo_of(meminfo), Some((28311740 * 1024, 20000000 * 1024)));
-        assert_eq!(meminfo_of("MemTotal: 1 kB\n"), None);
-    }
-
-    #[test]
-    fn a_cgroups_room_counts_its_inactive_files_reclaimable() {
-        let stat = "anon 100\nfile 900\ninactive_file 300\nactive_file 600\n";
-        assert_eq!(
-            room_of("8589934592\n", "8000000000\n", stat),
-            Some(8589934592 + 300 - 8000000000)
-        );
-        assert_eq!(room_of("max\n", "8000000000\n", stat), None);
-        assert_eq!(room_of("100\n", "1000\n", stat), Some(0));
-    }
-
-    #[test]
-    fn the_allowance_is_whats_held_and_available_less_the_headroom() {
-        const GIB: u64 = 1 << 30;
-        let chunk = CHUNK_SIZE as u64;
-        let bytes = |held, host, headroom| allowance(held, host, headroom, 0, false).bytes;
-        let host = HostMemory { total: 32 * GIB, available: 10 * GIB };
-        assert_eq!(bytes(4 * GIB, host, 2 * GIB), 12 * GIB);
-        // Squeezed past the headroom: what is held less what is missing.
-        let squeezed = HostMemory { total: 32 * GIB, available: GIB };
-        assert_eq!(bytes(4 * GIB, squeezed, 2 * GIB), 3 * GIB);
-        // A chunk at least, and whole chunks.
-        assert_eq!(bytes(0, squeezed, 2 * GIB), chunk);
-        assert_eq!(bytes(chunk + 1, HostMemory { total: GIB, available: 0 }, 0), chunk);
-    }
-
     /// cladefs: board 5662: the allowance never goes under the floor, however little the host has
-    /// left; the host is full under it, and stays full until the room is past it and a quarter more.
+    /// left; the host is full under it, and stays full until the room is past it and a quarter more:
+    /// the edges a test end to end reaches only by luck.
     #[test]
     fn the_allowance_keeps_its_floor_and_says_the_host_full_under_it() {
         const MIB: u64 = 1 << 20;
@@ -421,68 +388,5 @@ mod tests {
         assert!(!allowance(40 * MIB, host(1284 * MIB), 1024 * MIB, floor, false).full);
         let past = allowance(40 * MIB, host(1324 * MIB), 1024 * MIB, floor, true);
         assert_eq!(past, Allowance { bytes: 340 * MIB, full: false });
-    }
-
-    /// cladefs: board 5662: the floor is a sixty-fourth of the daemon's memory, 256 MiB at least
-    /// and an eighth of it at most, in whole chunks.
-    #[test]
-    fn the_floor_is_a_sixty_fourth_of_the_memory_256_mib_at_least_an_eighth_at_most() {
-        const GIB: u64 = 1 << 30;
-        assert_eq!(floor(64 * GIB), Ok(GIB));
-        assert_eq!(floor(4 * GIB), Ok(256 << 20));
-        assert_eq!(floor(27 * GIB + 12345), Ok(432 << 20));
-        assert_eq!(floor(GIB), Ok(128 << 20));
-        assert_eq!(floor(1 << 20), Ok(CHUNK_SIZE as u64));
-    }
-
-    /// cladefs: board 5662: the daemon's memory is the host's, or less: a host's smaller than every
-    /// cgroup's limit is its.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn the_limit_is_the_hosts_when_less_than_the_cgroups() {
-        assert_eq!(limit(1 << 20), 1 << 20);
-    }
-
-    #[test]
-    fn disk_headrooms_are_bytes_or_a_share_and_by_default_a_twentieth() {
-        const GIB: u64 = 1 << 30;
-        assert_eq!(disk_headroom_of(None), Ok(None));
-        assert_eq!(disk_headroom_of(Some("")), Ok(None));
-        assert_eq!(disk_headroom_of(Some("1024")), Ok(Some(DiskHeadroom::Bytes(1024))));
-        assert_eq!(disk_headroom_of(Some("5%")), Ok(Some(DiskHeadroom::Percent(5))));
-        for wrong in ["5 %", "100%", "-1", "1G", "%"] {
-            assert_eq!(
-                disk_headroom_of(Some(wrong)),
-                Err(format!("CLADEFSD_DISK_HEADROOM is bytes or N%, not {wrong:?}"))
-            );
-        }
-        // A twentieth of a large disk; 4 GiB at least; half of a small one at most.
-        assert_eq!(disk_headroom(4000 * GIB, None), 200 * GIB);
-        assert_eq!(disk_headroom(40 * GIB, None), 4 * GIB);
-        assert_eq!(disk_headroom(2 * GIB, None), GIB);
-        assert_eq!(disk_headroom(4000 * GIB, Some(DiskHeadroom::Percent(2))), 80 * GIB);
-        assert_eq!(disk_headroom(4000 * GIB, Some(DiskHeadroom::Bytes(GIB))), GIB);
-    }
-
-    #[test]
-    fn a_disks_allowance_is_whats_held_and_free_less_whats_not_landed_and_the_headroom() {
-        assert_eq!(disk_allowance(40, 100, 10, 30), 100);
-        assert_eq!(disk_allowance(40, 0, 10, 50), 0);
-    }
-
-    #[test]
-    fn pressure_enters_under_the_headroom_and_leaves_a_quarter_past_it() {
-        let headroom = 400;
-        assert!(!pressured(false, 400, headroom));
-        assert!(pressured(false, 399, headroom));
-        assert!(pressured(true, 499, headroom));
-        assert!(!pressured(true, 500, headroom));
-    }
-
-    #[test]
-    fn shares_go_by_weight() {
-        let tenants = [(0xa, 3), (0xb, 1), (0xc, 0)];
-        assert_eq!(shares(400, &tenants), [(0xa, 300), (0xb, 100), (0xc, 0)]);
-        assert_eq!(shares(400, &[(0xf, 0)]), [(0xf, 0)]);
     }
 }

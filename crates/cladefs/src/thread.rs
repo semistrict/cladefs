@@ -84,14 +84,6 @@ pub fn run<'a, T: Send + 'static>(
 mod tests {
     use super::*;
 
-    /// A thread returns what it ran returns; one that panicked, an error.
-    #[test]
-    fn threads_return_what_they_ran_returns() {
-        assert_eq!(spawn("returns", || 42).unwrap().join().unwrap(), 42);
-        let panicked = spawn("panics", || -> u8 { panic!("as it should") }).unwrap();
-        assert!(panicked.join().is_err());
-    }
-
     /// What runs on another thread borrows the caller's, which it changes before the caller goes
     /// on.
     #[test]

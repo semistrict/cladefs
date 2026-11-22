@@ -1919,94 +1919,6 @@ mod tests {
         }
     }
 
-    /// An open cell's closed segments are the objects of its cell in the bucket, byte for byte, as
-    /// are its extents stored on their own (doc-7, decision 1): the uploader puts its files; and
-    /// once the bucket has acknowledged them, they leave the open cell whole, into the host's
-    /// cache, as those objects, which the open cell's reads read there with the bucket's gone
-    /// (TASK-165.8).
-    #[tokio::test(flavor = "multi_thread")]
-    async fn uploaded_segments_are_the_cells_files() {
-        use bucket_cell::layout::{self, Footer};
-        let dir = tempfile::tempdir().unwrap();
-        let memory = Arc::new(InMemory::new());
-        let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
-        let cache = Arc::new(Cache::open(&dir.path().join("cache"), 1 << 30).unwrap());
-        let options = local_cell::upload::Options { cache: Some(cache.clone()), ..idle() };
-        let open_cell =
-            kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options)
-                .await
-                .unwrap();
-        let cell = open_cell.cell();
-        write(&open_cell, 1, &pattern(1, BLOCK)).await;
-        write(&open_cell, 2, &pattern(2, 4 << 20)).await;
-        open_cell.commit(Some(b"one")).await.unwrap();
-        write(&open_cell, 3, &pattern(3, 2 * BLOCK)).await;
-        open_cell.commit(Some(b"two")).await.unwrap();
-
-        // The open cell's files of `kind`, by their contents.
-        let files = |kind: &str| -> Vec<Vec<u8>> {
-            let path =
-                dir.path().join("store").join(kind).join(base32_id::Padded(cell.id).to_string());
-            let mut files: Vec<_> = std::fs::read_dir(path)
-                .unwrap()
-                .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
-                .collect();
-            files.sort();
-            files
-        };
-        // The bucket's objects under `prefix`.
-        let objects = |prefix: String| -> Vec<Vec<u8>> {
-            futures::executor::block_on(async {
-                let listed = bucket_cell::Bucket::list(&*bucket, &prefix).await.unwrap();
-                let mut objects = Vec::new();
-                for meta in listed {
-                    let object = bucket_cell::Bucket::get(&*bucket, &meta.key).await.unwrap();
-                    objects.push(object.bytes);
-                }
-                objects
-            })
-        };
-        // The cell's segments but its writer's fence, which holds no commit.
-        let mut segments: Vec<_> = objects(layout::segments(cell))
-            .into_iter()
-            .filter(|bytes| !layout::footer::<Footer>(bytes).unwrap().contents.commits.is_empty())
-            .collect();
-        segments.sort();
-        assert_eq!(segments.len(), 2);
-        let mut own = objects(layout::extents(cell));
-        own.sort();
-        assert_eq!(own.len(), 1);
-        assert_eq!((files("segments"), files("extents")), (Vec::new(), Vec::new()));
-        assert_eq!(
-            uploaded(&bucket, cell),
-            (
-                vec![(1, pattern(1, BLOCK)), (2, pattern(2, 4 << 20)), (3, pattern(3, 2 * BLOCK))],
-                Some(b"two".to_vec())
-            )
-        );
-        futures::executor::block_on(async {
-            use futures::StreamExt as _;
-            use object_store::{ObjectStore as _, ObjectStoreExt as _};
-            for prefix in ["segments", "extents"] {
-                let prefix = object_store::path::Path::from(prefix);
-                for meta in memory.list(Some(&prefix)).collect::<Vec<_>>().await {
-                    memory.delete(&meta.unwrap().location).await.unwrap();
-                }
-            }
-        });
-        let written =
-            [(1, pattern(1, BLOCK)), (2, pattern(2, 4 << 20)), (3, pattern(3, 2 * BLOCK))];
-        for (sequence, data) in written {
-            let extent = ExtentId { cell: cell.id, sequence };
-            let mut read = vec![0; data.len()];
-            open_cell
-                .read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut read[..])])
-                .await
-                .unwrap();
-            assert!(read == data, "extent {sequence} reads other data");
-        }
-    }
-
     /// cladefs: a byte the host's disk damaged in a file the uploader puts as it is, a sealed
     /// extent's own, fails the upload, and the commit waiting for it, rather than going to object
     /// storage under the CRC it fails (TASK-153.11).
@@ -2160,28 +2072,6 @@ mod tests {
         let made = open_cell.make_version(None).await.err().and_then(|err| err.errno());
         assert_eq!(made, Some(EROFS));
         assert_eq!(open_cell.set_capacity(2 << 30).await, Err(EROFS));
-    }
-
-    /// TASK-570: a cell names [`bucket_cell::layout::MAX_VERSIONS`] versions at most (doc-18):
-    /// one more, with no window, fails with `EMLINK`, making none, as every acknowledgement after
-    /// would write it into the head; one with a window, which drops the oldest, is made.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn cells_make_so_many_versions_at_most() {
-        let most = bucket_cell::layout::MAX_VERSIONS;
-        let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let open_cell = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
-            .await
-            .unwrap();
-        write(&open_cell, 1, &pattern(1, BLOCK)).await;
-        open_cell.commit(None).await.unwrap();
-        for _ in 0..most {
-            open_cell.make_version(None).await.unwrap();
-        }
-        let refused = open_cell.make_version(None).await.err().and_then(|err| err.errno());
-        assert_eq!(refused, Some(crate::Errno::EMLINK));
-        assert_eq!(open_cell.versions().await.len(), most);
-        open_cell.make_version(Some(1)).await.unwrap();
     }
 
     /// TASK-610: what this process made versions of it keeps for versions their cells name alone:
@@ -3482,49 +3372,6 @@ mod tests {
         assert_eq!(first.root(), Ok(b"meanwhile".to_vec()));
     }
 
-    /// A fork of an open cell kept in object storage is a fork of its cell there, recorded once the
-    /// parent uploaded through it: it inherits the parent's extents rather than upload them again,
-    /// and what either commits after is its own.
-    /// TASK-160.10: an open cell at a version refuses all that would change what it holds, with
-    /// `EROFS`, whoever asks: writes, frees, commits, a resize, a writer taking it over. What
-    /// changes none of its extents it does: it forks, and is made public.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn copies_of_versions_refuse_what_would_change_them() {
-        let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let source = kept_in(dir.path().join("source"), (1 << 30, None), &bucket.clone(), idle())
-            .await
-            .unwrap();
-        let extent = write(&source, 1, &pattern(1, BLOCK)).await;
-        source.commit(Some(b"root")).await.unwrap();
-        let path = dir.path().join("copy");
-        source.uploaded_version_at(&path).await.unwrap();
-        drop(source);
-
-        let version = reopened(&path, idle()).await.unwrap();
-        assert_eq!(version.access().role, crate::CellRole::Version);
-        let capacity = version.info().unwrap().capacity;
-        let own = ExtentId { cell: version.cell().id, sequence: 2 };
-        let refused = [
-            ("set_capacity", version.set_capacity(2 * capacity).await),
-            ("write", version.write(own, 0, &[VolatileSlice::from(&pattern(2, BLOCK)[..])]).await),
-            ("free", version.free(extent)),
-            ("commit", version.commit(Some(b"changed")).await),
-            ("commit_ordered", version.commit_ordered(None).await),
-            ("take_over", version.take_over()),
-        ];
-        for (what, result) in refused {
-            assert_eq!(result, Err(crate::Errno::EROFS), "{what}");
-        }
-        assert_eq!(version.info().unwrap().capacity, capacity);
-        assert_eq!(version.root().unwrap(), b"root");
-        version
-            .fork_to(dir.path().join("fork"), crate::host_cell::fork_child(version.cell()))
-            .await
-            .unwrap();
-        version.make_public().unwrap();
-    }
-
     /// TASK-395.7: a version forks into a cell of another tenant's only while shared: refused with
     /// `EACCES` before, leaving nothing at the fork's path; shared, the fork is made; unshared, new
     /// forks are refused again. Forks into its own tenant's cells need no sharing; sharing a
@@ -3929,76 +3776,6 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn forks_inherit_their_parents_extents() {
-        let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let parent = kept_in(dir.path().join("parent"), (1 << 30, None), &bucket.clone(), idle())
-            .await
-            .unwrap();
-        let large = pattern(2, 4 << 20);
-        let small = write(&parent, 1, &pattern(1, BLOCK)).await;
-        let own = write(&parent, 2, &large).await;
-        // Committed, not yet durable: the fork makes it so, and uploads it, first.
-        parent.commit_ordered(Some(b"root")).await.unwrap();
-        let child = crate::host_cell::fork_child(parent.cell());
-        let checkpoints = || {
-            let prefix = bucket_cell::layout::checkpoints(parent.cell());
-            futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, &prefix)).unwrap()
-        };
-        assert_eq!(checkpoints().len(), 0);
-        parent.fork_to(dir.path().join("child"), child).await.unwrap();
-        // A checkpoint at the fork, which the child recovers from.
-        assert_eq!(checkpoints().len(), 1);
-        write(&parent, 3, &pattern(3, BLOCK)).await;
-        parent.commit(None).await.unwrap();
-
-        let record =
-            futures::executor::block_on(bucket_cell::head::get(&*bucket, child)).unwrap().unwrap();
-        let origin = record.origin().unwrap();
-
-        assert_eq!(origin.parent, parent.cell());
-        let inherited = |state: &bucket_cell::State| {
-            let parents = [
-                bucket_cell::layout::segments(parent.cell()),
-                bucket_cell::layout::extents(parent.cell()),
-            ];
-            state
-                .extents
-                .iter()
-                .filter(|(_, location)| {
-                    parents.iter().any(|prefix| location.key.starts_with(prefix))
-                })
-                .map(|(extent, _)| extent.sequence)
-                .collect::<Vec<_>>()
-        };
-
-        let forked = reopened(dir.path().join("child"), idle()).await.unwrap();
-        let state =
-            futures::executor::block_on(recover(&*bucket, child, Some(origin))).unwrap().state;
-        assert_eq!(inherited(&state), [small.sequence, own.sequence]);
-        assert_eq!(state.root, Some(b"root".to_vec()));
-        let mut data = vec![0; 4 << 20];
-        forked.read(own, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).await.unwrap();
-        assert_eq!(data, large);
-        let info = forked.info().unwrap();
-        let sequence = info.next_sequence.max(info.sequence_floor);
-        let mine = write(&forked, sequence, &pattern(4, BLOCK)).await;
-        forked.commit(None).await.unwrap();
-        drop(forked);
-        let state =
-            futures::executor::block_on(recover(&*bucket, child, Some(origin))).unwrap().state;
-        assert_eq!(inherited(&state), [small.sequence, own.sequence]);
-        let held: Vec<_> = state.extents.keys().map(|extent| extent.sequence).collect();
-        assert_eq!(held, [small.sequence, own.sequence, mine.sequence]);
-        // And one when the parent's uploader stops, the open cell closing.
-        let parent_cell = parent.cell();
-        drop(parent);
-        let prefix = bucket_cell::layout::checkpoints(parent_cell);
-        let listed = futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, &prefix));
-        assert_eq!(listed.unwrap().len(), 2);
-    }
-
     /// TASK-79.39: a fork's child takes its cell through its marker, which names the fork's
     /// commit, the last the child inherits, though a later commit's segment is acknowledged with
     /// the fork's.
@@ -4119,47 +3896,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(taken.write(sealed, 0, &again).await, Err(crate::Errno::EPERM));
-    }
-
-    /// TASK-165.3: a cell's capacity is its state, set by the commit after a resize: a host that
-    /// takes the cell has it, not the capacity it made its open cell with, whether the cell's state
-    /// there comes from a checkpoint or from its segments' footers; and an open cell attaching to a
-    /// cell that has none, or another, sets its own with its next commit.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn resizes_hold_where_their_cell_is_taken() {
-        for checkpointed in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
-            let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-            let first = kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle())
-                .await
-                .unwrap();
-            let cell = first.cell();
-            let recovered = || {
-                let recovered = recover(&*bucket, cell, None);
-                futures::executor::block_on(recovered).unwrap().state.capacity
-            };
-            assert_eq!(recovered(), None, "{checkpointed}");
-            first.commit(None).await.unwrap();
-            assert_eq!(recovered(), Some(1 << 30), "{checkpointed}");
-            write(&first, 1, &pattern(1, BLOCK)).await;
-            first.set_capacity(3 << 29).await.unwrap();
-            first.commit(None).await.unwrap();
-            assert_eq!(recovered(), Some(3 << 29), "{checkpointed}");
-            if checkpointed {
-                drop(first);
-            } else {
-                std::mem::forget(first);
-            }
-
-            let taken =
-                kept_in(dir.path().join("taken"), (1 << 30, Some(cell)), &bucket.clone(), idle())
-                    .await
-                    .unwrap();
-            assert_eq!(taken.info().unwrap().capacity, 3 << 29, "{checkpointed}");
-            taken.set_capacity(1 << 31).await.unwrap();
-            taken.commit(None).await.unwrap();
-            assert_eq!(recovered(), Some(1 << 31), "{checkpointed}");
-        }
     }
 
     /// TASK-141.2: a cell whose record says a format newer than this daemon's is refused, naming
@@ -4410,52 +4146,5 @@ mod tests {
         let parent = reopened(dir.path().join("parent"), idle()).await.unwrap();
         parent.commit(Some(b"later")).await.unwrap();
         assert_eq!(parent.wait_uploaded().await, Ok(()));
-    }
-
-    /// An open cell of a cell taken elsewhere keeps what it reads from the bucket in the host's
-    /// cache, and reads it there next.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn reads_keep_what_they_fetch() {
-        let dir = tempfile::tempdir().unwrap();
-        let memory = Arc::new(InMemory::new());
-        let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
-        let cache = Arc::new(Cache::open(&dir.path().join("cache"), 1 << 30).unwrap());
-        let options = local_cell::upload::Options { cache: Some(cache.clone()), ..idle() };
-        let first = kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle())
-            .await
-            .unwrap();
-        let cell = first.cell();
-        let data = pattern(2, 2 << 20);
-        let extent = write(&first, 1, &data).await;
-        first.commit(None).await.unwrap();
-        drop(first);
-
-        let second =
-            kept_in(dir.path().join("second"), (1 << 30, Some(cell)), &bucket.clone(), options)
-                .await
-                .unwrap();
-        let read = async || {
-            let mut read = vec![0; 2 << 20];
-            second
-                .read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut read[..])])
-                .await
-                .unwrap();
-            read
-        };
-        assert_eq!(read().await, data);
-        // Its parts, as they are stored: compressed.
-        assert_ne!(cache.bytes(), 0);
-        assert!(cache.bytes() < (2 << 20) / 100, "{} bytes kept", cache.bytes());
-
-        // With the cell's segments gone from the bucket, its data is read from the cache.
-        futures::executor::block_on(async {
-            use futures::StreamExt as _;
-            use object_store::{ObjectStore as _, ObjectStoreExt as _};
-            let prefix = object_store::path::Path::from("segments");
-            for meta in memory.list(Some(&prefix)).collect::<Vec<_>>().await {
-                memory.delete(&meta.unwrap().location).await.unwrap();
-            }
-        });
-        assert_eq!(read().await, data);
     }
 }

@@ -1944,16 +1944,4 @@ mod tests {
         hashed(&bounds.iter().flat_map(|bound| bound.to_le_bytes()).collect::<Vec<_>>());
         hash
     }
-
-    /// cladefs: the extents a `FREE_MANY`'s payload names are those put in it, in order; one that
-    /// holds part of an ID is refused (TASK-92.13).
-    #[test]
-    fn free_many_payloads_name_their_extents() {
-        let extents =
-            [ExtentId { cell: 1, sequence: 2 }, ExtentId { cell: u64::MAX, sequence: 1 << 40 }];
-        let payload = extent_ids_payload(&extents);
-        assert_eq!(payload.len(), 2 * EXTENT_ID_BYTES);
-        assert_eq!(extent_ids(&payload).unwrap().collect::<Vec<_>>(), extents);
-        assert_eq!(extent_ids(&payload[..EXTENT_ID_BYTES + 8]).err(), Some(Errno::EINVAL));
-    }
 }

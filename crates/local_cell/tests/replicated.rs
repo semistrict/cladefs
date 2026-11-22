@@ -1229,17 +1229,32 @@ async fn earlier_writers_logs_given_up(budget: u64) -> bool {
     true
 }
 
-/// A host's peers as [`Peers`] reaches them, but `garbled`, whose answers say its logs of
-/// segments' records are `PAD` bytes longer than they are, padded with what no record frames.
-struct Garbling {
+/// A host's peers as [`Peers`] reaches them, but `member`, whose answers say otherwise of its
+/// logs, as `how` says.
+struct Misreporting {
     peers: Peers,
-    garbled: String,
+    member: String,
+    how: Misreport,
 }
 
-/// What [`Garbling`] pads a member's logs with.
+/// What [`Misreporting`]'s member says otherwise.
+#[derive(Clone, Copy)]
+enum Misreport {
+    /// Its logs of segments' records [`PAD`] bytes longer than they are, padded with what no
+    /// record frames.
+    Garbled,
+    /// A log more, [`EMPTY_LOG`], ending at nothing, its file empty: as a member holds a log
+    /// whose first append failed after its file was made (board 5914).
+    Empty,
+}
+
+/// What [`Misreport::Garbled`] pads a member's logs with.
 const PAD: usize = 64 << 10;
 
-impl local_cell::upload::Members for Garbling {
+/// The log [`Misreport::Empty`] says its member holds: of a segment's records, past any written.
+const EMPTY_LOG: u64 = 1 << 20;
+
+impl local_cell::upload::Members for Misreporting {
     fn me(&self) -> Result<bucket_cell::layout::Member, String> {
         self.peers.me()
     }
@@ -1271,14 +1286,18 @@ impl local_cell::upload::Members for Garbling {
         epoch: u64,
     ) -> futures::future::BoxFuture<'a, Result<Vec<(u64, u64)>, String>> {
         Box::pin(async move {
-            let ends = self.peers.fence(cell, configuration, member, epoch).await?;
-            Ok(match member.address == self.garbled {
-                true => ends
-                    .into_iter()
-                    .map(|(log, end)| (log, end + if log & 1 == 0 { PAD as u64 } else { 0 }))
-                    .collect(),
-                false => ends,
-            })
+            let mut ends = self.peers.fence(cell, configuration, member, epoch).await?;
+            if member.address == self.member {
+                match self.how {
+                    Misreport::Garbled => {
+                        for (log, end) in &mut ends {
+                            *end += if *log & 1 == 0 { PAD as u64 } else { 0 };
+                        }
+                    }
+                    Misreport::Empty => ends.push((EMPTY_LOG, 0)),
+                }
+            }
+            Ok(ends)
         })
     }
 
@@ -1290,11 +1309,20 @@ impl local_cell::upload::Members for Garbling {
         log: u64,
     ) -> futures::future::BoxFuture<'a, Result<Vec<u8>, String>> {
         Box::pin(async move {
-            let mut bytes = self.peers.read(cell, configuration, member, log).await?;
-            if member.address == self.garbled && log & 1 == 0 {
-                bytes.extend(std::iter::repeat_n(0xa5, PAD));
+            if member.address != self.member {
+                return self.peers.read(cell, configuration, member, log).await;
             }
-            Ok(bytes)
+            match self.how {
+                Misreport::Empty if log == EMPTY_LOG => Ok(Vec::new()),
+                Misreport::Empty => self.peers.read(cell, configuration, member, log).await,
+                Misreport::Garbled => {
+                    let mut bytes = self.peers.read(cell, configuration, member, log).await?;
+                    if log & 1 == 0 {
+                        bytes.extend(std::iter::repeat_n(0xa5, PAD));
+                    }
+                    Ok(bytes)
+                }
+            }
         })
     }
 
@@ -1313,6 +1341,21 @@ impl local_cell::upload::Members for Garbling {
 /// commit told replicated, held by that member alone, is there.
 #[tokio::test(flavor = "multi_thread")]
 async fn takes_prefer_whole_authentic_copies_to_longer_garbled_ones() {
+    take_past(Misreport::Garbled).await;
+}
+
+/// Board 5914: a take finding a member holding a log empty, its first append having failed after
+/// its file was made, takes the cell, every commit told replicated there: an empty copy holds
+/// nothing, as one never made; taken for a copy, no header of its own, none authentic, it failed
+/// every take.
+#[tokio::test(flavor = "multi_thread")]
+async fn takes_count_an_empty_copy_of_a_log_for_none() {
+    take_past(Misreport::Empty).await;
+}
+
+/// A cell written on a with b and c its members, c out of reach for its last commits; then a lost
+/// and c back, misreporting its logs as `how` says: d takes the cell, holding all it was told.
+async fn take_past(how: Misreport) {
     let host = replicated_host().await;
     let all = directories(&["a", "b", "c", "d", "e"]);
     let lost = Lost::default();
@@ -1338,10 +1381,10 @@ async fn takes_prefer_whole_authentic_copies_to_longer_garbled_ones() {
     let replicator = cell.replicator().unwrap();
     lose(writer, (uploader, cell, replicator));
 
-    // a lost, c back, answering its logs as longer than b's: d takes the cell.
+    // a lost, c back, misreporting its logs: d takes the cell.
     lost.lock().unwrap().remove("c");
     lost.lock().unwrap().insert("a".into());
-    let garbling = Garbling { peers: peers("d"), garbled: "c".into() };
+    let misreporting = Misreporting { peers: peers("d"), member: "c".into(), how };
     let elsewhere = MemDir::new();
     LocalCell::make(&elsewhere, DESCRIPTION, Some(URL), None).unwrap();
     let recovering = LocalCell::recover_unmade(elsewhere).unwrap();
@@ -1352,7 +1395,7 @@ async fn takes_prefer_whole_authentic_copies_to_longer_garbled_ones() {
     };
     let options = upload::Options {
         interval: Duration::from_secs(3600),
-        members: Some(upload::MembersOf(Arc::new(garbling))),
+        members: Some(upload::MembersOf(Arc::new(misreporting))),
         replace_after: Duration::from_secs(1),
         ..upload::Options::default()
     };

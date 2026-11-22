@@ -375,71 +375,6 @@ mod tests {
         assert_eq!(runs.runs().collect::<Vec<_>>(), [&(extent(1), 8, 8), &(extent(2), 0, 8)]);
     }
 
-    /// cladefs: a cell reads as it displays, `TENANT/CELL` in base 32; anything else is no
-    /// cell.
-    #[test]
-    fn cells_parse_as_they_display() {
-        let cell = CellId { tenant: 10, id: 33 };
-        assert_eq!(cell.to_string(), "a/11");
-        assert_eq!("a/11".parse(), Ok(cell));
-        assert_eq!("000000000000a/0000000000011".parse(), Ok(cell));
-        for wrong in ["11", "a/bp/11", "a/xu", "a/B", "a/", ""] {
-            let refused = format!("no cell, TENANT/CELL in base 32: {wrong}");
-            assert_eq!(wrong.parse::<CellId>(), Err(refused));
-        }
-    }
-
-    /// A tag holds its writer's epoch above `TAG_SHIFT` and the cell's below, each recovered whole.
-    #[test]
-    fn tags_hold_both_epochs() {
-        assert_eq!(tag(3, 5), 0x0300_0000_0005);
-        let last = (1 << TAG_SHIFT) - 1;
-        assert_eq!(tag(1, last), 0x01ff_ffff_ffff);
-        assert_eq!((writer_of(tag(3, 5)), epoch_of(tag(3, 5))), (3, 5));
-        let highest = u64::MAX >> TAG_SHIFT;
-        assert_eq!((writer_of(tag(highest, last)), epoch_of(tag(highest, last))), (highest, last));
-        assert_eq!((writer_of(tag(7, 0)), epoch_of(tag(7, 0))), (7, 0));
-    }
-
-    /// A chain numbers the segments it closes on from where it starts, of its writer's epoch; the
-    /// next sequence number each names is the chain's floor at least, and never below the one
-    /// before's.
-    #[test]
-    fn chains_number_what_they_close() {
-        let own = ExtentId { cell: 2, sequence: 7 };
-        let mut chain = Chain::new(cell(2), 4, 9, 100);
-        let contents = Contents {
-            commits: vec![tag(4, 1)],
-            extents: vec![(ExtentId { cell: 2, sequence: 6 }, 0, 4096)],
-            own: vec![(own.sequence, 512)],
-            next_sequence: 50,
-            ..Contents::default()
-        };
-        assert_eq!(
-            chain.close(contents),
-            Footer {
-                cell: cell(2),
-                segment: 9,
-                epoch: 4,
-                contents: Contents {
-                    commits: vec![tag(4, 1)],
-                    extents: vec![(ExtentId { cell: 2, sequence: 6 }, 0, 4096)],
-                    own: vec![(own.sequence, 512)],
-                    next_sequence: 100,
-                    ..Contents::default()
-                },
-            }
-        );
-        let second = chain.close(Contents { next_sequence: 200, ..Contents::default() });
-        let place = |footer: &Footer| (footer.segment, footer.contents.next_sequence);
-        assert_eq!(place(&second), (10, 200));
-        let third = chain.close(Contents { next_sequence: 150, ..Contents::default() });
-        assert_eq!(place(&third), (11, 200));
-        let place = (chain.cell(), chain.epoch(), chain.next_segment());
-        assert_eq!((place, chain.next_sequence()), ((cell(2), 4, 12), 200));
-        assert_eq!(chain.tag(5), tag(4, 5));
-    }
-
     /// A copy of a chain admits the footer the chain closed, and goes on from it as the chain did;
     /// it refuses one of another cell, number or epoch, and goes on from none.
     #[test]
@@ -463,33 +398,5 @@ mod tests {
             assert_eq!(start.admit(&wrong), Err(Corrupt(refused)), "{wrong:?}");
         }
         assert_eq!(start, Chain::new(cell(2), 4, 9, 100));
-    }
-
-    /// A footer's extents of their own are the cell's, at the keys of its writer's epoch and its
-    /// number: wherever it was closed, no other.
-    #[test]
-    fn footers_name_their_own_extents_at_their_writers_keys() {
-        let mut chain = Chain::new(cell(2), 4, 9, 100);
-        let footer = chain.close(Contents { own: vec![(7, 512), (5, 8)], ..Contents::default() });
-        let (seven, five) = (ExtentId { cell: 2, sequence: 7 }, ExtentId { cell: 2, sequence: 5 });
-        assert_eq!(
-            footer.own().collect::<Vec<_>>(),
-            [
-                (seven, Location { key: extent_key(CELL, 4, 9, seven), offset: 0, len: 512 }),
-                (five, Location { key: extent_key(CELL, 4, 9, five), offset: 0, len: 8 }),
-            ]
-        );
-    }
-
-    /// The keys of extents stored on their own: under their cell's prefix, by tenant and cell; then
-    /// by cell, the writer's epoch, the segment that names them, and sequence, in fixed-width
-    /// base 32, so that a listing is in that order.
-    #[test]
-    fn extent_keys_order_by_cell_cell_epoch_segment_and_sequence() {
-        let cell = CellId { tenant: 10, id: 12 };
-        let key = extent_key(cell, 7, 42, ExtentId { cell: 2, sequence: 31 });
-        let expected = "tenants/000000000000a/cells/000000000000c/extents/\
-                        0000000000007.000000000001a.000000000000z";
-        assert_eq!(key, expected);
     }
 }

@@ -298,24 +298,6 @@ mod tests {
         result.unwrap_err().to_string()
     }
 
-    #[test]
-    fn kek_objects_open_under_the_master_key_that_sealed_them() {
-        let keys = keys(1);
-        let kek = TenantKek::random();
-        let bytes = KekObject::seal(keys.newest(), 7, &kek);
-        assert_eq!(bytes.len(), KEK_OBJECT_LEN);
-        assert_eq!(&bytes[..14], b"fxkt\x01\x01\0\0\0\0\0\0\0\x07");
-        assert_eq!(&bytes[14..22], &kek.id.0);
-        assert_eq!(&bytes[22..30], &keys.newest().id().0);
-        let object = KekObject::decode(7, &bytes).unwrap();
-        assert_matches!(&object, KekObject::Kek { tenant: 7, id, master, .. }
-            if *id == kek.id && *master == keys.newest().id());
-        let opened = object.open(&keys).unwrap();
-        assert_eq!((opened.id, opened.key.expose()), (kek.id, kek.key.expose()));
-        assert!(!bytes.windows(32).any(|window| window == kek.key.expose()));
-        assert!(!bytes.windows(32).any(|window| window == keys.newest().key().expose()));
-    }
-
     /// AC #4: a KEK object wrapped by a master key the host has not is refused naming its ID and
     /// the host's, not taken for a tenant with no KEK.
     #[test]

@@ -163,18 +163,3 @@ fn remove_stale(socket: &Path) -> Result<(), Errno> {
 fn errno(err: std::io::Error) -> Errno {
     err.raw_os_error().map_or(Errno::EIO, Errno::from_raw)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{check_tenant, socket_name};
-    use crate::Errno;
-
-    /// Tenants' IDs name their sockets, in base 32; the default tenant's is refused.
-    #[test]
-    fn ids_name_sockets() {
-        assert_eq!(socket_name(0xa), "a.sock");
-        assert_eq!(socket_name(u64::MAX), "fzzzzzzzzzzzz.sock");
-        assert_eq!(check_tenant(1), Ok(()));
-        assert_eq!(check_tenant(crate::host_cell::DEFAULT_TENANT), Err(Errno::EINVAL));
-    }
-}

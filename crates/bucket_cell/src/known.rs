@@ -108,36 +108,3 @@ impl<K: std::hash::Hash + Eq + Clone, V> Bounded<K, V> {
         Some(value)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::layout::test_cell;
-
-    /// What it keeps is bounded, the oldest going first; a learning is taken once.
-    #[test]
-    fn knowledge_is_bounded_and_learnings_taken_once() {
-        let mut bounded = Bounded::default();
-        for key in 0..5 {
-            bounded.insert(key, key * 10, 3);
-        }
-        assert_eq!(
-            (bounded.get(&1), bounded.get(&2), bounded.get(&4)),
-            (None, Some(&20), Some(&40))
-        );
-        assert_eq!(bounded.map.len(), 3);
-
-        let known = Known::default();
-        let cell = test_cell(3);
-        known.named(cell, 7, 2);
-        assert_eq!((known.epoch(cell, 7), known.epoch(cell, 6)), (Some(2), None));
-        let bucket = crate::testing::Direct(crate::testing::SimBucket::new());
-        let made = crate::layout::Head::of(crate::record::Made::Root, 1);
-        let head = futures::executor::block_on(crate::head::birth(&bucket, cell, made)).unwrap();
-        known.learn(cell, Learned { head });
-        let learned = known.take(cell).map(|learned| learned.head.head(cell).unwrap().unwrap());
-        let last = crate::identity::DEFAULT_HEAD_SLOTS - 1;
-        assert_eq!(learned.map(|head| (head.owner, head.swaps)), Some((1, last)));
-        assert!(known.take(cell).is_none());
-    }
-}

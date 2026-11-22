@@ -235,26 +235,6 @@ mod tests {
         extents.trim(keeping, published).into_iter().map(|(extent, _)| extent).collect()
     }
 
-    /// The uploader's frees stay until it releases their commits; then those up to the commit
-    /// published go.
-    #[test]
-    fn frees_go_once_released_and_published() {
-        let mut extents = KeptExtents::default();
-        let none = Keeping::none();
-        extents.insert(extent(1), freed(1, true, 4096));
-        extents.insert(extent(2), freed(2, true, 4096));
-        extents.insert(extent(3), freed(3, true, 4096));
-        assert_eq!(trimmed(&mut extents, &none, 3), []);
-        extents.release(2);
-        assert_eq!(trimmed(&mut extents, &none, 1), [extent(1)]);
-        assert_eq!(trimmed(&mut extents, &none, 3), [extent(2)]);
-        assert_eq!(extents.bytes(), 4096);
-        assert!(extents.get(&extent(3)).is_some_and(|kept| kept.uploader));
-        extents.release(3);
-        assert_eq!(trimmed(&mut extents, &none, 3), [extent(3)]);
-        assert_eq!(extents.bytes(), 0);
-    }
-
     /// An extent kept again is kept as the later free says: its bytes and its commit counted once.
     #[test]
     fn extents_kept_again_count_once() {
@@ -267,42 +247,6 @@ mod tests {
         assert_eq!(extents.views_bytes(&Keeping::of(Some(1), [])), 8192);
         assert_eq!(trimmed(&mut extents, &Keeping::none(), 2), [extent(1)]);
         assert_eq!(extents.bytes(), 0);
-    }
-
-    /// Views keep the frees after the oldest's commit, and those they pin, whenever freed.
-    #[test]
-    fn views_keep_frees_after_the_oldest_and_pins() {
-        let mut extents = KeptExtents::default();
-        for sequence in 1..=4 {
-            extents.insert(extent(sequence), freed(sequence, false, sequence << 12));
-        }
-        let keeping = Keeping::of(Some(2), [extent(1)]);
-        assert_eq!(extents.views_bytes(&keeping), (1 + 3 + 4) << 12);
-        assert_eq!(trimmed(&mut extents, &keeping, 4), [extent(2)]);
-        assert_eq!(extents.views_bytes(&keeping), (1 + 3 + 4) << 12);
-        assert_eq!(extents.bytes(), (1 + 3 + 4) << 12);
-        // Once the views go, what they kept does.
-        assert_eq!(trimmed(&mut extents, &Keeping::none(), 4), [extent(1), extent(3), extent(4)]);
-        assert_eq!(extents.views_bytes(&Keeping::none()), 0);
-    }
-
-    /// A trim counts what views keep, which stays counted until the next, though frees come
-    /// meanwhile.
-    #[test]
-    fn trims_count_what_views_keep() {
-        let mut extents = KeptExtents::default();
-        extents.insert(extent(1), freed(2, false, 1 << 12));
-        extents.insert(extent(2), freed(3, false, 2 << 12));
-        assert_eq!(extents.for_views(), 0);
-        let keeping = Keeping::of(Some(2), []);
-        assert_eq!(trimmed(&mut extents, &keeping, 3), [extent(1)]);
-        assert_eq!(extents.for_views(), 2 << 12);
-        extents.insert(extent(3), freed(4, false, 4 << 12));
-        assert_eq!(extents.for_views(), 2 << 12);
-        assert_eq!(trimmed(&mut extents, &keeping, 3), []);
-        assert_eq!(extents.for_views(), (2 + 4) << 12);
-        assert_eq!(trimmed(&mut extents, &Keeping::none(), 4), [extent(2), extent(3)]);
-        assert_eq!(extents.for_views(), 0);
     }
 
     /// What views keep, counted on from the last count as the oldest view moves on, or one opens
