@@ -578,6 +578,7 @@ impl ConfigInterrupt for Counted {
 #[derive(Debug, Default)]
 struct FakeVm {
     calls: Mutex<Vec<String>>,
+    host: AtomicUsize,
 }
 
 impl WindowVm for FakeVm {
@@ -591,7 +592,8 @@ impl WindowVm for FakeVm {
         self.calls.lock().unwrap().push(format!("release {start:#x} {len:#x}"));
     }
 
-    fn add_slot(&self, guest_addr: u64, len: u64, _host: NonNull<u8>) -> Result<u32, BoxError> {
+    fn add_slot(&self, guest_addr: u64, len: u64, host: NonNull<u8>) -> Result<u32, BoxError> {
+        self.host.store(host.as_ptr() as usize, Ordering::Relaxed);
         self.calls.lock().unwrap().push(format!("add_slot {guest_addr:#x} {len:#x}"));
         Ok(1)
     }
@@ -749,6 +751,146 @@ fn windows_holding_private_pages_take_no_snapshot() {
     assert!(device.snapshot().is_none(), "a version made");
     assert_eq!(serve_with(&device, &map(2), RESPONSE).1, 0);
     device.take_snapshot(|| {}).unwrap();
+}
+
+/// cladefs board 6917: `VIRTIO_EXTENT_MAP_MANY` forwards directly to the daemon's `MAP_MANY` in
+/// one RPC (mixing extents, zeros and `MAP_PREFAULT`), and preserves partial-failure semantics
+/// when an entry fails on the daemon (mapping entries before the error and none after it).
+#[test]
+fn maps_many_in_one_request() {
+    const EXTENTS: u64 = 64;
+    let dir = daemon();
+    let lost: virtio_extent::OnLost = Arc::new(|| panic!("the daemon went"));
+    let vm = Arc::new(FakeVm::default());
+    let config = Config { dax_window_size: Some(4 << 20), ..config(&dir, "store") };
+    let mut device = Device::new(config, 1, vm.clone(), lost).unwrap();
+    device.activate(device.features(), Arc::new(Counted::default())).unwrap();
+    let base = vm.host.load(Ordering::Relaxed) as *const u8;
+    assert!(!base.is_null(), "DAX window slot was not mapped");
+    let mut space = [0u8; size_of::<ConfigSpace>()];
+    device.read_config(0, &mut space);
+    let cell = u64::from_le(ConfigSpace::read_from_bytes(&space).unwrap().cell);
+    let ps = cladefs::pages::page_size();
+    let id = |sequence: u64| ExtentIdLe { cell: cell.to_le(), sequence: sequence.to_le() };
+
+    for sequence in 1..=EXTENTS {
+        let args = IoArgs { id: id(sequence), offset: 0, len: (ps as u32).to_le(), root_len: 0 };
+        let write = bytes(VIRTIO_EXTENT_T_WRITE, 0, Some(args), &vec![sequence as u8; ps as usize]);
+        assert_eq!(serve_with(&device, &write, RESPONSE).1, 0);
+    }
+    let commit = bytes(VIRTIO_EXTENT_T_COMMIT, 0, Some(CommitArgs::default()), &[]);
+    assert_eq!(serve_with(&device, &commit, RESPONSE).1, 0);
+    // An uncommitted (open) extent, which the daemon refuses to map with EPERM.
+    let open_seq = EXTENTS + 1;
+    let args = IoArgs { id: id(open_seq), offset: 0, len: (ps as u32).to_le(), root_len: 0 };
+    let write = bytes(VIRTIO_EXTENT_T_WRITE, 0, Some(args), &vec![0xff; ps as usize]);
+    assert_eq!(serve_with(&device, &write, RESPONSE).1, 0);
+
+    let map_args = |sequence: u64, window_offset: u64| MapArgs {
+        id: id(sequence),
+        offset: 0,
+        len: ps.to_le(),
+        window_offset: window_offset.to_le(),
+    };
+    let mut entries: Vec<u8> = (2..=EXTENTS)
+        .flat_map(|sequence| {
+            let flags = if sequence % 2 == 0 { VIRTIO_EXTENT_MAP_PREFAULT } else { 0 };
+            let entry = MapEntry {
+                map: map_args(sequence, (sequence - 1) * ps),
+                flags: flags.to_le(),
+                reserved: 0,
+            };
+            entry.as_bytes().to_vec()
+        })
+        .collect();
+    let zeros_entry = MapEntry {
+        map: map_args(0, EXTENTS * ps),
+        flags: (VIRTIO_EXTENT_MAP_ZEROS | VIRTIO_EXTENT_MAP_PREFAULT).to_le(),
+        reserved: 0,
+    };
+    entries.extend_from_slice(zeros_entry.as_bytes());
+    let many = bytes(
+        VIRTIO_EXTENT_T_MAP,
+        VIRTIO_EXTENT_MAP_MANY | VIRTIO_EXTENT_MAP_PREFAULT,
+        Some(map_args(1, 0)),
+        &entries,
+    );
+    let maps = || served("map") + served("map_many");
+    let before = maps();
+    let before_many = served("map_many");
+    assert_eq!(serve_with(&device, &many, RESPONSE).1, 0);
+    assert_eq!(maps() - before, 1, "MAP_MANY fanned out into multiple RPCs");
+    assert_eq!(served("map_many") - before_many, 1);
+
+    // Verify mapped extents and zeros actually read back from the DAX window.
+    let read_page = |page: u64| -> Vec<u8> {
+        // SAFETY: `base` is the device's live 4 MiB DAX window mapping, and `page * ps + ps <= 4 MiB`.
+        unsafe { std::slice::from_raw_parts(base.add((page * ps) as usize), ps as usize).to_vec() }
+    };
+    assert_eq!(read_page(0), vec![1u8; ps as usize]);
+    assert_eq!(read_page(EXTENTS - 1), vec![EXTENTS as u8; ps as usize]);
+    assert_eq!(read_page(EXTENTS), vec![0u8; ps as usize]);
+
+    // Partial failure: entry 1 sealed, entry 2 open (EPERM), entry 3 sealed -> EPERM in 1 RPC.
+    let partial_entries: Vec<u8> = [
+        MapEntry { map: map_args(open_seq, 101 * ps), flags: 0, reserved: 0 },
+        MapEntry { map: map_args(2, 102 * ps), flags: 0, reserved: 0 },
+    ]
+    .iter()
+    .flat_map(|entry| entry.as_bytes().to_vec())
+    .collect();
+    let partial = bytes(
+        VIRTIO_EXTENT_T_MAP,
+        VIRTIO_EXTENT_MAP_MANY,
+        Some(map_args(1, 100 * ps)),
+        &partial_entries,
+    );
+    let before = maps();
+    assert_eq!(serve_with(&device, &partial, RESPONSE).1, errno(Errno::EPERM));
+    assert_eq!(maps() - before, 1);
+
+    // Entry 1 (page 100) was mapped before entry 2 failed; entries 2 and 3 (pages 101..=102)
+    // were NOT mapped. Verify both by reading page 100 and inspecting the snapshot's mappings
+    // (committing `open_seq` first so `make_version` allows the snapshot).
+    assert_eq!(read_page(100), vec![1u8; ps as usize]);
+    assert_eq!(serve_with(&device, &commit, RESPONSE).1, 0);
+    let freeze = bytes::<Info>(VIRTIO_EXTENT_T_FREEZE, VIRTIO_EXTENT_FREEZE_FROZEN, None, &[]);
+    assert_eq!(serve_with(&device, &freeze, RESPONSE).1, 0);
+    device.take_snapshot(|| {}).unwrap();
+    let mappings = &device.snapshot().unwrap().mappings;
+    let at = |page: u64| mappings.iter().find(|m| m.window_offset == page * ps);
+    assert_eq!(
+        at(0),
+        Some(&cladefs::WindowMapping {
+            window_offset: 0,
+            len: ps,
+            contents: cladefs::MappingContents::Extent {
+                extent: cladefs::ExtentId { cell, sequence: 1 },
+                offset: 0,
+            },
+        })
+    );
+    assert_eq!(
+        at(EXTENTS),
+        Some(&cladefs::WindowMapping {
+            window_offset: EXTENTS * ps,
+            len: ps,
+            contents: cladefs::MappingContents::Zeros,
+        })
+    );
+    assert_eq!(
+        at(100),
+        Some(&cladefs::WindowMapping {
+            window_offset: 100 * ps,
+            len: ps,
+            contents: cladefs::MappingContents::Extent {
+                extent: cladefs::ExtentId { cell, sequence: 1 },
+                offset: 0,
+            },
+        })
+    );
+    assert_eq!(at(101), None, "failing entry was mapped");
+    assert_eq!(at(102), None, "entry after failing entry was mapped");
 }
 
 /// A device with a window reserves it of its VM, its private pages at most in its configuration,

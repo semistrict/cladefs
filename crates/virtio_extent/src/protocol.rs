@@ -104,25 +104,25 @@ pub const VIRTIO_EXTENT_T_LAST: u32 = VIRTIO_EXTENT_T_STATS;
 /// A `WRITE`'s flags: a barrier precedes it, as if a `COMMIT` did; a `COMMIT` follows it (with
 /// `WRITE_COMMIT`); that commit completes once uploaded; cladefs: that commit sets the root, which
 /// follows the data, of `IoArgs::root_len` bytes.
-pub const VIRTIO_EXTENT_WRITE_BARRIER: u32 = 1 << 0;
-pub const VIRTIO_EXTENT_WRITE_COMMIT: u32 = 1 << 1;
-pub const VIRTIO_EXTENT_WRITE_UPLOADED: u32 = 1 << 2;
-pub const VIRTIO_EXTENT_WRITE_ROOT: u32 = 1 << 3;
+pub const VIRTIO_EXTENT_WRITE_BARRIER: u32 = cladefs::protocol::WRITE_BARRIER;
+pub const VIRTIO_EXTENT_WRITE_COMMIT: u32 = cladefs::protocol::WRITE_COMMIT;
+pub const VIRTIO_EXTENT_WRITE_UPLOADED: u32 = cladefs::protocol::WRITE_UPLOADED;
+pub const VIRTIO_EXTENT_WRITE_ROOT: u32 = cladefs::protocol::WRITE_ROOT;
 
 /// cladefs: a `FREE`'s flags: its data names more extents to free, each a `virtio_extent_id`
 /// (`F_FREE_MANY`), of [`MAX_MANY_DATA`] bytes at most.
 pub const VIRTIO_EXTENT_FREE_MANY: u32 = 1 << 0;
 
 /// A `COMMIT`'s flags: it completes once uploaded; it sets the root.
-pub const VIRTIO_EXTENT_COMMIT_UPLOADED: u32 = 1 << 0;
-pub const VIRTIO_EXTENT_COMMIT_ROOT: u32 = 1 << 1;
+pub const VIRTIO_EXTENT_COMMIT_UPLOADED: u32 = cladefs::protocol::COMMIT_UPLOADED;
+pub const VIRTIO_EXTENT_COMMIT_ROOT: u32 = cladefs::protocol::COMMIT_ROOT;
 /// A `MAP`'s flags, cladefs: its data holds more maps (`F_MAP_MANY`), of [`MAX_MANY_DATA`] bytes at
 /// most; and the guest accesses the pages next (`F_MAP_PREFAULT`); and zeros, its extent and offset
 /// ignored, of a writer's window, as each of a `MAP_MANY`'s maps may be. Every map is read-only:
 /// bit 0, writable DAX's `MAP_WRITE`, is not reused.
 pub const VIRTIO_EXTENT_MAP_MANY: u32 = 1 << 1;
 pub const VIRTIO_EXTENT_MAP_PREFAULT: u32 = 1 << 2;
-pub const VIRTIO_EXTENT_MAP_ZEROS: u32 = 1 << 3;
+pub const VIRTIO_EXTENT_MAP_ZEROS: u32 = cladefs::protocol::MAP_ZEROS;
 
 /// The size of each of the device's queues. Its request queues are interchangeable, which a driver
 /// may use one per CPU of (cladefs TASK-26.18.5): a VMM gives the device as many as its VM has
@@ -140,19 +140,19 @@ pub const DAX_WINDOW_ALIGNMENT: u64 = 2 << 20;
 pub const MAX_TAG_LEN: usize = 36;
 
 /// The most bytes one `READ` or `WRITE` moves.
-pub const MAX_TRANSFER: u32 = 8 << 20;
+pub const MAX_TRANSFER: u32 = cladefs::protocol::MAX_TRANSFER;
 /// The most bytes the root holds.
-pub const MAX_ROOT: u32 = 4096;
+pub const MAX_ROOT: u32 = cladefs::protocol::MAX_ROOT as u32;
 /// The most bytes one extent holds.
-pub const MAX_EXTENT: u64 = cladefs::OpenCell::MAX_EXTENT;
+pub const MAX_EXTENT: u64 = cladefs::protocol::MAX_EXTENT;
 /// cladefs: the most bytes of data a `FREE_MANY` or a `MAP_MANY` carries, its further extents or
 /// maps: a page of the largest a guest's kernel has, as its drivers send a page's worth at most;
 /// past it, the request is refused (`EINVAL`). The device lists what the data names in its own
 /// memory, and a chain's descriptors, naming the same guest memory again and again, can name far
 /// more than the guest has: unbounded, one request grew the VMM by what they named.
-pub const MAX_MANY_DATA: usize = 64 << 10;
+pub const MAX_MANY_DATA: usize = cladefs::protocol::MAX_MANY_DATA;
 /// cladefs: the most bytes of text a `STATS` carries (TASK-111.4): the extent daemon's.
-pub const MAX_STATS: usize = 64 << 10;
+pub const MAX_STATS: usize = cladefs::protocol::MAX_STATS;
 
 #[cfg(target_os = "linux")]
 const _: () = assert!(MAX_STATS == cladefs::CellClient::MAX_STATS);
@@ -191,28 +191,19 @@ impl Bounds {
     /// A `READ`'s or `WRITE`'s `len` bytes at `offset` in its extent: multiples of `block_size`,
     /// ending within `max_extent`.
     pub fn io(&self, offset: u64, len: u64) -> Result<(), cladefs::Errno> {
-        within(offset, len, self.block_size, self.max_extent)
+        cladefs::protocol::check_range_within(offset, len, self.block_size, self.max_extent)
     }
 
     /// A `MAP`'s `len` bytes at `offset` in its extent: multiples of `map_alignment`, ending
     /// within a u64. What lies past the extent, `max_extent` included, maps zeros.
     pub fn mapped(&self, offset: u64, len: u64) -> Result<(), cladefs::Errno> {
-        within(offset, len, self.map_alignment, u64::MAX)
+        cladefs::protocol::check_range_within(offset, len, self.map_alignment, u64::MAX)
     }
 
     /// A `MAP`'s, `UNMAP`'s or `PRIVATE`'s `len` bytes of the window at `window_offset`: multiples
     /// of `map_alignment`, ending within the window.
     pub fn window(&self, window_offset: u64, len: u64) -> Result<(), cladefs::Errno> {
-        within(window_offset, len, self.map_alignment, self.window)
-    }
-}
-
-/// `Ok` if `offset` and `len` are multiples of `alignment`, and `offset + len` is `most` at most.
-fn within(offset: u64, len: u64, alignment: u64, most: u64) -> Result<(), cladefs::Errno> {
-    let aligned = offset.is_multiple_of(alignment) && len.is_multiple_of(alignment);
-    match offset.checked_add(len) {
-        Some(end) if aligned && end <= most => Ok(()),
-        _ => Err(cladefs::Errno::EINVAL),
+        cladefs::protocol::check_range_within(window_offset, len, self.map_alignment, self.window)
     }
 }
 
@@ -267,26 +258,8 @@ pub fn ordered_only(type_: u32, flags: u32) -> u32 {
 /// The barriers a `WRITE`'s `flags` order it with, unless they are not a `WRITE`'s; the root that
 /// `WRITE_ROOT` sets the caller reads, after the data.
 pub fn write_barriers(flags: u32) -> Option<cladefs::WriteBarriers<'static>> {
-    let known = VIRTIO_EXTENT_WRITE_BARRIER
-        | VIRTIO_EXTENT_WRITE_COMMIT
-        | VIRTIO_EXTENT_WRITE_UPLOADED
-        | VIRTIO_EXTENT_WRITE_ROOT;
-    let commit = flags & VIRTIO_EXTENT_WRITE_COMMIT != 0;
-    if flags & !known != 0
-        || (flags & (VIRTIO_EXTENT_WRITE_UPLOADED | VIRTIO_EXTENT_WRITE_ROOT) != 0 && !commit)
-    {
-        return None;
-    }
-    let after = commit.then_some(if flags & VIRTIO_EXTENT_WRITE_UPLOADED != 0 {
-        cladefs::Commit::Uploaded
-    } else {
-        cladefs::Commit::Ordered
-    });
-    Some(cladefs::WriteBarriers {
-        before: flags & VIRTIO_EXTENT_WRITE_BARRIER != 0,
-        after,
-        root: None,
-    })
+    // Refused flags, a WRITE's no barriers say: None, what the caller refuses the request with.
+    cladefs::protocol::decode_write_barriers(flags, None).ok().map(|(barriers, _)| barriers)
 }
 
 /// A driver took `acked` of the features the device offered, `offered`, with all of them: as a
@@ -509,6 +482,14 @@ impl ConfigSpace {
         } else {
             data.fill(0);
         }
+    }
+}
+
+impl ExtentIdLe {
+    /// Decodes a guest-supplied extent ID at the VMM trust boundary, refusing `sequence ==
+    /// u64::MAX` (`EINVAL`, board 2762).
+    pub fn decode(self) -> Result<cladefs::ExtentId, cladefs::Errno> {
+        cladefs::protocol::check_extent_id(u64::from_le(self.cell), u64::from_le(self.sequence))
     }
 }
 

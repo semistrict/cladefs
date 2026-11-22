@@ -8,7 +8,8 @@
 use std::future::Future;
 
 use cladefs::{
-    Commit, Errno, ExtentId, ExtentInfo, VolatileSlice, VolatileSliceMut, WriteBarriers,
+    Commit, Errno, ExtentId, ExtentInfo, VolatileSlice, VolatileSliceMut, WindowMapping,
+    WriteBarriers,
 };
 
 /// The cell a device's requests are served with ([`handle`](crate::handle)), its backend: each
@@ -37,19 +38,10 @@ pub trait Backend: Send + Sync {
     ) -> impl Future<Output = Result<(), Errno>> + Send;
     /// `FREE`: frees `extents`, in order, the first error failing the rest.
     fn free_many(&self, extents: &[ExtentId]) -> impl Future<Output = Result<(), Errno>> + Send;
-    /// `MAP`: maps `len` bytes at `offset` in `extent` at `window_offset` in the window.
-    fn map(
+    /// `MAP`: maps `mappings`, in order, the first error failing the rest.
+    fn map_many(
         &self,
-        extent: ExtentId,
-        offset: u64,
-        len: u64,
-        window_offset: u64,
-    ) -> impl Future<Output = Result<(), Errno>> + Send;
-    /// `MAP` with `MAP_ZEROS`: maps zeros at `len` bytes of the window at `window_offset`.
-    fn map_zeros(
-        &self,
-        window_offset: u64,
-        len: u64,
+        mappings: &[WindowMapping],
     ) -> impl Future<Output = Result<(), Errno>> + Send;
     /// `MAP_PREFAULT`: maps `len` bytes of the window at `window_offset` for the guest ahead of its
     /// accesses. It must not wait.
@@ -124,22 +116,11 @@ impl Backend for cladefs::CellClient {
         self.free_many_async(extents)
     }
 
-    fn map(
+    fn map_many(
         &self,
-        extent: ExtentId,
-        offset: u64,
-        len: u64,
-        window_offset: u64,
+        mappings: &[WindowMapping],
     ) -> impl Future<Output = Result<(), Errno>> + Send {
-        self.map_async(extent, offset, len, window_offset)
-    }
-
-    fn map_zeros(
-        &self,
-        window_offset: u64,
-        len: u64,
-    ) -> impl Future<Output = Result<(), Errno>> + Send {
-        self.map_zeros_async(window_offset, len)
+        self.map_many_async(mappings)
     }
 
     fn prefault(&self, window_offset: u64, len: u64) {

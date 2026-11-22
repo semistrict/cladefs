@@ -12,7 +12,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cladefs::{Commit, Errno};
+use cladefs::{Errno, MappingContents, WindowMapping};
 use log::{error, info};
 
 use crate::backend::Backend;
@@ -138,8 +138,9 @@ async fn serve<S: Backend>(
             }
             let offset = u64::from_le(args.offset);
             bounds.io(offset, len.into())?;
+            let extent = args.id.decode()?;
             let mut slices = writer.slices(0, len as usize).ok_or(Errno::EINVAL)?;
-            cell.read(args.id.into(), offset, &mut slices).await?;
+            cell.read(extent, offset, &mut slices).await?;
             Ok(len as usize)
         }
         VIRTIO_EXTENT_T_WRITE => {
@@ -150,27 +151,26 @@ async fn serve<S: Backend>(
                 return Err(Errno::EINVAL);
             }
             bounds.io(offset, len.into())?;
+            let extent = args.id.decode()?;
             let data = reader.slices(len as usize)?;
             // A barrier before orders, without waiting for the disk or the bucket (doc-4); one
             // after, with WRITE_COMMIT, waits as a COMMIT does. One round trip to the daemon either
             // way.
-            let mut barriers = write_barriers(flags).ok_or(Errno::EINVAL)?;
+            let (mut barriers, has_root) = cladefs::protocol::decode_write_barriers(flags, None)?;
             // cladefs: the root that commit sets, after the data (WRITE_ROOT).
             let root;
-            if flags & VIRTIO_EXTENT_WRITE_ROOT != 0 {
+            if has_root {
                 let len = u32::from_le(args.root_len);
-                if len > MAX_ROOT {
-                    return Err(Errno::EINVAL);
-                }
+                cladefs::protocol::check_root_len(len as usize)?;
                 root = reader.bytes(len as usize)?;
                 barriers.root = Some(&root);
             }
-            cell.write(args.id.into(), offset, &data, barriers).await?;
+            cell.write(extent, offset, &data, barriers).await?;
             Ok(0)
         }
         VIRTIO_EXTENT_T_FREE => {
             let id: ExtentIdLe = reader.obj()?;
-            let mut extents = vec![id.into()];
+            let mut extents = vec![id.decode()?];
             // cladefs: the rest of a flush's dead extents, each freed as it would be alone, in one
             // request of the daemon's, not one each (TASK-92.13): the first error fails the
             // request, the extents before it freed (`F_FREE_MANY`); refused past `MAX_MANY_DATA`.
@@ -180,7 +180,7 @@ async fn serve<S: Backend>(
                 }
                 while reader.available() > 0 {
                     let id: ExtentIdLe = reader.obj()?;
-                    extents.push(id.into());
+                    extents.push(id.decode()?);
                 }
             }
             cell.free_many(&extents).await?;
@@ -195,7 +195,29 @@ async fn serve<S: Backend>(
             if flags & !(map_flags | VIRTIO_EXTENT_MAP_MANY) != 0 {
                 return Err(Errno::EINVAL);
             }
-            let mut maps = vec![(args, flags & map_flags)];
+            let mut mappings = Vec::new();
+            let mut prefault = Vec::new();
+            let mut push = |args: MapArgs, flags: u32| -> Result<(), Errno> {
+                let (window_offset, len) =
+                    (u64::from_le(args.window_offset), u64::from_le(args.len));
+                bounds.window(window_offset, len)?;
+                let contents = if flags & VIRTIO_EXTENT_MAP_ZEROS != 0 {
+                    MappingContents::Zeros
+                } else {
+                    let offset = u64::from_le(args.offset);
+                    bounds.mapped(offset, len)?;
+                    let extent = args.id.decode()?;
+                    MappingContents::Extent { extent, offset }
+                };
+                mappings.push(WindowMapping { window_offset, len, contents });
+                if flags & VIRTIO_EXTENT_MAP_PREFAULT != 0 {
+                    prefault.push((window_offset, len));
+                }
+                Ok(())
+            };
+            // cladefs: each within the window, and an extent's within a u64 (TASK-470), or none is
+            // sent.
+            push(args, flags & map_flags)?;
             // cladefs: the rest of a chunk's pieces (`F_MAP_MANY`), each with its own flags;
             // refused past `MAX_MANY_DATA`.
             if flags & VIRTIO_EXTENT_MAP_MANY != 0 {
@@ -208,40 +230,18 @@ async fn serve<S: Backend>(
                     if flags & !map_flags != 0 {
                         return Err(Errno::EINVAL);
                     }
-                    maps.push((entry.map, flags));
+                    push(entry.map, flags)?;
                 }
             }
-            // cladefs: each within the window, and an extent's within a u64 (TASK-470), or none is
-            // sent.
-            for (args, flags) in &maps {
-                let (window_offset, len) =
-                    (u64::from_le(args.window_offset), u64::from_le(args.len));
-                bounds.window(window_offset, len)?;
-                if flags & VIRTIO_EXTENT_MAP_ZEROS == 0 {
-                    bounds.mapped(u64::from_le(args.offset), len)?;
-                }
+            // cladefs board 6917: forwarded directly to `cladefsd`'s `MAP_MANY` (or `MAP` for a
+            // single entry), in order, one change of the window: the first error fails the
+            // request, those before it mapped, with no trailing concurrent RPCs (TASK-563).
+            cell.map_many(&mappings).await?;
+            // cladefs: what the guest reads next (`F_MAP_PREFAULT`) is then mapped for it
+            // (TASK-112.1).
+            for (window_offset, len) in prefault {
+                cell.prefault(window_offset, len);
             }
-            // Sent to the daemon at once, each as it would be alone: the first error fails the
-            // request, whichever others it mapped (`F_MAP_MANY`). cladefs: what the guest reads
-            // next (`F_MAP_PREFAULT`) is then mapped for it (TASK-112.1). cladefs: answered once
-            // every one is done, failed or not, as the daemon's own `MAP_MANY` is: none changes the
-            // window after the guest, told of the failure, maps the pieces again (TASK-563).
-            let mapped = futures::future::join_all(maps.iter().map(|(args, flags)| async move {
-                let (window_offset, len) =
-                    (u64::from_le(args.window_offset), u64::from_le(args.len));
-                if flags & VIRTIO_EXTENT_MAP_ZEROS != 0 {
-                    cell.map_zeros(window_offset, len).await?;
-                } else {
-                    let offset = u64::from_le(args.offset);
-                    cell.map(args.id.into(), offset, len, window_offset).await?;
-                }
-                if flags & VIRTIO_EXTENT_MAP_PREFAULT != 0 {
-                    cell.prefault(window_offset, len);
-                }
-                Ok::<_, Errno>(())
-            }))
-            .await;
-            mapped.into_iter().collect::<Result<(), Errno>>()?;
             Ok(0)
         }
         VIRTIO_EXTENT_T_UNMAP => {
@@ -265,21 +265,13 @@ async fn serve<S: Backend>(
         }
         VIRTIO_EXTENT_T_COMMIT => {
             let args: CommitArgs = reader.obj()?;
+            let (commit, has_root) = cladefs::protocol::decode_commit_flags(flags, None)?;
             let mut root = None;
-            if flags & VIRTIO_EXTENT_COMMIT_ROOT != 0 {
+            if has_root {
                 let len = u32::from_le(args.root_len);
-                if len > MAX_ROOT {
-                    return Err(Errno::EINVAL);
-                }
+                cladefs::protocol::check_root_len(len as usize)?;
                 root = Some(reader.bytes(len as usize)?);
             }
-            // Without COMMIT_UPLOADED, the commit completes once ordered: the daemon makes it
-            // local soon after (doc-4).
-            let commit = if flags & VIRTIO_EXTENT_COMMIT_UPLOADED != 0 {
-                Commit::Uploaded
-            } else {
-                Commit::Ordered
-            };
             cell.commit(root.as_deref(), commit).await?;
             Ok(0)
         }
@@ -324,7 +316,7 @@ async fn serve<S: Backend>(
                 return Err(Errno::EINVAL);
             }
             let text = reader.bytes(reader.available())?;
-            let text = std::str::from_utf8(&text).map_err(|_| Errno::EINVAL)?;
+            let text = cladefs::protocol::check_stats_text(&text)?;
             cell.answer_stats(u64::from_le(args.asked), Some(text)).await?;
             Ok(0)
         }
@@ -352,12 +344,12 @@ async fn serve<S: Backend>(
         }
         VIRTIO_EXTENT_T_PIN => {
             let id: ExtentIdLe = reader.obj()?;
-            cell.pin(id.into()).await?;
+            cell.pin(id.decode()?).await?;
             Ok(0)
         }
         VIRTIO_EXTENT_T_UNPIN => {
             let id: ExtentIdLe = reader.obj()?;
-            cell.unpin(id.into()).await?;
+            cell.unpin(id.decode()?).await?;
             Ok(0)
         }
         _ => Err(Errno::EINVAL),
@@ -506,7 +498,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::{Mutex, PoisonError};
 
-    use cladefs::{ExtentId, ExtentInfo, VolatileSlice, VolatileSliceMut, WriteBarriers};
+    use cladefs::{Commit, ExtentId, ExtentInfo, VolatileSlice, VolatileSliceMut, WriteBarriers};
     use zerocopy::{Immutable, IntoBytes};
 
     use super::*;
@@ -688,34 +680,40 @@ mod tests {
             Ok(())
         }
 
-        async fn map(
-            &self,
-            extent: ExtentId,
-            offset: u64,
-            len: u64,
-            window_offset: u64,
-        ) -> Result<(), Errno> {
-            if self.refused == Some(extent.sequence) {
-                return Err(Errno::EPERM);
-            }
+        /// As `OpenCell::map_many`: maps each entry in order, stopping at the first error,
+        /// leaving entries before it mapped.
+        async fn map_many(&self, mappings: &[WindowMapping]) -> Result<(), Errno> {
             let held = self.held.lock().unwrap_or_else(PoisonError::into_inner).take();
-            match held {
-                Some((sequence, gate)) if sequence == extent.sequence => gate.await.unwrap(),
-                held => *self.held.lock().unwrap_or_else(PoisonError::into_inner) = held,
+            if let Some((sequence, gate)) = held {
+                let matches = mappings.iter().any(|m| {
+                    matches!(m.contents, MappingContents::Extent { extent, .. } if extent.sequence == sequence)
+                });
+                if matches {
+                    gate.await.unwrap();
+                } else {
+                    *self.held.lock().unwrap_or_else(PoisonError::into_inner) =
+                        Some((sequence, gate));
+                }
             }
             let mut state = self.state();
-            state.window_range("MAP", window_offset, len)?;
-            // An extent's range, as cladefs's map checks it: aligned, its end within a u64.
-            let fits = offset % BLOCK == 0 && offset.checked_add(len).is_some();
-            state.range("MAP's extent", offset, len, fits)?;
-            state.maps.push((Some((extent, offset)), len, window_offset));
-            Ok(())
-        }
-
-        async fn map_zeros(&self, window_offset: u64, len: u64) -> Result<(), Errno> {
-            let mut state = self.state();
-            state.window_range("MAP_ZEROS", window_offset, len)?;
-            state.maps.push((None, len, window_offset));
+            for mapping in mappings {
+                let WindowMapping { window_offset, len, contents } = *mapping;
+                match contents {
+                    MappingContents::Extent { extent, offset } => {
+                        if self.refused == Some(extent.sequence) {
+                            return Err(Errno::EPERM);
+                        }
+                        state.window_range("MAP", window_offset, len)?;
+                        let fits = offset % BLOCK == 0 && offset.checked_add(len).is_some();
+                        state.range("MAP's extent", offset, len, fits)?;
+                        state.maps.push((Some((extent, offset)), len, window_offset));
+                    }
+                    MappingContents::Zeros => {
+                        state.window_range("MAP_ZEROS", window_offset, len)?;
+                        state.maps.push((None, len, window_offset));
+                    }
+                }
+            }
             Ok(())
         }
 
@@ -1040,16 +1038,16 @@ mod tests {
         assert_eq!(request(&cell, &many, RESPONSE).1, errno(Errno::EINVAL));
     }
 
-    /// cladefs TASK-563: a MAP_MANY one of whose pieces fails completes only once every piece it
-    /// sent is done, as the daemon's own MAP_MANY does: none changes the window after the guest,
-    /// told of the failure, maps the pieces again one at a time and stores to them.
+    /// cladefs TASK-563, board 6917: a MAP_MANY is forwarded as one `map_many` RPC, completing
+    /// only once the daemon answers, mapping entries in order up to the first failure and none
+    /// after it, and prefaulting nothing on failure.
     #[test]
     fn failed_map_manys_complete_once_every_piece_is_done() {
         use futures::FutureExt;
         let (open, gate) = futures::channel::oneshot::channel();
         let cell = FakeBackend {
             copies_on_write: true,
-            refused: Some(1),
+            refused: Some(2),
             held: Mutex::new(Some((2, gate))),
             ..FakeBackend::default()
         };
@@ -1059,9 +1057,19 @@ mod tests {
             len: BLOCK.to_le(),
             window_offset: window_offset.to_le(),
         };
-        let piece = MapEntry { map: map(2, 2 * BLOCK), flags: 0, reserved: 0 };
-        let flags = VIRTIO_EXTENT_MAP_MANY;
-        let mut readable = bytes(VIRTIO_EXTENT_T_MAP, flags, Some(map(1, 0)), piece.as_bytes());
+        let pieces: Vec<u8> = [
+            MapEntry {
+                map: map(2, 2 * BLOCK),
+                flags: VIRTIO_EXTENT_MAP_PREFAULT.to_le(),
+                reserved: 0,
+            },
+            MapEntry { map: map(3, 4 * BLOCK), flags: 0, reserved: 0 },
+        ]
+        .iter()
+        .flat_map(|entry| entry.as_bytes().to_vec())
+        .collect();
+        let flags = VIRTIO_EXTENT_MAP_MANY | VIRTIO_EXTENT_MAP_PREFAULT;
+        let mut readable = bytes(VIRTIO_EXTENT_T_MAP, flags, Some(map(1, 0)), &pieces);
         let mut written = vec![0xa5; RESPONSE];
         let mut buffers = Buffers::new();
         // SAFETY: The test's memory, which outlives the request, and nothing else accesses
@@ -1074,7 +1082,7 @@ mod tests {
         let waker = futures::task::noop_waker();
         let mut context = std::task::Context::from_waker(&waker);
         let polled = handling.poll_unpin(&mut context);
-        assert!(polled.is_pending(), "completed with a piece's MAP still to run: {polled:?}");
+        assert!(polled.is_pending(), "completed with map_many still in flight: {polled:?}");
         assert_eq!(cell.state().maps, vec![]);
         open.send(()).unwrap();
         let polled = handling.poll_unpin(&mut context);
@@ -1082,7 +1090,9 @@ mod tests {
         drop(handling);
         let response: Response = read_obj(&written);
         assert_eq!(u32::from_le(response.status), errno(Errno::EPERM));
-        assert_eq!(cell.state().maps, vec![(Some((id(2), 0)), BLOCK, 2 * BLOCK)]);
+        // Piece 1 mapped before piece 2 failed; piece 3 was not mapped; nothing was prefaulted.
+        assert_eq!(cell.state().maps, vec![(Some((id(1), 0)), BLOCK, 0)]);
+        assert_eq!(cell.state().prefaulted, vec![]);
     }
 
     /// cladefs: a FREE_MANY's or a MAP_MANY's data past MAX_MANY_DATA is refused, nothing done: the
@@ -1264,6 +1274,65 @@ mod tests {
         );
         let out_of_range = cell.state().out_of_range.clone();
         assert!(out_of_range.is_empty(), "the cell was asked {out_of_range:?}");
+    }
+
+    /// cladefs board 6917: `sequence == u64::MAX` has no successor and is refused (`EINVAL`) at
+    /// the VMM boundary across every extent-taking request (including further entries of
+    /// `FREE_MANY` and `MAP_MANY`), while `MAP_ZEROS` ignores the extent ID.
+    #[test]
+    fn last_sequence_is_refused() {
+        let cell = FakeBackend { copies_on_write: true, ..FakeBackend::default() };
+        let bad = ExtentIdLe { cell: CELL.to_le(), sequence: u64::MAX.to_le() };
+        let ok = ExtentIdLe { cell: CELL.to_le(), sequence: 1u64.to_le() };
+        let bad_io = IoArgs { id: bad, offset: 0, len: (BLOCK as u32).to_le(), root_len: 0 };
+        let bad_map = MapArgs { id: bad, offset: 0, len: BLOCK.to_le(), window_offset: 0 };
+        let ok_map = MapArgs { id: ok, offset: 0, len: BLOCK.to_le(), window_offset: 0 };
+
+        let cases = [
+            ("read", bytes(VIRTIO_EXTENT_T_READ, 0, Some(bad_io), &[]), BLOCK as usize),
+            ("write", bytes(VIRTIO_EXTENT_T_WRITE, 0, Some(bad_io), &[7; BLOCK as usize]), 0),
+            ("free", bytes(VIRTIO_EXTENT_T_FREE, 0, Some(bad), &[]), 0),
+            (
+                "free_many first",
+                bytes(VIRTIO_EXTENT_T_FREE, VIRTIO_EXTENT_FREE_MANY, Some(bad), ok.as_bytes()),
+                0,
+            ),
+            (
+                "free_many rest",
+                bytes(VIRTIO_EXTENT_T_FREE, VIRTIO_EXTENT_FREE_MANY, Some(ok), bad.as_bytes()),
+                0,
+            ),
+            ("map", bytes(VIRTIO_EXTENT_T_MAP, 0, Some(bad_map), &[]), 0),
+            (
+                "map_many first",
+                bytes(
+                    VIRTIO_EXTENT_T_MAP,
+                    VIRTIO_EXTENT_MAP_MANY,
+                    Some(bad_map),
+                    MapEntry { map: ok_map, ..MapEntry::default() }.as_bytes(),
+                ),
+                0,
+            ),
+            (
+                "map_many rest",
+                bytes(
+                    VIRTIO_EXTENT_T_MAP,
+                    VIRTIO_EXTENT_MAP_MANY,
+                    Some(ok_map),
+                    MapEntry { map: bad_map, ..MapEntry::default() }.as_bytes(),
+                ),
+                0,
+            ),
+            ("pin", bytes(VIRTIO_EXTENT_T_PIN, 0, Some(bad), &[]), 0),
+            ("unpin", bytes(VIRTIO_EXTENT_T_UNPIN, 0, Some(bad), &[]), 0),
+        ];
+        for (name, req, room) in cases {
+            assert_eq!(request(&cell, &req, room + RESPONSE).1, errno(Errno::EINVAL), "{name}");
+        }
+        assert_eq!(cell.state().ranges_asked, 0);
+        // Zeros ignore `id`, so `sequence == u64::MAX` is still served.
+        let zeros = bytes(VIRTIO_EXTENT_T_MAP, VIRTIO_EXTENT_MAP_ZEROS, Some(bad_map), &[]);
+        assert_eq!(request(&cell, &zeros, RESPONSE), (vec![], 0));
     }
 
     /// cladefs TASK-77: a guest's driver is untrusted: whatever a request says, of the types and
