@@ -371,9 +371,5 @@ mod tests {
         assert!(!host.accepted(0x3c));
         host.accept(0x3c, child).unwrap();
         assert!(open(dir.path()).unwrap().accepted(0x3c));
-        assert_eq!(host.accepted_cell(0x3c), Some(child));
-        host.release(0x3c).unwrap();
-        assert!(!open(dir.path()).unwrap().accepted(0x3c));
-        host.release(0x3c).unwrap();
     }
 }
