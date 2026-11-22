@@ -3338,13 +3338,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let held = Arena::new();
         let arena = held.id();
-        physmem::set_arena_cap(arena, Some(4 * chunk));
+        crate::slabs::set_arena_cap(arena, Some(4 * chunk));
         let (cell, window) = mapped_extents(&dir.path().join("store"), 16, &held).await;
         let first = id(&cell, 1);
         // What the cache holds of extent 1.
         let cached = || cache::find(arena, first).expect("extent 1 cached").held();
         read_twice(&window, 16, |round, sequence| {
-            let held = physmem::arena_bytes(arena);
+            let held = crate::slabs::arena_bytes(arena);
             assert!(held <= 4 * chunk, "round {round}, extent {sequence}: {held}");
             // Once all were read, the one asked for longest ago gave its pages back, as its
             // first page's read in again.
@@ -3353,6 +3353,31 @@ mod tests {
             }
         })
         .await;
+    }
+
+    /// TASK-602 (board 2600): an extent the guest MAPs over its own range, again and again, as a
+    /// guest rebinding a file's blocks does, is on its window set once (spec rule registerOnce):
+    /// its window list had an entry a MAP, every one of them visited by each of its evictions. A
+    /// window that maps it anew after it unmapped it all is on it once again; one unmapped, off it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn maps_over_an_extents_own_range_put_its_window_on_it_once() {
+        const EXTENT: u64 = 1 << 20;
+        let dir = tempfile::tempdir().unwrap();
+        let held = Arena::new();
+        let (cell, window) = mapped_extents(&dir.path().join("store"), 2, &held).await;
+        for _ in 0..1000 {
+            cell.map(id(&cell, 1), 0, EXTENT, 0).await.unwrap();
+        }
+        block_on(window.fault(0, Access::Read)).unwrap();
+        let cached = cache::find(held.id(), id(&cell, 1)).expect("extent 1 cached");
+        assert_eq!(cached.windows_held(), 1, "MAPs over its own range");
+        // Over the other extent's range, and back.
+        cell.map(id(&cell, 1), 0, EXTENT, EXTENT).await.unwrap();
+        cell.unmap(0, EXTENT).unwrap();
+        cell.map(id(&cell, 1), 0, EXTENT, 0).await.unwrap();
+        assert_eq!(cached.windows_held(), 1, "mapped twice, then once");
+        cell.unmap(0, 2 * EXTENT).unwrap();
+        assert_eq!(cached.windows_held(), 0, "unmapped");
     }
 
     /// TASK-92.32: relief takes first what no window maps, though what one maps was used longer
@@ -3409,7 +3434,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (_cell, window) = mapped_extents(&dir.path().join("store"), 64, &Arena::new()).await;
         read_twice(&window, 64, |_, _| ()).await;
-        assert_eq!(physmem::count_free_chunks(), 0, "memory never ran out");
+        let peak = crate::slabs::arenas_peak_bytes();
+        assert!(peak + crate::slabs::SLAB > memory, "memory never ran out: {peak} bytes at most");
     }
 
     /// An open cell holds a block at least; one asked for less is not made, nor its directory.

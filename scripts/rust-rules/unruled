@@ -76,3 +76,5 @@ holds-kept-with-copies-gone: a deletion taken out whole (the mirrors' holds of a
 mirrors-keep-their-pins: a release replaced by a drop: which pins a done mirror lets go is the protocol's (mirrorPins)
 mirrors-mark-short-copies: an extent left out of the copy before its marker: an order of the protocol's (markerAfterCopy)
 mirrors-move-no-references: a step replaced by its result's value (no references moved): the protocol's (mirrorListsAfterMark)
+evictions-reap-every-evicting-part: a check taken out whole (an eviction's token matched before it reaps a part): which parts an eviction owns is the cache's (TASK-560)
+windows-listed-once-a-map: a set replaced by a list, a window entered a map: the window set's own choice (TASK-602)

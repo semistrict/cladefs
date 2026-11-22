@@ -43,7 +43,7 @@ describe("where code comes from", () => {
     expect(crates.get("fxfs")).toBe("fuchsia");
     expect(crates.get("fuchsia-async")).toBe("fuchsia");
     expect(crates.get("cladefs")).toBe("cladefs");
-    expect(crates.get("physmem")).toBe("cladefs");
+    expect(crates.get("local_cell")).toBe("cladefs");
   });
 
   test("in cladefs's own crates, a file citing a Fuchsia source is ported", () => {

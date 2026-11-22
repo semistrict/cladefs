@@ -4,6 +4,33 @@ Open questions live in hotbed (`hotbed question ls -p cladefs` / `hotbed questio
 
 # Decisions
 
+## doc-26 as built: spares only recycled, what a run was staged to kept on its handle (boards 6204, 6206, 6208, 2026-11-21)
+
+Decided without you, building Wave 2's track 2A:
+- **Spare slabs are whole slabs freed, kept populated, two an arena; none is populated ahead on a
+  thread.** doc-26 kept physmem's prefault thread for its spares. With the daemon writing parts in
+  by `pwrite`, a part's memory is allocated in that write, with no page faults, and a full-page
+  write of shmem zeroes nothing: what the prefault took off the path (256 faults a part through
+  the physmap) is gone. A thread populating spares also races their being taken and freed, a late
+  `fallocate` repopulating a slab already punched, memory no count has. Under churn (relief
+  evicting for page-ins) freed slabs serve the next whole parts unpunched. A shrink evicts down to
+  what is in use, not counting spares, then gives them back (`slabs::arena_bytes_in_use`), so it
+  evicts no more than it must. *Undo:* populate the free slot after a spare is taken, under a
+  per-slot "populating" state, if board 6212's A/B shows page-in latency regressed.
+- **What a run was staged to is on its `PartSlab`** (a lock of its own), not a map of the arena's
+  keyed by run (doc-26's `staged`): a handle is one allocated run, made empty as it is allocated
+  and gone with it, so no run inherits or forgets another's peers by construction.
+- **Runs being punched are no one's until punched**, outside the arena's lock; an allocation they
+  would make room for waits for them rather than ask relief (`Rules::allocations_wait_for_punches`,
+  physmem's chunks-going-back rule kept).
+- **Page-ins read a part into a buffer of a small pool, then `pwrite` it** (doc-26); a fetch writes
+  what it fetched straight into the slab, holding no buffer while it waits. The anonymous-memory
+  budget counts the pool (`process::PAGE_INS`, 12 MiB).
+- **A tenant's memory limit under a slab (1 MiB) is refused** (`EINVAL`), where it was under a
+  chunk (2 MiB); limits are kept to the page.
+- **Hand mutants may name features** (`# Features: shuttle`), for Shuttle models as killers
+  (`crates/cladefs/mutants.sh`).
+
 ## doc-26: part slabs, quarantine scoped to what was staged, copy on write in the VM process (board 6124, 2026-11-21)
 
 Decided without you, designing Wave 2's track 2A:

@@ -40,6 +40,7 @@ pub(crate) mod uffd;
 use crate::error::{Errno, Result};
 use crate::open_cell::{MappingContents, WindowMapping};
 use crate::pages::{PhysLocation, page_size};
+use crate::slabs::{PartSlab, VmProcessId};
 use futures::future::BoxFuture;
 use local_cell::shared::SharedLock;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -120,6 +121,13 @@ pub trait SecondStage: Send + Sync {
     /// stage may change its memory once for the run rather than once a page (TASK-164.10).
     fn make_private(&self, offset: u64, from: &[Option<PhysLocation>]) {
         unimplemented!("{offset:#x} made private ({from:?}) in a stage that doesn't copy");
+    }
+
+    /// The VM process it is in, which makes its changes after they return: the runs the window
+    /// maps here are staged to it (`PartSlab::stage_to`), and wait for it once freed (doc-26).
+    /// None for a stage that makes each change before it returns, as tests' do.
+    fn vm_process(&self) -> Option<VmProcessId> {
+        None
     }
 }
 
@@ -227,6 +235,17 @@ impl Drop for Change<'_> {
     }
 }
 
+/// What of a [`Source`]'s pages is in memory ([`Source::each_present`]): `count` pages from its
+/// page `page`, consecutive in physical memory from `at`, of `slab`, which a window that maps them
+/// in another process's second stage stages to it; or of memory never freed, which needs none
+/// (zeros).
+pub(crate) struct Present<'a> {
+    pub page: u64,
+    pub count: u64,
+    pub at: PhysLocation,
+    pub slab: Option<&'a PartSlab>,
+}
+
 /// What a window's mapping maps pages of (`crate::cache`): a sealed extent's pages, or zeros. Its
 /// pages are numbered from its first, each a page of physical memory once it is in memory, which
 /// the source keeps until it lets go of it: a page it evicts, it first unmaps from each window it
@@ -235,9 +254,9 @@ impl Drop for Change<'_> {
 /// Its lock is taken after a window's, never before: a window looks its pages up, and maps them,
 /// under its own.
 pub(crate) trait Source: Send + Sync {
-    /// Calls `found` with each page of `pages` in memory, by number, under the source's lock, so
-    /// that it stays in memory while `found` maps it.
-    fn each_present(&self, pages: Range<u64>, found: &mut dyn FnMut(u64, &physmem::Page));
+    /// Calls `found` with each run of the pages of `pages` in memory, in order, under the source's
+    /// lock, so that they stay in memory while `found` maps them.
+    fn each_present(&self, pages: Range<u64>, found: &mut dyn FnMut(Present<'_>));
 
     /// Brings page `page` into memory: completes once it is in, holding no thread meanwhile,
     /// returning whether it waited for it; or fails, the page not in memory.
@@ -250,7 +269,7 @@ pub(crate) trait Source: Send + Sync {
     }
 
     /// `window` maps it from now on, until [`Source::unmapped`]: a page it evicts, it unmaps there
-    /// first.
+    /// first. Told again, it is so once.
     fn mapped(&self, _window: &Arc<Window>) {}
 
     /// `window` maps it no more.
@@ -379,8 +398,8 @@ struct Mapping {
 /// A page the window has mapped.
 #[derive(Clone, Copy)]
 enum Pte {
-    /// A page of its mapping's source: which page of physical memory it is.
-    Source { frame: u32 },
+    /// A page of its mapping's source: where in physical memory it is.
+    Source { at: PhysLocation },
     /// cladefs: a private page (backlog doc-13), of the second stage's memory, or, without one, of
     /// this process's, mapped in place ([`Window::map_private`]).
     Private,
@@ -794,8 +813,8 @@ impl Window {
             // as a source evicting it unmaps it here first, under the lock; or zeros.
             let mut held = None;
             if !zeros {
-                source.each_present(page..page + 1, &mut |_, frame| {
-                    held = Some(self.private_bytes(frame));
+                source.each_present(page..page + 1, &mut |present| {
+                    held = Some(self.private_bytes(&present));
                 });
                 // Evicted since it was brought in: brought in again.
                 if held.is_none() {
@@ -811,21 +830,24 @@ impl Window {
         }
     }
 
-    /// cladefs: what a private page copies of the source's page `frame` ([`Window::map_private`]):
+    /// cladefs: what a private page copies of the source's page `present` ([`Window::map_private`]):
     /// where it is, for the second stage to copy it, which it keeps from being freed until the
     /// stage has made the copy, as it took the page away; or, without a stage, its bytes.
-    fn private_bytes(&self, frame: &physmem::Page) -> Held {
-        match self.translation {
-            Translation::Stage(_) => {
-                // Once freed, it waits for the stage to copy it (`physmem::quarantine_with`).
-                frame.mark_staged();
-                Held::At(frame.location())
+    fn private_bytes(&self, present: &Present<'_>) -> Held {
+        match &self.translation {
+            Translation::Stage(stage) => {
+                // Once freed, it waits for the stage to copy it (`slabs::quarantine_with`).
+                if let (Some(vm), Some(slab)) = (stage.vm_process(), present.slab) {
+                    slab.stage_to(vm);
+                }
+                Held::At(present.at)
             }
             Translation::Host { .. } => {
-                let ps = page_size() as usize;
-                // SAFETY: The source's page is in memory while its lock is held, and never changes,
-                // a sealed extent's.
-                Held::Bytes(unsafe { std::slice::from_raw_parts(frame.as_ptr(), ps) }.into())
+                let slab = present.slab.expect("a sealed extent's page, in a slab");
+                let mut bytes = vec![0; page_size() as usize].into_boxed_slice();
+                let within = present.at.offset - slab.location().offset;
+                slab.read(within, &mut bytes).expect("a sealed extent's page read from its slab");
+                Held::Bytes(bytes)
             }
         }
     }
@@ -940,8 +962,8 @@ impl Window {
                     }
                     let mut held = None;
                     if source.origin() != Origin::Zeros {
-                        source.each_present(page..page + 1, &mut |_, frame| {
-                            held = Some(self.private_bytes(frame));
+                        source.each_present(page..page + 1, &mut |present| {
+                            held = Some(self.private_bytes(&present));
                         });
                         // Evicted since it was brought in: brought in again.
                         if held.is_none() {
@@ -1067,9 +1089,11 @@ impl Window {
         private: Private,
     ) -> Vec<Arc<dyn Source>> {
         let end = offset + len;
+        // Whether the window mapped it before, whatever of it this replaces: the guest's MAP of
+        // an extent over its own range tells it nothing (TASK-602).
+        let first = !state.by_source.contains_key(&source_identity(source));
         self.unmap_ptes(state, offset, end, private);
         let forgotten = state.forget(offset, end);
-        let first = !state.by_source.contains_key(&source_identity(source));
         state.insert(offset, Mapping { end, source: source.clone(), page });
         if first {
             source.mapped(self);
@@ -1173,9 +1197,9 @@ impl Window {
     }
 
     /// Unmaps the pages the window has mapped of `source`, by its identity, that `evicted` says
-    /// are of the frames it evicts: before it lets go of them. cladefs: a private page within its
-    /// mappings is none of its pages, and stays (backlog doc-13).
-    pub(crate) fn unmap_pages_of(&self, source: usize, evicted: &dyn Fn(u32) -> bool) {
+    /// are of the runs it evicts, by where they are: before it lets go of them. cladefs: a private
+    /// page within its mappings is none of its pages, and stays (backlog doc-13).
+    pub(crate) fn unmap_pages_of(&self, source: usize, evicted: &dyn Fn(PhysLocation) -> bool) {
         let mut state = self.state.with(Mutex::lock);
         let Some(starts) = state.by_source.get(&source) else { return };
         let ranges: Vec<(u64, u64)> =
@@ -1185,7 +1209,7 @@ impl Window {
             gone.extend(
                 (state.ptes.range(start..end))
                     .filter(|(_, pte)| match pte {
-                        Pte::Source { frame, .. } => evicted(*frame),
+                        Pte::Source { at } => evicted(*at),
                         Pte::Private => !rules().eviction_skips_private,
                     })
                     .map(|(offset, _)| *offset),
@@ -1217,28 +1241,36 @@ impl Window {
         pages: &mut Vec<(u64, PhysLocation)>,
     ) {
         let ps = page_size();
-        let staged = self.stage().is_some();
+        let vm = self.stage().and_then(|stage| stage.vm_process());
         for mapping_start in state.overlapping(start, end) {
             let mapping = &state.mappings[&mapping_start];
             let (from, to) = (start.max(mapping_start), end.min(mapping.end));
             let first = mapping.page + (from - mapping_start) / ps;
             let ptes = &state.ptes;
             let mut found = Vec::new();
-            mapping.source.each_present(first..first + (to - from) / ps, &mut |page, frame| {
-                let offset = from + (page - first) * ps;
-                if ptes.contains_key(&offset) {
-                    return;
+            mapping.source.each_present(first..first + (to - from) / ps, &mut |present| {
+                let mut staged = false;
+                for page in present.page..present.page + present.count {
+                    let offset = from + (page - first) * ps;
+                    if ptes.contains_key(&offset) {
+                        continue;
+                    }
+                    let within = (page - present.page) * ps;
+                    found.push((
+                        offset,
+                        PhysLocation { offset: present.at.offset + within, ..present.at },
+                    ));
+                    staged = true;
                 }
-                // Once freed, it waits for the stage to take it away (`physmem::quarantine_with`,
-                // TASK-79.9).
-                if staged {
-                    frame.mark_staged();
+                // Once freed, it waits for the VM process to take it away
+                // (`slabs::quarantine_with`, TASK-79.9, doc-26).
+                if staged && let (Some(vm), Some(slab)) = (vm, present.slab) {
+                    slab.stage_to(vm);
                 }
-                found.push((offset, frame.location(), frame.frame()));
             });
-            for (offset, location, frame) in found {
-                state.insert_pte(offset, Pte::Source { frame });
-                pages.push((offset, location));
+            for (offset, at) in found {
+                state.insert_pte(offset, Pte::Source { at });
+                pages.push((offset, at));
             }
         }
     }
@@ -1555,7 +1587,7 @@ pub(crate) mod tests {
         kind: Kind,
         /// The extent it says its pages are, its own.
         extent: ExtentId,
-        pages: Mutex<Vec<Option<physmem::Page>>>,
+        pages: Mutex<Vec<Option<PartSlab>>>,
         /// The pages asked for, and not yet taken ([`TestSource::request`]).
         requests: Mutex<Vec<u64>>,
         asked: Condvar,
@@ -1565,7 +1597,7 @@ pub(crate) mod tests {
     }
 
     impl TestSource {
-        fn new(kind: Kind, pages: Vec<Option<physmem::Page>>) -> Arc<Self> {
+        fn new(kind: Kind, pages: Vec<Option<PartSlab>>) -> Arc<Self> {
             static SEQUENCE: AtomicU64 = AtomicU64::new(0);
             let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
             Arc::new(Self {
@@ -1579,11 +1611,24 @@ pub(crate) mod tests {
         }
 
         /// A page of physical memory, its bytes `value`.
-        fn page_of(value: u8) -> physmem::Page {
-            let page = physmem::alloc(physmem::ArenaId::DEFAULT, physmem::Wait::No).unwrap();
-            // SAFETY: The page is allocated, and only this test's.
-            unsafe { std::ptr::write_bytes(page.as_ptr(), value, page_size() as usize) };
+        fn page_of(value: u8) -> PartSlab {
+            let page =
+                crate::slabs::alloc(crate::slabs::ArenaId::DEFAULT, 1, crate::slabs::Wait::No);
+            let page = page.unwrap();
+            page.write(0, &vec![value; page_size() as usize]).unwrap();
             page
+        }
+
+        /// Where its page `page` is, in memory.
+        pub fn location(&self, page: u64) -> PhysLocation {
+            let pages = self.pages.lock().unwrap();
+            pages[page as usize].as_ref().expect("the page in memory").location()
+        }
+
+        /// The first byte of its page `page`, in memory.
+        #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+        pub fn byte(&self, page: u64) -> u8 {
+            read_page(self.location(page))[0]
         }
 
         /// `pages` pages in memory, each its number plus `first`.
@@ -1666,17 +1711,28 @@ pub(crate) mod tests {
         }
     }
 
+    /// The bytes of the page of physical memory at `at`, read through its arena's object, as a VM
+    /// process mapping it reads them.
+    pub(crate) fn read_page(at: PhysLocation) -> Vec<u8> {
+        use std::os::unix::fs::FileExt;
+        let fd = crate::slabs::arena_fd(at.arena).expect("the page's arena");
+        let file = std::fs::File::from(fd.try_clone().expect("the arena's object, again"));
+        let mut bytes = vec![0; page_size() as usize];
+        file.read_exact_at(&mut bytes, at.offset).expect("the page read");
+        bytes
+    }
+
     /// A mapping of zeros, `len` bytes at `window_offset`, as [`Dax::mappings`] records it.
     pub(crate) fn zeros_at(window_offset: u64, len: u64) -> WindowMapping {
         WindowMapping { window_offset, len, contents: MappingContents::Zeros }
     }
 
     impl Source for TestSource {
-        fn each_present(&self, pages: Range<u64>, found: &mut dyn FnMut(u64, &physmem::Page)) {
+        fn each_present(&self, pages: Range<u64>, found: &mut dyn FnMut(Present<'_>)) {
             let held = self.pages.lock().unwrap();
             for page in pages {
-                if let Some(Some(frame)) = held.get(page as usize) {
-                    found(page, frame);
+                if let Some(Some(slab)) = held.get(page as usize) {
+                    found(Present { page, count: 1, at: slab.location(), slab: Some(slab) });
                 }
             }
         }
@@ -1947,10 +2003,9 @@ pub(crate) mod tests {
         assert_eq!(window.private_pages(), 2);
         assert_eq!(byte_of(&window, 2, 100, Some(4)), 4);
         assert_eq!(byte_of(&window, 2, 101, None), 0);
-        let mut shared = 1;
-        // SAFETY: The zeros' page is in memory while its lock is held.
-        zeros.each_present(0..1, &mut |_, frame| shared = unsafe { *frame.as_ptr().add(100) });
-        assert_eq!(shared, 0, "the write reached the shared zeros");
+        let mut shared = None;
+        zeros.each_present(0..1, &mut |present| shared = Some(read_page(present.at)[100]));
+        assert_eq!(shared, Some(0), "the write reached the shared zeros");
 
         let (mut plain, plain_window) = Dax::new(2 * ps, None).unwrap();
         plain.map(0, &source.source(), 0, ps);
@@ -1980,7 +2035,7 @@ pub(crate) mod tests {
         assert_eq!(stage.pages(), writable);
         // Each a copy of the source's page, which is mapped no more.
         let mut sources = Vec::new();
-        old.each_present(0..4, &mut |page, frame| sources.push((page, Some(frame.location()))));
+        old.each_present(0..4, &mut |present| sources.push((present.page, Some(present.at))));
         assert_eq!(stage.private(), sources);
         assert_eq!(stage.locations(), [], "a source's page mapped");
 
@@ -2000,7 +2055,7 @@ pub(crate) mod tests {
         assert_eq!(stage.pages(), pages);
         assert_eq!(stage.private(), sources[1..3]);
         let mut first = None;
-        new.each_present(0..1, &mut |_, frame| first = Some(frame.location()));
+        new.each_present(0..1, &mut |present| first = Some(present.at));
         assert_eq!(stage.locations(), [(0, first.unwrap())]);
         assert_eq!(live().private_pages, 2);
         drop((dax, window));

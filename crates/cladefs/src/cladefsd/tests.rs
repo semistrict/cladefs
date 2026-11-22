@@ -1123,13 +1123,14 @@ fn freeze(child: &std::process::Child) {
 /// process maps it from its tenant's arena, is free.
 fn page_is_free(arena: crate::pages::ArenaId, offset: u64) -> bool {
     let location = crate::pages::PhysLocation { arena, offset };
-    physmem::is_free(location).unwrap_or_else(|| panic!("no chunk of {arena:?} holds {offset:#x}"))
+    crate::slabs::is_free(location)
+        .unwrap_or_else(|| panic!("no slab of {arena:?} holds {offset:#x}"))
 }
 
 /// Whether the page of the daemon's physical memory at `offset` in the memory of `arena` is held:
 /// neither free, nor of memory that went back, every page of it free.
 fn page_is_held(arena: crate::pages::ArenaId, offset: u64) -> bool {
-    physmem::is_free(crate::pages::PhysLocation { arena, offset }) == Some(false)
+    crate::slabs::is_free(crate::pages::PhysLocation { arena, offset }) == Some(false)
 }
 
 /// TASK-79.9: a VM process that stops answering, frozen as SIGSTOP or a cgroup's freezer freezes
@@ -3991,12 +3992,13 @@ fn call(
 /// TASK-79.9: a shrink of a tenant's memory evicts what it must, and returns what the tenant holds,
 /// once the pages it evicted are free: a window's, which wait, freed, for its VM process to
 /// acknowledge their unmapping, or for the daemon to let go of it, as here of one that acknowledges
-/// nothing. Of two extents of a chunk each, read and mapped, it evicts the one asked for longest
-/// ago, which leaves the tenant the other's chunk alone.
+/// nothing. Of two extents of two slabs each, read and mapped, it evicts the one asked for longest
+/// ago, which leaves the tenant the other's slabs alone: those it freed, kept spare as they were,
+/// given back too.
 #[tokio::test(flavor = "multi_thread")]
 async fn shrinks_return_once_the_pages_they_evict_are_free() {
     use super::wire::*;
-    const CHUNK: u64 = physmem::CHUNK_SIZE as u64;
+    const CHUNK: u64 = 2 * crate::slabs::SLAB;
     host();
     let dir = tempfile::tempdir().unwrap();
     let tenant = super::server::Tenant::new(1, dir.path()).unwrap();
@@ -4837,7 +4839,7 @@ fn a_panic_holding_a_cells_lock_halts_it_alone() {
 const SHARED_LOCKS: &[&str] = &[
     "extent cache",
     "cached extent holders",
-    "cached extent pages",
+    "cached extent parts",
     "window",
     "stage change",
     "connection phase",

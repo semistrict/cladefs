@@ -2,28 +2,37 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The process's cache of sealed extents (`crate::extents`), in pages of physical memory
-//! (`crate::pages`).
+//! The process's cache of sealed extents (`crate::extents`), in part slabs of physical memory
+//! (`crate::slabs`, doc-26).
 //!
-//! A sealed extent is cached once, keyed by its ID and the arena its pages are of, which every cell
-//! and window in the process shares: a table of its pages ([`CachedExtent`]), each read in from a
+//! A sealed extent is cached once, keyed by its ID and the arena its parts are of, which every cell
+//! and window in the process shares: a table of its parts ([`CachedExtent`]), each read in from a
 //! cell that holds the extent as it is first read or mapped, a part (`extent_frame::PART`) at a
-//! time, on the pager's threads, and evicted, its extents asked for longest ago first, as memory
-//! runs out (`physmem::relieve_with`) or the daemon is asked to give memory back. Windows map its
-//! pages read-only: one copy of each page, whichever cell or fork maps it, as an extent never
-//! changes once sealed, its ID its cell's to write once, which the cell keeps to (TASK-79.6).
-//! A page evicted is unmapped from each window that maps it first; freed, it waits in quarantine
-//! for the VM processes that may reach it still (`physmem::quarantine_with`, TASK-79.9).
+//! time, into a slab of its own (or a run of a small slab's pages, for a part shorter), on the
+//! pager's threads, and evicted, its extents asked for longest ago first, as memory runs out
+//! (`slabs::relieve_with`) or the daemon is asked to give memory back. Windows map its pages
+//! read-only: one copy of each page, whichever cell or fork maps it, as an extent never changes
+//! once sealed, its ID its cell's to write once, which the cell keeps to (TASK-79.6).
+//!
+//! A part's slot owns its slab while it is present. An eviction moves the slab out of the slot
+//! into an [`Eviction`] of its own, leaving a token behind that holds no memory, unmaps it from
+//! each window on the extent's window set, then alone frees it: so no eviction frees a slab
+//! another holds, whose unmaps that other has yet to send (TASK-560, board 2516; spec rule
+//! ownTokens). Freed, a slab staged to VM processes waits in quarantine for them
+//! (`slabs::quarantine_with`, TASK-79.9). An extent's windows are a set, each window on it once
+//! however often it maps the extent (TASK-602, board 2600; spec rule registerOnce).
 //!
 //! An extent the default arena holds is that one copy for a tenant's cell too, as every VM
 //! process may read the default arena; and one a tenant's arena holds that a cell reads into the
-//! default arena, as a public base's extent its publisher's cell had read, moves there: its pages
-//! copied in memory, rather than paged in again, and evicted from the tenant's (TASK-234).
+//! default arena, as a public base's extent its publisher's cell had read, moves there: its parts
+//! copied from slab to slab in the kernel, rather than paged in again, and evicted from the
+//! tenant's (TASK-234).
 
-use crate::dax::{Origin, Source, Window};
+use crate::dax::{Origin, Present, Source, Window};
 use crate::error::{Errno, Result};
 use crate::open_cell::PublicReach;
 use crate::pages::{ArenaId, page_size};
+use crate::slabs::{self, PartSlab, PhysLocation};
 use crate::stats::{self, Counter};
 use bucket_cell::trace;
 use futures::future::BoxFuture;
@@ -39,7 +48,9 @@ use storage_device::NoExtent;
 /// The process's cache of sealed extents (see the module docs): its pager's threads, which read
 /// their pages from the cells, and the extents, by arena and ID.
 struct ExtentCache {
-    /// The threads the pager reads extents' parts on.
+    /// The threads the pager reads extents' parts on: under Shuttle, none, as the test's run's
+    /// tasks are (`spawn_page_in`).
+    #[cfg_attr(feature = "shuttle", allow(dead_code))]
     pager: tokio::runtime::Runtime,
     /// By the arena their pages are of (TASK-43), and their IDs. Every tenant's, which a panic
     /// holding aborts the daemon (`local_cell::shared`, TASK-149.24); as do the others here.
@@ -236,20 +247,19 @@ fn evict_in_order(arena: Option<ArenaId>, mut enough: impl FnMut(u64) -> bool) -
     (evicted, extents)
 }
 
-/// Gives, once, the relief of arenas under pressure (TASK-50.3) its evictor, which frees pages of
-/// cached extents (`physmem::relieve_with`): before a cell of any arena opens, whose allocations
+/// Gives, once, the relief of arenas under pressure (TASK-50.3) its evictor, which frees parts of
+/// cached extents (`slabs::relieve_with`): before a cell of any arena opens, whose allocations
 /// may wait for it.
 pub(crate) fn relieve_pressure() {
     node_local::node_local! {
         static STARTED: std::sync::Once = std::sync::Once::new();
     }
     STARTED.get().call_once(|| {
-        let relieved = physmem::relieve_with(|arena, bytes| {
-            evict_least_used(arena, |evicted| evicted >= bytes)
-        });
+        let relieved =
+            slabs::relieve_with(|arena, bytes| evict_least_used(arena, |evicted| evicted >= bytes));
         // Without its thread, an allocation that finds its arena out of memory fails. cladefs:
-        // under madsim, physical memory is the process's, which another simulated host started
-        // relief of already, and starts no thread (doc-24, TASK-685.14).
+        // under madsim, relief is the process's, which another simulated host started already,
+        // and starts no thread (doc-24, TASK-685.14).
         match relieved {
             Err(err) if cfg!(madsim) && err.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(err) => log::error!("cladefs: starting the thread that frees capped memory: {err}"),
@@ -500,13 +510,13 @@ fn let_go_least_used(
     idle.into_iter().take(excess).filter_map(|(_, key)| extents.remove(&key)).collect()
 }
 
-/// A page-in found no pages of its arena to read into.
+/// A page-in found no memory of its arena to read into.
 #[derive(Debug, thiserror::Error)]
-#[error("no pages to read into")]
+#[error("no memory to read into")]
 struct NoPages;
 
 /// The errno a page-in that failed with `error` fails its readers with: `ENOENT` for an extent
-/// the cell doesn't hold, `ENOMEM` for want of pages, `EIO` for the rest.
+/// the cell doesn't hold, `ENOMEM` for want of memory, `EIO` for the rest.
 fn read_errno(error: &anyhow::Error) -> Errno {
     if error.downcast_ref::<NoExtent>().is_some() {
         Errno::ENOENT
@@ -517,7 +527,16 @@ fn read_errno(error: &anyhow::Error) -> Errno {
     }
 }
 
-/// What a cached extent's pages are read from: its contents, in parts.
+/// Runs `page_in` on the pager's threads: under Shuttle, as a task of the test's run, which its
+/// scheduler interleaves with the test's threads.
+fn spawn_page_in(page_in: impl std::future::Future<Output = ()> + Send + 'static) {
+    #[cfg(feature = "shuttle")]
+    drop(shuttle::future::spawn(page_in));
+    #[cfg(not(feature = "shuttle"))]
+    drop(extent_cache().pager.spawn(page_in));
+}
+
+/// What a cached extent's parts are read from: its contents.
 pub(crate) trait Contents: Send + Sync {
     /// Reads its bytes at `offset` into `buf`: a future, which a read that waits, as a fetch from
     /// object storage does, holds no thread while it waits on.
@@ -527,11 +546,82 @@ pub(crate) trait Contents: Send + Sync {
         buf: &'a mut [u8],
     ) -> BoxFuture<'a, std::result::Result<(), anyhow::Error>>;
 
+    /// Fills `slab` with its `len` bytes at `offset`, and zeros past them: read into a buffer
+    /// ([`Contents::read`]), and written into the slab, as the daemon maps no slab (doc-26).
+    fn fill<'a>(
+        &'a self,
+        offset: u64,
+        len: u64,
+        slab: &'a PartSlab,
+    ) -> BoxFuture<'a, std::result::Result<(), anyhow::Error>> {
+        Box::pin(async move {
+            let mut buffer = buffers::Buffer::take(slab.len() as usize);
+            let (data, past) = buffer.split_at_mut(len as usize);
+            past.fill(0);
+            self.read(offset, data).await?;
+            slab.write(0, &buffer)?;
+            Ok(())
+        })
+    }
+
     /// Where, in the extent, its parts of `extent_frame::PART` bytes begin: an offset within the
     /// first, in whole pages. A part is decompressed whole, so reading less of it costs nearly as
     /// much.
     fn phase(&self) -> u64 {
         0
+    }
+}
+
+/// The buffers page-ins read parts into before writing them into their slabs: a few kept, the
+/// pager's threads' worth, as a part's (1 MiB) is the size the C library's allocator maps and
+/// unmaps each of on its own (`cladefsd::memory::MMAP_THRESHOLD`). Those past them are freed as
+/// they are given back. A page-in holds one only as its thread reads a part from a cell, and copies
+/// one in memory (`cladefsd::process::PAGE_INS`).
+mod buffers {
+    use std::sync::Mutex;
+
+    /// How many it keeps.
+    const KEPT: usize = super::PAGER_THREADS;
+
+    static KEPT_BUFFERS: Mutex<Vec<Box<[u8]>>> = Mutex::new(Vec::new());
+
+    /// A buffer of a part at most, given back as it is dropped.
+    pub(super) struct Buffer {
+        bytes: Option<Box<[u8]>>,
+        len: usize,
+    }
+
+    impl Buffer {
+        /// A buffer of `len` bytes, a slab's at most, its bytes whatever they were.
+        pub(super) fn take(len: usize) -> Self {
+            let kept = KEPT_BUFFERS.lock().unwrap().pop();
+            let bytes = kept.unwrap_or_else(|| vec![0; crate::slabs::SLAB as usize].into());
+            assert!(len <= bytes.len(), "a buffer of {len} bytes, past a slab's");
+            Self { bytes: Some(bytes), len }
+        }
+    }
+
+    impl std::ops::Deref for Buffer {
+        type Target = [u8];
+
+        fn deref(&self) -> &[u8] {
+            &self.bytes.as_ref().expect("a buffer until dropped")[..self.len]
+        }
+    }
+
+    impl std::ops::DerefMut for Buffer {
+        fn deref_mut(&mut self) -> &mut [u8] {
+            &mut self.bytes.as_mut().expect("a buffer until dropped")[..self.len]
+        }
+    }
+
+    impl Drop for Buffer {
+        fn drop(&mut self) {
+            let mut kept = KEPT_BUFFERS.lock().unwrap();
+            if kept.len() < KEPT {
+                kept.extend(self.bytes.take());
+            }
+        }
     }
 }
 
@@ -561,17 +651,21 @@ impl StoredExtent {
     }
 }
 
-impl Contents for StoredExtent {
-    /// A read of the local cell, which doesn't wait for long, on the pager's thread; or a fetch,
-    /// which the page-in waits for holding no thread.
-    fn read<'a>(
-        &'a self,
-        offset: u64,
-        buf: &'a mut [u8],
-    ) -> BoxFuture<'a, std::result::Result<(), anyhow::Error>> {
+/// Where a stored extent's bytes were found ([`StoredExtent::look`]).
+enum Found {
+    /// Read from a cell of the host's.
+    Read,
+    /// In object storage, which the fetch fetches: their bytes, as many as there are.
+    Fetch(BoxFuture<'static, std::result::Result<Vec<u8>, anyhow::Error>>),
+}
+
+impl StoredExtent {
+    /// Reads its bytes at `offset` into `buf` from the first of the cells that asked for it that
+    /// holds it still (TASK-79.7), which doesn't wait for long, on the pager's thread; or finds them
+    /// in object storage, to fetch, which the page-in waits for holding no thread.
+    fn look(&self, offset: u64, buf: &mut [u8]) -> std::result::Result<Found, anyhow::Error> {
         stats::add(Counter::PageIns, 1);
         let id = self.extent;
-        // Through the first of the cells that asked for it that holds it still (TASK-79.7).
         let mut failed = anyhow::Error::new(NoExtent(id));
         for (local, fetcher) in self.holders.open() {
             // An extent freed since it was mapped, which a follower's view keeps, reads as kept
@@ -585,25 +679,66 @@ impl Contents for StoredExtent {
             match read {
                 Ok(()) => {
                     stats::add(Counter::PageInBytes, buf.len() as u64);
-                    return Box::pin(std::future::ready(Ok(())));
+                    return Ok(Found::Read);
                 }
                 Err(ref error)
                     if let Some(data) = error.downcast_ref::<local_cell::BucketData>()
                         && let Some(fetcher) = fetcher =>
                 {
                     let fetched = fetcher.read(id, data.location.clone(), offset, buf.len() as u64);
-                    return Box::pin(async move {
+                    return Ok(Found::Fetch(Box::pin(async move {
                         let data = fetched.await?;
                         stats::add(Counter::FetchedBytes, data.len() as u64);
-                        buf[..data.len()].copy_from_slice(&data);
-                        buf[data.len()..].fill(0);
-                        Ok(())
-                    });
+                        Ok(data.to_vec())
+                    })));
                 }
                 Err(error) => failed = error,
             }
         }
-        Box::pin(std::future::ready(Err(failed)))
+        Err(failed)
+    }
+}
+
+impl Contents for StoredExtent {
+    fn read<'a>(
+        &'a self,
+        offset: u64,
+        buf: &'a mut [u8],
+    ) -> BoxFuture<'a, std::result::Result<(), anyhow::Error>> {
+        Box::pin(async move {
+            if let Found::Fetch(fetched) = self.look(offset, buf)? {
+                let data = fetched.await?;
+                buf[..data.len()].copy_from_slice(&data);
+                buf[data.len()..].fill(0);
+            }
+            Ok(())
+        })
+    }
+
+    /// Read from a cell into a buffer, and written; or fetched, and what is fetched written, the
+    /// buffer given back while the fetch waits, so that page-ins hold buffers only as their
+    /// threads read (`process::PAGE_INS`).
+    fn fill<'a>(
+        &'a self,
+        offset: u64,
+        len: u64,
+        slab: &'a PartSlab,
+    ) -> BoxFuture<'a, std::result::Result<(), anyhow::Error>> {
+        Box::pin(async move {
+            let mut buffer = buffers::Buffer::take(slab.len() as usize);
+            let (data, past) = buffer.split_at_mut(len as usize);
+            past.fill(0);
+            match self.look(offset, data)? {
+                Found::Read => slab.write(0, &buffer)?,
+                Found::Fetch(fetched) => {
+                    drop(buffer);
+                    let data = fetched.await?;
+                    slab.write(0, &data)?;
+                    slab.zero(data.len() as u64)?;
+                }
+            }
+            Ok(())
+        })
     }
 
     fn phase(&self) -> u64 {
@@ -612,8 +747,8 @@ impl Contents for StoredExtent {
 }
 
 /// An extent's contents read into the default arena from a tenant's copy of it (TASK-234): its
-/// pages in memory copied, and the rest read from the cells; either way, the copy's pages go, and
-/// the copy once none is left.
+/// parts in memory copied, slab to slab, and the rest read from the cells; either way, the copy's
+/// parts go, and the copy once none is left.
 struct Promoted {
     from: SharedLock<Mutex<Option<Arc<CachedExtent>>>>,
     stored: Box<dyn Contents>,
@@ -625,13 +760,27 @@ impl Contents for Promoted {
         offset: u64,
         buf: &'a mut [u8],
     ) -> BoxFuture<'a, std::result::Result<(), anyhow::Error>> {
+        self.stored.read(offset, buf)
+    }
+
+    /// The copy's part, if it holds it: copied from its slab, in the kernel, no bounce through the
+    /// daemon's memory where the copy's parts are laid out as these are (doc-26); else read in.
+    fn fill<'a>(
+        &'a self,
+        offset: u64,
+        len: u64,
+        slab: &'a PartSlab,
+    ) -> BoxFuture<'a, std::result::Result<(), anyhow::Error>> {
         let ps = page_size();
-        let pages = offset / ps..(offset + buf.len() as u64).div_ceil(ps);
+        let pages = offset / ps..(offset + slab.len()).div_ceil(ps);
         let from = self.from.with(Mutex::lock).clone();
         Box::pin(async move {
-            let copied = from.as_ref().is_some_and(|from| from.copy_present(offset, buf));
+            let copied = match &from {
+                Some(from) => from.copy_into(offset, len, slab)?,
+                None => false,
+            };
             if !copied {
-                self.stored.read(offset, buf).await?;
+                self.stored.fill(offset, len, slab).await?;
             }
             if let Some(from) = from {
                 from.evict_pages(pages);
@@ -653,66 +802,126 @@ impl Contents for Promoted {
 /// TASK-672.2).
 type Landed = OnceLock<Option<trace::Source>>;
 
-/// A page of a cached extent.
-enum Slot {
+/// What an eviction leaves in its part's slot: its number, which holds no memory, the slab being
+/// its eviction's ([`Eviction`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EvictionToken(u64);
+
+impl EvictionToken {
+    /// A token no other eviction has.
+    fn new() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+/// A part of a cached extent.
+enum PartSlot {
     /// Not in memory.
     Absent,
     /// Being read in, which [`CachedExtent::changed`] tells of the end of.
     Filling,
-    /// In memory.
-    Present(physmem::Page),
-    /// Being evicted: unmapped from the windows that map it, then let go of.
-    Evicting(physmem::Page),
+    /// In memory: its slab, the slot's.
+    Present(PartSlab),
+    /// Being evicted, by the eviction holding the token, which holds the slab: unmapped from the
+    /// windows that map it, then freed.
+    Evicting(EvictionToken),
     /// Its read in failed, as the next waiting for it are told; asked for again, it is read in
     /// anew.
     Failed(Errno),
 }
 
-/// A cached extent's pages, and the windows that map them, under its lock.
-struct Pages {
-    slots: Vec<Slot>,
-    windows: Vec<Weak<Window>>,
-    /// The page after the last part a page-in asked for: where a reader reading on asks next.
-    next: u64,
+/// A part's slab, taken out of its slot by an eviction, the eviction's alone, which frees it once
+/// it has unmapped it from the windows ([`CachedExtent::evict_pages`]).
+struct Eviction {
+    part: usize,
+    slab: PartSlab,
+    token: EvictionToken,
 }
 
-/// A sealed extent in the cache: a table of its pages. See the module docs.
+/// The runs evictions of an extent's parts hold: what a window's pages of them are found by.
+struct Evicted {
+    arena: ArenaId,
+    /// The runs, by their offsets in the arena's object: start to end.
+    runs: std::collections::BTreeMap<u64, u64>,
+}
+
+impl Evicted {
+    fn new(arena: ArenaId, evictions: &[Eviction]) -> Self {
+        let runs = (evictions.iter())
+            .map(|eviction| {
+                let at = eviction.slab.location().offset;
+                (at, at + eviction.slab.len())
+            })
+            .collect();
+        Self { arena, runs }
+    }
+
+    /// Whether the page at `at` is of a run evicted.
+    fn contains(&self, at: PhysLocation) -> bool {
+        at.arena == self.arena
+            && (self.runs.range(..=at.offset).next_back()).is_some_and(|(_, end)| at.offset < *end)
+    }
+}
+
+/// A cached extent's parts, and the windows that map them, under its lock.
+struct Parts {
+    slots: Vec<PartSlot>,
+    /// The windows that map it, each once, by its identity ([`window_identity`]).
+    windows: HashMap<usize, Weak<Window>>,
+    /// The part after the last a page-in asked for: where a reader reading on asks next.
+    next: usize,
+}
+
+/// The part page `page` of an extent is in: of an object's parts (`extent_frame::PART`), which a
+/// sealed extent's data is stored and fetched in, its first shortened by the extent's `phase`
+/// ([`Contents::phase`]).
+fn part_index(page: u64, phase: u64) -> usize {
+    ((page * page_size() + phase) / extent_frame::PART) as usize
+}
+
+/// The identity of `window`, the same for each of its handles: what an extent's window set keys it
+/// by.
+fn window_identity(window: &Window) -> usize {
+    window as *const Window as usize
+}
+
+/// A sealed extent in the cache: a table of its parts. See the module docs.
 pub(crate) struct CachedExtent {
     arena: ArenaId,
     extent: ExtentId,
     contents: Box<dyn Contents>,
     len: u64,
-    pages: SharedLock<Mutex<Pages>>,
-    /// How many of its pages are in memory, which relief asks of every extent cached (TASK-92.33).
+    parts: SharedLock<Mutex<Parts>>,
+    /// How many of its parts are in memory, which relief asks of every extent cached (TASK-92.33).
     present: AtomicUsize,
     /// When it was last asked for or faulted on, by [`CACHE_CLOCK`]: those longest ago are evicted
     /// first (TASK-50.3, TASK-92.32).
     used: AtomicU64,
-    /// Notified as pages come in, fail to, or go.
+    /// Notified as parts come in, fail to, or go.
     changed: event_listener::Event,
 }
 
 impl CachedExtent {
-    /// `extent`, of `len` bytes, read from `contents` into pages of `arena`.
+    /// `extent`, of `len` bytes, read from `contents` into slabs of `arena`.
     pub(crate) fn new(
         arena: ArenaId,
         extent: ExtentId,
         contents: Box<dyn Contents>,
         len: u64,
     ) -> Self {
-        let count = len.div_ceil(page_size()) as usize;
-        let slots = std::iter::repeat_with(|| Slot::Absent).take(count).collect();
+        let phase = contents.phase();
+        let pages = len.div_ceil(page_size());
+        let count = pages.checked_sub(1).map_or(0, |last| part_index(last, phase) + 1);
+        let slots = std::iter::repeat_with(|| PartSlot::Absent).take(count).collect();
         // A reader from its start reads on.
-        let pages = SharedLock::new(
-            "cached extent pages",
-            Mutex::new(Pages { slots, windows: Vec::new(), next: 0 }),
-        );
+        let parts = Parts { slots, windows: HashMap::new(), next: 0 };
         Self {
             arena,
             extent,
             contents,
             len,
-            pages,
+            parts: SharedLock::new("cached extent parts", Mutex::new(parts)),
             present: AtomicUsize::new(0),
             used: AtomicU64::new(0),
             changed: event_listener::Event::new(),
@@ -732,32 +941,60 @@ impl CachedExtent {
         if self.present.load(Ordering::Relaxed) == 0 {
             return None;
         }
-        let pages = self.pages.with(Mutex::lock);
-        let mapped = pages.windows.iter().any(|window| window.strong_count() > 0);
+        let parts = self.parts.with(Mutex::lock);
+        let mapped = parts.windows.values().any(|window| window.strong_count() > 0);
         Some((mapped, self.used.load(Ordering::Relaxed)))
     }
 
-    /// The part `page` is in, of its `pages`, as page numbers: a part of an object
-    /// (`extent_frame::PART`), which a sealed extent's data is stored and fetched in.
-    fn part_of(&self, page: u64, pages: u64) -> Range<u64> {
-        let (ps, part, phase) = (page_size(), extent_frame::PART, self.contents.phase());
-        let index = (page * ps + phase) / part;
-        let start = (index * part).saturating_sub(phase) / ps;
-        let end = ((index + 1) * part - phase).div_ceil(ps).min(pages);
+    /// How many pages it is.
+    fn pages(&self) -> u64 {
+        self.len.div_ceil(page_size())
+    }
+
+    /// The part `page` is in ([`part_index`]).
+    fn part_of(&self, page: u64) -> usize {
+        part_index(page, self.contents.phase())
+    }
+
+    /// The pages of its part `part`.
+    fn part_pages(&self, part: usize) -> Range<u64> {
+        let (ps, phase, part) = (page_size(), self.contents.phase(), part as u64);
+        let start = (part * extent_frame::PART).saturating_sub(phase) / ps;
+        let end = ((part + 1) * extent_frame::PART - phase).div_ceil(ps).min(self.pages());
         start..end
+    }
+
+    /// The parts holding its pages `pages`.
+    fn parts_of(&self, pages: Range<u64>) -> Range<usize> {
+        let end = pages.end.min(self.pages());
+        match pages.start < end {
+            true => self.part_of(pages.start)..self.part_of(end - 1) + 1,
+            false => 0..0,
+        }
     }
 
     /// How many of its pages are in memory.
     #[cfg(test)]
     pub(crate) fn held(&self) -> u64 {
-        let pages = self.pages.with(Mutex::lock);
-        pages.slots.iter().filter(|slot| matches!(slot, Slot::Present(_))).count() as u64
+        let parts = self.parts.with(Mutex::lock);
+        let present = parts.slots.iter().map(|slot| match slot {
+            PartSlot::Present(slab) => slab.pages(),
+            _ => 0,
+        });
+        present.sum()
     }
 
-    /// Reads its bytes at `offset` into `data`, reading in its pages that aren't in memory, as a
+    /// How many windows its window set holds, those gone included until it next lets go of them.
+    #[cfg(test)]
+    pub(crate) fn windows_held(&self) -> usize {
+        self.parts.with(Mutex::lock).windows.len()
+    }
+
+    /// Reads its bytes at `offset` into `data`, reading in its parts that aren't in memory, as a
     /// read of the extent that maps nothing does, awaiting them, holding no thread (doc-24, step
-    /// 5). Past its end, zeros. cladefs: a page in memory is copied as it is found, allocating
-    /// nothing; one not, brought in first (`Source::bring_in`, a future boxed), TASK-453.
+    /// 5). Past its end, zeros. cladefs: a part in memory is read from its slab as it is found,
+    /// allocating nothing; one not, brought in first (`Source::bring_in`, a future boxed),
+    /// TASK-453.
     pub(crate) async fn read(self: &Arc<Self>, offset: u64, data: &mut [u8]) -> Result<()> {
         let ps = page_size();
         let held = self.len.saturating_sub(offset).min(data.len() as u64) as usize;
@@ -766,73 +1003,69 @@ impl CachedExtent {
         let mut done = 0;
         while done < bytes.len() {
             let at = offset + done as u64;
-            let (page, within) = (at / ps, (at % ps) as usize);
-            let len = (ps as usize - within).min(bytes.len() - done);
+            let page = at / ps;
             {
-                let pages = self.pages.with(Mutex::lock);
-                if let Some(Slot::Present(frame)) = pages.slots.get(page as usize) {
-                    // SAFETY: The page is the extent's, in memory while its lock is held, and
-                    // encrypted: only read.
-                    let memory = unsafe { std::slice::from_raw_parts(frame.as_ptr(), ps as usize) };
-                    bytes[done..done + len].copy_from_slice(&memory[within..within + len]);
+                let parts = self.parts.with(Mutex::lock);
+                let part = self.part_of(page);
+                if let Some(PartSlot::Present(slab)) = parts.slots.get(part) {
+                    let within = at - self.part_pages(part).start * ps;
+                    let len = ((slab.len() - within) as usize).min(bytes.len() - done);
+                    if let Err(err) = slab.read(within, &mut bytes[done..done + len]) {
+                        log::error!("cladefs: reading {:?} from its slab: {err}", self.extent);
+                        return Err(Errno::EIO);
+                    }
                     done += len;
                     continue;
                 }
             }
-            // Read in, then copied, unless evicted meanwhile: read in again.
+            // Read in, then read, unless evicted meanwhile: read in again.
             self.clone().bring_in(page).await?;
         }
         Ok(())
     }
 
+    /// Marks its parts `parts` filling, as far as they aren't in memory or being read in, and
+    /// returns those it marked, to read in; under its lock.
+    fn mark_filling(table: &mut Parts, parts: impl IntoIterator<Item = usize>) -> Vec<usize> {
+        (parts.into_iter())
+            .filter(|&part| {
+                let slot = &mut table.slots[part];
+                let wanted = matches!(slot, PartSlot::Absent | PartSlot::Failed(_));
+                if wanted {
+                    *slot = PartSlot::Filling;
+                }
+                wanted
+            })
+            .collect()
+    }
+
     /// cladefs: reads the parts of it holding its `len` bytes at `offset` into memory, ahead of
-    /// any reader, as page-ins read them: those of which a page is neither in memory nor being
-    /// read in. Not as a reader reading on: what a page-in reads ahead of one it reads nothing of.
-    /// How many parts it read in, once none of their pages is being read in any more. What a fork
-    /// reads ahead of its guest of what its version's evidence predicts (`crate::evidence`, board
-    /// 6225).
+    /// any reader, as page-ins read them: those neither in memory nor being read in. Not as a
+    /// reader reading on: what a page-in reads ahead of one it reads nothing of. How many parts it
+    /// read in, once none of them is being read in any more. What a fork reads ahead of its guest
+    /// of what its version's evidence predicts (`crate::evidence`, board 6225).
     pub(crate) async fn read_ahead(self: &Arc<Self>, offset: u64, len: u64) -> u64 {
         self.used();
         let ps = page_size();
+        let pages = offset / ps..offset.saturating_add(len).div_ceil(ps);
         let parts = {
-            let mut table = self.pages.with(Mutex::lock);
-            let count = table.slots.len() as u64;
-            let end = offset.saturating_add(len).div_ceil(ps).min(count);
-            let mut parts = Vec::new();
-            let mut page = offset / ps;
-            while page < end {
-                let part = self.part_of(page, count);
-                let mut wanted = false;
-                for page in part.clone() {
-                    let slot = &mut table.slots[page as usize];
-                    if matches!(slot, Slot::Absent | Slot::Failed(_)) {
-                        *slot = Slot::Filling;
-                        wanted = true;
-                    }
-                }
-                page = part.end;
-                if wanted {
-                    parts.push(part);
-                }
-            }
-            parts
+            let mut table = self.parts.with(Mutex::lock);
+            Self::mark_filling(&mut table, self.parts_of(pages))
         };
         // Read in by the pager, as a page-in is, so that the reader's going leaves none of them
         // filling, which a fault would wait on for good.
-        for part in &parts {
+        for &part in &parts {
             let span = self.page_in_span(part);
-            extent_cache().pager.spawn(self.clone().read_part(part.clone(), span, None));
+            spawn_page_in(self.clone().read_part(part, span, None));
         }
         loop {
             let listener = {
-                let table = self.pages.with(Mutex::lock);
-                let filling = |part: &Range<u64>| {
-                    part.clone().any(|page| matches!(table.slots[page as usize], Slot::Filling))
-                };
+                let table = self.parts.with(Mutex::lock);
+                let filling = |part: &usize| matches!(table.slots[*part], PartSlot::Filling);
                 if !parts.iter().any(filling) {
                     break;
                 }
-                // Listened for under the lock, which what changes a page takes.
+                // Listened for under the lock, which what changes a part takes.
                 self.changed.listen()
             };
             listener.await;
@@ -840,105 +1073,124 @@ impl CachedExtent {
         parts.len() as u64
     }
 
-    /// Copies its bytes at `offset` into `data`, if its pages they are of are all in memory:
-    /// whether they were (TASK-234).
-    fn copy_present(&self, offset: u64, data: &mut [u8]) -> bool {
+    /// Copies its `len` bytes at `offset`, and zeros past them, into `slab`, if its parts they are
+    /// of are all in memory: whether they were (TASK-234). A part laid out as `slab` is copied from
+    /// its slab in the kernel; others are read from their slabs into a buffer, and written.
+    fn copy_into(
+        &self,
+        offset: u64,
+        len: u64,
+        slab: &PartSlab,
+    ) -> std::result::Result<bool, anyhow::Error> {
         let ps = page_size();
-        let pages = self.pages.with(Mutex::lock);
-        let first = offset / ps;
-        let count = (data.len() as u64).div_ceil(ps);
-        let frames: Option<Vec<_>> = (first..first + count)
-            .map(|page| match pages.slots.get(page as usize) {
-                Some(Slot::Present(frame)) => Some(frame.as_ptr()),
-                _ => None,
-            })
-            .collect();
-        let Some(frames) = frames else { return false };
-        for (frame, bytes) in frames.into_iter().zip(data.chunks_mut(ps as usize)) {
-            // SAFETY: The page is the extent's, in memory while its lock is held, and sealed: only
-            // read.
-            unsafe { std::ptr::copy_nonoverlapping(frame, bytes.as_mut_ptr(), bytes.len()) };
+        let parts = self.parts.with(Mutex::lock);
+        let pages = offset / ps..(offset + slab.len()).div_ceil(ps);
+        let mut present = Vec::new();
+        for part in self.parts_of(pages.clone()) {
+            let PartSlot::Present(from) = &parts.slots[part] else { return Ok(false) };
+            present.push((self.part_pages(part), from));
         }
-        true
+        if let [(from_pages, from)] = &present[..]
+            && *from_pages == pages
+            && from.len() == slab.len()
+        {
+            slab.copy_from(from)?;
+            return Ok(true);
+        }
+        let mut buffer = buffers::Buffer::take(slab.len() as usize);
+        buffer.fill(0);
+        for (from_pages, from) in present {
+            let start = from_pages.start.max(pages.start);
+            let end = from_pages.end.min(pages.end);
+            let within = (start - from_pages.start) * ps;
+            let into = ((start - pages.start) * ps) as usize;
+            let bytes = ((end - start) * ps) as usize;
+            from.read(within, &mut buffer[into..into + bytes])?;
+        }
+        buffer[len as usize..].fill(0);
+        slab.write(0, &buffer)?;
+        Ok(true)
     }
 
     /// The windows that map it.
     fn windows(&self) -> Vec<Arc<Window>> {
-        let pages = self.pages.with(Mutex::lock);
-        pages.windows.iter().filter_map(Weak::upgrade).collect()
+        let parts = self.parts.with(Mutex::lock);
+        parts.windows.values().filter_map(Weak::upgrade).collect()
     }
 
-    /// The first pages of its parts of which a page is in memory (TASK-234).
+    /// The first pages of its parts in memory (TASK-234).
     fn present_parts(&self) -> Vec<u64> {
-        let pages = self.pages.with(Mutex::lock);
-        let count = pages.slots.len() as u64;
-        let mut parts = Vec::new();
-        let mut page = 0;
-        while page < count {
-            let part = self.part_of(page, count);
-            if part.clone().any(|page| matches!(pages.slots[page as usize], Slot::Present(_))) {
-                parts.push(part.start);
-            }
-            page = part.end;
-        }
-        parts
+        let parts = self.parts.with(Mutex::lock);
+        (parts.slots.iter().enumerate())
+            .filter(|(_, slot)| matches!(slot, PartSlot::Present(_)))
+            .map(|(part, _)| self.part_pages(part).start)
+            .collect()
     }
 
-    /// Evicts its pages in memory: unmaps them from the windows that map them, then lets go of
-    /// them, those a window's second stage mapped into quarantine (`physmem::quarantine_with`).
-    /// Returns the bytes it evicted.
+    /// Evicts its parts in memory: unmaps them from the windows that map them, then frees their
+    /// slabs, those staged to VM processes into quarantine (`slabs::quarantine_with`). Returns the
+    /// bytes it evicted.
     pub(crate) fn evict(&self) -> u64 {
         self.evict_pages(0..u64::MAX)
     }
 
-    /// Evicts its pages in memory of `range`, as [`CachedExtent::evict`] evicts them all.
-    fn evict_pages(&self, range: Range<u64>) -> u64 {
-        let (frames, windows) = {
-            let mut pages = self.pages.with(Mutex::lock);
-            let mut frames = HashSet::new();
-            let end = range.end.min(pages.slots.len() as u64) as usize;
-            let start = (range.start as usize).min(end);
-            for slot in &mut pages.slots[start..end] {
-                *slot = match std::mem::replace(slot, Slot::Absent) {
-                    Slot::Present(frame) => {
-                        frames.insert(frame.frame());
-                        self.present.fetch_sub(1, Ordering::Relaxed);
-                        Slot::Evicting(frame)
-                    }
-                    other => other,
+    /// Evicts its parts in memory holding its pages `pages`, as [`CachedExtent::evict`] evicts
+    /// them all, each its own (spec rule ownTokens): their slabs moved out of their slots into
+    /// evictions of this call's, tokens left in their place; unmapped from each window on its
+    /// window set; their slots then absent, and their slabs freed, by this call alone. A part
+    /// another eviction is evicting is that one's: this one leaves it.
+    fn evict_pages(&self, pages: Range<u64>) -> u64 {
+        let (evictions, windows) = {
+            let mut parts = self.parts.with(Mutex::lock);
+            let mut evictions = Vec::new();
+            for part in self.parts_of(pages) {
+                let slot = &mut parts.slots[part];
+                if !matches!(slot, PartSlot::Present(_)) {
+                    continue;
+                }
+                let token = EvictionToken::new();
+                let PartSlot::Present(slab) = std::mem::replace(slot, PartSlot::Evicting(token))
+                else {
+                    unreachable!("a part present")
                 };
+                self.present.fetch_sub(1, Ordering::Relaxed);
+                evictions.push(Eviction { part, slab, token });
             }
-            pages.windows.retain(|window| window.strong_count() > 0);
-            (frames, pages.windows.iter().filter_map(Weak::upgrade).collect::<Vec<_>>())
+            parts.windows.retain(|_, window| window.strong_count() > 0);
+            (evictions, parts.windows.values().filter_map(Weak::upgrade).collect::<Vec<_>>())
         };
-        if frames.is_empty() {
+        if evictions.is_empty() {
             return 0;
         }
+        let evicted = Evicted::new(self.arena, &evictions);
         let identity = self as *const Self as *const () as usize;
         for window in windows {
-            window.unmap_pages_of(identity, &|frame| frames.contains(&frame));
+            window.unmap_pages_of(identity, &|at| evicted.contains(at));
         }
-        let evicted: Vec<physmem::Page> = {
-            let mut pages = self.pages.with(Mutex::lock);
-            (pages.slots.iter_mut())
-                .filter_map(|slot| match std::mem::replace(slot, Slot::Absent) {
-                    Slot::Evicting(frame) => Some(frame),
-                    other => {
-                        *slot = other;
-                        None
-                    }
-                })
-                .collect()
-        };
+        {
+            let mut parts = self.parts.with(Mutex::lock);
+            for eviction in &evictions {
+                let slot = &mut parts.slots[eviction.part];
+                assert!(
+                    matches!(slot, PartSlot::Evicting(token) if *token == eviction.token),
+                    "part {} of {:?} changed under its eviction",
+                    eviction.part,
+                    self.extent
+                );
+                *slot = PartSlot::Absent;
+            }
+        }
         self.changed.notify(usize::MAX);
-        let bytes = evicted.len() as u64 * page_size();
-        drop(evicted);
+        let bytes = evictions.iter().map(|eviction| eviction.slab.len()).sum();
+        // Freed past the extent's lock, each into quarantine if it was staged.
+        drop(evictions);
         bytes
     }
 
-    /// cladefs: the span of a page-in of its part `pages`, `cache.page_in` (`bucket_cell::trace`,
+    /// cladefs: the span of a page-in of its part `part`, `cache.page_in` (`bucket_cell::trace`,
     /// TASK-258): its reads, from the cell or the bucket, its children.
-    fn page_in_span(&self, pages: &Range<u64>) -> trace::Span {
+    fn page_in_span(&self, part: usize) -> trace::Span {
+        let pages = self.part_pages(part);
         let span = trace::Span::start("cache.page_in");
         span.set_with(trace::CELL, || base32_id::Short(self.extent.cell).to_string());
         span.set_count(trace::EXTENT, self.extent.sequence);
@@ -947,51 +1199,38 @@ impl CachedExtent {
         span
     }
 
-    /// Reads in the part `pages` of the extent, which a page-in marked filling, into pages of its
-    /// arena, and puts those still filling then in its table: `span` the page-in's, the parent of
-    /// its reads (TASK-258). cladefs: says where it read them from on `span`, `local` if from the
-    /// host's cells alone, and tells `landed`, if a bring-in waits to hear it, before the pages
-    /// are in; `span` ended before those waiting for them are told, so that their spans end after
-    /// it (TASK-672.2).
+    /// Reads in its part `part`, which a page-in marked filling, into a slab of its arena, and
+    /// puts it in its slot: `span` the page-in's, the parent of its reads (TASK-258). cladefs: says
+    /// where it read it from on `span`, `local` if from the host's cells alone, and tells
+    /// `landed`, if a bring-in waits to hear it, before the part is in; `span` ended before those
+    /// waiting for it are told, so that their spans end after it (TASK-672.2).
     async fn read_part(
         self: Arc<Self>,
-        pages: Range<u64>,
+        part: usize,
         span: trace::Span,
         landed: Option<Arc<Landed>>,
     ) {
-        let ps = page_size();
-        let (read, source) = span.around(trace::sourced(self.read_pages(pages.clone()))).await;
+        let (read, source) = span.around(trace::sourced(self.fill(part))).await;
         span.set(trace::SOURCE, source.map_or("local", trace::Source::name));
         if let Some(landed) = landed {
             landed.set(source).expect("a page-in lands once");
         }
         let entered = span.enter();
-        let mut table = self.pages.with(Mutex::lock);
+        let mut table = self.parts.with(Mutex::lock);
+        let slot = &mut table.slots[part];
+        assert!(matches!(slot, PartSlot::Filling), "part {part} of {:?} not filling", self.extent);
         match read {
-            Ok(frames) => {
-                for (page, frame) in pages.zip(frames) {
-                    let slot = &mut table.slots[page as usize];
-                    if let Slot::Filling = slot {
-                        *slot = Slot::Present(frame);
-                        self.present.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
+            Ok(slab) => {
+                *slot = PartSlot::Present(slab);
+                self.present.fetch_add(1, Ordering::Relaxed);
             }
             Err(error) => {
                 // What the read failed with, not its errno alone, which said nothing of why
                 // (TASK-217).
                 let errno = read_errno(&error);
-                log::error!(
-                    "cladefs: reading {:?} at {:#x}: {errno:?}: {error:#}",
-                    self.extent,
-                    pages.start * ps
-                );
-                for page in pages {
-                    let slot = &mut table.slots[page as usize];
-                    if let Slot::Filling = slot {
-                        *slot = Slot::Failed(errno);
-                    }
-                }
+                let at = self.part_pages(part).start * page_size();
+                log::error!("cladefs: reading {:?} at {at:#x}: {errno:?}: {error:#}", self.extent);
+                *slot = PartSlot::Failed(errno);
             }
         }
         drop(table);
@@ -1000,89 +1239,47 @@ impl CachedExtent {
         self.changed.notify(usize::MAX);
     }
 
-    /// The pages `pages` of the extent, read in: pages of its arena, consecutive where they can be
-    /// (`physmem::alloc_run`), so that a window maps them in as few runs as can be (TASK-108.1),
-    /// and read into in place if they are, else copied into.
-    async fn read_pages(
-        &self,
-        pages: Range<u64>,
-    ) -> std::result::Result<Vec<physmem::Page>, anyhow::Error> {
-        let ps = page_size();
-        let count = (pages.end - pages.start) as usize;
-        let frames = physmem::alloc_run(self.arena, count, physmem::Wait::Yes)
+    /// Its part `part`, read in: a slab of its arena, a part's long, filled with its bytes, zeros
+    /// past its end.
+    async fn fill(&self, part: usize) -> std::result::Result<PartSlab, anyhow::Error> {
+        let pages = self.part_pages(part);
+        let slab = slabs::alloc(self.arena, pages.end - pages.start, slabs::Wait::Yes)
             .map_err(|_| anyhow::Error::new(NoPages))?;
-        let offset = pages.start * ps;
-        let len = count * ps as usize;
+        let offset = pages.start * page_size();
         // What of it the extent holds; past it, zeros.
-        let read = self.len.saturating_sub(offset).min(len as u64) as usize;
-        let consecutive = frames
-            .windows(2)
-            .all(|pair| pair[1].as_ptr() as usize == pair[0].as_ptr() as usize + ps as usize);
-        let result = if consecutive {
-            // SAFETY: The pages are consecutive in this process's memory, and allocated, and only
-            // this read's until it puts them in the table.
-            let memory = unsafe { std::slice::from_raw_parts_mut(frames[0].as_ptr(), len) };
-            let (data, past) = memory.split_at_mut(read);
-            past.fill(0);
-            self.contents.read(offset, data).await
-        } else {
-            let mut data = vec![0; len];
-            let result = self.contents.read(offset, &mut data[..read]).await;
-            for (frame, bytes) in frames.iter().zip(data.chunks(ps as usize)) {
-                // SAFETY: As above, a page at a time.
-                unsafe {
-                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), frame.as_ptr(), bytes.len())
-                };
-            }
-            result
-        };
-        result?;
-        Ok(frames)
+        let len = self.len.saturating_sub(offset).min(slab.len());
+        self.contents.fill(offset, len, &slab).await?;
+        Ok(slab)
     }
 
-    /// Marks the parts of `page`, and those after it a reader reading on asks for next, filling,
+    /// Marks the part of `page`, and those after it a reader reading on asks for next, filling,
     /// as far as they aren't in memory or being read in, and returns them, to read in; under its
     /// lock.
-    fn parts_to_read(&self, table: &mut Pages, page: u64) -> Vec<Range<u64>> {
-        let count = table.slots.len() as u64;
-        let mut parts = Vec::new();
-        let part = self.part_of(page, count);
-        let sequential = part.start == table.next;
-        let mut next = part.clone();
-        parts.push(part);
-        if sequential {
-            for _ in 0..PARTS_AHEAD {
-                if next.end >= count {
-                    break;
-                }
-                next = self.part_of(next.end, count);
-                parts.push(next.clone());
-            }
-        }
-        table.next = parts.last().map_or(u64::MAX, |part| part.end);
-        (parts.into_iter())
-            .filter_map(|part| {
-                let mut wanted = false;
-                for page in part.clone() {
-                    let slot = &mut table.slots[page as usize];
-                    if matches!(slot, Slot::Absent | Slot::Failed(_)) {
-                        *slot = Slot::Filling;
-                        wanted = true;
-                    }
-                }
-                wanted.then_some(part)
-            })
-            .collect()
+    fn parts_to_read(&self, table: &mut Parts, page: u64) -> Vec<usize> {
+        let count = table.slots.len();
+        let part = self.part_of(page);
+        let ahead = match part == table.next {
+            true => PARTS_AHEAD as usize,
+            false => 0,
+        };
+        let parts = part..(part + 1 + ahead).min(count);
+        table.next = parts.end;
+        Self::mark_filling(table, parts)
     }
 }
 
 impl Source for CachedExtent {
-    fn each_present(&self, pages: Range<u64>, found: &mut dyn FnMut(u64, &physmem::Page)) {
-        let table = self.pages.with(Mutex::lock);
-        for page in pages {
-            if let Some(Slot::Present(frame)) = table.slots.get(page as usize) {
-                found(page, frame);
-            }
+    fn each_present(&self, pages: Range<u64>, found: &mut dyn FnMut(Present<'_>)) {
+        let (ps, table) = (page_size(), self.parts.with(Mutex::lock));
+        for part in self.parts_of(pages.clone()) {
+            let PartSlot::Present(slab) = &table.slots[part] else { continue };
+            let part_pages = self.part_pages(part);
+            let (start, end) = (part_pages.start.max(pages.start), part_pages.end.min(pages.end));
+            let at = PhysLocation {
+                arena: slab.arena(),
+                offset: slab.location().offset + (start - part_pages.start) * ps,
+            };
+            found(Present { page: start, count: end - start, at, slab: Some(slab) });
         }
     }
 
@@ -1094,27 +1291,17 @@ impl Source for CachedExtent {
             // one (TASK-672.2).
             let mut landing: Option<Arc<Landed>> = None;
             loop {
+                let mut reading = Vec::new();
                 let listener = {
-                    let mut table = self.pages.with(Mutex::lock);
-                    let done = match table.slots.get(page as usize) {
+                    let mut table = self.parts.with(Mutex::lock);
+                    let slot = (page < self.pages()).then(|| &table.slots[self.part_of(page)]);
+                    let done = match slot {
                         None => Some(Err(Errno::ENOENT)),
-                        Some(Slot::Present(_)) => Some(Ok(waited)),
-                        Some(Slot::Failed(errno)) if waited => Some(Err(*errno)),
-                        Some(Slot::Filling | Slot::Evicting(_)) => None,
-                        Some(Slot::Absent | Slot::Failed(_)) => {
-                            // cladefs: for the guest request that wants it first, if any, which
-                            // its reads of object storage log (TASK-260).
-                            for part in self.parts_to_read(&mut table, page) {
-                                // cladefs: a child of what faulted, or read, on the page.
-                                let span = self.page_in_span(&part);
-                                let landed = (part.contains(&page))
-                                    .then(|| landing.insert(Arc::default()).clone());
-                                let reading = self.clone().read_part(part, span, landed);
-                                let request = crate::request::current();
-                                extent_cache()
-                                    .pager
-                                    .spawn(crate::request::within(request, reading));
-                            }
+                        Some(PartSlot::Present(_)) => Some(Ok(waited)),
+                        Some(PartSlot::Failed(errno)) if waited => Some(Err(*errno)),
+                        Some(PartSlot::Filling | PartSlot::Evicting(_)) => None,
+                        Some(PartSlot::Absent | PartSlot::Failed(_)) => {
+                            reading = self.parts_to_read(&mut table, page);
                             None
                         }
                     };
@@ -1129,9 +1316,20 @@ impl Source for CachedExtent {
                         }
                         return done;
                     }
-                    // Listened for under the lock, which what changes the page takes.
+                    // Listened for under the lock, which what changes the part takes.
                     self.changed.listen()
                 };
+                // Started past the lock, which a page-in takes as it ends.
+                let wanted = self.part_of(page);
+                for part in reading {
+                    // cladefs: a child of what faulted, or read, on the page; for the guest
+                    // request that wants it first, if any, which its reads of object storage log
+                    // (TASK-260).
+                    let span = self.page_in_span(part);
+                    let landed = (part == wanted).then(|| landing.insert(Arc::default()).clone());
+                    let read = self.clone().read_part(part, span, landed);
+                    spawn_page_in(crate::request::within(crate::request::current(), read));
+                }
                 listener.await;
                 waited = true;
             }
@@ -1140,17 +1338,18 @@ impl Source for CachedExtent {
 
     /// The rest of its part, which a page-in reads whole.
     fn brought_in_with(&self, page: u64) -> u64 {
-        let count = self.pages.with(Mutex::lock).slots.len() as u64;
-        self.part_of(page, count).end.saturating_sub(page).max(1)
+        self.part_pages(self.part_of(page)).end.saturating_sub(page).max(1)
     }
 
+    /// `window` is on its window set from now on, once however often it is told (spec rule
+    /// registerOnce, TASK-602).
     fn mapped(&self, window: &Arc<Window>) {
-        self.pages.with(Mutex::lock).windows.push(Arc::downgrade(window));
+        let mut table = self.parts.with(Mutex::lock);
+        table.windows.insert(window_identity(window), Arc::downgrade(window));
     }
 
     fn unmapped(&self, window: &Window) {
-        let mut table = self.pages.with(Mutex::lock);
-        table.windows.retain(|mapped| !std::ptr::eq(mapped.as_ptr(), window));
+        self.parts.with(Mutex::lock).windows.remove(&window_identity(window));
     }
 
     fn origin(&self) -> Origin {
@@ -1159,13 +1358,14 @@ impl Source for CachedExtent {
 }
 
 /// Zeros, which windows map read-only where nothing else is to be read: one page of them, of the
-/// default arena, which every VM process maps, wherever they are mapped.
-struct Zeros(physmem::Page);
+/// default arena, which every VM process maps, wherever they are mapped. Never freed, it is staged
+/// to none.
+struct Zeros(PartSlab);
 
 impl Source for Zeros {
-    fn each_present(&self, pages: Range<u64>, found: &mut dyn FnMut(u64, &physmem::Page)) {
+    fn each_present(&self, pages: Range<u64>, found: &mut dyn FnMut(Present<'_>)) {
         for page in pages {
-            found(page, &self.0);
+            found(Present { page, count: 1, at: self.0.location(), slab: None });
         }
     }
 
@@ -1186,8 +1386,144 @@ pub(crate) fn zeros() -> Result<Arc<dyn Source>> {
     if let Some(zeros) = ZEROS.get() {
         return Ok(zeros.clone());
     }
-    let page = physmem::alloc(ArenaId::DEFAULT, physmem::Wait::Yes).map_err(|_| Errno::ENOMEM)?;
-    // SAFETY: The page is allocated, and only this one's, never written after.
-    unsafe { std::ptr::write_bytes(page.as_ptr(), 0, page_size() as usize) };
+    let page = slabs::alloc(ArenaId::DEFAULT, 1, slabs::Wait::Yes).map_err(|_| Errno::ENOMEM)?;
+    page.write(0, &vec![0; page_size() as usize]).map_err(|err| {
+        log::error!("cladefs: writing the zeros windows map: {err}");
+        Errno::ENOMEM
+    })?;
     Ok(ZEROS.get_or_init(|| Arc::new(Zeros(page))).clone())
+}
+
+#[cfg(all(test, feature = "shuttle"))]
+mod shuttle_tests {
+    //! The extent cache and its slabs under Shuttle (awslabs/shuttle): evictions of one extent's
+    //! parts on threads of their own, racing a page-in and a map, against a window whose second
+    //! stage records what it maps, and a quarantine that checks, as each slab is freed, that the
+    //! stage maps none of its pages (TASK-560, board 2516; spec rule ownTokens).
+
+    use super::*;
+    use crate::Access;
+    use crate::dax::{Dax, SecondStage};
+    use crate::shuttle_testing::{config, runs};
+    use crate::slabs::VmProcessId;
+    use shuttle::scheduler::{PctScheduler, RandomScheduler};
+    use shuttle::{Runner, future, thread};
+    use std::collections::BTreeMap;
+
+    /// An extent's contents, each part's bytes its number and one.
+    struct Numbered;
+
+    impl Contents for Numbered {
+        fn read<'a>(
+            &'a self,
+            offset: u64,
+            buf: &'a mut [u8],
+        ) -> BoxFuture<'a, std::result::Result<(), anyhow::Error>> {
+            buf.fill((offset / extent_frame::PART) as u8 + 1);
+            Box::pin(std::future::ready(Ok(())))
+        }
+    }
+
+    /// The VM process of [`Recording`].
+    const VM: VmProcessId = VmProcessId(1);
+
+    /// A second stage that makes each change as it is made, as a VM process would once it made
+    /// them in order, and records the pages it maps: a slab the window staged here, freed, waits
+    /// in quarantine for nothing, so that what frees it while a page of it is mapped here is
+    /// caught as it frees it.
+    #[derive(Default)]
+    struct Recording(shuttle::sync::Mutex<BTreeMap<u64, PhysLocation>>);
+
+    impl SecondStage for Recording {
+        fn map(&self, offset: u64, phys: PhysLocation, len: u64) {
+            let mut pages = self.0.lock().unwrap();
+            for at in (0..len).step_by(page_size() as usize) {
+                let page = PhysLocation { offset: phys.offset + at, ..phys };
+                assert!(pages.insert(offset + at, page).is_none(), "mapped over {offset:#x}");
+            }
+        }
+
+        fn unmap(&self, offset: u64, len: u64) {
+            let mut pages = self.0.lock().unwrap();
+            for at in (offset..offset + len).step_by(page_size() as usize) {
+                assert!(pages.remove(&at).is_some(), "unmapped {at:#x}, not mapped");
+            }
+        }
+
+        fn vm_process(&self) -> Option<VmProcessId> {
+            Some(VM)
+        }
+    }
+
+    /// The stage of the schedule running, which the quarantine checks the slabs freed against.
+    static STAGE: std::sync::Mutex<Option<Arc<Recording>>> = std::sync::Mutex::new(None);
+
+    /// The quarantine of [`evictions_race_page_ins_and_maps`]: each slab freed, the stage maps none
+    /// of its pages, or a VM process would keep reading memory freed, punched or another's.
+    fn checking_quarantine() -> crate::slabs::QuarantineForTest {
+        crate::slabs::quarantine_for_test(|freed| {
+            assert_eq!(freed.staged(), [VM]);
+            let stage = STAGE.lock().unwrap().clone().expect("a schedule's stage");
+            let pages = stage.0.lock().unwrap();
+            let still: Vec<_> = pages.iter().filter(|(_, at)| freed.contains(**at)).collect();
+            assert!(still.is_empty(), "a second stage maps a freed run: {still:x?}");
+        })
+    }
+
+    /// TASK-560 (board 2516): an extent of three parts, two in memory and mapped, evicted a part
+    /// each by two threads at once, as relief and a promotion's copy do, while a third faults the
+    /// third part in and a fourth MAPs the extent over its own range: no slab is freed while the
+    /// window's stage maps a page of it. Each eviction frees its own part's slab alone, after it
+    /// has unmapped it; the reaping of every evicting part by whichever eviction came last freed
+    /// the other's before its unmaps were sent.
+    fn evictions_race_page_ins_and_maps() {
+        let (ps, part) = (page_size(), extent_frame::PART);
+        let stage = Arc::new(Recording::default());
+        *STAGE.lock().unwrap() = Some(stage.clone());
+        let extent = ExtentId { cell: 0, sequence: 560 };
+        let cached =
+            Arc::new(CachedExtent::new(ArenaId::DEFAULT, extent, Box::new(Numbered), 3 * part));
+        let source: Arc<dyn Source> = cached.clone();
+        let (mut dax, window) = Dax::new(3 * part, Some(stage.clone())).unwrap();
+        dax.map(0, &source, 0, 3 * part);
+        for at in [0, part] {
+            future::block_on(window.fault(at, Access::Read)).unwrap();
+        }
+        let evictors: Vec<_> = [0, part / ps]
+            .into_iter()
+            .map(|first| {
+                let cached = cached.clone();
+                thread::spawn(move || cached.evict_pages(first..first + part / ps))
+            })
+            .collect();
+        let faulting = window.clone();
+        let fault = thread::spawn(move || {
+            future::block_on(faulting.fault(2 * part, Access::Read)).unwrap();
+            future::block_on(faulting.fault(0, Access::Read)).unwrap();
+        });
+        let remapped = source.clone();
+        let map = thread::spawn(move || {
+            dax.map(part, &remapped, part, part);
+            dax
+        });
+        for evictor in evictors {
+            evictor.join().unwrap();
+        }
+        fault.join().unwrap();
+        let mut dax = map.join().unwrap();
+        assert_eq!(cached.windows_held(), 1);
+        dax.unmap(0, 3 * part);
+        cached.evict();
+        drop((dax, window));
+        STAGE.lock().unwrap().take();
+    }
+
+    #[test]
+    fn evictions_race_page_ins_and_maps_in_any_order() {
+        let _quarantine = checking_quarantine();
+        Runner::new(RandomScheduler::new(runs(100)), config())
+            .run(evictions_race_page_ins_and_maps);
+        Runner::new(PctScheduler::new(3, runs(100)), config())
+            .run(evictions_race_page_ins_and_maps);
+    }
 }

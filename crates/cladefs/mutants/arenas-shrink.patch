@@ -3,14 +3,14 @@
 # every tenant's VMs with it (TASK-149.17).
 # Kind: daemon crashed
 # Killer: cladefsd::tests::hostile::vm_processes_shrinking_their_memory_crash_nothing
---- a/crates/physmem/src/physmap.rs
-+++ b/crates/physmem/src/physmap.rs
-@@ -141,7 +141,7 @@ fn create_shared_memory() -> OwnedFd {
+--- a/crates/cladefs/src/slabs/object.rs
++++ b/crates/cladefs/src/slabs/object.rs
+@@ -202,7 +202,7 @@
+     }
+     // SAFETY: `fd` was just created and is owned here.
      let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-     // SAFETY: Seals and modes the object just made.
-     unsafe {
--        let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
-+        let seals = libc::F_SEAL_SEAL;
-         let sealed = libc::fcntl(fd.as_raw_fd(), libc::F_ADD_SEALS, seals);
-         assert_eq!(sealed, 0, "seal an arena against shrinking: {}", errno());
-         assert_eq!(libc::fchmod(fd.as_raw_fd(), 0o600), 0, "mode an arena 0600: {}", errno());
+-    let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
++    let seals = libc::F_SEAL_SEAL;
+     // SAFETY: seals the object just made.
+     if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_ADD_SEALS, seals) } != 0 {
+         return Err(io::Error::last_os_error());

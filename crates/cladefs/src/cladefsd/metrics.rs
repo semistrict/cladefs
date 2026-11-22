@@ -648,10 +648,23 @@ pub(super) fn gauges() -> Vec<(&'static str, &'static str, u64)> {
             "Of those, private copies of pages the guest wrote, of windows that copy on write.",
             live.private_pages,
         ),
-        ("memory_bytes", "Memory extents' pages hold, every tenant's.", physmem::arenas_bytes()),
-        ("memory_capacity_bytes", "The most memory the daemon has.", physmem::count_total_bytes()),
+        (
+            "memory_bytes",
+            "Memory extents' parts hold, every tenant's.",
+            crate::slabs::arenas_bytes(),
+        ),
+        (
+            "memory_capacity_bytes",
+            "The most memory the daemon has.",
+            crate::slabs::count_total_bytes(),
+        ),
+        (
+            "memory_leaked_bytes",
+            "Memory of runs freed whose punch failed, counted still: what should never be.",
+            crate::slabs::leaked_bytes(),
+        ),
     ];
-    if let Some(limit) = physmem::total_cap() {
+    if let Some(limit) = crate::slabs::total_cap() {
         gauges.push(("memory_limit_bytes", "The limit of every tenant's memory.", limit));
     }
     // cladefs: TASK-94.

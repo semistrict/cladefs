@@ -29,7 +29,7 @@
 //! `super::disk`.
 
 use super::memory;
-use physmem::CHUNK_SIZE;
+use crate::slabs::SLAB;
 use std::time::Duration;
 
 /// How often the governor looks at the host's memory.
@@ -85,7 +85,7 @@ pub fn host_memory() -> std::io::Result<HostMemory> {
 /// The host's memory now (macOS: its pages free and speculative, as the VM statistics count them).
 #[cfg(target_os = "macos")]
 pub fn host_memory() -> std::io::Result<HostMemory> {
-    let page = physmem::page_size();
+    let page = crate::slabs::page_size();
     let total = sysctl_u64(c"hw.memsize")?;
     let free = sysctl_u64(c"vm.page_free_count")? + sysctl_u64(c"vm.page_speculative_count")?;
     Ok(HostMemory { total, available: free * page })
@@ -154,11 +154,10 @@ pub fn room_of(max: &str, current: &str, stat: &str) -> Option<u64> {
     Some((max + inactive).saturating_sub(current))
 }
 
-/// What the daemon may hold, holding `held`, of `host`, leaving `headroom`: whole chunks, one at
+/// What the daemon may hold, holding `held`, of `host`, leaving `headroom`: whole slabs, one at
 /// least.
 pub fn allowance(held: u64, host: HostMemory, headroom: u64) -> u64 {
-    let chunk = CHUNK_SIZE as u64;
-    ((held + host.available).saturating_sub(headroom) / chunk * chunk).max(chunk)
+    ((held + host.available).saturating_sub(headroom) / SLAB * SLAB).max(SLAB)
 }
 
 /// Each tenant's share of `target` bytes by its weight, of `tenants`' (ID, weight): what it keeps
@@ -253,18 +252,9 @@ pub fn pressured(was: bool, spare: u64, headroom: u64) -> bool {
     }
 }
 
-/// The size of physical memory for a governed daemon: all of the host's, in whole chunks. Fails if
-/// the host maps less (`vm.max_map_count` on Linux): a daemon whose cache can't grow into the
-/// host's memory doesn't start.
+/// The size of physical memory for a governed daemon: all of the host's, in whole slabs. The
+/// host's limit on mappings bounds none of it, as the daemon maps none of it (doc-26).
 pub fn memory_bytes() -> Result<u64, String> {
     let host = host_memory().map_err(|err| format!("reading the host's memory: {err}"))?;
-    let chunk = CHUNK_SIZE as u64;
-    let bytes = host.total / chunk * chunk;
-    if let Some(max) = physmem::max_size().filter(|&max| bytes > max) {
-        return Err(format!(
-            "the host's memory, {bytes} bytes, is more than the daemon can map, {max}: raise \
-             vm.max_map_count"
-        ));
-    }
-    Ok(bytes)
+    Ok(host.total / SLAB * SLAB)
 }

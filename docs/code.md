@@ -47,18 +47,20 @@ their leading comment:
   shared extents, and the on-disk format is version 63, the only one a mount
   reads: no format is migrated.
 
-## `crates/physmem`: physical memory
+## `crates/cladefs/src/slabs.rs`: physical memory
 
-The extent cache's pages, and the DAX windows', are host shared
+The extent cache's parts, and the zeros DAX windows map, are host shared
 memory: physical memory in arenas, each its own shared memory object (a memfd
-on Linux, POSIX shared memory on macOS), which a process given an arena's
-object maps the arena's pages from (TASK-43). An arena takes memory 2 MiB at a
-time, and gives a chunk back once its pages are all free; arenas may be capped,
-each and together (TASK-50.3); an arena starved at a cap asks for relief, which
-evicts cached extents' pages; and a page a VM process's window may still map,
-freed, waits in quarantine until the VM process has unmapped it (TASK-79.9).
-It was the Zircon kernel port's PMM, cladefs's own code there, lifted out with
-its tests when the port was deleted (TASK-96.1).
+on Linux, an unlinked temporary file on macOS), which a process given an
+arena's object maps the arena's pages from (TASK-43). An arena is 1 MiB part
+slabs: a whole part takes a whole slab, a shorter one a run of a small slab's
+pages, punched out as it is freed but for two whole slabs kept spare (doc-26).
+The daemon maps none of it: it reads and writes slabs by offset. Arenas may be
+capped, each and together (TASK-50.3); an arena starved at a cap asks for
+relief, which evicts cached extents' parts; and a slab a VM process was staged,
+freed, waits in quarantine until each VM process it was staged to has made what
+took it away (TASK-79.9, doc-26). It replaced `crates/physmem`, the Zircon
+kernel port's 4 KiB page allocator, in board 6204.
 
 ## `crates/fxfs-posix`: Fxfs's files and directories
 
@@ -150,8 +152,8 @@ of these stands in with the items the code copied from Fuchsia uses:
   (`OpenCell`), with one block size, one set of options and one way of
   minting cells. Neither stack collects its cells: the collector alone
   deletes (TASK-165.8).
-- `pages.rs` configures physical memory (`crates/physmem`): its size, which
-  extents' pages come from, and tenants' arenas of it.
+- `pages.rs` configures physical memory (`slabs.rs`): its size, which
+  extents' parts come from, and tenants' arenas of it.
 - `executor.rs` holds the fuchsia-async executor Fxfs runs on.
 
 `crates/local_cell` is cladefs's too: backlog doc-4's extent store on local

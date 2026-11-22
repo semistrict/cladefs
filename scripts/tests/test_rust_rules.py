@@ -104,7 +104,7 @@ class OffHostFs(unittest.TestCase):
         source = "fn f() { let _ = std::fs::read(\"x\"); }\n"
         self.assertEqual(self.matches(source, "crates/cladefs/src/fuse/x.rs"), [])
         self.assertEqual(self.matches(source, "crates/cladefs/src/cladefsd/tests.rs"), [])
-        self.assertEqual(self.matches(source, "crates/physmem/src/x.rs"), [])
+        self.assertEqual(self.matches(source, "crates/virtio_extent/src/x.rs"), [])
         self.assertEqual(self.matches("""\
             fn f() {}
             #[cfg(test)]

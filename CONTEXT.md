@@ -160,18 +160,15 @@ _Avoid_: PMM, page pool
 **Arena**:
 One shared memory object of physical memory, one per tenant plus the default one.
 
-**Chunk**:
-The 2 MiB unit an arena takes from and gives back to physical memory. Slabs replace it (doc-26).
-
 **Slab**:
-The 1 MiB unit of an arena, a part's size, at an offset of its memory object: a part in the extent cache holds a whole one, or a run of a small slab's pages (doc-26; not in the code yet).
-_Avoid_: chunk (the 2 MiB unit it replaces), frame
+The 1 MiB unit of an arena, a part's size, at an offset of its memory object: a part in the extent cache holds a whole one, or a run of a small slab's pages (doc-26, `cladefs::slabs`). A whole slab freed may be kept as a **spare**, populated still, for the next whole part.
+_Avoid_: chunk (the 2 MiB unit of physmem, which slabs replaced), frame
 
 **Staged** (a slab, to a VM process):
 Named to the VM process's window by a `STAGE_MAP` since the slab was filled: the VM processes its quarantine waits for (doc-26).
 
 **Eviction token**:
-What an evicted part's slot holds while one eviction, which alone holds the slab, takes it from the windows (doc-26; not in the code yet).
+What an evicted part's slot holds while one eviction, which alone holds the slab, takes it from the windows (doc-26, `cache::EvictionToken`).
 
 **Relief**:
 Eviction of cached pages for an arena starved at its cap.

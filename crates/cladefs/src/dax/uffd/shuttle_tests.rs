@@ -970,7 +970,7 @@ fn writes_to_pages_here_copy_them() {
     dax.map(0, &sealed.source(), 0, ps);
     let guest = HostGuest { memory, stage, window: window.clone(), base };
     let mut shared = None;
-    sealed.each_present(0..1, &mut |_, frame| shared = Some(frame.location()));
+    sealed.each_present(0..1, &mut |present| shared = Some(present.at));
     let shared = shared.unwrap();
     // Installed here, as a load first touches it (TASK-276.6).
     assert_eq!(load_byte(&guest, 0), SEALED);

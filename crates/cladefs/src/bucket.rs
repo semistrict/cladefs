@@ -1819,12 +1819,16 @@ mod tests {
         let fork = reopened(&path, idle()).await.unwrap();
         let held = Ok(Some((BLOCK as u64, false)));
         let mut data = vec![0; BLOCK];
-        // Each read once: into the cache.
-        for sequence in 1..=EXTENTS {
-            assert_eq!(fork.stored_extent(inherited(sequence)), held);
-            assert_eq!(fork.read_from_cache(inherited(sequence), 0, &mut data).await, Ok(true));
-            assert_eq!(data, pattern(sequence as u8, BLOCK), "{sequence}");
-        }
+        // Each read once: into the cache; on the executor the reads counted run on, whose first
+        // use on a thread allocates what it wakes it with.
+        futures::executor::block_on(async {
+            for sequence in 1..=EXTENTS {
+                assert_eq!(fork.stored_extent(inherited(sequence)), held);
+                let read = fork.read_from_cache(inherited(sequence), 0, &mut data).await;
+                assert_eq!(read, Ok(true));
+                assert_eq!(data, pattern(sequence as u8, BLOCK), "{sequence}");
+            }
+        });
         let (asked, ()) = allocations_while(|| {
             for sequence in 1..=EXTENTS {
                 assert_eq!(fork.stored_extent(inherited(sequence)), held);

@@ -8,8 +8,8 @@
   that cites a Fuchsia source in its leading comment, as scripts/upstream-changes.py finds them.
 - cladefs's own code, and its adaptations, carry The cladefs Authors' copyright.
 - Either is under the license of the nearest LICENSE file above it: BSD-3-Clause at the root, as
-  Fuchsia is, MIT in crates/physmem, lifted from cladefs's port of the Zircon kernel, as Zircon is. The
-  header says which, in Fuchsia's words.
+  Fuchsia is, or MIT under a crate's own LICENSE that says so. The header says which, in Fuchsia's
+  words.
 - guest/linux, built into the guest's Linux kernel, is GPL-2.0 OR BSD-3-Clause, and its patches to
   the kernel GPL-2.0, as the kernel is: an SPDX line, then cladefs's copyright. So is guest/sim, which
   links with the kernel's sources to run guest/linux's, and crates/fxfs-sim-diff's shim of
