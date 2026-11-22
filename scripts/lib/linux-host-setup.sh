@@ -106,7 +106,7 @@ host_rust() {
             "$RUSTUP_HOME/update-hashes/$RUSTUP_TOOLCHAIN"-*; do
             if [[ -e $part ]]; then rm -r -- "$part"; fi
         done
-        rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+        rustup toolchain install --no-self-update "$RUSTUP_TOOLCHAIN" --profile minimal
     fi
     rustup target add "$(uname -m)-unknown-linux-musl"
     # scripts/test.sh checks clippy's rules first (TASK-44.20).
@@ -253,7 +253,7 @@ host_kernel() {
         return 2
     fi
     channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$repo/guest/rust/rust-toolchain.toml")
-    rustup toolchain install "$channel" --component rust-src --profile minimal > /dev/null || return
+    rustup toolchain install --no-self-update "$channel" --component rust-src --profile minimal > /dev/null || return
     if [[ -z ${CLADEFS_TEST_HOST_KERNELS:-} || $kind == coverage ]]; then
         host_kernel_build "$kernel_work" || return
         # shellcheck disable=SC2034 # The sourcing scripts read them.

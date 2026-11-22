@@ -499,7 +499,7 @@ fi
                 0,
                 "",
                 [
-                    f"rustup toolchain install {self.TOOLCHAIN} --profile minimal",
+                    f"rustup toolchain install --no-self-update {self.TOOLCHAIN} --profile minimal",
                     "rustup target add x86_64-unknown-linux-musl",
                     "rustup component add clippy",
                 ],
