@@ -1,5 +1,19 @@
 # Open questions
 
+## Delete the tests of what Wave 2 removes? (doc-26, doc-27, board 6124, 6127, 2026-11-21)
+
+Needed: your OK to delete, as each Wave 2 step lands, the tests of code it removes. That means
+`crates/physmem` with its tests (doc-26 step 1); the collector's moves tests
+(`reads_follow_moves` and kin in `fetch.rs`, `…need_moves_taken_first`,
+`passes_creating_moves_late_need_moves_by_pass` in `collector.rs`, the sim's moves toggles; doc-27
+step 2); and the head-slot tests with specs/head-slots, its models and its six mutations (doc-27
+step 4). Why: your instructions reserve deleting tests to you, and the code these test goes.
+Recommend: yes. Each is replaced by a test of the class (doc-26's Shuttle model of slabs and
+eviction, specs/part-slabs; doc-27's relocation sim properties, specs/bucket's
+BucketRelocationsForks, ReachesRelocatedFreed and NoSwapsInPlace). Until answered: those steps'
+tasks land everything else and leave the old tests where they still compile, marked with this
+entry.
+
 ## Is herdtools7 (CeCILL-B) acceptable? (TASK-444.2, 2026-11-15)
 
 Needed: your call on herdtools7's licence, CeCILL-B (BSD-like, French law; GitHub reports
@@ -29,6 +43,55 @@ both. Until answered: they stay; their `[workspace.dependencies]` entries, which
 Cargo warned of, are gone, as is `crates/fidl-fuchsia-fs`, dead with no tests.
 
 # Decisions
+
+## doc-26: part slabs, quarantine scoped to what was staged, copy on write in the VM process (board 6124, 2026-11-21)
+
+Decided without you, designing Wave 2's track 2A:
+- **1 MiB slabs, with small slabs for short parts**, rather than size classes, or keeping
+  physmem's 4 KiB frames. A whole part takes a whole slab. A tail, or a small extent, takes a run
+  of a small slab's pages, which are punched as they are freed. The buddy allocator existed to
+  keep runs whole for the VM process's mappings, and a slab is one run by construction. *Undo:*
+  keep physmem and fix TASK-560 and TASK-602 in place.
+- **The daemon maps no arena**: `pwrite`/`pread`/`copy_file_range`/`fallocate` by offset. That
+  retires the physmap and the `vm.max_map_count` bound on physical memory (120 GiB at the default).
+  The alternative, mapping each arena whole, costs the daemon arenas × memory of address space,
+  past x86-64's 128 TiB at a few hundred tenants on a large host. macOS, development only, backs
+  an arena with an unlinked temporary file, the one place the host's page cache holds arena
+  pages. *Undo:* map arenas whole on Linux, with an address-space budget.
+- **Quarantine waits for the VM processes a slab was staged to**, rather than every VM process
+  holding its arena (the plan's "arena-scoped"). That is a subset, exact, and cheap at 1 MiB (a
+  SmallVec per slab). Tenant isolation follows, since a tenant's slabs are only staged to its own
+  VM processes. *Undo:* wait for the arena's holders. Spec mutation NoWaitsForStaged shows a
+  tenant-only scope is unsafe for public slabs.
+- **Copy on write, `private_max` and the snapshot's private-page check move into the VM process.**
+  None was a trust boundary: a VM process lying about them hurts only its own memory or its own
+  snapshot. The daemon no longer knows which pages are private, so a host change's unmap carries
+  `STAGE_KEEP_PRIVATE` (spec rule `evictionKeepsPrivate`). *Undo:* keep `FAULT_WRITE` and
+  `STAGE_PRIVATE`.
+- **A tenant's arena is handed to its VM processes read-only**, as the default one is. Nothing
+  writes it since TASK-501. *Undo:* hand it writable again.
+
+## doc-27: writers compact, a keyless collector, one head object (board 6127, 2026-11-21)
+
+Decided without you, designing Wave 2's track 2B:
+- **Writers relocate at checkpoint rounds.** That means segments of their own cell under half live
+  and pinned by no kept state; at most as many bytes copied as uploaded (write amplification ≤ 1);
+  at most `UPLOAD_BYTES / 4` in flight; and only with disk spare. Not before a version is made
+  (versions stay one local commit), and not on close (drain stays short). A cell nobody writes
+  keeps at most about 2x space. Versions and origins pin their segments whole, which the
+  collector's moves did not. If the soak shows that space, `cladefsctl compact` is the follow-up.
+  *Undo:* relocate on close too, or keep the collector's moves.
+- **The head is one object everywhere**, its swaps spaced (TASK-690) and coalesced, with the
+  checkpoint's swap folded into the next acknowledgement. A non-replicated GCS cell's
+  Uploaded-level sync loop gets about one sync a second, where ten slots gave about ten. fsync is
+  Ordered and unaffected. A GCS cell wanting fast durable syncs should be replicated (doc-21):
+  recommended. *Undo:* keep `head_slots` for GCS buckets alone (board 6020's state).
+- **Three spec mutations removed** with their rules: NoMovesByPass, NoMovesTakenFirst,
+  NoWaysFromSeals. The protocol no longer has moves. Their ground is still checked by models
+  that hold: KeysWrittenOnce in BucketCompaction (the collector writes nothing), and
+  BucketRelocationsForks (TASK-175's setting, with relocations). Your instructions reserve
+  deleting tests to you: say so, and they come back with the spec before this change.
+  *Undo:* `git revert` of the spec commit.
 
 ## "store" retired for a cell on a host: cell directory and open cell (board 5622, 2026-11-21)
 
