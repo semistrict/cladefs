@@ -233,7 +233,9 @@ async fn bucket(
     for meta in &listed {
         let key = meta.key.as_str();
         let at = || format!("{url} {key}");
-        let Some(object) = bucket_cell::bucket::get(&object_bucket, key).await else {
+        // A refusal fails the check (board 6800).
+        let got = bucket_cell::bucket::get(&object_bucket, key).await;
+        let Some(object) = got.with_context(|| format!("reading {url}"))? else {
             continue; // Deleted since it was listed.
         };
         let framed = match layout::kind(key) {

@@ -6,21 +6,21 @@
 # Killer: cladefsd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound
 --- a/crates/bucket_cell/src/bucket.rs
 +++ b/crates/bucket_cell/src/bucket.rs
-@@ -511,7 +511,7 @@ pub(crate) async fn create(bucket: &impl Bucket, key: &str, bytes: Vec<u8>) -> C
+@@ -591,7 +591,7 @@ pub(crate) async fn create(
      let bytes = Bytes::from(bytes);
      let mut failures = 0;
      loop {
 -        match bucket.put(key, bytes.clone(), PutMode::Create).await {
 +        match bucket.put(key, Bytes::copy_from_slice(&bytes), PutMode::Create).await {
-             Ok(version) => return Created::Created(version),
+             Ok(version) => return Ok(Created::Created(version)),
              // Perhaps this one's own write, which landed though its answer was lost; deleted
              // since, tried again.
-@@ -581,7 +581,7 @@ pub(crate) async fn update(
+@@ -668,7 +668,7 @@ pub(crate) async fn update(
      let bytes = Bytes::from(bytes);
      let mut failures = 0;
      loop {
 -        match bucket.put(key, bytes.clone(), PutMode::Update(version.clone())).await {
 +        match bucket.put(key, Bytes::copy_from_slice(&bytes), PutMode::Update(version.clone())).await {
-             Ok(version) => return Updated::Updated(version),
+             Ok(version) => return Ok(Updated::Updated(version)),
              Err(Error::Precondition | Error::NotFound) => {
-                 return match get(bucket, key).await {
+                 return Ok(match get(bucket, key).await? {
