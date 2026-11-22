@@ -1207,9 +1207,9 @@ GcFinish(i) ==
         r == g.rec
         objs == IF R("candidatesFirst") THEN g.objs ELSE Listing(c)
         L == g.live
-        touched == UNION {L[k].touched : k \in DOMAIN L} \cup UNION {p.touched : p \in g.pts}
-        locs == UNION {{<<x, L[k].ext[x]>> : x \in DOMAIN L[k].ext} : k \in DOMAIN L}
-                \cup UNION {{<<x, p.ext[x]>> : x \in DOMAIN p.ext} : p \in g.pts}
+        touched == (UNION {L[k].touched : k \in DOMAIN L}) \cup (UNION {p.touched : p \in g.pts})
+        locs == (UNION {{<<x, L[k].ext[x]>> : x \in DOMAIN L[k].ext} : k \in DOMAIN L})
+                \cup (UNION {{<<x, p.ext[x]>> : x \in DOMAIN p.ext} : p \in g.pts})
         \* The objects the states kept name their extents in: segments, and extents of their own.
         named == {l[2] : l \in {l \in locs : l[2][1] = "seg"}}
                  \cup {<<"own", l[2][2], l[2][3], l[2][4], l[1]>> :
