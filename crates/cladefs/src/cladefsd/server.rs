@@ -52,6 +52,7 @@ pub(super) const PAGE_INS: usize = 64;
 /// process's, the simulations sharing it kept for good.
 pub(super) fn io() -> &'static tokio::runtime::Runtime {
     node_local::node_local! {
+        // cladefs: the daemon's seam's runtime, a simulated host's own under madsim (above).
         static IO: tokio::runtime::Runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("cladefsd io")

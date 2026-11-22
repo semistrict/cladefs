@@ -120,10 +120,29 @@ MODULE = re.compile(r"(pub(\([\w:]+\))? )?mod ")
 
 
 def starts_tests(lines, number):
-    """Whether line `number` of `lines`, from 1, begins a file's test module: `#[cfg(test)]` on a
-    module's declaration, which, and what follows it, the rules leave to tests."""
-    return lines[number - 1].startswith("#[cfg(test)]") and number < len(lines) and \
-        MODULE.match(lines[number]) is not None
+    """Whether line `number` of `lines`, from 1, begins a test module: `#[cfg(test)]` on a
+    module's declaration, at any depth."""
+    return lines[number - 1].lstrip().startswith("#[cfg(test)]") and number < len(lines) and \
+        MODULE.match(lines[number].lstrip()) is not None
+
+
+def outside_tests(lines):
+    """Each of `lines`, numbered from 1, but those the rules leave to tests: a file's test module
+    and what follows it; a test module within another module (board 6105: migration.rs's), to its
+    closing brace, at its own indent."""
+    closing = None
+    for number, line in enumerate(lines, 1):
+        if closing is not None:
+            if line == closing:
+                closing = None
+            continue
+        if starts_tests(lines, number):
+            indent = line[:len(line) - len(line.lstrip())]
+            if not indent:
+                return
+            closing = indent + "}"
+            continue
+        yield number, line
 
 
 def outside_the_seam(path, text):
@@ -137,9 +156,7 @@ def outside_the_seam(path, text):
             or "/tests/" in posix:
         return
     lines = text.splitlines()
-    for number, line in enumerate(lines, 1):
-        if starts_tests(lines, number):
-            return
+    for number, line in outside_tests(lines):
         if not UNSEAMED.search(line.split("//", 1)[0]):
             continue
         above = lines[max(0, number - 1 - UNSEAMED_REASON_LINES):number]
@@ -181,9 +198,7 @@ def off_host_fs(path, text):
             or posix.endswith("/tests.rs") or "/tests/" in posix:
         return
     lines = text.splitlines()
-    for number, line in enumerate(lines, 1):
-        if starts_tests(lines, number):
-            return
+    for number, line in outside_tests(lines):
         if not OFF_HOST_FS.search(line.split("//", 1)[0]):
             continue
         above = lines[max(0, number - 1 - UNSEAMED_REASON_LINES):number]
