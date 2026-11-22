@@ -153,6 +153,7 @@ impl<B: Bucket> BucketKms<B> {
         let mut held = self.held.lock().unwrap();
         match &kek {
             Ok(kek) => held.insert(tenant, Held { kek: kek.clone(), read }),
+            // Unread: none held, so that the next asks again; the error is the caller's.
             Err(_) => held.remove(&tenant),
         };
         kek
@@ -236,6 +237,7 @@ fn refused_kms(tenant: u64, refused: bucket::Refused) -> Error {
     let kind = match refused.refusal {
         bucket::Refusal::Denied => std::io::ErrorKind::PermissionDenied,
         bucket::Refusal::Request => std::io::ErrorKind::InvalidInput,
+        bucket::Refusal::Unreadable => std::io::ErrorKind::InvalidData,
     };
     Error::Io { tenant, source: std::io::Error::new(kind, refused) }
 }

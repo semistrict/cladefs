@@ -541,6 +541,7 @@ impl Sender {
 
     /// Shuts the connection down, which ends its receiver's messages.
     pub fn shutdown(&self) {
+        // Shut down already, or never connected: nothing more to end.
         let _ = self.0.lock().unwrap().shutdown(std::net::Shutdown::Both);
     }
 }
@@ -1002,6 +1003,7 @@ impl Receiver {
         let mut id = unmap.id;
         let mut anew = false;
         let taken = self.take_waiting(|next| {
+            // One it refuses, it leaves, as the doc says.
             let next = Stage::decode(next).ok()?;
             let (at, len, made) = match next.op {
                 StageOp::Unmap { offset, len, keep_private: keep }

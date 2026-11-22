@@ -41,6 +41,7 @@ pub fn refuse_old_variables() -> Result<(), String> {
 
 /// [`refuse_old_variables`], of the variables `names`.
 fn refuse(names: impl Iterator<Item = std::ffi::OsString>) -> Result<(), String> {
+    // Not UTF-8: none of the old names, which are.
     let mut renamed: Vec<String> = names
         .filter_map(|name| name.into_string().ok())
         .filter_map(|name| now(&name).map(|new| format!("{name} is {new}")))

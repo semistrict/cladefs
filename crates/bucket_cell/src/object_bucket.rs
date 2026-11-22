@@ -73,7 +73,8 @@ pub struct ObjectBucket {
     /// (TASK-690).
     rewrites: Rewrites,
     /// cladefs: its settings, as its identity says, once read, or written by its formatting
-    /// (TASK-691): the defaults' for a bucket with none.
+    /// (TASK-691). Never the defaults a bucket not yet formatted goes by, which its formatting,
+    /// by any handle, replaces (board 5534).
     settings: std::sync::OnceLock<crate::identity::Settings>,
 }
 
@@ -660,35 +661,23 @@ impl ObjectBucket {
         RoutedBucket::unrouted(Arc::new(self))
     }
 
-    /// cladefs: its settings, as its identity says, read once (TASK-691): the defaults' for a
-    /// bucket not formatted (1 head slot, or 10 for GCS where `rewrites.every > 0`, board 6020).
-    async fn settings(&self) -> crate::identity::Settings {
+    /// cladefs: its settings, as its identity says, read once (TASK-691). A bucket not formatted
+    /// goes by the defaults (1 head slot, or 10 for GCS where `rewrites.every > 0`, board 6020)
+    /// until it is, asked again each time: its formatting, by another process as much as by this
+    /// one, gives it its own (board 5534). Refused where its identity can't be read: corrupt, or
+    /// of another build's format.
+    async fn settings(&self) -> Result<crate::identity::Settings, crate::bucket::Refused> {
         if let Some(settings) = self.settings.get() {
-            return *settings;
+            return Ok(*settings);
         }
-        let default_settings = if !self.rewrites.every.is_zero() {
-            crate::identity::Settings { head_slots: crate::identity::GCS_HEAD_SLOTS }
-        } else {
-            crate::identity::Settings::default()
+        let Some(object) = crate::bucket::get(self, layout::IDENTITY).await? else {
+            return Ok(crate::identity::Settings { head_slots: self.default_head_slots() });
         };
-        let mut failures = 0;
-        let settings = loop {
-            match self.object_get(layout::IDENTITY).await {
-                Ok(object) => match crate::identity::parse(&object.bytes) {
-                    Ok(identity) => break identity.settings,
-                    Err(err) => {
-                        log::warn!("bucket: reading its identity's settings: {err}");
-                        break default_settings;
-                    }
-                },
-                Err(Error::NotFound) => break default_settings,
-                Err(_) => {
-                    failures += 1;
-                    tokio::time::sleep(backoff(failures)).await;
-                }
-            }
-        };
-        *self.settings.get_or_init(|| settings)
+        let identity = crate::identity::parse(&object.bytes).map_err(|err| {
+            log::error!("bucket: reading its identity's settings: {err}");
+            crate::bucket::Refused::of(layout::IDENTITY, Refusal::Unreadable)
+        })?;
+        Ok(*self.settings.get_or_init(|| identity.settings))
     }
 
     /// cladefs: a new object ID of the bucket's, which no other cell of any bucket has, nor will
@@ -1039,6 +1028,8 @@ fn cloud(
             let builder = options.into_iter().fold(builder, |builder, (key, value)| {
                 match key.to_ascii_lowercase().parse() {
                     Ok(key) => builder.with_config(key, value),
+                    // Not one of this backend's: the environment holds every cloud's, each builder
+                    // taking its own.
                     Err(_) => builder,
                 }
             });
@@ -1138,6 +1129,7 @@ fn refusal_of(source: &(dyn std::error::Error + 'static)) -> Option<Refusal> {
 fn http_status(error: &(dyn std::error::Error + 'static)) -> Option<u16> {
     let text = error.to_string();
     let status = text.strip_prefix("Server returned non-2xx status code: ")?;
+    // No status, or not a number: not an HTTP answer.
     status.get(..3)?.parse().ok()
 }
 
@@ -1335,6 +1327,7 @@ impl ObjectBucket {
             if let (Ok(_), Some(bytes)) = (&result, identity)
                 && let Ok(identity) = crate::identity::parse(&bytes)
             {
+                // Set already only by a read of the same identity: a bucket formatted once.
                 let _ = self.settings.set(identity.settings);
             }
             let result = timed.answered(result, |_| len as usize)?;
@@ -1427,8 +1420,8 @@ impl Bucket for ObjectBucket {
         self.object_put(key, bytes, mode)
     }
 
-    async fn head_slots(&self, _cell: layout::CellId) -> u64 {
-        self.settings().await.head_slots
+    async fn head_slots(&self, _cell: layout::CellId) -> Result<u64, crate::bucket::Refused> {
+        Ok(self.settings().await?.head_slots)
     }
 
     fn default_head_slots(&self) -> u64 {
@@ -2245,6 +2238,53 @@ pub(crate) mod tests {
         });
     }
 
+    /// Board 5526: a listing of an object's moves, of a cell mirrored here, its bucket out of
+    /// reach: answered here for an object the mirror copied, as its children read it here; failed
+    /// for one it did not copy, whose moves its bucket alone holds, never taken for none; and
+    /// answered with them once that bucket is back.
+    #[test]
+    fn moves_of_objects_not_mirrored_wait_for_their_bucket() {
+        use crate::mirror::{Mirrored, mirror};
+        use crate::testing::{VERSION, fork_version_given};
+        futures::executor::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let two = Two::new(dir.path()).await;
+            let bucket = two.routed();
+            let parent = test_cell(2 << 48 | 1);
+            let (at, epoch, _) = Two::versioned(&bucket, parent).await;
+            let origin = Origin { parent, at, epoch };
+            let child = test_cell(1 << 48 | 2);
+            fork_version_given(&*bucket, child, VERSION, origin, 7).await.unwrap();
+            let mirrored = mirror(&*bucket, &*bucket.own(), 1, parent, at).await.unwrap();
+            assert!(matches!(mirrored, Mirrored::Done { .. }), "{mirrored:?}");
+            let here = two.home.object_list(&parent.prefix()).await.unwrap();
+            let copied = (here.into_iter().map(|meta| meta.key))
+                .find(|key| matches!(layout::kind(key), layout::Kind::Segment { .. }))
+                .unwrap();
+            // A segment of the parent's written since, compacted in its own bucket alone.
+            let later = layout::segment(parent, at + 1, epoch);
+            let moved = layout::moves(&later, 1).unwrap();
+            two.other.object_put(&moved, b"moves".to_vec().into(), PutMode::Create).await.unwrap();
+
+            let home = ObjectBucket::from_url(&two.home_url).unwrap();
+            let faults = dir.path().join("faults");
+            std::fs::write(&faults, "failing=unavailable").unwrap();
+            // SAFETY: nextest runs each test in a process of its own, whose other threads don't
+            // read the environment.
+            unsafe { std::env::set_var("CLADEFS_BUCKET_FAULTS", &faults) };
+            let cut = home.routed(Arc::new(Registered::new(Vec::<(String, String)>::new())));
+            let keys = |listed: Vec<Meta>| -> Vec<String> {
+                listed.into_iter().map(|meta| meta.key).collect()
+            };
+            let moves_of = |key: &str| layout::moves_of(key).unwrap();
+            assert_eq!(cut.list(&moves_of(&copied)).await.map(keys), Ok(vec![]));
+            assert_eq!(cut.list(&moves_of(&later)).await.map(keys), Err(Error::Unavailable));
+            std::fs::write(&faults, "").unwrap();
+            std::thread::sleep(crate::faults::READ_EVERY);
+            assert_eq!(cut.list(&moves_of(&later)).await.map(keys), Ok(vec![moved]));
+        });
+    }
+
     /// TASK-633.8 (AC #4): a mirror's host dying at each of its steps, then the version's cell
     /// deleted, and both buckets' collectors passing, this one's with the mirror's pin fresh, then
     /// stale (the mirror begun again, or given up, the version gone): nothing the child needs is
@@ -2804,6 +2844,35 @@ pub(crate) mod tests {
 
     fn memory() -> Arc<ObjectBucket> {
         Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "cladefs/test"))
+    }
+
+    /// Board 5534: a bucket's head slots, asked before it is formatted, are the default for then
+    /// alone: formatted since by another process with 3, its handle reads 3, as one opened since
+    /// does; an identity it can't read refuses them, never the default taken for its count.
+    #[test]
+    fn head_slots_asked_before_a_format_follow_it() {
+        use crate::identity::{Asked, Details};
+        futures::executor::block_on(async {
+            let store = Arc::new(InMemory::new());
+            let early = ObjectBucket::new(store.clone(), "cladefs/test");
+            let cell = test_cell(1);
+            assert_eq!(early.head_slots(cell).await, Ok(crate::identity::DEFAULT_HEAD_SLOTS));
+            let other = ObjectBucket::new(store.clone(), "cladefs/test");
+            let asked = Asked { head_slots: Some(3) };
+            crate::identity::format(&other, &Details::default(), asked).await.unwrap();
+            assert_eq!(early.head_slots(cell).await, Ok(3));
+            let fresh = ObjectBucket::new(store, "cladefs/test");
+            assert_eq!(fresh.head_slots(cell).await, Ok(3));
+
+            let corrupt = memory();
+            let identity = layout::IDENTITY;
+            corrupt
+                .object_put(identity, b"not one".to_vec().into(), PutMode::Create)
+                .await
+                .unwrap();
+            let refused = crate::bucket::Refused::of(identity, Refusal::Unreadable);
+            assert_eq!(corrupt.head_slots(cell).await, Err(refused));
+        });
     }
 
     /// TASK-264: a bucket reads the collector's newest marks with requests it doesn't count, at its

@@ -196,6 +196,7 @@ fn client(address: &str) -> Result<PeerClient<tonic::transport::Channel>, Errno>
 /// seconds, five minutes by default (board 5734).
 pub(super) fn idle() -> Result<Duration, String> {
     let Some(set) = node_local::env::var_os("CLADEFSD_MIGRATION_IDLE") else { return Ok(IDLE) };
+    // Not UTF-8, or not a number: refused below.
     match set.to_str().and_then(|seconds| seconds.parse::<u64>().ok()) {
         Some(0) | None => {
             Err(format!("CLADEFSD_MIGRATION_IDLE must be a positive number of seconds: {set:?}"))
@@ -299,6 +300,7 @@ async fn prepare_retrying(
     loop {
         tries += 1;
         let asked = tokio::time::timeout(PREPARE_BOUND, client.migrate_prepare(prepare.clone()));
+        // Unanswered within its bound: a failure, tried again below as the others are.
         let answered = asked.await.unwrap_or_else(|_| {
             Err(Status::deadline_exceeded(format!("no answer within {PREPARE_BOUND:?}")))
         });
@@ -526,8 +528,21 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
         return Ok(());
     }
     let marker_path = path.join(MARKER);
-    let marked: Option<Marker> =
-        host_fs::read(&marker_path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    // cladefs: a marker there but unread, its disk failing, or not whole, which its durable write
+    // never leaves, fails it: taken for none, a migration under way after a restart would be
+    // answered as none (board 6908).
+    let marked: Option<Marker> = match host_fs::read(&marker_path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        read => {
+            let marker = read
+                .map_err(anyhow::Error::from)
+                .and_then(|bytes| serde_json::from_slice(&bytes).map_err(anyhow::Error::from));
+            Some(marker.map_err(|err| {
+                log::error!("cladefsd: {}: {err:#}", marker_path.display());
+                Errno::EIO
+            })?)
+        }
+    };
     let under_way = match OUTGOING.get().lock().unwrap().get(&path) {
         // Its prepare not answered yet: nothing to hand over.
         Some(Underway::Preparing) => return Err(Errno::EBUSY),
@@ -628,9 +643,23 @@ async fn let_go(host: &ephemeral_host::Host, entry: &Entry) -> Result<(), Errno>
     let (path, child) = (entry.path.clone(), entry.child);
     super::cells::blocking(move || {
         // The cell, or its removal stopped part way: gone. Another cell put there since, its own.
+        // Its description there but unread fails it, asked again: taken for another's, the cell
+        // handed over would stay here, its entry forgotten (board 6908).
         let its = match local_cell::host_cell(&path) {
             Ok(cell) => cell == child,
-            Err(_) => local_cell::deleting_host(&path),
+            // Its removal stopped part way: its own still.
+            Err(_) if local_cell::deleting_host(&path) => true,
+            Err(err)
+                if err
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|err| err.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                false
+            }
+            Err(err) => {
+                log::warn!("cladefsd: {}, handed over: {err:#}", path.display());
+                return Err(Errno::EIO);
+            }
         };
         if !its {
             return Ok(());
@@ -668,6 +697,7 @@ async fn release(peer: &str, migration: u64) {
     match asked.await {
         Ok(Ok(_)) => {}
         Ok(Err(err)) => log::info!("cladefsd: releasing migration {migration:x} at {peer}: {err}"),
+        // Unanswered: said; the target forgets the migration when it is idle as long.
         Err(_) => log::info!("cladefsd: releasing migration {migration:x} at {peer}: no answer"),
     }
 }
@@ -771,6 +801,8 @@ fn write_durably(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         host_fs::rename(&staged, path)
     })();
     if let Err(err) = written {
+        // Failing already: what is left of the staged file, gone if it can go; the error is the
+        // caller's.
         let _ = host_fs::remove_file(&staged);
         return Err(err);
     }
@@ -872,7 +904,7 @@ pub(super) mod target {
     /// first, a crash bringing back an entry being taken had this host's start take it for a
     /// migration never accepted, removing the cell, the one copy its source let go of.
     async fn noted_taken(host: &ephemeral_host::Host, migration: u64) -> Result<(), Status> {
-        let Some(child) = host.accepted_cell(migration) else { return Ok(()) };
+        let Some(child) = host.accepted_cell(migration).map_err(journal)? else { return Ok(()) };
         let _taking = taking(child).await;
         let Some(entry) = host.entry(child).map_err(journal)? else { return Ok(()) };
         let its = match entry.migrating {
@@ -1006,6 +1038,7 @@ pub(super) mod target {
         let failed = match tokio::time::timeout(BUCKET_BOUND, referring).await {
             Ok(Ok(())) => None,
             Ok(Err(err)) => Some(status("its reference", err)),
+            // Timed out: the failure said, as the others are.
             Err(_) => Some(Status::unavailable(format!("referring to {origin:?} timed out"))),
         };
         if let Some(failed) = failed {
@@ -1139,7 +1172,7 @@ pub(super) mod target {
             // 5721): its acceptance made durable again, and the cell noted taken. A failure past
             // the acceptance's writing left it there but not for good; answered yes at once, a
             // crash then lost it, and its entry, its cell's source having let the cell go.
-            if let Some(child) = host.accepted_cell(migration) {
+            if let Some(child) = host.accepted_cell(migration).map_err(journal)? {
                 host.accept(migration, child)
                     .map_err(|err| status("remembering it accepted", err))?;
             }
@@ -1312,9 +1345,11 @@ pub(super) mod target {
                 return Some(format!("{path:?} leaves the cell"));
             };
             let found = host_fs::metadata(&at).map(|metadata| metadata.len());
+            // Unread: said below, with the error.
             if found.as_ref().ok() != Some(len) {
                 return Some(format!("{path}: {found:?} bytes, not {len}"));
             }
+            // Unread: no CRC, which differs from the one named, said below.
             let found = crc.and_then(|_| crc_of(&at).ok());
             (crc.is_some() && found != *crc).then(|| format!("{path}: CRC {found:?}, not {crc:?}"))
         })

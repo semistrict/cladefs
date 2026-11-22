@@ -92,6 +92,7 @@ pub fn runnable_ns() -> u64 {
             .and_then(|mut file| file.read(&mut stat));
         let Ok(read) = read else { return 0 };
         let text = std::str::from_utf8(&stat[..read]).unwrap_or("");
+        // Unread, or not a number: none counted, as a kernel without schedstat counts.
         text.split_ascii_whitespace().nth(1).and_then(|ns| ns.parse().ok()).unwrap_or(0)
     }
     #[cfg(not(target_os = "linux"))]

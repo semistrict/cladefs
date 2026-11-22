@@ -329,6 +329,7 @@ fn versions(dir: &Path) -> io::Result<Vec<u32>> {
     for entry in fs::read_dir(dir)? {
         let name = entry?.file_name();
         let version = name.to_str().and_then(|name| name.strip_suffix(KEK_SUFFIX));
+        // Not a number: not a KEK's file.
         if let Some(version) = version.and_then(|version| version.parse().ok()) {
             versions.push(version);
         }

@@ -1405,6 +1405,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             progress.stalls += 1;
             let pending = self.cell().wal_bytes()?;
             let commits = epoch.saturating_sub(progress.uploaded);
+            // A clock gone back: no age to say.
             let oldest = progress.seen.front().and_then(|(_, seen)| seen.elapsed().ok());
             let max = self.options.max_lag_bytes;
             log::warn!("{}", stalled(pending, max, commits, oldest));
@@ -1713,7 +1714,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             let opening =
                 Opening { state, layer, taken: None, cache, keys: keys.clone(), held: parts };
             let open_cell = blocking(|| recovering.open(options, opening))?;
-            let _ = self.cell.set(Arc::new(open_cell));
+            assert!(self.cell.set(Arc::new(open_cell)).is_ok(), "an uploader opens its cell once");
             self.hold_ring(&keys);
             let mut progress = self.progress.lock().unwrap();
             progress.uploaded_through(u64::MAX);
@@ -1876,9 +1877,9 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let (state, layer, taken) = (writer.state(), writer.layer(), Some(writer.taken().clone()));
         let opening = Opening { state, layer, taken, cache, keys: keys.clone(), held: parts };
         let open_cell = blocking(|| recovering.open(options, opening))?;
-        let _ = self.cell.set(Arc::new(open_cell));
+        assert!(self.cell.set(Arc::new(open_cell)).is_ok(), "an uploader opens its cell once");
         self.hold_ring(&keys);
-        let _ = self.token.set(placement);
+        self.token.set(placement).expect("an uploader's writers take one placement's token");
         self.took(&writer, placement);
         // cladefs: taken by force from too few members: what may be lost said, and kept in its
         // status (TASK-681).
@@ -2530,7 +2531,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let sealing = keys.clone();
         let keys = keys.for_version(cell);
         let state = (recovered.layer.clone()).unwrap_or_else(|| Arc::new(recovered.state.clone()));
-        let _ = self.at_version.set(AtVersion { origin, version: id, sealing, state });
+        let at_version = AtVersion { origin, version: id, sealing, state };
+        assert!(self.at_version.set(at_version).is_ok(), "an uploader opens one version");
         Ok((recovered, keys))
     }
 
@@ -2559,6 +2561,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         if closing {
             let waited = {
                 let progress = self.progress.lock().unwrap();
+                // A clock gone back: nothing waited yet.
                 let oldest = progress.seen.front().and_then(|(_, seen)| seen.elapsed().ok());
                 oldest.is_some_and(|waited| waited >= self.options.filling_wait)
             };

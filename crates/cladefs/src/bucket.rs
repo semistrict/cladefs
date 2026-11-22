@@ -184,11 +184,13 @@ pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
         Failure::Bucket(Error::Unmade(_)) => Some(Errno::ENOENT),
         Failure::Bucket(Error::IdTaken(_) | Error::OtherKind(_)) => Some(Errno::EEXIST),
         Failure::Bucket(Error::NotShared(_)) => Some(Errno::EACCES),
-        // cladefs: a bucket refusing the host's credentials, for good, or a request of its own:
-        // never retried (board 5861).
+        // cladefs: a bucket refusing the host's credentials, for good, or a request of its own, or
+        // answering what this build can't read: never retried (boards 5861, 5534).
         Failure::Bucket(Error::Refused(refused)) => Some(match refused.refusal {
             bucket_cell::bucket::Refusal::Denied => Errno::EACCES,
-            bucket_cell::bucket::Refusal::Request => Errno::EIO,
+            bucket_cell::bucket::Refusal::Request | bucket_cell::bucket::Refusal::Unreadable => {
+                Errno::EIO
+            }
         }),
         // cladefs: a tenant's KEK the KMS refused, revoked, destroyed, or unreached: its open cells
         // open no more until it is given back (TASK-411.3).
@@ -285,6 +287,7 @@ pub fn require_kms() -> Result<(), String> {
 /// cladefs: the host's bucket KMS, if [`kms`] is that (TASK-411.27): what shreds a tenant here
 /// ([`shred_tenant`]).
 pub fn bucket_kms() -> Option<Arc<BucketKms<ObjectBucket>>> {
+    // None had: the process refused to start (require_kms), but in a tool that needs none.
     host_keys().as_ref().ok().and_then(|keys| keys.bucket.clone())
 }
 
@@ -296,13 +299,19 @@ fn host_keys() -> &'static Result<HostKeys, String> {
             Ok(chosen) => {
                 let bucket = chosen.bucket().cloned();
                 // cladefs: each other bucket's cells under that bucket's KMS (TASK-633.6), given the
-                // host's bucket to reach them by; the host's alone without one.
-                let (kmses, by_bucket): (Arc<dyn keys::Kmses>, _) = match host_bucket() {
-                    Ok(home) => {
+                // host's bucket to reach them by; the host's alone without one. One named that
+                // can't be had refuses the KMS: the host's alone, other buckets' cells would be
+                // wrapped under it rather than their own bucket's (board 6908).
+                let home = match crate::host_cell::host_bucket_url() {
+                    None => None,
+                    Some(_) => Some(host_bucket()?),
+                };
+                let (kmses, by_bucket): (Arc<dyn keys::Kmses>, _) = match home {
+                    Some(home) => {
                         let by_bucket = Arc::new(ByBucket::new(home, chosen, std::env::vars()));
                         (by_bucket.clone(), Some(by_bucket))
                     }
-                    Err(_) => (one(chosen.shared()), None),
+                    None => (one(chosen.shared()), None),
                 };
                 Ok(HostKeys { kmses, bucket, by_bucket })
             }
@@ -471,6 +480,7 @@ pub async fn shred_tenant(
     tenant: u64,
 ) -> Result<(bucket_cell::bucket_kms::Destroyed, Forgotten), String> {
     use bucket_cell::bucket_kms::{Destroyed, Shredded};
+    // None had: the process refused to start (require_kms); nothing to shred under.
     let keys = host_keys().as_ref().ok();
     let shredded = match (keys.and_then(|keys| keys.by_bucket.as_ref()), bucket_kms()) {
         (Some(by_bucket), _) => by_bucket.shred(tenant).await,
@@ -603,6 +613,7 @@ pub fn set_upload_memory(bytes: u64) -> Result<(), String> {
     }
     match UPLOAD_MEMORY.get().set(bytes) {
         Ok(()) => Ok(()),
+        // Set already, to the same: as asked.
         Err(_) if UPLOAD_MEMORY.get().get() == Some(&bytes) => Ok(()),
         Err(_) => Err("the upload memory is set already, as cells opened".to_owned()),
     }
@@ -3107,6 +3118,9 @@ mod tests {
         use bucket_cell::object_bucket::Request;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
+        // Formatted, as a host's bucket is: its head slots read once (board 5534).
+        let (details, asked) = Default::default();
+        bucket_cell::identity::format(&*bucket.own(), &details, asked).await.unwrap();
         let lost = kept_in(dir.path().join("lost"), (1 << 30, None), &bucket.clone(), idle())
             .await
             .unwrap();
@@ -3782,6 +3796,27 @@ mod tests {
         let numbers: Vec<u16> = root.buckets.iter().map(|entry| entry.number).collect();
         assert_eq!(numbers, [1, 2, 3]);
         assert_eq!((registry("two"), registry("three")), (root.clone(), root));
+    }
+
+    /// Board 6908: a host whose bucket, `CLADEFSD_BUCKET`, can't be opened has no KMS: its own alone,
+    /// other buckets' cells would be wrapped under it rather than their own bucket's.
+    #[test]
+    fn hosts_whose_bucket_cant_be_opened_have_no_kms() {
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: this test's process is its own (nextest), no open cell open yet.
+        unsafe {
+            std::env::remove_var("CLADEFS_MASTER_KEY");
+            std::env::set_var("CLADEFS_KMS", format!("local://{}", dir.path().display()));
+            std::env::set_var("CLADEFSD_BUCKET", "nowhere://bucket");
+        }
+        assert_eq!(
+            crate::bucket::require_kms(),
+            Err(
+                "the host's KMS: nowhere://bucket: nowhere://bucket: Generic URL error: Unable to \
+                 recognise URL \"nowhere://bucket\""
+                    .to_owned()
+            )
+        );
     }
 
     /// TASK-411.27: a host given a master key (`CLADEFS_MASTER_KEY`) and no `CLADEFS_KMS` keeps its

@@ -640,6 +640,7 @@ impl Drop for PartSlab {
 /// room, and fails once relief makes none; one that may not, or one with no relief, fails. One of
 /// an arena removed fails at once.
 pub fn alloc(arena: ArenaId, pages: u64, wait: Wait) -> Result<PartSlab, NoMemory> {
+    // Past a u16: a run of no slab, which panics below.
     let pages = u16::try_from(pages).ok().filter(|pages| (1..=slab_pages()).contains(pages));
     let pages = pages.unwrap_or_else(|| panic!("a run of {pages:?} pages, not of a slab"));
     node().arena(arena).ok_or(NoMemory)?.alloc(pages, wait)
@@ -814,5 +815,6 @@ pub fn has_alloc_failed_no_mem() -> bool {
 pub fn is_free(location: PhysLocation) -> Option<bool> {
     let arena = node().arena(location.arena)?;
     let (slab, page) = (location.offset / SLAB, (location.offset % SLAB) / page_size());
+    // A slab past a u32: none of the arena's.
     arena.state.lock().unwrap().is_free(u32::try_from(slab).ok()?, page as u16)
 }

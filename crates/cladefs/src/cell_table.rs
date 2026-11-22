@@ -97,6 +97,7 @@ pub(crate) async fn within<F: std::future::Future>(wait: Duration, future: F) ->
     }
     #[cfg(not(feature = "shuttle"))]
     {
+        // Timed out: none, as its callers ask.
         tokio::time::timeout(wait, future).await.ok()
     }
 }

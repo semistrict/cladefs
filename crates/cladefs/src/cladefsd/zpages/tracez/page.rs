@@ -34,6 +34,7 @@ impl Query {
         for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
             match key.as_ref() {
                 "name" => parsed.name = Some(value.into_owned()),
+                // Not a number: no latency bucket, all spans shown.
                 "bucket" => parsed.which = value.parse().ok().map(Which::Latency),
                 "failed" => parsed.which = Some(Which::Failed),
                 "running" => parsed.running = true,
@@ -288,6 +289,7 @@ fn line(span: &SpanData, depth: usize, began: SystemTime, sampled: bool, html: &
 /// capture itself left out.
 fn resolved(frames: &str) -> String {
     let mut lines = Vec::new();
+    // Not an address: none to resolve.
     for frame in frames.split(' ').filter_map(|frame| usize::from_str_radix(frame, 16).ok()) {
         let mut names = Vec::new();
         // A return address, past its call: resolved at the call.

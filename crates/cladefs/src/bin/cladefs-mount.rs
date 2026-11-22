@@ -62,6 +62,7 @@ fn main() -> anyhow::Result<()> {
                 options.allow_other(true);
             }
             Some("--new") => {
+                // Not a number, or none: the error below says what one is.
                 let capacity = args.next().and_then(|capacity| capacity.to_str()?.parse().ok());
                 new = Some(capacity.with_context(|| format!("--new CAPACITY, in bytes? {USAGE}"))?);
             }

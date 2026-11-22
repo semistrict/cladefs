@@ -365,6 +365,7 @@ impl Mapper {
                 state.mapped[(node / 64) as usize] |= 1 << (node % 64);
             }
             for waiting in state.waiting.remove(&node).unwrap_or_default() {
+                // Its waiter gone: nothing to tell.
                 let _ = waiting.send(result);
             }
         }

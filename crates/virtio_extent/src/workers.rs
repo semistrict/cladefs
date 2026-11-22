@@ -173,10 +173,12 @@ impl<Q: RequestQueue> Worker<Q> {
             let epoll = match watch(&event, &stop_theirs) {
                 Ok(epoll) => epoll,
                 Err(err) => {
+                    // Its starter gone: nothing to tell.
                     let _ = ready.send(Err(err));
                     return None;
                 }
             };
+            // Its starter gone: nothing to tell.
             let _ = ready.send(Ok(()));
             Some(work(shared, &event, &stop_theirs, &epoll))
         })?;
@@ -194,6 +196,7 @@ impl<Q: RequestQueue> Worker<Q> {
         if stopped.is_err() {
             error!("extent device: the worker panicked");
         }
+        // Panicked, said above: nothing given back.
         stopped.ok().flatten()
     }
 }

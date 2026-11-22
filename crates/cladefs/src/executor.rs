@@ -56,6 +56,7 @@ impl Executor {
             .spawn(move || {
                 fuchsia_async::SendExecutorBuilder::new().num_threads(threads).build().run(
                     async move {
+                        // Its starter gone: nothing to tell.
                         let _ = runtime.send(tokio::runtime::Handle::current());
                         // The sender dropped stops it as well as a message would.
                         let _ = stopped.await;
@@ -88,6 +89,7 @@ impl Executor {
     ) -> T {
         let (sender, receiver) = oneshot::channel();
         self.spawn(async move {
+            // Its waiter gone: nothing to tell.
             let _ = sender.send(future.await);
         });
         receiver.await.expect("the executor dropped a future")
@@ -103,6 +105,7 @@ impl Executor {
         local_cell::blocks!("waiting for a future of Fxfs's executor, an outermost entry's");
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         self.spawn(async move {
+            // Its waiter gone: nothing to tell.
             let _ = sender.send(future.await);
         });
         receiver.recv().expect("the executor dropped a future")

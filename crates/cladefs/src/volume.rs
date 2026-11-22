@@ -394,6 +394,7 @@ impl Volume {
             volume.image.unmounted(volume.store_id);
             // Its beginner may have given up on it.
             let _ = result.send(unmounted);
+            // Its waiter gone: nothing to tell.
             let _ = done.send(());
         });
         Unmount::Began(began)

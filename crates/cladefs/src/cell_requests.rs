@@ -108,6 +108,7 @@ impl Shrinking {
         let mut shrinking = self.asked.lock().unwrap();
         if shrinking.as_ref().is_some_and(|(asked, _)| *asked == capacity) {
             let (_, answer) = shrinking.take().unwrap();
+            // Its asker gone: nothing to tell.
             let _ = answer.send(took);
         }
     }

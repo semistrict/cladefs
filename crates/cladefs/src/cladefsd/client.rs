@@ -220,8 +220,9 @@ impl CellClient {
     /// Calls `changed` with the cell's capacity each time the daemon resizes it (the control API's
     /// `ResizeCell`), and whether the guest is asked to shrink to it, which it answers
     /// ([`CellClient::resized`]). Unless something is called so, the guest refuses every shrink.
+    /// Once: a second would be called never, and panics.
     pub fn on_capacity(&self, changed: impl Fn(u64, bool) + Send + Sync + 'static) {
-        let _ = self.client.capacity.set(Box::new(changed));
+        assert!(self.client.capacity.set(Box::new(changed)).is_ok(), "on_capacity is called once");
     }
 
     /// Answers the daemon's asking the guest to shrink to `capacity` bytes: whether it took it.
@@ -239,8 +240,10 @@ impl CellClient {
     /// so, the guest's answer then going to [`CellClient::answer_stats`]; otherwise the
     /// cell answers at once, with no guest's stats, as it does unless something is called so.
     /// Called on the thread receiving the daemon's messages, it must not wait.
+    /// Once: a second would be called never, and panics.
     pub fn on_stats_asked(&self, asked: impl Fn(u64) -> bool + Send + Sync + 'static) {
-        let _ = self.client.stats_asked.set(Box::new(asked));
+        let set = self.client.stats_asked.set(Box::new(asked));
+        assert!(set.is_ok(), "on_stats_asked is called once");
     }
 
     /// cladefs: answers the daemon's ask `ask` for this process's stats ([`STATS`]), with the
@@ -703,14 +706,15 @@ impl CellClient {
         if unmapped.is_some() {
             stage.writes_are_guests();
         }
-        let _ = self.client.stage.set(stage.clone());
+        // cladefs: one of an attempt that failed before holds it: refused, never served stale.
+        self.client.stage.set(stage.clone()).map_err(|_| Error::new(Errno::EEXIST))?;
         // cladefs: and the runs of pages it keeps installed, which the daemon's metrics show
         // (TASK-111.5).
         let budget = stage.budget() as u64;
         self.client.request_blocking(&Request::Window { size, copying, budget })?;
         self.copying.store(copying, Ordering::Release);
         let faults_of = Arc::new(DaemonFaults { client: self.client.clone(), size, unmapped });
-        let _ = self.window_faults.set(faults_of.clone());
+        self.window_faults.set(faults_of.clone()).map_err(|_| Error::new(Errno::EEXIST))?;
         *faults = Some(stage.serve(faults_of)?);
         Ok(())
     }
@@ -1073,6 +1077,7 @@ impl Client {
                     status => Err(Errno::from_raw(-status)),
                 };
                 if let Some(waiting) = self.answered(header.id) {
+                    // Its waiter gone: nothing to tell.
                     let _ = waiting.send(reply);
                 }
                 continue;

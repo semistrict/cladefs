@@ -1261,7 +1261,7 @@ async fn walk<B: Bucket>(
             let inherited = match crate::head::get(bucket, cell).await? {
                 None => Err(Attempt::Failed(Error::Lost(layout::heads(cell)))),
                 Some(head) => {
-                    let n = bucket.head_slots(cell).await;
+                    let n = bucket.head_slots(cell).await?;
                     touched.extend((0..n).map(|slot| layout::head(cell, slot)));
                     match head.origin() {
                         None => Ok(None),

@@ -503,6 +503,7 @@ pub(crate) fn frame_salted(payload: &[u8], salt: u64) -> Vec<u8> {
 
 /// The records at the start of `bytes` that are whole and intact, and how many bytes they take.
 pub(crate) fn decode<R: serde::de::DeserializeOwned>(bytes: &[u8]) -> (Vec<R>, usize) {
+    // Not whole: the records before it are, as a log a crash cut short holds.
     decode_with(bytes, 0, |_, payload| bincode::deserialize(payload).ok())
 }
 

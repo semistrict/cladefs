@@ -23,6 +23,7 @@ use std::path::Path;
 /// simulation; its control API (`CLADEFSD_GRPC`) and its peers (`CLADEFSD_PEER_ADDRESS`) at
 /// addresses of the simulated network; its memory given, the host's being the simulation's.
 pub async fn boot(socket: &Path, memory: Option<u64>) -> anyhow::Result<()> {
+    // Unset, or not UTF-8, which no value it takes is: none.
     let set = |name| node_local::env::var(name).ok().filter(|value| !value.is_empty());
     let set_os = |name| node_local::env::var_os(name).filter(|value| !value.is_empty());
     // A host of the multi-node system: the bucket and this host's placement token named.
@@ -63,6 +64,7 @@ pub async fn boot(socket: &Path, memory: Option<u64>) -> anyhow::Result<()> {
     }
     // cladefs: what its uploads may hold at once (TASK-317).
     if let Some(bytes) = set_os("CLADEFSD_UPLOAD_MEMORY") {
+        // Not UTF-8, or not a number: the error below says what it must be.
         let bytes = bytes.to_str().and_then(|bytes| bytes.parse().ok());
         let bytes = bytes.context("CLADEFSD_UPLOAD_MEMORY must be a number of bytes")?;
         crate::bucket::set_upload_memory(bytes).map_err(anyhow::Error::msg)?;

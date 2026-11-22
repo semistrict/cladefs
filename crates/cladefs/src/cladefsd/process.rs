@@ -254,6 +254,7 @@ fn resident() -> (u64, u64) {
 
 /// The KiB `status`, as /proc/PID/status has it, says of `field`: 0 if it doesn't.
 fn kib_of(status: &str, field: &str) -> u64 {
+    // Not a number: none counted, as a kernel without the field counts.
     (status.lines())
         .find_map(|line| line.strip_prefix(field))
         .and_then(|value| value.trim().strip_suffix("kB"))

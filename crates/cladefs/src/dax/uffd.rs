@@ -458,6 +458,7 @@ fn thread_name(thread: u32) -> String {
     if !std::path::Path::new("/proc/self").exists() {
         return "unnamed: no /proc".to_owned();
     }
+    // Unread: the thread gone, as the name says.
     [format!("/proc/self/task/{thread}/comm"), format!("/proc/{thread}/comm")]
         .iter()
         .find_map(|path| std::fs::read_to_string(path).ok())
@@ -2447,7 +2448,9 @@ impl<H: HostMemory> UffdSecondStage<H> {
         let pages = loop {
             match self.pages.try_lock() {
                 Ok(pages) => break Some(pages),
+                // Held past the deadline: none, as the caller takes it.
                 Err(_) if std::time::Instant::now() >= deadline => break None,
+                // Held still: tried again.
                 Err(_) => std::hint::spin_loop(),
             }
         };
@@ -2631,10 +2634,12 @@ fn host_ids() -> (u32, u32) {
 /// gid_map's lines: `INSIDE OUTSIDE COUNT`), if the map holds it.
 fn host_id(id: u32, map: &str) -> Option<u32> {
     map.lines().find_map(|line| {
+        // A field not a number: not a line of the map's.
         let fields: Vec<u64> =
             line.split_whitespace().map(|field| field.parse().ok()).collect::<Option<_>>()?;
         let [inside, outside, count] = fields[..] else { return None };
         let id = u64::from(id);
+        // An ID past a u32: not one the map gives.
         (inside..inside + count).contains(&id).then(|| u32::try_from(outside + id - inside).ok())?
     })
 }

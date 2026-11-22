@@ -83,7 +83,9 @@ pub fn limit(total: u64) -> u64 {
     let mut dir = std::path::Path::new("/sys/fs/cgroup").join(path.trim_start_matches('/'));
     let mut limit = total;
     loop {
+        // Unread: a cgroup with no memory controller, which limits nothing.
         let max = std::fs::read_to_string(dir.join("memory.max")).ok();
+        // max, unlimited, is no number: no limit here.
         if let Some(max) = max.and_then(|max| max.trim().parse::<u64>().ok()) {
             limit = limit.min(max);
         }
@@ -186,6 +188,7 @@ fn sysctl_u64(name: &std::ffi::CStr) -> std::io::Result<u64> {
 pub fn meminfo_of(meminfo: &str) -> Option<(u64, u64)> {
     let field = |name: &str| {
         let line = meminfo.lines().find_map(|line| line.strip_prefix(name))?;
+        // Not a number: not the field.
         let kib: u64 = line.trim().strip_suffix("kB")?.trim().parse().ok()?;
         Some(kib * 1024)
     };
@@ -212,8 +215,11 @@ fn cgroup_room(dir: &std::path::Path) -> std::io::Result<Option<u64>> {
 
 /// A cgroup's room, of its memory.max, memory.current and memory.stat: none if unlimited.
 pub fn room_of(max: &str, current: &str, stat: &str) -> Option<u64> {
+    // max, unlimited, is no number: no room said.
     let max: u64 = max.trim().parse().ok()?;
+    // Not a number: no room said, as for a cgroup unlimited.
     let current: u64 = current.trim().parse().ok()?;
+    // Not a number: none inactive, as a kernel without the field has none.
     let inactive: u64 = stat
         .lines()
         .find_map(|line| line.strip_prefix("inactive_file "))

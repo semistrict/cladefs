@@ -381,6 +381,7 @@ impl proto::peer_server::Peer for Server {
             let mut next = match appends.message().await {
                 Ok(next) => next,
                 Err(status) => {
+                    // Its asker gone: nothing to tell.
                     let _ = answer.send(Err(status)).await;
                     return;
                 }
@@ -389,6 +390,7 @@ impl proto::peer_server::Peer for Server {
             let (replicas, of) = match of_in(&ours, &replicas, first.of.clone()) {
                 Ok(found) => found,
                 Err(status) => {
+                    // Its asker gone: nothing to tell.
                     let _ = answer.send(Err(status)).await;
                     return;
                 }
@@ -404,6 +406,7 @@ impl proto::peer_server::Peer for Server {
                 next = match appends.message().await {
                     Ok(next) => next,
                     Err(status) => {
+                        // Its asker gone: nothing to tell.
                         let _ = answer.send(Err(status)).await;
                         return;
                     }
@@ -515,6 +518,7 @@ impl proto::peer_server::Peer for Server {
         request: Request<GetPartRequest>,
     ) -> Result<Response<GetPartResponse>, Status> {
         let GetPartRequest { bucket, key, part, home, root } = request.into_inner();
+        // A home past a u16: no region's, refused as one of another region.
         let theirs = (root != 0)
             .then_some(())
             .and_then(|()| Some(Region { home: u16::try_from(home).ok()?, root }));

@@ -136,10 +136,12 @@ impl GuestStats {
                     return Some(());
                 }
                 if let Some(histogram) = name.strip_suffix("_hist") {
+                    // Not numbers: a line logged and left out, below.
                     let counts = value.split(',').map(str::parse).collect::<Result<_, _>>().ok()?;
                     stats.histograms.insert(histogram.to_owned(), counts);
                     return Some(());
                 }
+                // Not a number: a line logged and left out, below.
                 stats.counters.insert(name.to_owned(), value.parse().ok()?);
                 Some(())
             });

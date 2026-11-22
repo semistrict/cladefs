@@ -144,6 +144,7 @@ fn default_sampler() -> Result<Option<Sampler>, String> {
     }
     let ratio = match std::env::var("OTEL_TRACES_SAMPLER_ARG") {
         Ok(ratio) if !ratio.is_empty() => {
+            // Not a number: refused below.
             ratio.parse::<f64>().ok().filter(|ratio| (0.0..=1.0).contains(ratio)).ok_or_else(
                 || format!("OTEL_TRACES_SAMPLER_ARG must be a ratio, 0 to 1: {ratio}"),
             )?

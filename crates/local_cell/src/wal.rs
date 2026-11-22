@@ -281,7 +281,9 @@ impl LogRecord {
                 unauthentic.set(Some(at));
                 return None;
             }
+            // Not a record of this build's: one of before runs were held, its runs synced.
             bincode::deserialize::<Self>(payload).ok().or_else(|| {
+                // Not a record of the older form either: not whole.
                 let contents = bincode::deserialize::<Contents>(payload).ok()?;
                 Some(Self { contents, runs: Runs::Synced })
             })
@@ -1016,7 +1018,9 @@ fn whole_footer<D: Dir>(dir: &D, segment: SegmentId, left: bool) -> Result<Optio
     let path = segment_path(segment);
     let file = dir.open(&path, true)?;
     let footer = match read_frame(&file, &extent_frame::NoKeys)? {
-        Some((_, footer)) => segment_footer(&footer).ok().flatten(),
+        // cladefs: a footer that passed its check but doesn't decode, another build's or a bug's,
+        // fails the recovery: taken for none, its segment's commits would be taken for lost.
+        Some((_, footer)) => segment_footer(&footer).with_context(|| path.clone())?,
         None => None,
     };
     if !left {
@@ -1410,6 +1414,26 @@ mod tests {
         let raw = dir.open(START, false).unwrap();
         raw.write_at(&[0xff; 8], 0).unwrap();
         assert_eq!(StartFile::read(&dir).unwrap().1, Some(9));
+    }
+
+    /// Board 6908: a segment's framed file whose footer passes its check but doesn't decode, of
+    /// another build's or a bug's, fails the recovery, naming the file: taken for none, the
+    /// segment's commits, its raw data and log gone, would be taken for lost.
+    #[test]
+    fn footers_that_dont_decode_fail_recoveries() {
+        let dir = MemDir::new();
+        create_cell_dirs(&dir, CELL.id).unwrap();
+        left_open(&dir, 0, 1, &[commit(1, 1, 0)]);
+        recover_closing(&dir).unwrap();
+        let path = segment_path(segment(0));
+        let framed = read_whole(&dir.open(&path, true).unwrap()).unwrap();
+        let keys = bucket_cell::testing::ring([CELL]);
+        let restamped = extent_frame::restamp(&framed, b"no footer", &keys.of(CELL.id)).unwrap();
+        dir.remove(&path).unwrap();
+        dir.create(&path, true).unwrap().write_at(&restamped, 0).unwrap();
+        let failed = recover(&dir, CELL, None).map(drop).map_err(|err| format!("{err:#}"));
+        let footer = "a segment's footer: a footer: io error: unexpected end of file";
+        assert_eq!(failed, Err(format!("{path}: {footer}")));
     }
 
     /// TASK-411.9: a recovery frames nothing: a segment it closes again keeps its raw data and log,

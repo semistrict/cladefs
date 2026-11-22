@@ -174,6 +174,7 @@ pub async fn stop_serving() {
     SERVING.get().send_replace(false);
     if control::is_serving() {
         let mut reported = REPORTED.get().subscribe();
+        // The health service gone: nothing left to report to.
         let _ = reported.wait_for(|serving| !*serving).await;
     }
 }

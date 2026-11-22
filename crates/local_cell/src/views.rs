@@ -464,6 +464,7 @@ async fn within<F: std::future::Future>(wait: Duration, future: F) -> Option<F::
     }
     #[cfg(not(feature = "shuttle"))]
     {
+        // Timed out: none, as its callers ask.
         tokio::time::timeout(wait, future).await.ok()
     }
 }

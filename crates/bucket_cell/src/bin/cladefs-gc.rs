@@ -929,6 +929,7 @@ impl log::Log for Stderr {
         }
         if self.enabled(record.metadata()) {
             let mut pairs = Pairs(String::new());
+            // Pairs takes every value: the visit fails none.
             let _ = record.key_values().visit(&mut pairs);
             eprintln!("{} {}{}", record.level(), record.args(), pairs.0);
         }

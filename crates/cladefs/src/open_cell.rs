@@ -2438,7 +2438,7 @@ impl OpenCell {
     /// cladefs: routes reads to what is attached to the open cell, as recorded, each opened by
     /// `open` when first read: however many are attached, they cost it nothing until then.
     pub fn open_bases(&self, open: OpenBase) -> Result<()> {
-        let _ = self.bases.open.set(open);
+        assert!(self.bases.open.set(open).is_ok(), "an open cell opens its bases one way");
         for (cells, base) in cell_dir::attached(&self.path)? {
             self.bases.add(self.routed(&cells), &base);
         }

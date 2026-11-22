@@ -190,6 +190,7 @@ pub fn git_main(args: impl IntoIterator<Item = String>) -> anyhow::Result<()> {
     let root = std::env::var_os("FXFS_AUTOMOUNT_ROOT").unwrap_or_else(|| "/repos".into());
     let port = match std::env::var("FXFS_AUTOMOUNT_PORT") {
         Ok(port) => port.parse().context("FXFS_AUTOMOUNT_PORT names a port")?,
+        // Unset, or not UTF-8, which no port is: the default.
         Err(_) => crate::PORT,
     };
     let git_dir = std::env::var_os("GIT_DIR").map(PathBuf::from);

@@ -209,7 +209,7 @@ impl Read {
 /// at once (TASK-165.11): every slot, one GET each, at once (TASK-691).
 /// cladefs: a slot's read refused, [`bucket::Refused`] (board 5861).
 pub async fn read(bucket: &impl Bucket, cell: CellId) -> Result<Read, bucket::Refused> {
-    let n = bucket.head_slots(cell).await;
+    let n = bucket.head_slots(cell).await?;
     let gets = (0..n).map(|slot| async move {
         Ok::<_, bucket::Refused>(
             bucket::get(bucket, &layout::head(cell, slot)).await?.map(|object| (slot, object)),
@@ -411,7 +411,7 @@ pub(crate) async fn birth(
     cell: CellId,
     head: Head,
 ) -> Result<Slots, Unwritten> {
-    let n = bucket.head_slots(cell).await;
+    let n = bucket.head_slots(cell).await?;
     let head = Head { swaps: 0, ..head };
     let first = layout::head(cell, 0);
     let version = match bucket::create(bucket, &first, layout::encode(&head)).await? {
@@ -512,7 +512,7 @@ pub(crate) async fn change_leaving<R>(
 ) -> Result<(R, Slots), Error> {
     let mut slots = match start {
         Start::Read => read(bucket, cell).await?.0,
-        Start::Create => Slots::none(bucket.head_slots(cell).await),
+        Start::Create => Slots::none(bucket.head_slots(cell).await?),
         Start::Found(found) => found,
     };
     loop {
@@ -550,6 +550,7 @@ async fn overwrite(
             Err(bucket::Error::Refused(refusal)) => {
                 return Err(bucket::Refused { key: key.to_owned(), refusal });
             }
+            // Out of reach: asked again, as every request of a bucket is.
             Err(_) => {
                 failures += 1;
                 bucket.pause(failures).await;
@@ -754,7 +755,7 @@ mod tests {
         assert_eq!(held.map(|held| held.next_key(CELL)), Ok(layout::head(CELL, 1)));
         assert_eq!(slots(&bucket, CELL), [(0, 3), (1, 1), (2, 2)]);
         let unformatted = Direct(SimBucket::new());
-        assert_eq!(block_on(unformatted.head_slots(CELL)), crate::identity::DEFAULT_HEAD_SLOTS);
+        assert_eq!(block_on(unformatted.head_slots(CELL)), Ok(crate::identity::DEFAULT_HEAD_SLOTS));
     }
 
     /// A deletion's head is found whatever slots are left, as the collector removes them; none once

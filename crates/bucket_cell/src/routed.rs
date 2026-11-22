@@ -9,7 +9,9 @@
 //! (`RoutedBucket::own`), eliminating shadow clones (`twin()`) and duplicate counts/marks/decoded
 //! caches.
 
-use crate::bucket::{Bucket, ByteRange, Error, Listing, Meta, Object, Page, PutMode, Version};
+use crate::bucket::{
+    Bucket, ByteRange, Error, Listing, Meta, Object, Page, PutMode, Refusal, Refused, Version,
+};
 use crate::layout;
 use crate::object_bucket::{ObjectBucket, Registered, Stats};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -94,9 +96,10 @@ impl<B: Bucket> RoutedBucket<B> {
             return Ok(Some(number));
         }
         let identity = match self.home.get(layout::IDENTITY).await {
+            // cladefs: unreadable, read the same again: refused, never retried (board 5534).
             Ok(object) => crate::identity::parse(&object.bytes).map_err(|err| {
-                log::warn!("bucket: reading its own identity: {err}");
-                Error::Unavailable
+                log::error!("bucket: reading its own identity: {err}");
+                Error::Refused(Refusal::Unreadable)
             })?,
             Err(Error::NotFound) => return Ok(None),
             Err(err) => return Err(err),
@@ -105,45 +108,87 @@ impl<B: Bucket> RoutedBucket<B> {
         Ok(Some(identity.number))
     }
 
-    /// Whether this bucket holds a mirror of any version of `cell`, a cell of another bucket.
-    async fn mirrored(&self, cell: layout::CellId) -> bool {
+    /// Its own number, [`RoutedBucket::own_number`], asked until its bucket answers: refused for
+    /// good, or its identity unreadable, refused. Never none for a bucket out of reach, which a
+    /// fork would take for no mirror here, and refer in its version's bucket.
+    async fn own_number_answered(&self, route: &Route<B>) -> Result<Option<u16>, Refused> {
+        let mut failures = 0u32;
+        loop {
+            match self.own_number(route).await {
+                Ok(number) => return Ok(number),
+                Err(Error::Refused(refusal)) => {
+                    return Err(Refused::of(layout::IDENTITY, refusal));
+                }
+                // Out of reach: asked again, as every request of a bucket is.
+                Err(_) => {
+                    failures = failures.saturating_add(1);
+                    self.pause(failures).await;
+                }
+            }
+        }
+    }
+
+    /// Whether this bucket holds a mirror of any version of `cell`, a cell of another bucket. Its
+    /// markers' listing failing fails it: taken for none, it would leave a mirror's moves out of
+    /// the cell's listings for as long as it is kept (board 5526).
+    async fn mirrored(&self, cell: layout::CellId) -> Result<bool, Error> {
         if let Some(&(held, listed)) = self.mirrored.lock().unwrap().get(&cell)
             && listed.elapsed() < MIRRORED_FOR
         {
-            return held;
+            return Ok(held);
         }
         let listed = Instant::now();
-        let markers = self.home.list(&layout::mirrors(cell)).await.unwrap_or_default();
+        let markers = self.home.list(&layout::mirrors(cell)).await?;
         let held = markers
             .iter()
             .any(|meta| matches!(layout::kind(&meta.key), layout::Kind::Mirror { .. }));
         self.mirrored.lock().unwrap().insert(cell, (held, listed));
-        held
+        Ok(held)
     }
 
-    async fn read_here_first(&self, key: &str) -> bool {
-        let Some(route) = &self.route else { return false };
-        let Some(number) = layout::routed_to(key) else { return false };
-        if !crate::peer::served(key) || self.own_number(route).await.ok().flatten() == Some(number)
-        {
-            return false;
+    async fn read_here_first(&self, key: &str) -> Result<bool, Error> {
+        let Some(route) = &self.route else { return Ok(false) };
+        let Some(number) = layout::routed_to(key) else { return Ok(false) };
+        if !crate::peer::served(key) || self.own_number(route).await? == Some(number) {
+            return Ok(false);
         }
-        let Some(cell) = layout::cell_of(key) else { return false };
+        let Some(cell) = layout::cell_of(key) else { return Ok(false) };
         self.mirrored(cell).await
     }
 
-    async fn lists_here_too(&self, prefix: &str) -> bool {
-        let Some(route) = &self.route else { return false };
+    async fn lists_here_too(&self, prefix: &str) -> Result<bool, Error> {
+        let Some(route) = &self.route else { return Ok(false) };
         let (Some(number), Some(cell)) = (layout::routed_to(prefix), layout::cell_of(prefix))
         else {
-            return false;
+            return Ok(false);
         };
         if !prefix.starts_with(&layout::moves_prefix(cell))
-            || self.own_number(route).await.ok().flatten() == Some(number)
+            || self.own_number(route).await? == Some(number)
         {
-            return false;
+            return Ok(false);
         }
         self.mirrored(cell).await
+    }
+
+    /// Whether a listing of moves at `prefix` of a cell mirrored here, `here` what this bucket
+    /// listed, is whole without what the cell's bucket holds, which failed to list: the mirror's
+    /// copies answer for an object it copied, which the children here read here, with the cell's
+    /// bucket out of reach (TASK-633.8, AC #4); for one it did not copy, the cell's bucket alone
+    /// can, and its failure fails the listing, which [`crate::bucket::list`] asks again: the moves
+    /// made there since taken for none, its reads would find the object gone, lost (board 5526).
+    /// A listing of the moves of several objects, [`crate::moves::MovesMaps::read`]'s, a
+    /// checkpoint's, is whole of those the mirror copied: what it misses of the others it misses
+    /// as it would moves written after it, which readers follow from the object's older location.
+    async fn answered_by_the_mirror(&self, prefix: &str, here: &[Meta]) -> Result<bool, Error> {
+        let Some(object) = layout::moved_object(prefix) else { return Ok(true) };
+        if !here.is_empty() {
+            return Ok(true);
+        }
+        match self.home.head(&object).await {
+            Ok(_) => Ok(true),
+            Err(Error::NotFound) => Ok(false),
+            Err(err) => Err(err),
+        }
     }
 
     async fn member(&self, key: &str) -> Result<Option<Arc<B>>, Error> {
@@ -255,7 +300,7 @@ impl<B: Bucket> Bucket for RoutedBucket<B> {
     }
 
     async fn get(&self, key: &str) -> Result<Object, Error> {
-        if self.read_here_first(key).await
+        if self.read_here_first(key).await?
             && let Ok(object) = self.home.get(key).await
         {
             return Ok(object);
@@ -267,7 +312,7 @@ impl<B: Bucket> Bucket for RoutedBucket<B> {
     }
 
     async fn get_range(&self, key: &str, range: ByteRange) -> Result<Vec<u8>, Error> {
-        if self.read_here_first(key).await
+        if self.read_here_first(key).await?
             && let Ok(bytes) = self.home.get_range(key, range.clone()).await
         {
             return Ok(bytes);
@@ -279,7 +324,7 @@ impl<B: Bucket> Bucket for RoutedBucket<B> {
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {
-        if self.read_here_first(key).await
+        if self.read_here_first(key).await?
             && let Ok(meta) = self.home.head(key).await
         {
             return Ok(meta);
@@ -291,11 +336,19 @@ impl<B: Bucket> Bucket for RoutedBucket<B> {
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<Meta>, Error> {
-        if self.lists_here_too(prefix).await {
+        if self.lists_here_too(prefix).await? {
             let mut listed = self.home.list(prefix).await?;
             let there = match self.member(prefix).await {
-                Ok(Some(member)) => member.list(prefix).await.unwrap_or_default(),
-                _ => Vec::new(),
+                Ok(Some(member)) => member.list(prefix).await,
+                Ok(None) => Ok(Vec::new()),
+                Err(err) => Err(err),
+            };
+            let there = match there {
+                Ok(there) => there,
+                Err(err) => {
+                    self.answered_by_the_mirror(prefix, &listed).await?.then_some(()).ok_or(err)?;
+                    Vec::new()
+                }
             };
             let here: BTreeSet<String> = listed.iter().map(|meta| meta.key.clone()).collect();
             listed.extend(there.into_iter().filter(|meta| !here.contains(&meta.key)));
@@ -322,13 +375,16 @@ impl<B: Bucket> Bucket for RoutedBucket<B> {
         }
     }
 
-    async fn head_slots(&self, cell: layout::CellId) -> u64 {
+    async fn head_slots(&self, cell: layout::CellId) -> Result<u64, Refused> {
         let key = layout::heads(cell);
         let mut failures = 0u32;
         loop {
             match self.member(&key).await {
                 Ok(Some(member)) => return member.head_slots(cell).await,
                 Ok(None) => return self.home.head_slots(cell).await,
+                Err(Error::Refused(refusal)) => return Err(Refused::of(&key, refusal)),
+                // cladefs: its bucket out of reach: asked again, never another bucket's count
+                // taken for it (board 5522).
                 Err(_) => {
                     failures = failures.saturating_add(1);
                     self.pause(failures).await;
@@ -344,6 +400,8 @@ impl<B: Bucket> Bucket for RoutedBucket<B> {
     async fn rewritable(&self, key: &str) {
         match self.member(key).await {
             Ok(Some(member)) => member.rewritable(key).await,
+            // Out of reach: spaced as this bucket's writes are; the write itself goes to its own
+            // bucket, which answers for it.
             Ok(None) | Err(_) => self.home.rewritable(key).await,
         }
     }
@@ -397,7 +455,7 @@ impl<B: Bucket> crate::mirror::Here for RoutedBucket<B> {
         Box::pin(async move {
             let Some(route) = &self.route else { return Ok(false) };
             let Some(of) = layout::routed_to(&parent.prefix()) else { return Ok(false) };
-            if self.own_number(route).await.ok().flatten().is_none_or(|number| number == of) {
+            if self.own_number_answered(route).await?.is_none_or(|number| number == of) {
                 return Ok(false);
             }
             let marker = layout::mirror(parent, at);

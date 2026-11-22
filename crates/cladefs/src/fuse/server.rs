@@ -1251,6 +1251,8 @@ impl Server {
                                     entry.inode = Inode(found.attr.ino);
                                     found
                                 }
+                                // Failing past entries already in the reply: those go, and the next
+                                // read asks again from there.
                                 Err(_) if !reply.is_empty() => break,
                                 Err(errno) => return Err(errno),
                             }

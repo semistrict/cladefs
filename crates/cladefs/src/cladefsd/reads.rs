@@ -53,6 +53,8 @@ pub(super) fn configure() -> Result<(), String> {
     {
         return Err(format!("CLADEFSD_READ_TRACES names no directory: {dir:?}"));
     }
+    // Set by this node's first start: a restart under the simulation keeps it, of the same
+    // environment.
     let _ = DIR.get().set(dir.map(PathBuf::from));
     Ok(())
 }

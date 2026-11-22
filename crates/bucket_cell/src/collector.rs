@@ -615,6 +615,7 @@ impl Collector {
         let collected = self.collect_held(bucket, cell, &taken, recorded, heard, listed).await;
         let ended = match &collected {
             Ok((_, passed)) => PassEnd::Through(passed.clone()),
+            // The pass's failure, its caller's below: its lease says it ended.
             Err(_) => PassEnd::Failed,
         };
         self.release(bucket, cell, &taken, ended).await?;
@@ -1172,7 +1173,7 @@ impl Remembered {
                         };
                     }
                 }
-                let (n, first) = (bucket.head_slots(cell).await, heads.get(&0).cloned());
+                let (n, first) = (bucket.head_slots(cell).await?, heads.get(&0).cloned());
                 match crate::head::found(n, heads.into_values(), first) {
                     crate::head::Found::Head(head) => Some(head),
                     _ => None,
@@ -2199,6 +2200,7 @@ impl Pass {
         // When the object at `key` may go for having been compacted: a grace period after its
         // latest moves were written, if any were listed.
         let compacted = |key: &str| {
+            // A key of no cell's has no moves.
             let moves = moves_listed(&self.objects, key).ok()?;
             moves.last().map(|moves| due(&self.objects[*moves]))
         };
@@ -3856,6 +3858,9 @@ mod tests {
     /// pass made.
     async fn pass_over_versions(versions: u64) -> (u64, u64, u64) {
         let bucket = memory_bucket();
+        // Formatted, as a host's bucket is: its head slots read once (board 5534).
+        let (details, asked) = Default::default();
+        crate::identity::format(&*bucket, &details, asked).await.unwrap();
         let cell = test_cell(1);
         lifecycle::create(&*bucket, cell, 0).await.unwrap();
         let writer = Writer::open(bucket.clone(), cell, 10, 0).await.unwrap();

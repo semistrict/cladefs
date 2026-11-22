@@ -394,6 +394,7 @@ pub(crate) fn pack_ahead(part: u64, data: Buffer, pending: Pending) {
                 refused.into_iter().for_each(|(_, _, pending)| pending.skip());
                 return;
             }
+            // Packers run already: they take it.
             Err(_) => {}
         }
     }

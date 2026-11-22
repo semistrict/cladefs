@@ -393,6 +393,7 @@ pub(crate) fn at_once<T: Sync>(
         let Err(error) = joined else { continue };
         match synced {
             Ok(()) => synced = Err(error),
+            // Failed already, with the first error: this one said.
             Err(_) => log::warn!("extent store: {error:#} too"),
         }
     }

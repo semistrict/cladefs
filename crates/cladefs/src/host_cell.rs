@@ -206,6 +206,7 @@ pub(crate) fn host_bucket_url() -> Option<String> {
     if let Some(url) = HOST_BUCKET.lock().unwrap().clone() {
         return Some(url);
     }
+    // Unset, or not UTF-8, which no URL is: none.
     node_local::env::var("CLADEFSD_BUCKET").ok().filter(|url| !url.is_empty())
 }
 
@@ -293,12 +294,20 @@ impl Opened {
 
 /// The bucket the cell directory at `path` names, if its description is there: as deleting it, or
 /// what of it a deletion that stopped left, goes by. A cell of another format is refused
-/// (`local_cell::Format`).
+/// (`local_cell::Format`), and a description there but unread, or not whole: taken for none, its
+/// cell would be deleted in no bucket, or the daemon's, and left in its own (board 6908).
 pub(crate) fn bucket_at(path: &Path) -> anyhow::Result<Option<Arc<RoutedBucket>>> {
     match local_cell::host_bucket(path) {
         Ok(Some(url)) => Ok(Some(bucket(&url)?)),
-        Err(err) if err.is::<local_cell::Format>() => Err(err),
-        Ok(None) | Err(_) => Ok(None),
+        Ok(None) => Ok(None),
+        Err(err)
+            if err
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|err| err.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Ok(None)
+        }
+        Err(err) => Err(err),
     }
 }
 

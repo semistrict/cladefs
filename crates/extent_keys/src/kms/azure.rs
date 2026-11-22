@@ -84,6 +84,7 @@ const QUERY: [&str; 4] = ["key", "keys", "alg", "endpoint"];
 /// The KMS `url` names ([`super::from_url`]).
 pub(super) fn from_url(url: &str) -> Result<super::Shared, String> {
     let parsed = parse(url)?;
+    // Unset, or not UTF-8, which no value it takes is: none.
     let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
     let source = source(&var);
     Ok(Arc::new(AzureKms::new(parsed, source).map_err(|why| format!("{url}: {why}"))?))
@@ -565,6 +566,7 @@ impl AzureKms {
         let parsed = parsed.map_err(|err| format!("the authority's answer: {err}"))?;
         let seconds = match &parsed.expires_in {
             Seconds::Number(seconds) => Some(*seconds),
+            // Not a number: no lifetime said, the token asked for again at its next use.
             Seconds::String(seconds) => seconds.parse().ok(),
         };
         let lifetime = Duration::from_secs(seconds.unwrap_or(0));
@@ -616,6 +618,7 @@ struct VaultError {
 ///   [`Error::Io`];
 /// - anything else: [`Error::Io`], transient if throttled (429) or the service's (5xx).
 fn refusal(tenant: u64, id: &str, op: Op, code: u16, body: &[u8]) -> Failure {
+    // Not JSON, or not Key Vault's error: the default, the status alone saying what failed.
     let error = serde_json::from_slice::<serde_json::Value>(body)
         .ok()
         .and_then(|value| serde_json::from_value::<VaultError>(value.get("error")?.clone()).ok())

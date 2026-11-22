@@ -75,6 +75,7 @@ fn seconds(query: &str) -> Result<Duration, String> {
         .find(|(key, _)| key == "seconds")
         .map(|(_, value)| value.into_owned());
     let Some(asked) = asked else { return Ok(DEFAULT) };
+    // Not a number: refused below.
     asked
         .parse::<u64>()
         .ok()

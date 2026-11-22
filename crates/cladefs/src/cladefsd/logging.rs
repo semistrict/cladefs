@@ -56,6 +56,7 @@ impl Default for Settings {
 impl Settings {
     /// What this process's environment says.
     pub fn from_env() -> Result<Self, String> {
+        // Unset, or not UTF-8, which no value it takes is: none.
         Self::from_vars(|name| std::env::var(name).ok())
     }
 

@@ -862,12 +862,18 @@ pub(crate) fn of_host(path: &Path, disk: &Arc<HostDisk>) -> io::Result<Arc<Footp
 }
 
 /// Forgets the footprint of the cell whose directory is at `path`, if it was counted: removed.
-/// `forgotten` runs between, the cell directory removed by it if it is `Ok`.
+/// `forgotten` runs between, the cell directory removed by it if it is `Ok`. A directory that is
+/// not there was counted by none; one whose identity can't be read fails it, never left counted
+/// for good.
 pub(crate) fn removing<T>(
     path: &Path,
     forgotten: impl FnOnce() -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
-    let id = dir_id(path).ok();
+    let id = match dir_id(path) {
+        Ok(id) => Some(id),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+        Err(err) => return Err(anyhow::Error::new(err).context(format!("{}", path.display()))),
+    };
     let removed = forgotten()?;
     let mut ledger = LEDGER.get().lock().unwrap();
     let footprint = id.and_then(|id| ledger.as_mut().and_then(|ledger| ledger.remove(&id)));

@@ -243,6 +243,7 @@ impl proto::mount_server::Mount for Control {
             let mut cells = control.cells.lock().unwrap();
             match &attached {
                 Ok(_) => cells.insert(cell, Attaching::Attached(token)),
+                // Not attached: forgotten here; the error is the caller's.
                 Err(_) => cells.remove(&cell),
             };
             attached

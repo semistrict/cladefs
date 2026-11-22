@@ -51,6 +51,7 @@ pub fn spawn<T: Send + 'static>(
 ) -> std::io::Result<Thread<T>> {
     let (done, result) = mpsc::sync_channel(1);
     let run = Box::new(move || {
+        // Its joiner gone: nothing to tell.
         let _ = done.send(run());
     });
     let name = name.into();

@@ -188,6 +188,10 @@ pub enum Refusal {
     /// and the like).
     #[error("it refuses the request itself")]
     Request,
+    /// cladefs: its answer, one this build can't read: an identity corrupt, or of a format of
+    /// another build's (board 5534). Asking again reads the same.
+    #[error("its answer is not one this build reads")]
+    Unreadable,
 }
 
 /// cladefs: a request of `key` that the bucket refuses for good ([`Error::Refused`]): what a call
@@ -292,10 +296,14 @@ pub trait Bucket: Send + Sync + 'static {
 
     /// cladefs: how many slots the heads of `cell` are kept in (TASK-691): the setting of the
     /// bucket `cell` is of ([`crate::identity::Settings::head_slots`]), as its identity says; the
-    /// default for a bucket never formatted, as tests' are.
-    fn head_slots(&self, cell: crate::layout::CellId) -> impl Future<Output = u64> + Send {
+    /// default for a bucket never formatted, as tests' are. Refused where that bucket, or its
+    /// identity, can't say: never a count guessed (boards 5522, 5534).
+    fn head_slots(
+        &self,
+        cell: crate::layout::CellId,
+    ) -> impl Future<Output = Result<u64, Refused>> + Send {
         let _ = cell;
-        std::future::ready(crate::identity::DEFAULT_HEAD_SLOTS)
+        std::future::ready(Ok(crate::identity::DEFAULT_HEAD_SLOTS))
     }
 
     /// cladefs: default head slots when formatting this bucket without an explicit provider or
@@ -372,6 +380,7 @@ async fn readmitted(bucket: &impl Bucket, key: &str) -> Result<(), Refused> {
         match bucket.head(key).await {
             Ok(_) | Err(Error::NotFound) => return Ok(()),
             Err(Error::Refused(refusal)) => return Err(Refused::of(key, refusal)),
+            // Out of reach, or the credentials expired still: it waits on.
             Err(_) => {}
         }
     }
@@ -434,6 +443,7 @@ pub(crate) async fn get_range(
             Ok(bytes) => return Ok(Some(bytes)),
             Err(Error::NotFound) => return Ok(None),
             Err(Error::Refused(refusal)) => return Err(Refused::of(key, refusal).into()),
+            // Failed: a HEAD tells a range past the object's end, which reads none, from a failure.
             Err(_) => match bucket.head(key).await {
                 Err(Error::NotFound) => return Ok(None),
                 Err(Error::Refused(refusal)) => return Err(Refused::of(key, refusal).into()),

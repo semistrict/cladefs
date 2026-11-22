@@ -73,6 +73,7 @@ pub(super) fn from_url(url: &str) -> Result<super::Shared, String> {
         .connect_timeout(CONNECT_TIMEOUT)
         .build()
         .map_err(|err| format!("{url}: an HTTP client: {err}"))?;
+    // Unset, or not UTF-8, which no project is: none.
     let quota_project = std::env::var(QUOTA_PROJECT_VAR).ok().filter(|project| !project.is_empty());
     Ok(Arc::new(GcpKms { ring, names, http, credentials, quota_project }))
 }
@@ -154,6 +155,7 @@ fn qualified(ring: &str, name: &str) -> String {
 /// The credentials its calls carry: [`TOKEN_VAR`]'s token, if it has one, else Application
 /// Default Credentials, found as `object_store` finds them for a `gs://` bucket.
 fn credentials() -> Result<GcpCredentialProvider, String> {
+    // Unset, or not UTF-8, which no token is: Application Default Credentials.
     if let Some(bearer) = std::env::var(TOKEN_VAR).ok().filter(|token| !token.is_empty()) {
         return Ok(Arc::new(StaticCredentialProvider::new(GcpCredential { bearer })));
     }
@@ -252,6 +254,7 @@ enum Int64 {
 impl Int64 {
     fn value(&self) -> Option<u64> {
         match self {
+            // Not a number: none, which its caller refuses.
             Int64::String(digits) => digits.parse().ok(),
             Int64::Number(number) => Some(*number),
         }
@@ -450,6 +453,7 @@ struct Violation {
 /// - anything else, `UNAUTHENTICATED` (cladefs's credentials) and the service's failures among
 ///   them: [`Error::Io`], transient if the service may answer it next time.
 fn refusal(tenant: u64, name: &str, op: Op, code: u16, body: &[u8]) -> Failure {
+    // Not JSON, or not Google's error: the default, the status alone saying what failed.
     let rpc = serde_json::from_slice::<serde_json::Value>(body)
         .ok()
         .and_then(|value| serde_json::from_value::<Status>(value.get("error")?.clone()).ok())

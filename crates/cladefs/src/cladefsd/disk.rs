@@ -263,6 +263,7 @@ pub struct DiskConfig {
 impl DiskConfig {
     /// As the environment says it: refused, naming the variable, if it says what isn't one.
     pub fn from_env() -> Result<Self, String> {
+        // Unset, or not UTF-8, which no value it takes is: none.
         let var = |name| node_local::env::var(name).ok();
         let headroom = super::governor::disk_headroom_of(var("CLADEFSD_DISK_HEADROOM").as_deref())?;
         let fixed = match var("CLADEFSD_DISK_BYTES").filter(|value| !value.is_empty()) {
@@ -430,6 +431,7 @@ pub fn host_disks() -> Vec<(&'static str, &'static str, Vec<(String, u64)>)> {
     ];
     let sampled: Vec<_> = (HostDisk::all().into_iter())
         .filter_map(|disk| {
+            // A disk unsampled: left out of the metrics, as one gone is.
             let sample = disk.sample().ok()?;
             let dev = disk.dev()?;
             let device =

@@ -132,6 +132,7 @@ impl Drop for DaemonWindow {
         // holds the cell still, when the memory stays, as the cell may yet map it.
         match Arc::try_unwrap(self.cell.take().expect("a cell")) {
             Ok(cell) => drop(cell),
+            // Held still: said; its memory stays mapped for it.
             Err(_) => {
                 log::warn!("sqlite_cladefs: a window's cell outlives it: its memory stays mapped");
                 return;

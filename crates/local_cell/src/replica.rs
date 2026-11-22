@@ -489,6 +489,7 @@ impl<D: Dir> Replicas<D> {
         for name in self.dir.list("").context("listing the replica directory")? {
             match parse_name(&name) {
                 Some((of, None)) if of == cell => {
+                    // Not a number: the error below names the file.
                     let epoch = name.rsplit('.').next().and_then(|epoch| epoch.parse().ok());
                     let epoch = epoch.ok_or_else(|| anyhow!("bad promise {name:?}"))?;
                     // A crash between a promise and the removal of the one before leaves both.
@@ -496,6 +497,7 @@ impl<D: Dir> Replicas<D> {
                     held.promises.insert(epoch);
                 }
                 Some((of, Some(key))) if of == cell => {
+                    // Not a number: the error below names the file.
                     let log = name.rsplit('.').next().and_then(|log| log.parse().ok());
                     let log = log.ok_or_else(|| anyhow!("bad log name {name:?}"))?;
                     let file =
@@ -536,6 +538,7 @@ fn log_path(cell: CellId, key: Key, log: u64) -> String {
 /// The cell a file of the directory is of, and the configuration, if it is a log's.
 fn parse_name(name: &str) -> Option<(CellId, Option<Key>)> {
     let parts: Vec<&str> = name.split('.').collect();
+    // Not a number: not a file of a cell's.
     let number = |at: usize| parts.get(at).and_then(|part| part.parse::<u64>().ok());
     let cell = CellId { tenant: number(0)?, id: number(1)? };
     match parts.len() {

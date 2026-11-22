@@ -162,6 +162,7 @@ fn level() -> i32 {
             Ok(level) => {
                 level.parse().unwrap_or_else(|_| panic!("CLADEFS_ZSTD_LEVEL is {level:?}"))
             }
+            // Unset, or not UTF-8, which no level is: the default.
             Err(_) => LEVEL,
         });
     *CHOSEN

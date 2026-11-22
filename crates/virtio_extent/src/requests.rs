@@ -455,6 +455,7 @@ mod linux {
         ) {
             *self.serving.lock().expect("Poisoned lock") += 1;
             let start = Instant::now();
+            // No buffers: no header to name the request by; their failure is answered below.
             let header = buffers.as_ref().ok().and_then(Buffers::header);
             // cladefs: served with the guest's number of it current, which the daemon's client's
             // calls for it carry to the daemon's log (`cladefs::request`, TASK-260): 0, none, if

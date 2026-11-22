@@ -544,8 +544,11 @@ macro_rules! reply {
 }
 
 impl Bucket for SimBucket {
-    fn head_slots(&self, _: CellId) -> impl Future<Output = u64> + Send {
-        std::future::ready(self.slots())
+    fn head_slots(
+        &self,
+        _: CellId,
+    ) -> impl Future<Output = Result<u64, crate::bucket::Refused>> + Send {
+        std::future::ready(Ok(self.slots()))
     }
 
     fn get(&self, key: &str) -> impl Future<Output = Result<Object, Error>> + Send {
@@ -678,8 +681,11 @@ impl Direct {
 }
 
 impl Bucket for Direct {
-    fn head_slots(&self, _: CellId) -> impl Future<Output = u64> + Send {
-        std::future::ready(self.0.slots())
+    fn head_slots(
+        &self,
+        _: CellId,
+    ) -> impl Future<Output = Result<u64, crate::bucket::Refused>> + Send {
+        std::future::ready(Ok(self.0.slots()))
     }
 
     fn get(&self, key: &str) -> impl Future<Output = Result<Object, Error>> + Send {
@@ -951,7 +957,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
     for (&cell, record) in &records {
         // Every cell's head stays, a deleted one's final, which fences its writers (TASK-174,
         // TASK-407): but that of a cell that goes whole (TASK-455).
-        let n = bucket.head_slots(cell).await;
+        let n = bucket.head_slots(cell).await.expect("its head slots");
         let slots = (0..n).map(|slot| layout::head(cell, slot));
         if record.deleted() {
             if !removed(cell) {

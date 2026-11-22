@@ -212,6 +212,7 @@ async fn hold_alone(path: &Path) -> Result<Hold, Errno> {
 pub(super) async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, Errno> + Send + 'static,
 ) -> Result<T, Errno> {
+    // Its work unfinished, the runtime gone: said, and failed.
     super::run::off_the_runtime(work).await.unwrap_or_else(|err| {
         log::error!("cladefsd: a cell's blocking work: {err}");
         Err(Errno::EIO)
@@ -377,6 +378,7 @@ fn keep(hold: &Hold, open_cell: OpenCell) -> Arc<HeldCell> {
             // On the runtime that lives as long as the daemon, whatever its caller's.
             drop(super::server::io().spawn(idle));
         }
+        // Something open there already: this one closes after its fork, said here.
         Err(_) => log::error!(
             "cladefsd: {} has something open already: the kept opened isn't kept",
             hold.key().display()
@@ -390,6 +392,7 @@ fn keep(hold: &Hold, open_cell: OpenCell) -> Arc<HeldCell> {
 async fn close_kept(kept: Option<Kept>) {
     let Some(Kept { held, closed, .. }) = kept else { return };
     drop(release_held_behind(held));
+    // Its sender dropped: closed, as said.
     let _ = closed.await;
 }
 
@@ -675,6 +678,7 @@ pub fn replace_after() -> Result<std::time::Duration, String> {
     let Some(set) = node_local::env::var_os("CLADEFSD_REPLACE_AFTER") else {
         return Ok(local_cell::upload::Options::default().replace_after);
     };
+    // Not UTF-8, or not a number: refused below.
     match set.to_str().and_then(|seconds| seconds.parse::<u64>().ok()) {
         Some(0) | None => {
             Err(format!("CLADEFSD_REPLACE_AFTER must be a positive number of seconds: {set:?}"))
@@ -1435,6 +1439,7 @@ fn open_instances() -> Vec<Arc<OpenCell>> {
 /// The cells open for connections whose commits upload now, and what their
 /// uploaders have left to do (`metrics`, TASK-91.3).
 pub(super) fn upload_statuses() -> Vec<(CellId, local_cell::upload::UploadStatus)> {
+    // Its uploader stopped, or none: no status to show.
     (open_instances().iter())
         .filter_map(|open_cell| Some((open_cell.cell(), open_cell.upload_status().ok()??)))
         .collect()
@@ -1719,6 +1724,7 @@ fn daemon_line() -> String {
 fn process_io() -> [(&'static str, u64); 2] {
     let io = host_fs::read_to_string("/proc/self/io").unwrap_or_default();
     let field = |name: &str| {
+        // Not a number: none counted, as a kernel without the field counts.
         (io.lines())
             .find_map(|line| line.strip_prefix(name)?.strip_prefix(": "))
             .and_then(|value| value.trim().parse().ok())
@@ -1785,6 +1791,7 @@ pub fn cache_config() -> Result<Option<(std::path::PathBuf, u64)>, String> {
                         directory for the cache"
                 .to_owned());
         }
+        // Not UTF-8, or not a number: refused below.
         Some(bytes) => match bytes.to_str().and_then(|bytes| bytes.parse().ok()) {
             Some(0) | None => {
                 return Err(format!(

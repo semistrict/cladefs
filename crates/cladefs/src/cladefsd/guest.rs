@@ -141,6 +141,7 @@ async fn receive(mut receiver: AsyncReceiver, sender: Arc<AsyncSender>, waiting:
             let replied =
                 waiting.lock().unwrap().as_mut().and_then(|waiting| waiting.remove(&header.id));
             if let Some(replied) = replied {
+                // Its waiter gone: nothing to tell.
                 let _ = replied.send(message);
             }
             continue;

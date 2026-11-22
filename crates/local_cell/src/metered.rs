@@ -223,6 +223,7 @@ impl<F: File> File for MeteredFile<F> {
         let written = self.file.write_at(buf, offset);
         match &written {
             Ok(()) => self.len.grow(&self.footprint, offset + buf.len() as u64),
+            // Failed: its length what the file holds now; the error is the caller's.
             Err(_) => {
                 if let Ok(size) = self.file.size() {
                     self.len.grow(&self.footprint, size);

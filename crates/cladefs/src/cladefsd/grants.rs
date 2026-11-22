@@ -75,6 +75,8 @@ impl Grants {
                 .map_err(errno)
         });
         if let Err(errno) = served {
+            // Failing already: what is left of the socket, gone if it can go; the error is the
+            // caller's.
             let _ = std::fs::remove_file(&socket);
             return Err(errno);
         }

@@ -461,6 +461,7 @@ fn start_connection(stream: super::wire::Stream, tenant: Arc<Tenant>) -> mpsc::R
     io().spawn(async move {
         run_connection(stream, tenant).await;
         drop((connected, counted));
+        // Its waiter gone: nothing to tell.
         let _ = done.send(());
     });
     finished
@@ -575,6 +576,8 @@ async fn run_connection(stream: super::wire::Stream, tenant: Arc<Tenant>) {
     let behind = connection.behind.with(Mutex::lock).take();
     if let Some((stop, behind)) = behind {
         drop(stop);
+        // Panicked: the panic halted its cell as it went through the cell's locks (crate::halt),
+        // whose next opener has it as of its last commit.
         let _ = behind.await;
     }
     // cladefs: and in the bucket, as the daemon drains, the open segment's commits too, which a
@@ -663,6 +666,7 @@ fn receive(
         }
         // Let go of first, as its going waits for the last to (TASK-79.34).
         drop(connection);
+        // Its waiter gone: nothing to tell.
         let _ = gone.send(ended);
     })
 }
@@ -1527,6 +1531,7 @@ impl Connection {
         #[cfg(feature = "failpoints")]
         if let Some(version) = failpoint(request.kind()) {
             fail::fail_point!(version, |errno: Option<String>| {
+                // Not a number: EIO, the failpoint's default.
                 let errno = errno.and_then(|errno| errno.parse().ok());
                 Err(Errno::from_raw(errno.unwrap_or(Errno::EIO.raw())))
             });
@@ -1795,6 +1800,7 @@ impl Connection {
                 reply.args = Opened { cell, arena, commit: 0, max_map_count }.args();
                 Vec::from(self.memories())
             }
+            // Not opened: no memories to send; the failure goes in the answer.
             Err(_) => Vec::new(),
         };
         answer.send(opened.map(drop), reply, Vec::new(), fds);
@@ -2210,6 +2216,7 @@ async fn tell_commits(
     while let Err(TryRecvError::Empty) = stopped.try_recv() {
         let committed = open_cell.commits();
         let Some(latest) = open_cell.newer(commit, std::time::Duration::ZERO).await else {
+            // Waited out, or committed: either way, looked at again.
             let _ = tokio::time::timeout(COMMITS_POLL, committed).await;
             continue;
         };

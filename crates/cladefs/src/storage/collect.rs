@@ -82,6 +82,7 @@ fn pace() -> Pace {
 /// under their KEKs, unwrapped through the host's KMS (TASK-411.28): with none, the bucket runtime
 /// its pools refill on not to be made (TASK-449's review), it compacts none, deleting as ever.
 fn new_collector(options: Options) -> Collector {
+    // No KMS: none to compact under, as the doc says; deleting goes on.
     Collector::new(options).kmses(crate::bucket::kms().ok().map(|kms| kms.kmses().clone()))
 }
 
@@ -140,6 +141,7 @@ impl State {
 
     /// Takes the collector back from `running`, waiting for it to end, and what it did.
     fn ended(&mut self, running: JoinHandle<(Collector, Report)>, options: Options) {
+        // A pass that panicked, its panic said: a new collector in its place, as reap says.
         let (collector, report) =
             running.join().unwrap_or_else(|_| (new_collector(options), Report::default()));
         self.idle = Some(collector);
@@ -230,6 +232,7 @@ impl Drop for Collecting {
     fn drop(&mut self) {
         let running = self.state.get_mut().unwrap().running.take();
         if let Some(running) = running {
+            // A pass that panicked: dropping, nothing to tell; its panic said itself.
             let _ = running.join();
         }
     }

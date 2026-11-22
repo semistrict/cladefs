@@ -1429,6 +1429,7 @@ impl<P: Platform> Fxfs<P> {
             // SAFETY: The filesystem stays where it is until this stops (`FxfsRef`).
             let fs = unsafe { &*fs.0 };
             worker(fs).await;
+            // Its waiter gone: nothing to tell.
             let _ = stop.send(());
         });
         stopped
@@ -1481,6 +1482,7 @@ impl<P: Platform> Fxfs<P> {
         let workers = self.delayed.workers.lock().unwrap().take();
         if let Some(DelayedWorkers { stopped }) = workers {
             for worker_stopped in stopped {
+                // Its sender dropped: the worker stopped all the same.
                 let _ = worker_stopped.await;
             }
         }

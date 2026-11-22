@@ -131,6 +131,7 @@ impl<T> AsyncMutex<T> {
         // Taken, Acquire, as a mutex's lock: what the last holder wrote, its Release, is seen.
         // Refused, Relaxed: nothing is read of the value then, and the guard is not made.
         let taken = self.held.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed);
+        // Held by another: none, as try_lock answers.
         taken.ok().map(|_| AsyncMutexGuard {
             mutex: self,
             _awaited: crate::shared::Awaited::new(self.name),

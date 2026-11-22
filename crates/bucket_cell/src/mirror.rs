@@ -213,6 +213,7 @@ impl Mirrors {
             return None;
         }
         let one = known.making.entry(version).or_default().clone();
+        // Held by another mirror of the version: this one waits its turn (Turn::mirror).
         let held = one.clone().try_lock_owned().ok();
         Some(Turn { mirrors: self.clone(), version, one: Some(one), held })
     }

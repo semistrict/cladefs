@@ -224,6 +224,7 @@ where
             answered
         });
         Box::pin(async move {
+            // Its call unfinished, the runtime gone: said, and refused.
             detached.await.unwrap_or_else(|unfinished| {
                 log::error!("cladefsd: a control call: {unfinished}");
                 Refusal::refused(Status::unavailable(unfinished.to_string()))
@@ -319,7 +320,9 @@ pub async fn connect(
 
 /// The errno a call failed with, as its status's [`ERRNO`] entry has it, if it has one.
 pub fn errno(status: &Status) -> Option<Errno> {
+    // Not text: no errno said.
     let errno = status.metadata().get(ERRNO)?.to_str().ok()?;
+    // Not a number: no errno said.
     errno.parse().ok().map(Errno::from_raw)
 }
 

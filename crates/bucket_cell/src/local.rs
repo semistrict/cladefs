@@ -100,6 +100,7 @@ impl Local {
         };
         let locked = match tokio::runtime::Handle::try_current() {
             Ok(runtime) => runtime.spawn_blocking(lock).await.map_err(std::io::Error::other),
+            // No runtime: the thread is the caller's to block.
             Err(_) => Ok(lock()),
         };
         locked.and_then(|locked| locked).map_err(|source| object_store::Error::Generic {

@@ -119,6 +119,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
     let args: Vec<String> = args.collect();
     let flags = args.iter().position(|arg| arg.starts_with("--")).unwrap_or(args.len());
     let (counts, flags) = args.split_at(flags);
+    // Not a number, or none: the usage says what one is.
     let count = |arg: &str| arg.parse().ok().filter(|&count: &u64| count > 0).ok_or_else(usage);
     let (dir, counts) = counts.split_first().ok_or_else(usage)?;
     let counts: Vec<u64> = counts.iter().map(|arg| count(arg)).collect::<Result<_, _>>()?;

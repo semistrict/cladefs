@@ -72,6 +72,7 @@ impl Token {
     /// The token the environment gives: [`TOKEN_ENV`]'s, or [`TOKEN_FILE_ENV`]'s file, exactly one
     /// of them set.
     pub fn from_env() -> Result<Self, String> {
+        // Unset, or not UTF-8, which no token is: none.
         Self::of_env(|name| std::env::var(name).ok())
     }
 
@@ -608,6 +609,7 @@ impl Received {
         }
         match serde_json::from_slice::<Errors>(&self.body) {
             Ok(errors) => errors.errors.join("; ").split_whitespace().collect::<Vec<_>>().join(" "),
+            // Not OpenBao's errors: the body itself, its first bytes.
             Err(_) => String::from_utf8_lossy(&self.body[..self.body.len().min(200)]).into_owned(),
         }
     }
@@ -748,6 +750,7 @@ impl<'a> Parsed<'a> {
     fn version_of(ciphertext: &str) -> Option<u32> {
         let (version, sealed) = ciphertext.strip_prefix(CIPHERTEXT_PREFIX)?.split_once(':')?;
         let digits = !version.is_empty() && version.bytes().all(|b| b.is_ascii_digit());
+        // Past a u32: no version Transit gives.
         (digits && !sealed.is_empty()).then(|| version.parse().ok()).flatten()
     }
 }

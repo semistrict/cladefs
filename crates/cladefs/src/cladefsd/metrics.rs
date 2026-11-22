@@ -512,6 +512,7 @@ pub fn render() -> String {
             "gauge",
             "How long a cell's oldest commit not yet uploaded has waited, by its cell.",
             |status| {
+                // A clock gone back: none waited yet.
                 let waited = status.oldest_pending.and_then(|since| since.elapsed().ok());
                 waited.unwrap_or_default().as_secs_f64().to_string()
             },

@@ -233,6 +233,7 @@ fn predict(
         let read = bucket_cell::evidence::read(&*bucket, of, &ring.of(of.cell().id)).await;
         read.map(|read| Arc::new(Prediction::of(&read.recordings)))
     });
+    // Unread, or its task stopped: no prediction, which only reads ahead; reads go on without it.
     reading.map(|read| read.ok().flatten()).boxed().shared()
 }
 

@@ -161,10 +161,17 @@ impl Host {
         write_durably(&path, &serde_json::to_vec(&child)?)
     }
 
-    /// The cell migration `migration` took, if this host accepted it.
-    pub fn accepted_cell(&self, migration: u64) -> Option<CellId> {
-        let bytes = host_fs::read(self.dir.join(ACCEPTED).join(format!("{migration:x}"))).ok()?;
-        serde_json::from_slice(&bytes).ok()
+    /// The cell migration `migration` took, if this host accepted it. Failing if its acceptance is
+    /// there but unread, its disk failing, or not whole, which its durable write never leaves:
+    /// taken for none, the cell would go unnoted as taken, and a crash lose it (board 6908).
+    pub fn accepted_cell(&self, migration: u64) -> Result<Option<CellId>, Error> {
+        let path = self.dir.join(ACCEPTED).join(format!("{migration:x}"));
+        let bytes = match host_fs::read(&path) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            read => read.with_context(|| format!("reading {}", path.display()))?,
+        };
+        let child = serde_json::from_slice(&bytes);
+        Ok(Some(child.with_context(|| format!("reading {}", path.display()))?))
     }
 
     /// Whether it accepted migration `migration`.
@@ -205,6 +212,7 @@ impl Host {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             read => read.with_context(|| format!("reading {}", path.display()))?,
         };
+        // Torn by a crash before it was durable: none, as the doc says.
         Ok(serde_json::from_slice(&bytes).ok())
     }
 
@@ -353,7 +361,8 @@ mod tests {
     use super::*;
 
     /// A host's directory keeps its incarnation across openings, and its journal its notes, until
-    /// forgotten; a torn note, or one staged, goes as it is listed.
+    /// forgotten; a torn note, or one staged, goes as it is listed. Board 6908: an acceptance there
+    /// but not whole fails, never read as none.
     #[test]
     fn hosts_keep_their_incarnation_and_their_notes() {
         let dir = tempfile::tempdir().unwrap();
@@ -381,5 +390,17 @@ mod tests {
         assert!(!host.accepted(0x3c));
         host.accept(0x3c, child).unwrap();
         assert!(open(dir.path()).unwrap().accepted(0x3c));
+        assert_eq!(host.accepted_cell(0x3c).unwrap(), Some(child));
+        assert_eq!(host.accepted_cell(0x3d).unwrap(), None);
+        host_fs::write(dir.path().join(ACCEPTED).join("3e"), b"{\"tenant").unwrap();
+        let unread = host.accepted_cell(0x3e).map_err(|err| format!("{err:#}"));
+        let file = dir.path().join(ACCEPTED).join("3e");
+        assert_eq!(
+            unread,
+            Err(format!(
+                "reading {}: EOF while parsing a string at line 1 column 8",
+                file.display()
+            ))
+        );
     }
 }

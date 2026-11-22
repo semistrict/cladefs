@@ -46,6 +46,7 @@ pub struct Config {
 impl Config {
     /// The mount the environment names: none without `CLADEFSD_MOUNT`.
     pub fn from_env() -> Result<Option<Self>, String> {
+        // Unset, or not UTF-8, which no value it takes is: none.
         Self::from_vars(|name| node_local::env::var(name).ok().filter(|value| !value.is_empty()))
     }
 

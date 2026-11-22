@@ -88,6 +88,7 @@ impl Buffers {
     /// The request's header, its first bytes, if the driver wrote that many.
     pub fn header(&self) -> Option<RequestHeader> {
         let mut reader = Reader::new(self);
+        // Fewer bytes than a header: none, as the doc says.
         reader.obj().ok()
     }
 

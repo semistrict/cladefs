@@ -58,6 +58,7 @@ pub(crate) async fn gone() {
     match GONE.try_with(Shared::clone) {
         // Its sender dropped, never sent on: what the answer's awaiter held.
         Ok(gone) => drop(gone.await),
+        // Outside an answer's task: never gone, as no awaiter's drop can say.
         Err(_) => std::future::pending().await,
     }
 }

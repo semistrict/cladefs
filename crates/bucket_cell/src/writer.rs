@@ -236,12 +236,13 @@ impl<B: Bucket> Writer<B> {
     /// Has `mover` told of the extents the writer's checkpoints record as moved, from where to
     /// where, as the writer names them where they went, before each checkpoint lands: a host's
     /// cell reading them, which so names none further back along its way than the writer's newest
-    /// checkpoint, from which the collector keeps the moves (TASK-195). Once.
+    /// checkpoint, from which the collector keeps the moves (TASK-195). Once: a second mover
+    /// would be told nothing, and panics.
     pub fn following(
         &self,
         mover: impl Fn(&[(ExtentId, Location, Location)]) + Send + Sync + 'static,
     ) {
-        let _ = self.mover.set(Box::new(mover));
+        assert!(self.mover.set(Box::new(mover)).is_ok(), "a writer follows one mover");
     }
 
     fn inner(&self) -> MutexGuard<'_, Inner> {

@@ -261,6 +261,7 @@ impl Sweep {
                 }
                 std::future::ready(cell.is_ok())
             })
+            // Refused, kept above: the listing's last item.
             .filter_map(|cell| std::future::ready(cell.ok()));
         // The cells taken only as `buffer_unordered` has room for another pass: a page of them
         // listed as the passes before it end.
@@ -448,7 +449,10 @@ impl<B: Bucket> Bucket for Counted<B> {
         self.bucket.rewritable(key)
     }
 
-    fn head_slots(&self, cell: crate::layout::CellId) -> impl Future<Output = u64> + Send {
+    fn head_slots(
+        &self,
+        cell: crate::layout::CellId,
+    ) -> impl Future<Output = Result<u64, crate::bucket::Refused>> + Send {
         self.bucket.head_slots(cell)
     }
 
@@ -873,6 +877,9 @@ mod tests {
         let cells = cells(10);
         let bucket =
             Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
+        // Formatted, as a host's bucket is: its head slots read once (board 5534).
+        let (details, asked) = Default::default();
+        block_on(crate::identity::format(&*bucket, &details, asked)).unwrap();
         block_on(fill(&bucket, &cells, true));
         let before = block_on(sizes(&*bucket));
         let counted = bucket.stats();

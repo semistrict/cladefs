@@ -136,6 +136,14 @@ class OffHostFs(unittest.TestCase):
         self.assertEqual(module("not(test)"), [(3, "off-host-fs")])
         self.assertEqual(module('target_os = "linux"'), [(3, "off-host-fs")])
 
+    def test_a_test_module_in_a_file_of_its_own_leaves_the_lines_after_it(self):
+        """Board 6908: `#[cfg(test)] mod sim;` is sim.rs's alone."""
+        self.assertEqual(self.matches("""\
+            #[cfg(test)]
+            mod sim;
+            fn g() { let _ = std::fs::read("y"); }
+            """), [(3, "off-host-fs")])
+
     def test_a_test_module_within_a_module_passes_to_its_end_alone(self):
         """Board 6105: migration.rs's tests are a module within one of the file's."""
         self.assertEqual(self.matches("""\
@@ -150,6 +158,125 @@ class OffHostFs(unittest.TestCase):
                 fn g() { let _ = std::fs::read("y"); }
             }
             """), [(9, "off-host-fs")])
+
+
+class SilentFallback(unittest.TestCase):
+    """cladefs: an error dropped says why, or fails (board 6908)."""
+
+    def matches(self, source, path="/nowhere/crates/cladefs/src/x.rs"):
+        return [(match.line, match.rule)
+                for match in rules.silent_fallback(Path(path), textwrap.dedent(source))]
+
+    def test_each_shape_of_an_error_dropped_is_flagged(self):
+        self.assertEqual(self.matches("""\
+            fn f() -> u64 {
+                match slots() {
+                    Ok(n) => n,
+                    Err(_) => 1,
+                }
+                let n = count().ok();
+                let n = count().unwrap_or_else(|_| 0);
+                let n = listed.await.unwrap_or_default();
+                let n = listed
+                    .await
+                    .unwrap_or_default();
+                let _ = flushed(epoch);
+                let _ = task.await;
+            }
+            """), [(4, "silent-fallback"), (6, "silent-fallback"), (7, "silent-fallback"),
+                   (8, "silent-fallback"), (11, "silent-fallback"), (12, "silent-fallback"),
+                   (13, "silent-fallback")])
+
+    def test_one_saying_why_passes_on_its_line_or_over_its_statement(self):
+        self.assertEqual(self.matches("""\
+            fn f() -> u64 {
+                match slots() {
+                    Ok(n) => n,
+                    // Unformatted: the default.
+                    Err(_) => 1,
+                }
+                let n = count().ok(); // Not a number: none.
+                // Its waiter gone: nothing to tell.
+                let _ = done.send(());
+                // A clock gone back: none waited.
+                let waited = seen
+                    .elapsed()
+                    .ok();
+                let more = check()
+                    && let Some(len) = bytes.u64().and_then(|len| usize::try_from(len).ok());
+            }
+            """), [(15, "silent-fallback")])
+
+    def test_an_error_given_on_or_a_panic_is_no_fallback(self):
+        self.assertEqual(self.matches("""\
+            fn f() -> Result<u64, E> {
+                match slots() {
+                    Ok(n) => Ok(n),
+                    Err(_) => return Err(E::Slots),
+                    Err(..) => panic!("no slots"),
+                }
+                let n = within.unwrap_or_else(|_| Err(out_of_reach()));
+                let n = task.await.unwrap_or_else(|err| {
+                    Err(E::Joined(err))
+                });
+                match asked {
+                    Err(_) => {
+                        return Err(E::TimedOut);
+                    }
+                }
+                assert!(matches!(found, Err(_)));
+            }
+            """), [])
+
+    def test_bindings_and_writes_dropped_are_no_errors(self):
+        self.assertEqual(self.matches("""\
+            fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+                let _ = (from, to);
+                let _ = &self.handle;
+                let _ = cell;
+                let _ = writeln!(out, "{name} {value}");
+                let _ =
+                    writeln!(out, "{name}");
+                Err(io::Error::from(io::ErrorKind::Unsupported))
+            }
+            """), [])
+
+    def test_tests_simulations_and_other_crates_pass(self):
+        source = "fn f() { let n = count().ok(); }\n"
+        self.assertEqual(self.matches(source), [(1, "silent-fallback")])
+        self.assertEqual(self.matches(source, "/nowhere/crates/fxfs/src/x.rs"), [])
+        self.assertEqual(self.matches(source, "/nowhere/crates/cladefs/src/cladefsd/tests.rs"), [])
+        self.assertEqual(self.matches(source, "/nowhere/crates/cladefs/tests/x.rs"), [])
+        self.assertEqual(self.matches(source, "/nowhere/crates/cladefs/src/x_tests.rs"), [])
+        self.assertEqual(self.matches("""\
+            fn f() {}
+            #[cfg(test)]
+            fn quickened() -> Option<Pace> {
+                PACE.try_with(|pace| *pace).ok()
+            }
+            #[cfg(madsim)]
+            {
+                let _ = (most, work);
+            }
+            #[cfg(any(test, feature = "testing"))]
+            pub mod testing {
+                fn t() { let n = count().ok(); }
+            }
+            fn g() { let n = count().ok(); }
+            """), [(14, "silent-fallback")])
+
+    def test_a_file_declared_only_in_tests_passes(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        src = Path(scratch.name) / "crates/local_cell/src"
+        (src / "sim").mkdir(parents=True)
+        (src / "lib.rs").write_text("#[cfg(test)]\nmod sim;\nmod live;\n")
+        (src / "sim/mod.rs").write_text("mod world;\n")
+        source = "fn f() { let n = count().ok(); }\n"
+        for name in ["sim/mod.rs", "sim/world.rs", "live.rs"]:
+            (src / name).write_text(source) if name != "sim/mod.rs" else None
+        self.assertEqual(self.matches(source, src / "sim/world.rs"), [])
+        self.assertEqual(self.matches(source, src / "live.rs"), [(1, "silent-fallback")])
 
 
 class MixedOrderings(unittest.TestCase):

@@ -152,6 +152,7 @@ impl Drop for Unfinished {
         let deleting = delete_half_made(path);
         match tokio::runtime::Handle::try_current() {
             Ok(runtime) => drop(runtime.spawn(deleting)),
+            // No runtime: the thread is the dropper's to block.
             Err(_) => local_cell::upload::wait_on(deleting),
         }
     }

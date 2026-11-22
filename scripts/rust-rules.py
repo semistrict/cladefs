@@ -126,7 +126,7 @@ CFG_TOKEN = re.compile(r'\w+|"[^"]*"|[(),=]')
 
 def cfg_tree(predicate):
     """A cfg `predicate` as (name, children): children None for an option, `name = "value"`
-    named `=`."""
+    named `name="value"`."""
     tokens = CFG_TOKEN.findall(predicate)
     position = 0
 
@@ -136,7 +136,7 @@ def cfg_tree(predicate):
         position += 1
         if position < len(tokens) and tokens[position] == "=":
             position += 2
-            return ("=", None)
+            return (f"{name}={tokens[position - 1]}", None)
         if position == len(tokens) or tokens[position] != "(":
             return (name, None)
         position += 1
@@ -151,42 +151,73 @@ def cfg_tree(predicate):
     return node()
 
 
-def only_in_tests(tree):
-    """Whether a cfg predicate, as cfg_tree says it, holds only where `test` does: `test`, `all`
-    of one such among others, `any` of such alone (board 6490: `all(test, target_os = "linux")`)."""
+def only_in_tests(tree, tests=("test",)):
+    """Whether a cfg predicate, as cfg_tree says it, holds only where one of `tests` does:
+    `test`, `all` of one such among others, `any` of such alone (board 6490: `all(test, target_os
+    = "linux")`)."""
     name, children = tree
     if children is None:
-        return name == "test"
+        return name in tests
     if name == "all":
-        return any(only_in_tests(child) for child in children)
+        return any(only_in_tests(child, tests) for child in children)
     if name == "any":
-        return bool(children) and all(only_in_tests(child) for child in children)
+        return bool(children) and all(only_in_tests(child, tests) for child in children)
     return False
 
 
-def starts_tests(lines, number):
+# What tests alone build: `test`; the `testing` feature, which a crate's tests turn on in the
+# crates they test for their harnesses (`any(test, feature = "testing")`); and `madsim`, the
+# full-stack simulation's build (doc-24).
+TESTS_AND_HARNESSES = ("test", 'feature="testing"', "madsim")
+
+
+def starts_tests(lines, number, tests=("test",)):
     """Whether line `number` of `lines`, from 1, begins a test module: a `#[cfg(...)]` holding
-    only in tests on a module's declaration, at any depth."""
+    only in `tests` on a module's declaration with its body, at any depth. One in a file of its own
+    (`mod sim;`) is that file's (built_only_in), the lines after it the declaring file's."""
     cfg = CFG.match(lines[number - 1].strip())
-    return cfg is not None and only_in_tests(cfg_tree(cfg.group(1))) and number < len(lines) and \
-        MODULE.match(lines[number].lstrip()) is not None
+    return cfg is not None and only_in_tests(cfg_tree(cfg.group(1)), tests) and \
+        number < len(lines) and MODULE.match(lines[number].lstrip()) is not None and \
+        not lines[number].split("//", 1)[0].rstrip().endswith(";")
 
 
-def outside_tests(lines):
+def built_only_in_tests(lines, number, tests=("test",)):
+    """Whether line `number` of `lines`, from 1, is a `#[cfg(...)]` holding only in `tests`: on an
+    item or a statement, of any kind (board 6908: a function of tests', a statement of theirs)."""
+    cfg = CFG.match(lines[number - 1].strip())
+    return cfg is not None and only_in_tests(cfg_tree(cfg.group(1)), tests)
+
+
+def outside_tests(lines, tests=("test",)):
     """Each of `lines`, numbered from 1, but those the rules leave to tests: a file's test module
     and what follows it; a test module within another module (board 6105: migration.rs's), to its
-    closing brace, at its own indent."""
+    closing brace, at its own indent; and any other item or statement built only in `tests`, its
+    line, or to its closing brace. A test module is one built only in `tests`."""
     closing = None
+    attributed = None
     for number, line in enumerate(lines, 1):
         if closing is not None:
-            if line == closing:
+            if line.startswith(closing + "}"):
                 closing = None
             continue
-        if starts_tests(lines, number):
+        if attributed is not None:
+            if line.lstrip().startswith("#["):
+                continue
+            code = line.split("//", 1)[0].rstrip()
+            if not code.endswith((";", "}", ",")):
+                closing = attributed
+            attributed = None
+            continue
+        if starts_tests(lines, number, tests):
             indent = line[:len(line) - len(line.lstrip())]
-            if not indent:
+            # A file's tests, at its top: they and what follows them. A harness of tests among
+            # its items (`any(test, feature = "testing")`): to its closing brace.
+            if not indent and starts_tests(lines, number):
                 return
-            closing = indent + "}"
+            closing = indent
+            continue
+        if built_only_in_tests(lines, number, tests):
+            attributed = line[:len(line) - len(line.lstrip())]
             continue
         yield number, line
 
@@ -256,10 +287,134 @@ def off_host_fs(path, text):
                     "(doc-24, TASK-685.4)")
 
 
+# cladefs: the crates whose code falls back silently at its peril: the daemon's, and what it is
+# built of, cladefs's own. Fuchsia's crates are upstream's; the simulations and examples are tests.
+FALLBACK_CRATES = (
+    "block_device", "bucket_cell", "cladefs", "extent_frame", "extent_keys", "follower",
+    "follower_history", "fxfs-automount", "fxfs-posix", "host_fs", "local_cell", "node_local",
+    "sqlite_cladefs", "virtio_extent",
+)
+# An error dropped: a pattern of any `Err`, its error unnamed; a `Result` made an `Option`; a
+# closure given the error that ignores it; a `Result` awaited and made a value at once.
+DROPPED = re.compile(r"\bErr\((?:_|\.\.)\)|\.ok\(\)|\.unwrap_or_else\(\|_\||"
+                     r"\.await\s*\.unwrap_or(?:_default|_else)?\(")
+# A `let _ =` on anything but bindings, which drops what it is: a call's `Result`, a task's answer
+# awaited (a panic within it among them). Not `write!` into a String, which can't fail, nor
+# arguments a default method leaves unused, a binding or a tuple of them, borrowed or not.
+BINDING = r"&?(?:(?!\.await\b)[\w.:])+"
+BINDINGS = rf"{BINDING}|\((?:\s*{BINDING}\s*,?)+\)"
+LET_DROPPED = re.compile(rf"\blet _ =(?!\s*(?:write!|writeln!|(?:{BINDINGS})\s*;))")
+# What makes a dropped error no fallback, right after it on its line: an `Err` arm giving an
+# error on, or panicking; a closure given the error making another of it.
+PROPAGATED = re.compile(r"\s*(?:\|[\w, ]*\|\s*)?(?:=>\s*)?(?:return\s+)?(?:Err\(|Some\(Err\(|panic!|unreachable!|"
+                        r"anyhow::bail!|bail!)")
+# A line continuing the statement above it: a method chained, a closing bracket, a `?`, a
+# condition's next term.
+CONTINUES = re.compile(r"^\s*(?:\.|\?|\)|\]|&&|\|\|)")
+
+
+def parent_module(path):
+    """The file declaring `path`'s module, and the name it declares it by: None for a crate's root,
+    a binary's or a file outside a crate's src/."""
+    parts = path.parts
+    if "src" not in parts:
+        return None
+    src = len(parts) - 1 - parts[::-1].index("src")
+    inner = parts[src + 1:]
+    if inner in (("lib.rs",), ("main.rs",)) or inner[:1] == ("bin",):
+        return None
+    name = path.parent.name if path.name == "mod.rs" else path.stem
+    directory = path.parent.parent if path.name == "mod.rs" else path.parent
+    if directory == Path(*parts[:src + 1]):
+        candidates = [directory / "lib.rs", directory / "main.rs"]
+    else:
+        candidates = [directory.with_suffix(".rs"), directory / "mod.rs"]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate, name
+    return None
+
+
+def built_only_in(path, tests):
+    """Whether `path`'s module is built only in `tests`: its declaration, or an ancestor's, under a
+    cfg that holds only there, or within a test module of the file declaring it."""
+    declared = parent_module(path)
+    if declared is None:
+        return False
+    parent, name = declared
+    lines = parent.read_text(errors="replace").splitlines()
+    declaration = re.compile(rf"^\s*(pub(\([\w:]+\))? )?mod {re.escape(name)};")
+    built = {number for number, _ in outside_tests(lines, tests)}
+    for number, line in enumerate(lines, 1):
+        if not declaration.match(line):
+            continue
+        if number not in built:
+            return True
+        above = number - 1
+        while above >= 1 and lines[above - 1].strip().startswith("#["):
+            cfg = CFG.match(lines[above - 1].strip())
+            if cfg and only_in_tests(cfg_tree(cfg.group(1)), tests):
+                return True
+            above -= 1
+        return built_only_in(parent, tests)
+    return False
+
+
+def explained(lines, number):
+    """Whether line `number` of `lines`, from 1, has a comment on it, or the statement it belongs
+    to a comment just above it: the lines of comment right over its first line."""
+    if "//" in lines[number - 1]:
+        return True
+    start = number
+    while start > 1 and (CONTINUES.match(lines[start - 1])
+                         or lines[start - 2].split("//", 1)[0].rstrip().endswith(("=", "("))):
+        start -= 1
+        if "//" in lines[start - 1]:
+            return True
+    return start > 1 and lines[start - 2].lstrip().startswith("//")
+
+
+def silent_fallback(path, text):
+    """An error dropped without a word: an `Err(_)` arm carrying on, a `.ok()`, an
+    `.unwrap_or_else(|_| ..)`, a `Result` awaited and defaulted, a `let _ =` on a call, in
+    cladefs's own crates' code. Each is a failure the code goes on past as though it had been an
+    answer, and some such answers stick: a bucket's default slot count kept for good (board 5534),
+    a member's failed LIST taken for an empty one (board 5526), a spool's failure ignored until a
+    flush asserted (board 5424). Each says why on its line, or in the comment over its statement,
+    or fails (board 6908). Tests aside: their files, modules and harnesses."""
+    posix = path.as_posix()
+    crate = re.search(r"crates/([^/]+)/src/", posix)
+    if crate is None or crate.group(1) not in FALLBACK_CRATES or "/tests/" in posix \
+            or posix.endswith(("/tests.rs", "_tests.rs", "/testing.rs")) \
+            or built_only_in(path, TESTS_AND_HARNESSES):
+        return
+    lines = text.splitlines()
+    for number, line in outside_tests(lines, TESTS_AND_HARNESSES):
+        code = line.split("//", 1)[0]
+        # What follows a dropped error ending its line, `{` or `=> {`, goes on on the next.
+        following = lines[number].split("//", 1)[0] if number < len(lines) else ""
+        dropped = any(not (PROPAGATED.match(code, found.end()) or
+                           re.fullmatch(r"\s*(?:\|[\w, ]*\|\s*)?(?:=>\s*)?\{\s*",
+                                        code[found.end():]) and
+                           PROPAGATED.match(following) or
+                           found.group().startswith("Err") and "matches!(" in code)
+                      for found in DROPPED.finditer(code))
+        follows_await = re.match(r"\s*\.unwrap_or(?:_default|_else)?\(", code) and number > 1 \
+            and lines[number - 2].split("//", 1)[0].rstrip().endswith(".await")
+        # A `let _ =` its value on the line after.
+        let = LET_DROPPED.search(code) and LET_DROPPED.search(f"{code} {following}")
+        if not (dropped or follows_await or let) or explained(lines, number):
+            continue
+        yield Match(path, number, "silent-fallback",
+                    "an error dropped, carried on past as an answer: say why on its line or over "
+                    "its statement, or let it fail (board 6908)")
+
+
 # Each rule, and the mutants of the bugs it is from.
 RULES = [
     (outside_the_seam, []),
     (off_host_fs, []),
+    (silent_fallback, []),
     (mixed_orderings, [
         "latest-listens-relaxed", "latest-rises-relaxed", "occurrence-happens-relaxed",
         "occurrence-listens-relaxed", "answers-release-no-capacity", "capacities-read-relaxed",

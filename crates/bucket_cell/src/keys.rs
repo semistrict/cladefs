@@ -770,6 +770,7 @@ impl CachingKms {
         match &answer {
             Ok(_) => self.answered(key, tenant, asked),
             Err(error) if revokes(error) => self.revoked_at((key, kms), tenant, error.to_string()),
+            // Failing otherwise, the KMS revoked nothing: the answer is the caller's.
             Err(_) => {}
         }
         answer

@@ -250,6 +250,18 @@ pub fn moves_of(key: &str) -> Result<String, crate::Error> {
     Ok(format!("{}/", moves_under(key)?))
 }
 
+/// cladefs: the object whose moves' keys `prefix` is the prefix of, as [`moves_of`] makes it: none
+/// for another prefix, of no cell's, or of the moves of several objects ([`moves_under`]), which
+/// names no object of a cell's.
+pub fn moved_object(prefix: &str) -> Option<String> {
+    let (cell, rest) = in_cell(prefix)?;
+    let of = rest.strip_prefix(MOVES)?.strip_suffix('/')?;
+    let key = format!("{}{of}", cell.prefix());
+    let moved = matches!(kind(&key), Kind::Segment { .. } | Kind::Extent { .. });
+    // Of no cell's object: no moves' prefix.
+    (moved && moves_of(&key).ok()? == prefix).then_some(key)
+}
+
 /// cladefs: the prefix of the keys of the moves of the objects whose keys start with `prefix`, a
 /// cell's: `<C>moves/<rest>` for `<C><rest>`.
 pub fn moves_under(prefix: &str) -> Result<String, crate::Error> {
@@ -699,6 +711,7 @@ pub fn kind(key: &str) -> Kind<'_> {
             if let Some((at, held)) = rest.split_once('/')
                 && let Some(bucket) = held.strip_prefix(PIN).and_then(|held| held.strip_prefix('.'))
             {
+                // Not a bucket's number: no hold's key.
                 let bucket = u16::from_str_radix(bucket, 16).ok()?;
                 return Some(Kind::Hold { parent: cell, at: number(at)?, bucket });
             }

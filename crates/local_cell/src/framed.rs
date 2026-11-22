@@ -103,9 +103,14 @@ pub fn read_object<F: File>(file: &F) -> io::Result<Vec<u8>> {
 }
 
 /// cladefs: the parts of a framed file's last bytes, `suffix`, read holding `keys`, if they pass
-/// their checks (TASK-411.3): one in the clear does not (TASK-411.28).
+/// their checks (TASK-411.3): one in the clear does not (TASK-411.28). One under a key `keys`
+/// doesn't hold fails it, never taken for a file not whole.
 fn parts_of(suffix: &[u8], keys: &dyn Keys) -> Result<Option<Parts>, Error> {
-    Ok(Parts::of_suffix(suffix, keys).ok())
+    match Parts::of_suffix(suffix, keys) {
+        Ok(parts) => Ok(Some(parts)),
+        Err(extent_frame::Error::Corrupt(_)) => Ok(None),
+        Err(err @ extent_frame::Error::NoKey(_)) => Err(err.into()),
+    }
 }
 
 /// The parts of the framed file `file`, and its footer, if it is whole: its trailer, table and
