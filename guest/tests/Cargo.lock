@@ -1039,7 +1039,6 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
- "physmem",
  "pin-project-lite",
  "pprof",
  "prost 0.14.4",
@@ -1049,6 +1048,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "siphasher",
+ "smallvec",
  "storage_device",
  "tar",
  "thiserror",
@@ -3208,15 +3208,6 @@ dependencies = [
  "fixedbitset 0.5.7",
  "hashbrown 0.15.5",
  "indexmap",
-]
-
-[[package]]
-name = "physmem"
-version = "0.1.0"
-dependencies = [
- "libc",
- "node_local",
- "shuttle-parking_lot",
 ]
 
 [[package]]
