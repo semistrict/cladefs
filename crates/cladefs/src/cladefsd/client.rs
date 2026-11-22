@@ -16,7 +16,7 @@ use crate::dax::uffd::{FaultThread, UffdSecondStage};
 use crate::error::{Errno, Error, Result};
 use crate::hearing::{Latest, Occurrence};
 use crate::{
-    Access, CellVersion, Commit, ExtentId, ExtentInfo, MappingContents, Prefault, SecondStage,
+    CellVersion, Commit, ExtentId, ExtentInfo, MappingContents, Prefault, SecondStage,
     VolatileSlice, VolatileSliceMut, WindowMapping, WriteBarriers,
 };
 use bucket_cell::cell::Kind;
@@ -41,6 +41,9 @@ pub struct CellClient {
     memories: Vec<(crate::pages::ArenaId, OwnedFd)>,
     /// The thread serving the guest's faults on the window, once it is created.
     faults: Mutex<Option<FaultThread>>,
+    /// cladefs: what resolves the window's faults through the daemon, once the window is created,
+    /// which a `PRIVATE` reads its pages in with too ([`CellClient::make_private`], doc-26).
+    window_faults: std::sync::OnceLock<Arc<DaemonFaults>>,
     /// cladefs: whether it is a follower's, read-only (backlog doc-8).
     read_only: bool,
     /// Its transfer area, which reads and writes move their data through ([`TRANSFER`]).
@@ -134,8 +137,18 @@ impl CellClient {
             .map_err(|err| err.context("giving the daemon a transfer area"))?
             .into();
         let copying = std::sync::atomic::AtomicBool::new(false);
-        let faults = Mutex::new(None);
-        Ok(Self { client, cell, memories, faults, read_only, transfer, copying, max_map_count })
+        let (faults, window_faults) = (Mutex::new(None), std::sync::OnceLock::new());
+        Ok(Self {
+            client,
+            cell,
+            memories,
+            faults,
+            window_faults,
+            read_only,
+            transfer,
+            copying,
+            max_map_count,
+        })
     }
 
     /// cladefs: whether it is a follower's, read-only ([`CellClient::connect_read_only`]).
@@ -447,6 +460,12 @@ impl CellClient {
     /// filesystem frozen, `EBUSY` otherwise: what a VM snapshot holds, which any number of hosts
     /// fork at once ([`DaemonConnection::open_forked`]), and none writes.
     pub fn make_version(&self) -> Result<CellVersion> {
+        // cladefs: not while its window holds private pages, whose bytes no extent holds: a VM
+        // restored from the version would read their sources' old bytes (TASK-203). This process
+        // alone knows of them (doc-26).
+        if self.private_pages() > 0 {
+            return Err(Errno::EBUSY);
+        }
         let reply = self.client.request_blocking(&Request::Version)?;
         let Forked { cell, version, tenant } = Forked::from_args(reply.header.args);
         Ok(CellVersion { tenant, cell, version })
@@ -510,18 +529,23 @@ impl CellClient {
     }
 
     /// cladefs: makes `len` bytes of the window at `window_offset` private now, as writes to each
-    /// of their pages would, mapped writable (doc-4's `PRIVATE`, backlog doc-13): `ENOMEM` past its
-    /// private pages, none made private; `EINVAL` unless the window copies on write.
+    /// of their pages would, mapped writable (doc-4's `PRIVATE`, backlog doc-13): here, in this
+    /// process's memory, the pages the window names nothing at read in through the daemon first
+    /// (doc-26). `ENOMEM` past its private pages, none made private; `EINVAL` unless the window
+    /// copies on write.
     pub fn make_private(&self, window_offset: u64, len: u64) -> Result<()> {
         blocking(self.make_private_async(window_offset, len))
     }
 
     /// [`CellClient::make_private`], waiting for the daemon holding no thread.
     pub async fn make_private_async(&self, window_offset: u64, len: u64) -> Result<()> {
+        let (Some(stage), Some(faults)) = (self.client.stage.get(), self.window_faults.get())
+        else {
+            return Err(Errno::EINVAL);
+        };
         let start = std::time::Instant::now();
-        let made = self.client.request(&Request::Private { window_offset, len }).await.map(drop);
-        // cladefs: as this process waited for it, the daemon's and its stage operations' parts
-        // apart (TASK-164.10).
+        let made = stage.make_private(faults.as_ref(), window_offset, len).await;
+        // cladefs: what serving it took (TASK-164.10).
         self.client.stage_counts.private_request_since(start);
         made
     }
@@ -533,6 +557,12 @@ impl CellClient {
             Some(stage) => stage.private_runs(),
             None => Ok(Vec::new()),
         }
+    }
+
+    /// cladefs: how many of its window's pages are private now (backlog doc-13), this process's
+    /// memory, which it alone knows of (doc-26): a snapshot of its VM is refused while any is.
+    pub fn private_pages(&self) -> u64 {
+        self.client.stage.get().map_or(0, |stage| stage.private_pages())
     }
 
     /// cladefs: whether its window copies on write, a writer's
@@ -594,11 +624,11 @@ impl CellClient {
     /// hypervisor such as KVM maps as guest memory: the daemon maps its pages there, read-only, and
     /// the guest's faults there go to it. `prefault`, if any, is told of the pages mapped for the
     /// guest ahead of its accesses. cladefs: a writer's copies on write (backlog doc-13), of
-    /// `private_max` private pages at most, one at least, this process's memory, for which the
-    /// daemon reserves nothing (TASK-501): a write to a page, by the guest's own threads
-    /// ([`crate::guest_thread_started`]), or one of a page mapped here, makes the page private. A
-    /// follower's copies nothing, refusing every write, its `private_max` 0 (`EINVAL` otherwise, as
-    /// a writer's of 0).
+    /// `private_max` private pages at most, one at least, this process's memory, which it bounds
+    /// itself, and the daemon reserves nothing for (TASK-501, doc-26): a write to a page, by the
+    /// guest's own threads ([`crate::guest_thread_started`]), or one of a page mapped here, makes
+    /// the page private, a copy of what the daemon maps there. A follower's copies nothing,
+    /// refusing every write, its `private_max` 0 (`EINVAL` otherwise, as a writer's of 0).
     ///
     /// # Safety
     ///
@@ -649,8 +679,8 @@ impl CellClient {
         private_max: u64,
         unmapped: Option<Arc<dyn Unmapped>>,
     ) -> Result<(), Error> {
-        let private_max = (private_max != 0).then_some(private_max);
-        if private_max.is_some() == self.read_only {
+        let copying = private_max != 0;
+        if copying == self.read_only {
             return Err(Error::new(Errno::EINVAL));
         }
         let mut faults = self.faults.lock().unwrap();
@@ -666,8 +696,8 @@ impl CellClient {
         let stage = unsafe {
             UffdSecondStage::new(base.as_ptr() as usize, size, phys, prefault, self.max_map_count)
         }?;
-        if private_max.is_some() {
-            stage.copy_on_write()?;
+        if copying {
+            stage.copy_on_write(private_max)?;
         }
         // cladefs: a VM's memory's window, every write a guest's (TASK-456.3).
         if unmapped.is_some() {
@@ -677,10 +707,11 @@ impl CellClient {
         // cladefs: and the runs of pages it keeps installed, which the daemon's metrics show
         // (TASK-111.5).
         let budget = stage.budget() as u64;
-        self.client.request_blocking(&Request::Window { size, private_max, budget })?;
-        self.copying.store(private_max.is_some(), Ordering::Release);
-        let faults_of = DaemonFaults { client: self.client.clone(), size, unmapped };
-        *faults = Some(stage.serve(Arc::new(faults_of))?);
+        self.client.request_blocking(&Request::Window { size, copying, budget })?;
+        self.copying.store(copying, Ordering::Release);
+        let faults_of = Arc::new(DaemonFaults { client: self.client.clone(), size, unmapped });
+        let _ = self.window_faults.set(faults_of.clone());
+        *faults = Some(stage.serve(faults_of)?);
         Ok(())
     }
 }
@@ -1077,11 +1108,7 @@ impl Client {
                     break;
                 }
             };
-            let taken = match stage.op {
-                StageOp::Private { .. } => receiver.take_privates(&mut stage).map(Taken::Privates),
-                _ => receiver.take_change(&mut stage).map(Taken::Anew),
-            };
-            let taken = match taken {
+            let taken = match receiver.take_change(&mut stage) {
                 Ok(taken) => taken,
                 Err(err) => {
                     log::error!("receiving a change to the window: {err}");
@@ -1090,7 +1117,7 @@ impl Client {
             };
             let start = std::time::Instant::now();
             let made = self.make(stage.op, &taken);
-            self.stage_counts.count_since(start, &stage.op, &taken);
+            self.stage_counts.count_since(start);
             if let Err(err) = made {
                 log::error!("making the extent daemon's change to the window: {err}");
                 break;
@@ -1109,7 +1136,7 @@ impl Client {
             told = std::time::Instant::now();
             // cladefs: the runs of private pages, said as often, apart (TASK-164.10).
             if told.duration_since(told_private) >= STAGE_COUNTS_EVERY {
-                let private = self.stage_counts.private();
+                let private = self.stage_counts.private(self.stage.get());
                 if (private[0] | private[3]) != 0
                     && let Err(err) =
                         self.sender.send(Made::PrivateCounts(private).encode(), &[], &[])
@@ -1145,7 +1172,7 @@ impl Client {
         if counts.costs[0] == 0 {
             return;
         }
-        let private = self.stage_counts.private();
+        let private = self.stage_counts.private(self.stage.get());
         let told =
             (self.sender.send(Made::Counts(counts).encode(), &[], &[])).and_then(
                 |()| match private[0] {
@@ -1169,7 +1196,8 @@ impl Client {
         let stage = self.stage.get();
         let [overwritten, left_out] = stage.map_or([0; 2], |stage| stage.taken());
         let installed = stage.map_or(0, |stage| stage.installed());
-        StageCounts { costs: [ops, ns, overwritten, left_out], installed }
+        let private = stage.map_or(0, |stage| stage.private_pages());
+        StageCounts { costs: [ops, ns, overwritten, left_out], installed, private }
     }
 
     /// cladefs: answers the daemon's ask `ask` for stats ([`STATS`]), with the guest's, `guest`, if
@@ -1185,27 +1213,21 @@ impl Client {
 
     /// Makes the stage operation `op` to the window, with what was taken after it, at once: an
     /// unmap with what follows it within what it unmaps, as [`Receiver::take_change`] takes them
-    /// (TASK-91.16); cladefs: a private page with those following it on, the run
-    /// [`Receiver::take_privates`] takes (TASK-164.10).
-    fn make(&self, op: StageOp, taken: &Taken) -> std::io::Result<()> {
+    /// (TASK-91.16); cladefs: keeping the private pages there, or ending them, as it says
+    /// (doc-26).
+    fn make(&self, op: StageOp, anew: &[crate::dax::Anew]) -> std::io::Result<()> {
+        use crate::dax::Private;
         let stage = self.stage.get().ok_or_else(|| std::io::Error::other("no window"))?;
-        match (op, taken) {
-            (StageOp::Unmap { offset, len }, Taken::Anew(anew)) if !anew.is_empty() => {
-                stage.remap(offset, len, anew)
+        let private = |keep| if keep { Private::Keep } else { Private::End };
+        match op {
+            StageOp::Unmap { offset, len, keep_private } if !anew.is_empty() => {
+                stage.remap(offset, len, private(keep_private), anew)
             }
-            (StageOp::Map { offset, phys, len }, _) => stage.map(offset, phys, len),
-            (StageOp::Unmap { offset, len }, _) => stage.unmap(offset, len),
-            (StageOp::Mapped { offset, len }, _) => stage.window_mapped(offset, len),
-            // cladefs: refused, as the daemon's error, of a window that doesn't copy.
-            (StageOp::Private { .. }, _) if !stage.copying() => {
-                return Err(std::io::Error::other("a private page of a window that doesn't copy"));
+            StageOp::Map { offset, phys, len } => stage.map(offset, phys, len),
+            StageOp::Unmap { offset, len, keep_private } => {
+                stage.unmap(offset, len, private(keep_private))
             }
-            (StageOp::Private { offset, .. }, Taken::Privates(run)) => {
-                stage.make_private(offset, run)
-            }
-            (StageOp::Private { offset, from }, Taken::Anew(_)) => {
-                stage.make_private(offset, &[from])
-            }
+            StageOp::Mapped { offset, len } => stage.window_mapped(offset, len),
         }
         Ok(())
     }
@@ -1243,66 +1265,42 @@ impl Waiting {
     }
 }
 
-/// cladefs: what the receiving thread took with a stage operation, to make with it at once.
-enum Taken {
-    /// An unmap's maps anew within it ([`Receiver::take_change`]), none for another operation.
-    Anew(Vec<crate::dax::Anew>),
-    /// A private page's run, its own first ([`Receiver::take_privates`]).
-    Privates(Vec<Option<crate::pages::PhysLocation>>),
-}
-
 /// cladefs: the stage operations a VM process made of a window, and the nanoseconds they took, as
-/// [`STAGE_COUNTS`] tells them: the receiving thread counts them, which makes them. Of those, the
-/// runs of private pages, the pages, and their nanoseconds (TASK-164.10).
+/// [`STAGE_COUNTS`] tells them: the receiving thread counts them, which makes them. And the
+/// guest's `PRIVATE`s it served (TASK-164.10, doc-26).
 #[derive(Default)]
 struct StageCosts {
     ops: AtomicU64,
     ns: AtomicU64,
-    private_runs: AtomicU64,
-    private_pages: AtomicU64,
-    private_ns: AtomicU64,
-    /// The `PRIVATE` requests made, and the nanoseconds this process waited for their replies.
+    /// The `PRIVATE`s served, and the nanoseconds they took.
     private_requests: AtomicU64,
     private_request_ns: AtomicU64,
 }
 
 impl StageCosts {
-    /// Counts an operation, `op` with what was `taken` with it, made since `start`.
-    fn count_since(&self, start: std::time::Instant, op: &StageOp, taken: &Taken) {
+    /// Counts an operation made since `start`.
+    fn count_since(&self, start: std::time::Instant) {
         let ns = start.elapsed().as_nanos() as u64;
         self.ops.fetch_add(1, Ordering::Relaxed);
         self.ns.fetch_add(ns, Ordering::Relaxed);
-        if let StageOp::Private { .. } = op {
-            let pages = match taken {
-                Taken::Privates(run) => run.len() as u64,
-                Taken::Anew(_) => 1,
-            };
-            self.private_runs.fetch_add(1, Ordering::Relaxed);
-            self.private_pages.fetch_add(pages, Ordering::Relaxed);
-            self.private_ns.fetch_add(ns, Ordering::Relaxed);
-        }
     }
 
     fn counts(&self) -> [u64; 2] {
         [self.ops.load(Ordering::Relaxed), self.ns.load(Ordering::Relaxed)]
     }
 
-    /// Counts a `PRIVATE` request sent at `start`, its reply here.
+    /// Counts a `PRIVATE` served from `start` on.
     fn private_request_since(&self, start: std::time::Instant) {
         self.private_requests.fetch_add(1, Ordering::Relaxed);
         self.private_request_ns.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 
-    /// The runs of private pages, as [`STAGE_PRIVATE_COUNTS`] says them.
-    fn private(&self) -> PrivateCosts {
+    /// The runs of private pages `stage` made, if any, and the `PRIVATE`s served, as
+    /// [`STAGE_PRIVATE_COUNTS`] says them.
+    fn private(&self, stage: Option<&Arc<UffdSecondStage>>) -> PrivateCosts {
         let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
-        [
-            load(&self.private_runs),
-            load(&self.private_pages),
-            load(&self.private_ns),
-            load(&self.private_requests),
-            load(&self.private_request_ns),
-        ]
+        let [runs, pages, ns] = stage.map_or([0; 3], |stage| stage.private_costs());
+        [runs, pages, ns, load(&self.private_requests), load(&self.private_request_ns)]
     }
 }
 
@@ -1529,16 +1527,12 @@ impl Faults for DaemonFaults {
         self.size
     }
 
-    fn fault(&self, offset: u64, access: Access) -> BoxFuture<'_, Result<()>> {
-        self.fault_with(Fault { offset, access, page: false, probe: false })
-    }
-
-    fn fault_page(&self, offset: u64, access: Access) -> BoxFuture<'_, Result<()>> {
-        self.fault_with(Fault { offset, access, page: true, probe: false })
+    fn fault_page(&self, offset: u64) -> BoxFuture<'_, Result<()>> {
+        self.fault_with(Fault { offset, page: true, probe: false })
     }
 
     fn probe(&self, offset: u64) -> BoxFuture<'_, Result<()>> {
-        self.fault_with(Fault { offset, access: Access::Read, page: true, probe: true })
+        self.fault_with(Fault { offset, page: true, probe: true })
     }
 
     fn lost(&self) -> bool {

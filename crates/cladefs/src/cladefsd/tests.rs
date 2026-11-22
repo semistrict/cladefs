@@ -326,8 +326,8 @@ fn keeps_object_storage_and_follower_stats() {
     }
     expected.extend(["durable_segments", "own_sync_max_us", "raw_sync_max_us"].map(str::to_owned));
     // And the bytes its cells wrote, by kind, and the process, as its kernel counts them
-    // (TASK-310).
-    let kinds = ["raw", "copied", "framed", "own", "log"];
+    // (TASK-310); cladefs: and relocated, its writers' compaction's (doc-27).
+    let kinds = ["raw", "copied", "framed", "own", "log", "relocated"];
     expected.extend(kinds.map(|kind| format!("written_{kind}_bytes")));
     // And the writes they took, and the stats file's own (TASK-330.2).
     expected.extend(["written_writes", "stats_written_bytes"].map(str::to_owned));
@@ -2326,9 +2326,37 @@ async fn requests_attach_nothing() {
     assert_eq!(read, Err(Errno::ENOENT));
 }
 
+/// doc-26: a VM process is handed its tenant's arena and the default one read-only: it copies its
+/// guest's writes into memory of its own, and writes no page the daemon's cache holds.
+#[test]
+fn vm_processes_are_handed_their_memory_read_only() {
+    use super::wire::*;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let stream = UnixStream::connect(&socket).unwrap();
+    let (sender, mut receiver) =
+        (Sender::new(stream.try_clone().unwrap()), Receiver::new(stream.try_clone().unwrap()));
+    let open = Header::new(OPEN, 1).with_args(&[1 << 24, 0, 0, 0, VERSION]).with_flags(OPEN_CREATE);
+    let path = dir.path().join("store");
+    sender.send(open, std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()), &[]).unwrap();
+    let opened = receiver.receive(|| 0).unwrap().unwrap();
+    assert_eq!((opened.header.status, opened.fds.len()), (0, 2));
+    for fd in &opened.fds {
+        use std::os::fd::AsRawFd;
+        // SAFETY: Plain system call on a descriptor the message holds.
+        let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+        assert_eq!(flags & libc::O_ACCMODE, libc::O_RDONLY, "handed writable");
+    }
+}
+
 /// TASK-702.1: with `CLADEFSD_READ_TRACES` naming a directory, a VM's reads are traced, and the
-/// trace written as its connection goes: its `MAP`, its `READ`, then its window's faults, a load's
-/// and a cell's, each naming the extent, its length, and the range read, in the order made.
+/// trace written as its connection goes: its `MAP`, its `READ`, then its window's fault, a load's,
+/// each naming the extent, its length, and the range read, in the order made. cladefs: its write,
+/// to a page the load's fault named with the rest of its part, its VM process copies itself, which
+/// the daemon never hears of (doc-26).
 #[test]
 fn a_vms_reads_are_traced() {
     host();
@@ -2384,7 +2412,6 @@ fn a_vms_reads_are_traced() {
             vec!["map", &id, "1", &len, &one, &two],
             vec!["read", &id, "1", &len, "0", "200"],
             vec!["fault", &id, "1", &len, &one, &one],
-            vec!["store", &id, "1", &len, &two, &one],
         ],
         "{text}"
     );
@@ -2843,7 +2870,7 @@ fn vm_processes_naming_vast_windows_are_let_go_all_the_same() {
     std::thread::spawn(move || serve(listener));
     let (sender, mut receiver, stream, cell) =
         raw_connection(&socket, &dir.path().join("store"), 1 << 24);
-    let window = Header::new(WINDOW, 2).with_args(&[1 << 60, 1]);
+    let window = Header::new(WINDOW, 2).with_args(&[1 << 60]).with_flags(WINDOW_COPYING);
     let answered = call(&sender, &mut receiver, window, &[]).header.status;
     let len = 8 << 20;
     let written = Header::new(WRITE, 3).with_args(&[cell, 1, 0]);
@@ -2870,7 +2897,7 @@ fn windows_go_up_to_the_most_the_daemon_makes_room_for() {
         let (sender, mut receiver, _stream, _) =
             raw_connection(&socket, &dir.path().join(name), 1 << 24);
         // cladefs: a writer's, copying on write (backlog doc-13).
-        let window = Header::new(WINDOW, 2).with_args(&[size, 1]);
+        let window = Header::new(WINDOW, 2).with_args(&[size]).with_flags(WINDOW_COPYING);
         assert_eq!(call(&sender, &mut receiver, window, &[]).header.status, status, "{name}");
     }
 }
@@ -4021,7 +4048,7 @@ async fn shrinks_return_once_the_pages_they_evict_are_free() {
         let read = Header::new(READ, 3 + sequence).with_args(&[cell, sequence, 0, CHUNK]);
         assert_eq!(served(read, &[]).payload, pattern(sequence as u8, CHUNK as usize));
     }
-    served(Header::new(WINDOW, 6).with_args(&[2 * CHUNK, 1]), &[]);
+    served(Header::new(WINDOW, 6).with_args(&[2 * CHUNK]).with_flags(WINDOW_COPYING), &[]);
     for sequence in 1..=2 {
         let at = (sequence - 1) * CHUNK;
         served(Header::new(MAP, 6 + sequence).with_args(&[cell, sequence, 0, CHUNK, at]), &[]);
@@ -4065,8 +4092,20 @@ impl HandVm {
         payload: &[u8],
         ack: bool,
     ) -> (super::wire::Message, Vec<super::wire::Header>) {
+        self.call_flagged(kind, 0, args, payload, ack)
+    }
+
+    /// As [`HandVm::call`], the request of `flags`.
+    fn call_flagged(
+        &mut self,
+        kind: u32,
+        flags: u32,
+        args: &[u64],
+        payload: &[u8],
+        ack: bool,
+    ) -> (super::wire::Message, Vec<super::wire::Header>) {
         use super::wire::*;
-        let header = Header::new(kind, self.next).with_args(args);
+        let header = Header::new(kind, self.next).with_args(args).with_flags(flags);
         self.next += 1;
         self.sender.send(header, payload, &[]).unwrap();
         let mut staged = Vec::new();
@@ -4109,7 +4148,7 @@ impl HandVm {
         use super::wire::*;
         let (cell, sequence) = (extent.cell, extent.sequence);
         self.call(READ, &[cell, sequence, 0, len], &[], true);
-        self.call(WINDOW, &[len, 1], &[], true);
+        self.call_flagged(WINDOW, WINDOW_COPYING, &[len], &[], true);
         let (_, staged) = self.call(MAP, &[cell, sequence, 0, len, 0], &[], true);
         (staged.into_iter())
             .filter(|header| header.kind == STAGE_MAP)
@@ -4497,7 +4536,7 @@ fn window_mappings_are_answered_beside_the_stream_data_in_flight() {
     std::thread::spawn(move || serve(listener));
     let path = dir.path().join("store");
     let (sender, mut receiver, _stream, cell) = raw_connection(&socket, &path, 1 << 30);
-    let window = Header::new(WINDOW, 2).with_args(&[2 * count * ps, 1]);
+    let window = Header::new(WINDOW, 2).with_args(&[2 * count * ps]).with_flags(WINDOW_COPYING);
     call(&sender, &mut receiver, window, &[]);
     // The mappings, as many in flight as a thread taking their replies leaves room for.
     let sender = std::sync::Arc::new(sender);
@@ -4589,7 +4628,7 @@ enum LastWords {
 /// however it likes, panics nothing, leaves another tenant's cell as it was and served, and lets
 /// its own go. TASK-154: and it gets of the bucket what its VM manager put in its directory alone,
 /// a version it restores, and nothing of the cell it names. TASK-164.1: through a window that
-/// copies on write too, its writes' faults copying pages into its own memory, and its `PRIVATE`s.
+/// copies on write too, which its VM process makes its own copies in (doc-26).
 /// Seeded by proptest, which says the sequence if one fails.
 #[test]
 fn whatever_a_vm_process_says_harms_no_other() {
@@ -4639,7 +4678,8 @@ fn whatever_a_vm_process_says_harms_no_other() {
         STAGE_COUNTS,
         BUILD,
         29,
-        PRIVATE,
+        // `PRIVATE`'s, which a VM process serves itself now (doc-26).
+        30,
         REPLY,
         STAGE_MAP,
         STAGE_UNMAP,
@@ -4758,8 +4798,6 @@ fn whatever_a_vm_process_says_harms_no_other() {
             }),
         (page(), length()).prop_map(|(at, len)| (UNMAP, 0, 0, [at, len, 0, 0, 0], Vec::new())),
         (page(), 0u32..4).prop_map(|(at, flags)| (FAULT, flags, 0, [at, 0, 0, 0, 0], Vec::new())),
-        // cladefs: of a window that copies on write, or not (backlog doc-13).
-        (page(), length()).prop_map(|(at, len)| (PRIVATE, 0, 0, [at, len, 0, 0, 0], Vec::new())),
         sequence().prop_map(|extent| (FREE, 0, 0, [OWN_CELL, extent, 0, 0, 0], Vec::new())),
         (0u32..4).prop_map(|flags| (COMMIT, flags, 0, [0; 5], Vec::new())),
         Just((MAPPINGS, 0, 0, [0; 5], Vec::new())),
@@ -4796,11 +4834,12 @@ fn whatever_a_vm_process_says_harms_no_other() {
         1 => Just(MAX_WINDOW + ps),
         1 => Just(1 << 60),
     ];
-    // cladefs: copying on write, of some private pages, none, or more than it has (backlog doc-13).
+    // cladefs: copying on write, or not (backlog doc-13), and its private pages, which a WINDOW
+    // says no more (doc-26).
     let copying = prop_oneof![
-        1 => Just(0u64),
-        6 => 1u64..16,
-        1 => Just(u64::MAX),
+        1 => Just((0u32, 0u64)),
+        6 => Just((WINDOW_COPYING, 0)),
+        1 => (0u32..2, 1u64..16),
     ];
     let sequence = (
         proptest::collection::vec(message, 1..64),
@@ -4875,7 +4914,8 @@ fn whatever_a_vm_process_says_harms_no_other() {
                     }
                 })
             };
-            let window = Header::new(WINDOW, 2).with_args(&[window, copying]);
+            let (flags, private) = copying;
+            let window = Header::new(WINDOW, 2).with_args(&[window, private]).with_flags(flags);
             sender.send(window, &[], &[]).unwrap();
             if transfer {
                 // SAFETY: Makes a descriptor, which is owned below.

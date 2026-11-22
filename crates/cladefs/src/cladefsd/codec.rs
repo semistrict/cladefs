@@ -25,7 +25,7 @@
 
 use super::wire::*;
 use crate::pages::{ArenaId, PhysLocation};
-use crate::{Access, Commit, Errno, ExtentId, ExtentInfo, MappingContents};
+use crate::{Commit, Errno, ExtentId, ExtentInfo, MappingContents};
 use crate::{WindowMapping, WriteBarriers};
 use bucket_cell::cell::Kind;
 use std::borrow::Cow;
@@ -62,11 +62,10 @@ pub(crate) enum Request<'a> {
     Root,
     /// [`INFO`].
     Info,
-    /// [`WINDOW`]: of `size` bytes, [`MAX_WINDOW`] at most; cladefs: copying on write, of
-    /// `private_max` private pages at most, as many as it has pages at most, if given, a writer's;
-    /// or not, a follower's, its `args[1]` 0. Its VM process keeps `budget` runs of pages
-    /// installed at most, 0 if it doesn't say (TASK-111.5).
-    Window { size: u64, private_max: Option<u64>, budget: u64 },
+    /// [`WINDOW`]: of `size` bytes, [`MAX_WINDOW`] at most; cladefs: whose VM process copies on
+    /// write if `copying` ([`WINDOW_COPYING`]), a writer's, or not, a follower's. Its VM process
+    /// keeps `budget` runs of pages installed at most, 0 if it doesn't say (TASK-111.5).
+    Window { size: u64, copying: bool, budget: u64 },
     /// [`FAULT`].
     Fault(Fault),
     /// [`FORK`]: to `cell`, a new directory at `path`.
@@ -92,8 +91,6 @@ pub(crate) enum Request<'a> {
     /// [`BUILD`]: the commit the VM process was built of, a label's characters, [`MAX_BUILD`] at
     /// most.
     Build(&'a str),
-    /// cladefs: [`PRIVATE`].
-    Private { window_offset: u64, len: u64 },
     /// cladefs: [`STATS`]: the answer to ask `ask`, with its guest's stats if it has a guest that
     /// answers, [`MAX_STATS`] bytes at most.
     Stats { ask: u64, guest: Option<&'a str> },
@@ -137,8 +134,6 @@ pub(crate) enum Data<'a> {
 pub(crate) struct Fault {
     /// Where in the window.
     pub offset: u64,
-    /// A write ([`FAULT_WRITE`]), or not.
-    pub access: Access,
     /// On that page alone ([`FAULT_PAGE`]).
     pub page: bool,
     /// cladefs: the VM process's probe of the page, to read, not the guest's access
@@ -210,11 +205,12 @@ fn known_flags(kind: u32) -> Result<u32, Errno> {
         }
         MAP => MAP_ZEROS,
         COMMIT => COMMIT_ROOT | COMMIT_UPLOADED | COMMIT_LOCAL,
-        FAULT => FAULT_WRITE | FAULT_PAGE | FAULT_PROBE,
+        FAULT => FAULT_PAGE | FAULT_PROBE,
+        WINDOW => WINDOW_COPYING,
         FORK => FORK_QUIESCENT | FORK_DROP,
         STATS => STATS_GUEST,
-        FREE | FREE_MANY | UNMAP | ROOT | INFO | WINDOW | RESIZED | MAPPINGS | ADVANCE | LET_GO
-        | PIN | UNPIN | TRANSFER | BUILD | PRIVATE | MAP_MANY => 0,
+        FREE | FREE_MANY | UNMAP | ROOT | INFO | RESIZED | MAPPINGS | ADVANCE | LET_GO | PIN
+        | UNPIN | TRANSFER | BUILD | MAP_MANY => 0,
         _ => return Err(Errno::EINVAL),
     })
 }
@@ -245,7 +241,6 @@ impl<'a> Request<'a> {
             Request::Unpin(_) => UNPIN,
             Request::Transfer { .. } => TRANSFER,
             Request::Build(_) => BUILD,
-            Request::Private { .. } => PRIVATE,
             Request::Stats { .. } => STATS,
         }
     }
@@ -338,13 +333,11 @@ impl<'a> Request<'a> {
             Request::Root | Request::Info | Request::Mappings | Request::Advance => {
                 message(0, [0; 5])
             }
-            Request::Window { size, private_max, budget } => {
-                message(0, [*size, private_max.unwrap_or(0), *budget, 0, 0])
+            Request::Window { size, copying, budget } => {
+                message(flag(*copying, WINDOW_COPYING), [*size, 0, *budget, 0, 0])
             }
-            Request::Fault(Fault { offset, access, page, probe }) => {
-                let flags = flag(*access == Access::Write, FAULT_WRITE)
-                    | flag(*page, FAULT_PAGE)
-                    | flag(*probe, FAULT_PROBE);
+            Request::Fault(Fault { offset, page, probe }) => {
+                let flags = flag(*page, FAULT_PAGE) | flag(*probe, FAULT_PROBE);
                 message(flags, [*offset, 0, 0, 0, 0])
             }
             Request::Fork { path } => message(0, [0; 5]).carrying(path.as_os_str().as_bytes()),
@@ -358,7 +351,6 @@ impl<'a> Request<'a> {
                 Encoded { fd: Some(area.0), ..message(0, [*len, 0, 0, 0, 0]) }
             }
             Request::Build(commit) => message(0, [0; 5]).carrying(commit.as_bytes()),
-            Request::Private { window_offset, len } => message(0, [*window_offset, *len, 0, 0, 0]),
             Request::Stats { ask, guest } => {
                 let args = [*ask, 0, 0, 0, 0];
                 message(flag(guest.is_some(), STATS_GUEST), args)
@@ -525,22 +517,20 @@ impl<'a> Request<'a> {
                 if args[0] > MAX_WINDOW {
                     return Err(Errno::EINVAL);
                 }
-                // cladefs: some private pages, no more than the window's, or none (backlog doc-13).
-                let private_max = (args[1] != 0).then_some(args[1]);
-                if args[1] > args[0] / crate::pages::page_size() {
+                // cladefs: its private pages are its VM process's to bound (doc-26).
+                if args[1] != 0 {
                     return Err(Errno::EINVAL);
                 }
-                Request::Window { size: args[0], private_max, budget: args[2] }
+                Request::Window { size: args[0], copying: has(WINDOW_COPYING), budget: args[2] }
             }
             FAULT => {
                 nothing()?;
-                let access = if has(FAULT_WRITE) { Access::Write } else { Access::Read };
-                // cladefs: a probe is of a page alone, to read.
+                // cladefs: a probe is of a page alone.
                 let probe = has(FAULT_PROBE);
-                if probe && (access == Access::Write || !has(FAULT_PAGE)) {
+                if probe && !has(FAULT_PAGE) {
                     return Err(Errno::EINVAL);
                 }
-                Request::Fault(Fault { offset: args[0], access, page: has(FAULT_PAGE), probe })
+                Request::Fault(Fault { offset: args[0], page: has(FAULT_PAGE), probe })
             }
             FORK if has(FORK_QUIESCENT) && has(FORK_DROP) => return Err(Errno::EINVAL),
             FORK if has(FORK_QUIESCENT) => {
@@ -574,11 +564,6 @@ impl<'a> Request<'a> {
                 Request::Transfer { len: args[0], area: Area(fd.ok_or(Errno::EINVAL)?) }
             }
             BUILD => Request::Build(build(payload)?),
-            PRIVATE => {
-                nothing()?;
-                in_window(args[0], args[1])?;
-                Request::Private { window_offset: args[0], len: args[1] }
-            }
             STATS => {
                 let guest = match has(STATS_GUEST) {
                     true => Some(stats_text(payload)?),
@@ -747,18 +732,25 @@ pub(crate) struct StageCounts {
     pub costs: [u64; 4],
     /// The runs of pages it has installed now, each a mapping of its own (TASK-111.5).
     pub installed: u64,
+    /// cladefs: its window's private pages now (backlog doc-13), which the VM process alone knows
+    /// of (doc-26).
+    pub private: u64,
 }
 
 impl StageCounts {
     #[cfg(target_os = "linux")]
     fn args(&self) -> [u64; 5] {
         let [ops, ns, overwrites, leave_outs] = self.costs;
-        [ops, ns, overwrites, leave_outs, self.installed]
+        let now = (self.installed & u64::from(u32::MAX)) | self.private << 32;
+        [ops, ns, overwrites, leave_outs, now]
     }
 
+    /// cladefs: `args[4]` holds the runs installed, its low 32 bits, and the private pages, its
+    /// high 32 (doc-26), a window of [`MAX_WINDOW`] having fewer of each.
     fn from_args(args: [u64; 5]) -> Self {
-        let [ops, ns, overwrites, leave_outs, installed] = args;
-        Self { costs: [ops, ns, overwrites, leave_outs], installed }
+        let [ops, ns, overwrites, leave_outs, now] = args;
+        let (installed, private) = (now & u64::from(u32::MAX), now >> 32);
+        Self { costs: [ops, ns, overwrites, leave_outs], installed, private }
     }
 }
 
@@ -852,22 +844,19 @@ pub(crate) struct Stage {
 pub(crate) enum StageOp {
     /// [`STAGE_MAP`]: maps `len` bytes of physical memory at `phys`, read-only.
     Map { offset: u64, phys: PhysLocation, len: u64 },
-    /// [`STAGE_UNMAP`].
-    Unmap { offset: u64, len: u64 },
+    /// [`STAGE_UNMAP`]: cladefs: the private pages there kept if `keep_private`
+    /// ([`STAGE_KEEP_PRIVATE`], doc-26), as the host's own changes keep them; else ended, as the
+    /// guest's own do.
+    Unmap { offset: u64, len: u64, keep_private: bool },
     /// cladefs: [`STAGE_MAPPED`].
     Mapped { offset: u64, len: u64 },
-    /// cladefs: [`STAGE_PRIVATE`]: the page at `offset` private, holding the page's at `from`, or
-    /// zeros.
-    Private { offset: u64, from: Option<PhysLocation> },
 }
 
 impl StageOp {
     /// Whether it takes access to pages away, which its VM process acknowledges ([`STAGE_ACK`]).
     pub fn taking(&self) -> bool {
         match self {
-            // cladefs: a private page takes the page mapped there away, and copies the page `from`,
-            // which the daemon keeps until it is made.
-            StageOp::Unmap { .. } | StageOp::Private { .. } => true,
+            StageOp::Unmap { .. } => true,
             StageOp::Map { .. } | StageOp::Mapped { .. } => false,
         }
     }
@@ -875,18 +864,17 @@ impl StageOp {
 
 impl Stage {
     pub fn encode(&self) -> Header {
-        let (kind, args) = match self.op {
+        let (kind, args, keep) = match self.op {
             StageOp::Map { offset, phys, len } => {
-                (STAGE_MAP, [offset, phys.offset, len, 0, phys.arena.0.into()])
+                (STAGE_MAP, [offset, phys.offset, len, 0, phys.arena.0.into()], 0)
             }
-            StageOp::Unmap { offset, len } => (STAGE_UNMAP, [offset, len, 0, 0, 0]),
-            StageOp::Mapped { offset, len } => (STAGE_MAPPED, [offset, len, 0, 0, 0]),
-            StageOp::Private { offset, from: None } => (STAGE_PRIVATE, [offset, 0, 0, 0, 0]),
-            StageOp::Private { offset, from: Some(from) } => {
-                (STAGE_PRIVATE, [offset, from.offset, 1, 0, from.arena.0.into()])
+            StageOp::Unmap { offset, len, keep_private } => {
+                let keep = if keep_private { STAGE_KEEP_PRIVATE } else { 0 };
+                (STAGE_UNMAP, [offset, len, 0, 0, 0], keep)
             }
+            StageOp::Mapped { offset, len } => (STAGE_MAPPED, [offset, len, 0, 0, 0], 0),
         };
-        let flags = if self.op.taking() { STAGE_ACK } else { 0 };
+        let flags = if self.op.taking() { STAGE_ACK } else { 0 } | keep;
         Header { kind, flags, id: self.id, args, ..Default::default() }
     }
 
@@ -903,23 +891,19 @@ impl Stage {
                 let phys = PhysLocation { arena, offset: args[1] };
                 StageOp::Map { offset: args[0], phys, len: args[2] }
             }
-            STAGE_UNMAP => StageOp::Unmap { offset: args[0], len: args[1] },
-            STAGE_MAPPED => StageOp::Mapped { offset: args[0], len: args[1] },
-            STAGE_PRIVATE => {
-                let from = match args[2] {
-                    0 => None,
-                    1 => {
-                        let arena = ArenaId(u32::try_from(args[4]).map_err(|_| Errno::EINVAL)?);
-                        Some(PhysLocation { arena, offset: args[1] })
-                    }
-                    _ => return Err(Errno::EINVAL),
-                };
-                StageOp::Private { offset: args[0], from }
+            STAGE_UNMAP => {
+                let keep_private = flags & STAGE_KEEP_PRIVATE != 0;
+                StageOp::Unmap { offset: args[0], len: args[1], keep_private }
             }
+            STAGE_MAPPED => StageOp::Mapped { offset: args[0], len: args[1] },
             _ => return Err(Errno::EINVAL),
         };
         let acknowledged = if op.taking() { STAGE_ACK } else { 0 };
-        if flags != acknowledged {
+        let keep = match op {
+            StageOp::Unmap { keep_private: true, .. } => STAGE_KEEP_PRIVATE,
+            _ => 0,
+        };
+        if flags != acknowledged | keep {
             return Err(Errno::EINVAL);
         }
         Ok(Stage { id, op })
@@ -1105,7 +1089,7 @@ mod tests {
         /// cladefs: a guest's stats (TASK-111.4).
         stats: String,
         commit: Commit,
-        access: Access,
+        copying: bool,
     }
 
     fn fields() -> impl Strategy<Value = Fields> {
@@ -1118,11 +1102,22 @@ mod tests {
             (path(), proptest::collection::vec(extent, 0..8)),
             ("[a-zA-Z0-9._-]{1,64}", "(\\PC{0,16}\n){0,8}"),
             prop_oneof![Just(Commit::Ordered), Just(Commit::Local), Just(Commit::Uploaded)],
-            prop_oneof![Just(Access::Read), Just(Access::Write)],
+            any::<bool>(),
         )
             .prop_map(
-                |((words, flags, data, root), (path, extents), (build, stats), commit, access)| {
-                    Fields { words, flags, data, root, path, extents, build, stats, commit, access }
+                |((words, flags, data, root), (path, extents), (build, stats), commit, copying)| {
+                    Fields {
+                        words,
+                        flags,
+                        data,
+                        root,
+                        path,
+                        extents,
+                        build,
+                        stats,
+                        commit,
+                        copying,
+                    }
                 },
             )
     }
@@ -1194,14 +1189,10 @@ mod tests {
             Request::Commit { commit, root: one.then_some(&fields.data[..]) },
             Request::Root,
             Request::Info,
-            Request::Window { size: a % (MAX_WINDOW + 1), private_max: None, budget: c },
-            Request::Window {
-                size: MAX_WINDOW,
-                private_max: Some(1 + b % (MAX_WINDOW / crate::pages::page_size())),
-                budget: d,
-            },
-            Request::Fault(Fault { offset: a, access: fields.access, page: one, probe: false }),
-            Request::Fault(Fault { offset: a, access: Access::Read, page: true, probe: true }),
+            Request::Window { size: a % (MAX_WINDOW + 1), copying: fields.copying, budget: c },
+            Request::Window { size: MAX_WINDOW, copying: true, budget: d },
+            Request::Fault(Fault { offset: a, page: one, probe: false }),
+            Request::Fault(Fault { offset: a, page: true, probe: true }),
             Request::Fork { path: path.clone() },
             Request::Version,
             Request::DropVersion { version: a },
@@ -1213,7 +1204,6 @@ mod tests {
             Request::Unpin(other),
             Request::Transfer { len: a, area: Area(area) },
             Request::Build(&fields.build),
-            Request::Private { window_offset: unmapped, len: unmapped_len },
             Request::Stats { ask: a, guest: None },
             Request::Stats { ask: b, guest: Some(&fields.stats) },
         ]
@@ -1254,7 +1244,6 @@ mod tests {
             (PIN, [1, 1, 0, 0, 0], [1, last, 0, 0, 0], [1, last - 1, 0, 0, 0]),
             (READ, [1, 1, 0, 4096, 0], [1, 1, last - 4095, 4096, 0], [1, 1, last - 4096, 4096, 0]),
             (UNMAP, [0, 4096, 0, 0, 0], [MAX_WINDOW, 1, 0, 0, 0], [MAX_WINDOW - 1, 1, 0, 0, 0]),
-            (PRIVATE, [0, 4096, 0, 0, 0], [1, MAX_WINDOW, 0, 0, 0], [0, MAX_WINDOW, 0, 0, 0]),
             (MAP, [1, 1, 0, 4096, 0], [1, 1, last, 1, 0], [1, 1, last - 1, 1, 0]),
             (MAP, [1, 1, 0, 4096, 0], [1, 1, 0, 2, MAX_WINDOW - 1], [1, 1, 0, 1, MAX_WINDOW - 1]),
         ] {
@@ -1281,10 +1270,9 @@ mod tests {
     }
 
     /// Every kind of request.
-    const KINDS: [u32; 24] = [
+    const KINDS: [u32; 23] = [
         OPEN, READ, WRITE, FREE, MAP, UNMAP, COMMIT, ROOT, INFO, WINDOW, FAULT, FORK, RESIZED,
-        MAPPINGS, ADVANCE, LET_GO, PIN, UNPIN, TRANSFER, FREE_MANY, BUILD, PRIVATE, STATS,
-        MAP_MANY,
+        MAPPINGS, ADVANCE, LET_GO, PIN, UNPIN, TRANSFER, FREE_MANY, BUILD, STATS, MAP_MANY,
     ];
 
     /// `request`, as its receiver receives it: of ID `id`.
@@ -1312,7 +1300,7 @@ mod tests {
             build: "build".into(),
             stats: "stats".into(),
             commit: Commit::Ordered,
-            access: Access::Read,
+            copying: false,
         };
         let area = area();
         let guest = NonZeroU64::new(0x1234_5678_9abc).unwrap();
@@ -1381,7 +1369,10 @@ mod tests {
                 MAP => 0b1000,
                 // cladefs: bit 2, COMMIT_LOCAL (TASK-301).
                 COMMIT => 0b111,
-                FAULT => 0b11,
+                // cladefs: bit 0, a write, is gone: a VM process copies itself (doc-26).
+                FAULT => 0b10,
+                // cladefs: copying on write (doc-26).
+                WINDOW => 0b1,
                 FORK => 0b1,
                 // cladefs: the guest's (TASK-111.4).
                 STATS => 0b1,
@@ -1398,7 +1389,7 @@ mod tests {
             build: "abc".into(),
             stats: "seals 1\n".into(),
             commit: Commit::Ordered,
-            access: Access::Read,
+            copying: false,
         };
         let area = area();
         let requests = requests(&fields, area.as_fd());
@@ -1431,16 +1422,16 @@ mod tests {
         refused(COMMIT, COMMIT_UPLOADED | COMMIT_LOCAL, b"");
         // cladefs: a probe is of a page alone, to read.
         refused(FAULT, FAULT_PROBE, b"");
-        refused(FAULT, FAULT_PROBE | FAULT_PAGE | FAULT_WRITE, b"");
+        // cladefs: bit 0 said a write once, which a VM process copies itself now (doc-26).
+        refused(FAULT, 1 << 0, b"");
         // What the daemon tells, and VM processes say of their stage operations, the same: a
         // stage operation is acknowledged if, and only if, it takes access away.
         let phys = PhysLocation { arena: ArenaId::DEFAULT, offset: 0 };
         let ops = [
             StageOp::Map { offset: 0, phys, len: 4096 },
-            StageOp::Unmap { offset: 0, len: 4096 },
+            StageOp::Unmap { offset: 0, len: 4096, keep_private: false },
+            StageOp::Unmap { offset: 0, len: 4096, keep_private: true },
             StageOp::Mapped { offset: 0, len: 4096 },
-            StageOp::Private { offset: 0, from: Some(phys) },
-            StageOp::Private { offset: 0, from: None },
         ];
         let told = ops.map(|op| Told::Stage(Stage { id: 1, op })).into_iter().chain([
             Told::Capacity { capacity: 4096, ask: false },
@@ -1452,7 +1443,10 @@ mod tests {
             assert_eq!(Told::decode(&header), Ok(told));
             for bit in (0..32).map(|bit| 1u32 << bit) {
                 let flipped = Header { flags: header.flags ^ bit, ..header };
-                let known = matches!(told, Told::Capacity { .. }) && bit == CAPACITY_ASK;
+                // cladefs: an unmap keeps the private pages there, or ends them (doc-26).
+                let known = matches!(told, Told::Capacity { .. }) && bit == CAPACITY_ASK
+                    || matches!(told, Told::Stage(Stage { op: StageOp::Unmap { .. }, .. }))
+                        && bit == STAGE_KEEP_PRIVATE;
                 assert_eq!(Told::decode(&flipped).is_ok(), known, "{told:?}, flag {bit:#x}");
             }
         }
@@ -1477,10 +1471,8 @@ mod tests {
         refused(Header::new(TRANSFER, 1).with_args(&[4096]), b"", vec![]);
         refused(Header::new(TRANSFER, 1).with_args(&[4096]), b"", vec![area(), area()]);
         refused(Header::new(WINDOW, 1).with_args(&[MAX_WINDOW + 1]), b"", vec![]);
-        // cladefs: a window copying on write of more private pages than it has pages.
-        let pages = (1 << 20) / crate::pages::page_size();
-        refused(Header::new(WINDOW, 1).with_args(&[1 << 20, pages + 1]), b"", vec![]);
-        refused(Header::new(PRIVATE, 1).with_args(&[0, 4096]), b"extra", vec![]);
+        // cladefs: a window saying its private pages, which its VM process bounds (doc-26).
+        refused(Header::new(WINDOW, 1).with_args(&[1 << 20, 1]), b"", vec![]);
         refused(Header::new(RESIZED, 1).with_args(&[4096, 2]), b"", vec![]);
         refused(Header { status: -1, ..Header::new(INFO, 1) }, b"", vec![]);
         refused(Header::new(FREE_MANY, 1).with_args(&[1, 1]), &[0; EXTENT_ID_BYTES + 8], vec![]);
@@ -1614,17 +1606,12 @@ mod tests {
                 b"r".to_vec(),
             ),
             (
-                Request::Fault(Fault {
-                    offset: 5,
-                    access: Access::Write,
-                    page: true,
-                    probe: false,
-                }),
-                header(FAULT, FAULT_WRITE | FAULT_PAGE, &[5]),
+                Request::Fault(Fault { offset: 5, page: true, probe: false }),
+                header(FAULT, FAULT_PAGE, &[5]),
                 vec![],
             ),
             (
-                Request::Fault(Fault { offset: 5, access: Access::Read, page: true, probe: true }),
+                Request::Fault(Fault { offset: 5, page: true, probe: true }),
                 header(FAULT, FAULT_PAGE | FAULT_PROBE, &[5]),
                 vec![],
             ),
@@ -1641,13 +1628,13 @@ mod tests {
                 vec![],
             ),
             (
-                Request::Window { size: 8192, private_max: None, budget: 0 },
+                Request::Window { size: 8192, copying: false, budget: 0 },
                 header(WINDOW, 0, &[8192]),
                 vec![],
             ),
             (
-                Request::Window { size: 8192, private_max: Some(2), budget: 3 },
-                header(WINDOW, 0, &[8192, 2, 3]),
+                Request::Window { size: 8192, copying: true, budget: 3 },
+                header(WINDOW, WINDOW_COPYING, &[8192, 0, 3]),
                 vec![],
             ),
             (
@@ -1656,11 +1643,6 @@ mod tests {
                 b"seals 1\n".to_vec(),
             ),
             (Request::Stats { ask: 5, guest: None }, header(STATS, 0, &[5]), vec![]),
-            (
-                Request::Private { window_offset: 4096, len: 8192 },
-                header(PRIVATE, 0, &[4096, 8192]),
-                vec![],
-            ),
         ];
         for (request, header, payload) in cases {
             let encoded = request.encode();
@@ -1677,21 +1659,17 @@ mod tests {
             },
         };
         assert_eq!(map.encode(), Header::new(STAGE_MAP, 4).with_args(&[1, 2, 3, 0, 6]));
-        let unmap = Stage { id: 4, op: StageOp::Unmap { offset: 1, len: 2 } };
+        let unmap = Stage { id: 4, op: StageOp::Unmap { offset: 1, len: 2, keep_private: false } };
         let acked = Header::new(STAGE_UNMAP, 4).with_args(&[1, 2]).with_flags(STAGE_ACK);
         assert_eq!(unmap.encode(), acked);
-        // cladefs: a private page, a copy of a page or zeros, acknowledged (backlog doc-13).
-        let from = Some(PhysLocation { arena: ArenaId(6), offset: 2 });
-        let private = Stage { id: 4, op: StageOp::Private { offset: 1, from } }.encode();
-        let copied = Header::new(STAGE_PRIVATE, 4).with_args(&[1, 2, 1, 0, 6]);
-        assert_eq!(private, copied.with_flags(STAGE_ACK));
-        let zeros = Stage { id: 4, op: StageOp::Private { offset: 1, from: None } }.encode();
-        assert_eq!(zeros, Header::new(STAGE_PRIVATE, 4).with_args(&[1]).with_flags(STAGE_ACK));
+        // cladefs: the host's own, keeping the private pages there (doc-26).
+        let kept = Stage { id: 4, op: StageOp::Unmap { offset: 1, len: 2, keep_private: true } };
+        assert_eq!(kept.encode(), acked.with_flags(STAGE_ACK | STAGE_KEEP_PRIVATE));
         let ask = Told::Capacity { capacity: 4096, ask: true }.encode();
         assert_eq!(ask, Header::new(CAPACITY, 0).with_args(&[4096]).with_flags(CAPACITY_ASK));
-        let counts = StageCounts { costs: [1, 2, 3, 4], installed: 5 };
+        let counts = StageCounts { costs: [1, 2, 3, 4], installed: 5, private: 6 };
         let ack = Made::Ack { id: 4, counts }.encode();
-        assert_eq!(ack, Header::new(ACK, 4).with_args(&[1, 2, 3, 4, 5]));
+        assert_eq!(ack, Header::new(ACK, 4).with_args(&[1, 2, 3, 4, 5 | 6 << 32]));
         let asked = Told::Stats { ask: 6 }.encode();
         assert_eq!(asked, Header::new(STATS_ASK, 0).with_args(&[6]));
         let private = Made::PrivateCounts([1, 64, 5, 2, 9]).encode();
@@ -1711,10 +1689,8 @@ mod tests {
             let phys = PhysLocation { arena: ArenaId(arena), offset: b };
             let stages = [
                 StageOp::Map { offset: a, phys, len: c },
-                StageOp::Unmap { offset: a, len: b },
+                StageOp::Unmap { offset: a, len: b, keep_private: ask },
                 StageOp::Mapped { offset: a, len: b },
-                StageOp::Private { offset: a, from: Some(phys) },
-                StageOp::Private { offset: a, from: None },
             ];
             let told = stages.map(|op| Told::Stage(Stage { id, op })).into_iter().chain([
                 Told::Capacity { capacity: a, ask },
@@ -1724,8 +1700,9 @@ mod tests {
             for told in told {
                 prop_assert_eq!(Told::decode(&told.encode()), Ok(told));
             }
-            let counts = StageCounts { costs: [a, b, c, d], installed: e };
-            let other = StageCounts { costs: [b, c, d, e], installed: a };
+            let low = |word: u64| word & u64::from(u32::MAX);
+            let counts = StageCounts { costs: [a, b, c, d], installed: low(e), private: low(a) };
+            let other = StageCounts { costs: [b, c, d, e], installed: low(a), private: low(b) };
             let made = [
                 Made::Ack { id, counts },
                 Made::Counts(other),
@@ -1833,7 +1810,7 @@ mod tests {
     fn the_wire_is_its_version() {
         /// The version, and the fingerprint of the wire it is. A change to the wire is a new
         /// version, both changed together, never the fingerprint alone.
-        const WIRE: (u64, u64) = (12, 0xe97f_a148_915c_9701);
+        const WIRE: (u64, u64) = (13, 0xfb14_df49_06a8_8e2c);
         let fingerprint = fingerprint();
         assert_eq!(
             (VERSION, fingerprint),
@@ -1869,7 +1846,7 @@ mod tests {
             build: "build".into(),
             stats: "stats".into(),
             commit: Commit::Uploaded,
-            access: Access::Write,
+            copying: true,
         };
         let area = area();
         for request in requests(&fields, area.as_fd()) {
@@ -1886,10 +1863,9 @@ mod tests {
         let phys = PhysLocation { arena: ArenaId(6), offset: 1 << 21 };
         let told = [
             StageOp::Map { offset: 4096, phys, len: 8192 },
-            StageOp::Unmap { offset: 4096, len: 8192 },
+            StageOp::Unmap { offset: 4096, len: 8192, keep_private: false },
+            StageOp::Unmap { offset: 4096, len: 8192, keep_private: true },
             StageOp::Mapped { offset: 4096, len: 8192 },
-            StageOp::Private { offset: 4096, from: Some(phys) },
-            StageOp::Private { offset: 4096, from: None },
         ]
         .map(|op| Told::Stage(Stage { id: 2, op }))
         .into_iter()
@@ -1902,8 +1878,8 @@ mod tests {
             header(&mut hashed, told.encode());
         }
         let (counts, other) = (
-            StageCounts { costs: [1, 2, 3, 4], installed: 5 },
-            StageCounts { costs: [5, 6, 7, 8], installed: 9 },
+            StageCounts { costs: [1, 2, 3, 4], installed: 5, private: 6 },
+            StageCounts { costs: [5, 6, 7, 8], installed: 9, private: 10 },
         );
         let private = Made::PrivateCounts([1, 64, 5, 2, 9]);
         for made in [Made::Ack { id: 2, counts }, Made::Counts(other), private] {

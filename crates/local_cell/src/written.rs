@@ -25,6 +25,9 @@ pub(crate) enum Kind {
     Own,
     /// The segments' logs of the commits in them, and the write-ahead log's start.
     Log,
+    /// cladefs: the extents its writer relocated out of its sparse segments in the bucket, into
+    /// its open segment (doc-27): what writers' compaction costs the host's disk.
+    Relocated,
 }
 
 /// The bytes this process's cells wrote, by kind ([`written`]).
@@ -35,6 +38,7 @@ pub struct Written {
     pub framed: u64,
     pub own: u64,
     pub log: u64,
+    pub relocated: u64,
     /// The writes, of every kind, each to a range of a file: what the host's kernel counts the
     /// pages of, as it dirties them, each write's at most one page more than its bytes take
     /// (TASK-330.2).
@@ -43,18 +47,19 @@ pub struct Written {
 
 impl Written {
     /// Each kind, by its name in the extent daemon's stats.
-    pub fn named(&self) -> [(&'static str, u64); 5] {
+    pub fn named(&self) -> [(&'static str, u64); 6] {
         [
             ("raw", self.raw),
             ("copied", self.copied),
             ("framed", self.framed),
             ("own", self.own),
             ("log", self.log),
+            ("relocated", self.relocated),
         ]
     }
 }
 
-static WRITTEN: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+static WRITTEN: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
 static WRITES: AtomicU64 = AtomicU64::new(0);
 
 /// A cell of this process's wrote `bytes` of `kind`, in one write.
@@ -72,6 +77,7 @@ pub fn written() -> Written {
         framed: load(Kind::Framed),
         own: load(Kind::Own),
         log: load(Kind::Log),
+        relocated: load(Kind::Relocated),
         writes: WRITES.load(Ordering::Relaxed),
     }
 }

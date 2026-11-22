@@ -1048,6 +1048,14 @@ impl<F> Uncommitted<F> {
         self.changes.push(change);
     }
 
+    /// cladefs: the extents freed since the last commit, which the next frees.
+    pub fn frees(&self) -> impl Iterator<Item = ExtentId> + '_ {
+        self.changes.iter().filter_map(|change| match change {
+            Change::Free(extent) => Some(*extent),
+            _ => None,
+        })
+    }
+
     /// cladefs: the cell's capacity is `capacity`, as of the next commit.
     pub fn resize(&mut self, capacity: u64) {
         self.capacity = Some(capacity);

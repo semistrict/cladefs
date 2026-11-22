@@ -703,6 +703,54 @@ fn snapshots_dropped_are_gone() {
     assert_ne!(device.snapshot().unwrap().version, dropped);
 }
 
+/// cladefs doc-26 (TASK-203): a device whose window holds a private page, its VM process's own,
+/// takes no snapshot: refused once its workers are quiesced, before a version is made, saying how
+/// many, as no extent holds the page's bytes. The page rebound, an extent of its bytes mapped over
+/// it as the guest's freeze does, it takes one.
+#[test]
+fn windows_holding_private_pages_take_no_snapshot() {
+    let dir = daemon();
+    let lost: virtio_extent::OnLost = Arc::new(|| panic!("the daemon went"));
+    let vm: Arc<dyn WindowVm> = Arc::new(FakeVm::default());
+    let config = Config { dax_window_size: Some(4 << 20), ..config(&dir, "store") };
+    let mut device = Device::new(config, 1, vm, lost).unwrap();
+    device.activate(device.features(), Arc::new(Counted::default())).unwrap();
+    let mut space = [0u8; size_of::<ConfigSpace>()];
+    device.read_config(0, &mut space);
+    let cell = u64::from_le(ConfigSpace::read_from_bytes(&space).unwrap().cell);
+    let ps = cladefs::pages::page_size();
+    let id = |sequence: u64| ExtentIdLe { cell: cell.to_le(), sequence: sequence.to_le() };
+    for sequence in [1, 2] {
+        let io = IoArgs { id: id(sequence), offset: 0, len: (ps as u32).to_le(), root_len: 0 };
+        let write = bytes(VIRTIO_EXTENT_T_WRITE, 0, Some(io), &vec![sequence as u8; ps as usize]);
+        assert_eq!(serve_with(&device, &write, RESPONSE).1, 0);
+    }
+    let commit = bytes(VIRTIO_EXTENT_T_COMMIT, 0, Some(CommitArgs::default()), &[]);
+    assert_eq!(serve_with(&device, &commit, RESPONSE).1, 0);
+    let map = |sequence: u64| {
+        let args = MapArgs { id: id(sequence), offset: 0, len: ps.to_le(), window_offset: 0 };
+        bytes(VIRTIO_EXTENT_T_MAP, 0, Some(args), &[])
+    };
+    assert_eq!(serve_with(&device, &map(1), RESPONSE).1, 0);
+    let args = UnmapArgs { window_offset: 0, len: ps.to_le() };
+    let private = bytes(VIRTIO_EXTENT_T_PRIVATE, 0, Some(args), &[]);
+    assert_eq!(serve_with(&device, &private, RESPONSE).1, 0);
+    let freeze = bytes::<Info>(VIRTIO_EXTENT_T_FREEZE, VIRTIO_EXTENT_FREEZE_FROZEN, None, &[]);
+    assert_eq!(serve_with(&device, &freeze, RESPONSE).1, 0);
+
+    let mut quiesced = false;
+    let refused = device.take_snapshot(|| quiesced = true).unwrap_err();
+    assert!(quiesced, "refused before its workers were quiesced");
+    assert_eq!(
+        refused.to_string(),
+        "Extent device extents: its DAX window holds 1 private pages, whose bytes no extent holds \
+         (freeze the guest's filesystem, which rebinds them)"
+    );
+    assert!(device.snapshot().is_none(), "a version made");
+    assert_eq!(serve_with(&device, &map(2), RESPONSE).1, 0);
+    device.take_snapshot(|| {}).unwrap();
+}
+
 /// A device with a window reserves it of its VM, its private pages at most in its configuration,
 /// creates it as the driver activates the device, and, restored from a snapshot, reserves it where
 /// the snapshot had it; dropped, it removes its slot before releasing its addresses.

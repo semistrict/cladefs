@@ -19,8 +19,8 @@
 //!   (`crate::cache::entries`); `cladefsd_window_mappings`, `cladefsd_window_mapped_bytes` and
 //!   `cladefsd_window_pages`: the ranges the VMs' windows map, their bytes, and the pages of them
 //!   mapped in the VM processes (`crate::dax::live`, TASK-131.6); cladefs:
-//!   `cladefsd_window_private_pages`, of those, the private copies of windows that copy on write,
-//!   and `cladefsd_window_open_maps_refused_total`, the `MAP`s of open extents refused, which no
+//!   `cladefsd_window_private_pages`, the private copies of windows that copy on write, as their
+//!   VM processes say (doc-26), and `cladefsd_window_open_maps_refused_total`, the `MAP`s of open extents refused, which no
 //!   guest makes (backlog doc-13).
 //! - cladefs: of each VM process connected that opened a cell, by its cell, in
 //!   base 32, and its connection's number (`connection`), which tells a writer and its
@@ -99,7 +99,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 /// The kinds of request metrics are kept of, and their names.
-const KINDS: [(u32, &str); 23] = [
+const KINDS: [(u32, &str); 22] = [
     (OPEN, "open"),
     (READ, "read"),
     (WRITE, "write"),
@@ -120,8 +120,6 @@ const KINDS: [(u32, &str); 23] = [
     (UNPIN, "unpin"),
     (TRANSFER, "transfer"),
     (FREE_MANY, "free_many"),
-    // cladefs: backlog doc-13.
-    (PRIVATE, "private"),
     // cladefs: TASK-111.4.
     (STATS, "stats"),
     // cladefs: TASK-92.14.
@@ -270,9 +268,11 @@ pub fn render() -> String {
         ("vm_window_pages", "Pages a VM's DAX window has mapped in its VM process.", |vm| {
             Some(vm.window?.pages)
         }),
-        ("vm_window_private_pages", "Of those, private copies of pages the guest wrote.", |vm| {
-            Some(vm.window?.private_pages)
-        }),
+        (
+            "vm_window_private_pages",
+            "Private copies of pages the guest wrote, as its VM process last said.",
+            |vm| vm.window.is_some().then_some(vm.stage.private),
+        ),
         (
             "vm_host_mappings",
             "Runs of pages a VM process's window has installed in its memory, each a mapping, as \
@@ -647,8 +647,11 @@ pub(super) fn gauges() -> Vec<(&'static str, &'static str, u64)> {
         ),
         (
             "window_private_pages",
-            "Of those, private copies of pages the guest wrote, of windows that copy on write.",
-            live.private_pages,
+            "Private copies of pages the guests wrote, as their VM processes last said.",
+            (super::stats::vms().iter())
+                .filter(|vm| vm.window.is_some())
+                .map(|vm| vm.stage.private)
+                .sum(),
         ),
         (
             "memory_bytes",

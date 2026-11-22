@@ -239,7 +239,9 @@ impl Policy {
 /// bases'. The default tenant's is as any other's ([`default_tenant`], TASK-79.17).
 struct Memory {
     arena: Arc<crate::pages::Arena>,
-    memory: Arc<std::os::fd::OwnedFd>,
+    /// Its arena's memory, reopened read-only: its VM processes copy their guests' writes into
+    /// memory of their own (doc-26), and write no page of it.
+    memory: std::os::fd::OwnedFd,
     /// The default arena's memory, reopened read-only.
     public: std::os::fd::OwnedFd,
     /// cladefs: how many connections the tenant's VM processes have ([`MAX_CONNECTIONS`]).
@@ -250,11 +252,13 @@ struct Memory {
 }
 
 impl Memory {
-    /// An arena of its own, and the default one, read-only.
+    /// An arena of its own, and the default one, each read-only.
     fn new() -> std::io::Result<Self> {
-        let public = reopen_read_only(std::os::fd::AsFd::as_fd(&*crate::pages::physical_memory()))?;
+        use std::os::fd::AsFd;
+        let public = reopen_read_only(crate::pages::physical_memory().as_fd())?;
         let arena = crate::pages::Arena::new();
-        let memory = crate::pages::arena_memory(arena.id()).expect("a new arena");
+        let memory =
+            reopen_read_only(crate::pages::arena_memory(arena.id()).expect("a new arena").as_fd())?;
         let (connections, in_flight) = Default::default();
         Ok(Self { arena, memory, public, connections, in_flight })
     }
@@ -952,7 +956,7 @@ fn traced(span: &trace::Span, request: &Request<'_>) {
             let bytes = mappings.iter().fold(0u64, |sum, mapping| sum.saturating_add(mapping.len));
             (Some(bytes), Some(mappings.len() as u64))
         }
-        Request::Unmap { len, .. } | Request::Private { len, .. } => (Some(*len), None),
+        Request::Unmap { len, .. } => (Some(*len), None),
         Request::Free(_) => (None, Some(1)),
         Request::FreeMany { rest, .. } => (None, Some(1 + rest.len() as u64)),
         Request::Commit { commit, .. } => {
@@ -1426,10 +1430,6 @@ impl Connection {
             Err(Errno::EPROTONOSUPPORT) => refuse_version(&message.header, answer),
             Err(errno) => refuse(answer, errno),
             Ok(Request::Fault(fault)) => self.clone().fault(fault, answer).await,
-            // cladefs: as a fault, which waits for its pages to be brought in (backlog doc-13).
-            Ok(Request::Private { window_offset, len }) => {
-                self.clone().make_private(window_offset, len, answer).await
-            }
             // cladefs: boxed, as an opening's future holds all a cell's opening awaits, some 22 KB,
             // which every request's future, commits' and writes' too, would hold and be copied
             // with, onto the heap in `serve_future`: some 15% of the daemon's CPU under pgbench
@@ -1653,7 +1653,7 @@ impl Connection {
             }
             Request::Info => open_cell.info().map(|info| reply.args = Info(info).args()),
             // No larger than the daemon makes room for, the codec has it (TASK-150.3).
-            Request::Window { size, private_max, budget } => {
+            Request::Window { size, copying, budget } => {
                 let (sender, acks) = (self.peer.sender.clone(), self.peer.acks.clone());
                 let stage = Arc::new(VmProcessStage {
                     sender,
@@ -1661,13 +1661,12 @@ impl Connection {
                     vm: self.peer.id,
                     change: SharedLock::new("stage change", Mutex::default()),
                 });
-                // cladefs: a writer's copies on write, and only a writer's (backlog doc-13).
+                // cladefs: a writer's copies on write, and only a writer's (backlog doc-13), in its
+                // VM process (doc-26).
                 let writer = self.hold().is_some();
-                let window = match private_max {
-                    Some(most) if writer => {
-                        open_cell.create_copying_dax_window(*size, Some(stage), *most)
-                    }
-                    None if !writer => open_cell.create_dax_window(*size, Some(stage)),
+                let window = match *copying {
+                    true if writer => open_cell.create_copying_dax_window(*size, stage),
+                    false if !writer => open_cell.create_dax_window(*size, Some(stage)),
                     _ => return Err(Errno::EINVAL),
                 };
                 let window = window.map_err(|err| {
@@ -1693,27 +1692,25 @@ impl Connection {
             Request::Build(commit) => self.report.said_build(commit),
             Request::Stats { ask, guest } => self.report.answered(*ask, *guest),
             // Served apart, as futures ([`Connection::serve_in_turn`]).
-            Request::Open { .. } | Request::Fault(_) | Request::Private { .. } => {
-                Err(Errno::EINVAL)
-            }
+            Request::Open { .. } | Request::Fault(_) => Err(Errno::EINVAL),
         }
     }
 
     /// cladefs: resolves the guest's `fault` ([`FAULT`]), and replies: a future, which holds no
     /// thread while it waits for the pager (TASK-92.20), served so ([`serve_future`]).
     async fn fault(self: Arc<Self>, fault: Fault, answer: Answer) {
-        let Fault { offset, access, page, .. } = fault;
+        let Fault { offset, page, .. } = fault;
         let began = std::time::Instant::now();
         let faulted = async {
             let window = self.window.with(Mutex::lock).clone().ok_or(Errno::EBADF)?;
             // cladefs: in its turn, as what it pages in holds memory (TASK-149.34).
             let _turn = self.page_ins.acquire().await.map_err(|_| Errno::EIO)?;
-            window.fault(offset, access).await?;
+            window.fault(offset, crate::Access::Read).await?;
             Ok(window)
         };
         let faulted = match faulted.await {
             Ok(window) => {
-                self.traced_fault(&window, began, offset, access);
+                self.traced_fault(&window, began, offset);
                 Ok(())
             }
             Err(errno) => Err(errno),
@@ -1721,15 +1718,11 @@ impl Connection {
         if !page {
             crate::stats::add(crate::stats::Counter::FaultStores, 1);
         }
-        // cladefs: a write refused, or an access to a page the window maps nothing at, stops its
-        // VM if the guest goes on with it for a second, with no more than KVM_RUN's EFAULT to say
-        // so: what the window had there, and its latest MAPs and UNMAPs, each refusal of the
-        // first thousand, a run's few, and every power of two after (TASK-99, TASK-101). Those of
-        // pages mapped nothing too: a guest took one as mapped writably (TASK-119.21).
+        // cladefs: an access to a page the window maps nothing at stops its VM if the guest goes on
+        // with it for a second, with no more than KVM_RUN's EFAULT to say so: what the window had
+        // there, and its latest MAPs and UNMAPs, each refusal of the first thousand, a run's few,
+        // and every power of two after (TASK-99, TASK-101, TASK-119.21).
         let refused = refusal(&fault, faulted);
-        if faulted == Err(Errno::EACCES) {
-            crate::stats::add(crate::stats::Counter::FaultRefusals, 1);
-        }
         if let Some(what) = refused {
             static REFUSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let count = REFUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -1746,24 +1739,9 @@ impl Connection {
         answer.send(faulted, reply, Vec::new(), Vec::new());
     }
 
-    /// cladefs: makes `len` bytes of the window at `window_offset` private ([`PRIVATE`], backlog
-    /// doc-13), and replies: a future, as a fault is, which holds no thread while it waits for the
-    /// pages it copies to be brought in.
-    async fn make_private(self: Arc<Self>, window_offset: u64, len: u64, answer: Answer) {
-        let made = async {
-            let window = self.window.with(Mutex::lock).clone().ok_or(Errno::EBADF)?;
-            // cladefs: in its turn, as a fault's, as it pages in what it copies (TASK-149.34).
-            let _turn = self.page_ins.acquire().await.map_err(|_| Errno::EIO)?;
-            window.make_private(window_offset, len).await
-        };
-        let made = made.await;
-        let reply = answer.reply_header();
-        answer.send(made, reply, Vec::new(), Vec::new());
-    }
-
     /// The VM process's physical memory, which the reply to its `OPEN` hands it, of the arena
-    /// it says ([`Opened`]): its tenant's arena, and the default one, read-only (TASK-43); the
-    /// default tenant's as any other's (TASK-79.17).
+    /// it says ([`Opened`]): its tenant's arena, and the default one, each read-only (TASK-43,
+    /// doc-26); the default tenant's as any other's (TASK-79.17).
     fn memories(&self) -> [std::os::fd::BorrowedFd<'_>; 2] {
         let memory = &self.tenant.memory;
         [memory.memory.as_fd(), memory.public.as_fd()]
@@ -1860,26 +1838,16 @@ impl Connection {
         }
     }
 
-    /// cladefs: records in its trace, as [`Connection::traced`] does, the guest's fault for
-    /// `access` at `offset` in `window`, begun at `began` and resolved: the page of the sealed
+    /// cladefs: records in its trace, as [`Connection::traced`] does, the guest's fault at `offset`
+    /// in `window`, begun at `began` and resolved: the page of the sealed
     /// extent mapped there, if one is still.
-    fn traced_fault(
-        &self,
-        window: &DaxWindow,
-        began: std::time::Instant,
-        offset: u64,
-        access: crate::Access,
-    ) {
+    fn traced_fault(&self, window: &DaxWindow, began: std::time::Instant, offset: u64) {
         let Some(open_cell) = self.cell() else { return };
         if self.reads.get().is_none() && !open_cell.records_reads() {
             return;
         }
         let Some((extent, at)) = window.extent_at(offset) else { return };
-        let kind = match access {
-            crate::Access::Read => Kind::Fault,
-            crate::Access::Write => Kind::Write,
-        };
-        self.traced(kind, began, open_cell, extent, at, crate::pages::page_size());
+        self.traced(Kind::Fault, began, open_cell, extent, at, crate::pages::page_size());
     }
 
     /// Opens the cell at `path`, authorized, as `how` says: creating it if it doesn't exist, or
@@ -2761,15 +2729,15 @@ fn peer_process(stream: &super::wire::Stream) -> std::io::Result<Option<VmProces
 }
 
 /// cladefs: what of the guest's access a fault the window resolved as `faulted` refused, if it
-/// refused any, to tell of: a write to a page mapped read-only, or an access to a page mapped
-/// nothing at. A probe ([`FAULT_PROBE`]) is the VM process's own, of the page after one a write
-/// faulted on, which the guest may map nothing at: its refusal refuses the guest nothing. Told of
-/// as the guest's, it filled cladefsd's log with refusals no access of the guest's met (r544).
-/// The words are the log's, which `scripts/dax-refusals.py` reads: a write is a "store" there.
+/// refused any, to tell of: an access to a page mapped nothing at. A probe ([`FAULT_PROBE`]) is
+/// the VM process's own, of the page after one a write faulted on, which the guest may map nothing
+/// at: its refusal refuses the guest nothing. Told of as the guest's, it filled cladefsd's log
+/// with refusals no access of the guest's met (r544). The words are the log's, which
+/// `scripts/dax-refusals.py` reads. A write refused, a "store" there, is the VM process's to tell
+/// of now, which copies on write itself (doc-26).
 fn refusal(fault: &Fault, faulted: Result<(), Errno>) -> Option<&'static str> {
     match faulted {
         _ if fault.probe => None,
-        Err(Errno::EACCES) => Some("a store"),
         Err(Errno::ENOENT) => Some("an access to nothing mapped"),
         _ => None,
     }
@@ -2778,21 +2746,17 @@ fn refusal(fault: &Fault, faulted: Result<(), Errno>) -> Option<&'static str> {
 #[cfg(test)]
 mod refusal_tests {
     use super::{Errno, Fault, refusal};
-    use crate::Access;
 
     /// cladefs: a probe of a page mapped nothing at, the VM process's own after a write's fault,
-    /// refuses the guest nothing, and isn't told of; the guest's own access to it is, as a write
-    /// refused is. Red with probes told of as the guest's accesses.
+    /// refuses the guest nothing, and isn't told of; the guest's own access to it is. Red with
+    /// probes told of as the guest's accesses.
     #[test]
     fn probes_refuse_the_guest_nothing() {
-        let (read, write) = (Access::Read, Access::Write);
-        let probe = Fault { offset: 0x1000, access: read, page: true, probe: true };
+        let probe = Fault { offset: 0x1000, page: true, probe: true };
         let guests = Fault { probe: false, ..probe };
         let nothing_mapped = Err(Errno::ENOENT);
         assert_eq!(refusal(&probe, nothing_mapped), None);
         assert_eq!(refusal(&guests, nothing_mapped), Some("an access to nothing mapped"));
-        let written = Fault { access: write, page: false, ..guests };
-        assert_eq!(refusal(&written, Err(Errno::EACCES)), Some("a store"));
         assert_eq!(refusal(&guests, Ok(())), None);
     }
 }
@@ -2991,21 +2955,13 @@ impl SecondStage for VmProcessStage {
         }
     }
 
-    fn unmap(&self, offset: u64, len: u64) {
-        self.send(StageOp::Unmap { offset, len });
+    fn unmap(&self, offset: u64, len: u64, private: crate::dax::Private) {
+        let keep_private = private == crate::dax::Private::Keep;
+        self.send(StageOp::Unmap { offset, len, keep_private });
     }
 
     fn window_mapped(&self, offset: u64, len: u64) {
         self.send(StageOp::Mapped { offset, len });
-    }
-
-    /// cladefs: a page an operation, which the VM process takes together, consecutive, and makes as
-    /// a run (`wire::Receiver::take_privates`, TASK-164.10).
-    fn make_private(&self, offset: u64, from: &[Option<crate::pages::PhysLocation>]) {
-        let page_size = crate::pages::page_size();
-        for (at, &from) in from.iter().enumerate() {
-            self.send(StageOp::Private { offset: offset + at as u64 * page_size, from });
-        }
     }
 }
 

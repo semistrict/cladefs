@@ -98,6 +98,29 @@ Decided without you, building Wave 2's track 2A:
 - **Hand mutants may name features** (`# Features: shuttle`), for Shuttle models as killers
   (`crates/cladefs/mutants.sh`).
 
+## doc-26 as built: copy on write in the VM process (board 6210, 2026-11-22)
+
+Decided without you:
+- **`OPEN`'s reply carries no zeros page location.** Its five args are taken. The zeros page is a
+  page of the default arena, which every VM process reads, so a write to it copies zeros by the
+  same `pread` as any page's, some microseconds, rather than none. *Undo:* a payload on `OPEN`'s
+  reply, and `UffdSecondStage` filling zeros for that location.
+- **The private pages ride `STAGE_COUNTS`'s `args[4]`**, its high 32 bits, beside the runs
+  installed in its low 32: all five args were taken. `STAGE_PRIVATE_COUNTS` stays (doc-26 dropped
+  it): its runs of private pages, now the VM process's own copies, and the `PRIVATE`s it serves
+  are costs the daemon's stats still show.
+- **The window remembers what the host's changes took away keeping private pages** (an
+  eviction's, a free's, a rebind's: `WindowState::kept`, runs of pages), as the daemon knows
+  nothing of which pages are private: a private page is where the window has a page mapped, or one
+  of those. The guest's `MAP` and `UNMAP` of a window that copies unmap both, ending their private
+  pages (`Rules::guests_changes_end_private`); a `MAP` of a range never touched unmaps nothing.
+  Doc-26 left this open. *Undo:* unmapping the whole range, which a restore's `MAP_MANY` paid an
+  unmap a mapping for (2,817 stage operations against 1,280).
+- **`CellClient::make_version` refuses `EBUSY` with private pages**, as the daemon's did, and
+  `Device::take_snapshot` refuses first with `SnapshotError::Private`, after quiescing.
+- **The daemon's `FaultRefusals` count stays at 0**: write refusals are the VM process's now, which
+  logs them. The counter is kept in the stats API.
+
 ## doc-26: part slabs, quarantine scoped to what was staged, copy on write in the VM process (board 6124, 2026-11-21)
 
 Decided without you, designing Wave 2's track 2A:
@@ -147,6 +170,27 @@ Decided without you, designing Wave 2's track 2B:
   writer and recovery code alone. Only the cell's own segments are counted, and an emptied
   segment is forgotten. Data lengths come in at acknowledgement now, and from checkpoints and
   tails later in 6214. *Undo:* keep a per-key map in `Writer`'s `Inner`, updated as `apply` runs.
+- **A relocation's commit holds its moves and nothing else** (board 6214, `LocalCell::relocate`).
+  It doesn't seal the guest's open extents, and it doesn't take the guest's frees made since its
+  last commit. A sealed extent refuses its next write, so a commit sealing what the guest has open
+  would fail the guest. That is what `commit_version` would do here.
+  - It waits for writes in progress as a commit does.
+  - It fills no segment and closes none, so the guest's next commit still seals its one-run writes
+    in place (TASK-92.41). It relocates nothing while the guest has filled a segment since its last
+    commit. It also relocates nothing while an extent the guest has open ends its run at the open
+    segment's end: a copy there would split the run that the guest's next write extends.
+    Relocation then waits for a moment between the guest's runs. Whether that starves it under
+    steady sequential writes is for board 6222's measurement to show.
+  - A copy that fails is dead space; the cell goes on, since a relocation is optional.
+  - It is flushed before returning, because the uploader takes only durable commits.
+  - *Other option:* let the guest's next commit carry the moves. A segment closed between commits
+    would then hold moves no commit had recorded yet.
+  - *Undo:* make `relocate_in` a `commit_in` step.
+- **A free's commit number is set when a commit records it**, not guessed as "the next commit's"
+  when the free is made (`kept::PENDING`, `KeptExtents::freed_by`). A relocation's commit, which
+  records no frees, would otherwise take that number, and views as of it lost extents their commit
+  holds. A resize's commit did the same before this. *Undo:* `freed = state.epoch + 1` in `free`,
+  with relocations forbidden while frees are pending.
 
 ## A fork's prefetch reads its prediction into memory, its tenant's arena paying (board 6225, 2026-11-21)
 

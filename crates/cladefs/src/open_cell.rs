@@ -504,7 +504,10 @@ fn upload_wait(epoch: u64) -> trace::Span {
 /// and any other the open cell failing to read or write, `EIO`, logged. The one list of them, which
 /// a writer's requests and a follower's share.
 pub(crate) fn errno(error: anyhow::Error) -> Errno {
-    if error.is::<local_cell::CutOff>() {
+    if let Some(&errno) = error.downcast_ref::<Errno>() {
+        // cladefs: one said already, as a halt's (`crate::halt`), passed on as it was.
+        errno
+    } else if error.is::<local_cell::CutOff>() {
         // A follower too far behind its writer (doc-8, decision 7): it remounts.
         Errno::ESTALE
     } else if let Some(NotHeld(extent)) = error.downcast_ref::<NotHeld>() {
@@ -1564,38 +1567,57 @@ impl OpenCell {
     /// open cell holds it without its data.
     async fn read_stored(&self, extent: ExtentId, offset: u64, data: &mut [u8]) -> Result<()> {
         stats::add(Counter::ReadStoredBytes, data.len() as u64);
-        let read = match &self.following {
-            Some(following) => {
-                let view = following.view.lock(&self.halt)?;
-                self.local.read_view(&view, extent, offset, data)
-            }
-            None => self.local.read(extent, offset, data),
-        };
-        match read {
+        match self.read_held(extent, offset, data) {
             Err(ref error)
                 if let Some(in_bucket) = error.downcast_ref::<local_cell::BucketData>() =>
             {
                 let (location, len) = (in_bucket.location.clone(), data.len() as u64);
-                let fetched = self.fetcher().read(extent, location, offset, len).await;
-                let fetched = fetched.map_err(|failure| {
-                    match failure {
-                        // cladefs: a follower's of an extent its writer freed since its view's
-                        // commit, which the bucket's collector reclaimed: it is cut off, as one too
-                        // far behind its writer is (doc-8, decision 7; TASK-165.8).
-                        local_cell::upload::Failure::Bucket(bucket_cell::Error::Lost(ref lost))
-                            if self.following.is_some() =>
-                        {
-                            log::info!("cladefs: a follower's {extent:?} is gone: {lost}");
-                            Errno::ESTALE
-                        }
-                        failure => upload_errno(failure),
+                // cladefs: what the cell holds of it now, if a relocation moved it meanwhile
+                // (doc-27), read as first, into a buffer of its own.
+                let mut here = vec![0; data.len()];
+                let again = || self.read_held(extent, offset, &mut here);
+                let fetcher = self.fetcher();
+                let followed = fetcher.read_following(extent, location, (offset, len), again);
+                match followed.await.map_err(|error| self.fetch_errno(extent, error))? {
+                    crate::bucket::Followed::Fetched(fetched) => {
+                        data[..fetched.len()].copy_from_slice(&fetched);
+                        data[fetched.len()..].fill(0);
                     }
-                })?;
-                data[..fetched.len()].copy_from_slice(&fetched);
-                data[fetched.len()..].fill(0);
+                    crate::bucket::Followed::Here(()) => data.copy_from_slice(&here),
+                }
                 Ok(())
             }
             read => read.map_err(errno),
+        }
+    }
+
+    /// cladefs: reads `data.len()` bytes at `offset` in `extent` as the cell holds it: as its
+    /// follower's view does, if it follows; failing with [`local_cell::BucketData`] if in the
+    /// bucket.
+    fn read_held(&self, extent: ExtentId, offset: u64, data: &mut [u8]) -> anyhow::Result<()> {
+        match &self.following {
+            Some(following) => {
+                let view = following.view.lock(&self.halt).map_err(anyhow::Error::new)?;
+                self.local.read_view(&view, extent, offset, data)
+            }
+            None => self.local.read(extent, offset, data),
+        }
+    }
+
+    /// cladefs: the errno of a read of `extent` from the bucket that failed with `error`: a
+    /// follower's of an extent its writer freed since its view's commit, which the bucket's
+    /// collector reclaimed, is cut off, as one too far behind its writer is (doc-8, decision 7;
+    /// TASK-165.8).
+    fn fetch_errno(&self, extent: ExtentId, error: anyhow::Error) -> Errno {
+        match error.downcast::<local_cell::upload::Failure>() {
+            Ok(local_cell::upload::Failure::Bucket(bucket_cell::Error::Lost(ref lost)))
+                if self.following.is_some() =>
+            {
+                log::info!("cladefs: a follower's {extent:?} is gone: {lost}");
+                Errno::ESTALE
+            }
+            Ok(failure) => upload_errno(failure),
+            Err(error) => errno(error),
         }
     }
 
@@ -1905,26 +1927,17 @@ impl OpenCell {
     }
 
     /// cladefs: creates the DAX window as [`create_dax_window`](Self::create_dax_window) does, one
-    /// that copies on write (backlog doc-13): a write to a page gives the page a private copy, of
-    /// which it holds `private_max` pages at most, its second stage's memory, not the daemon's:
-    /// none is reserved for them (TASK-501). A cell whose extents can't change, a follower's, a
-    /// version or a public base, takes none (as [`CellAccess::may_write`]).
+    /// whose `second_stage` copies on write (backlog doc-13): a write to a page gives the page a
+    /// private copy there, its VM process's memory, which it bounds, and the daemon knows nothing
+    /// of (TASK-501, doc-26). A cell whose extents can't change, a follower's, a version or a
+    /// public base, takes none (as [`CellAccess::may_write`]).
     pub fn create_copying_dax_window(
         &self,
         size: u64,
-        second_stage: Option<Arc<dyn SecondStage>>,
-        private_max: u64,
+        second_stage: Arc<dyn SecondStage>,
     ) -> Result<DaxWindow, Error> {
         self.admit(Changing::Contents)?;
-        let copying = crate::dax::CopyOnWrite::at_most(private_max);
-        self.install_dax(|| Ok(Dax::copying(size, second_stage, Some(copying))?))
-    }
-
-    /// cladefs: the private pages the DAX window holds (backlog doc-13): none without a window, or
-    /// with one that doesn't copy on write.
-    pub fn private_pages(&self) -> Result<u64> {
-        let dax = self.dax.lock(&self.halt)?;
-        Ok(dax.as_ref().map_or(0, Dax::private_pages))
+        self.install_dax(|| Ok(Dax::copying(size, second_stage)?))
     }
 
     fn install_dax(
@@ -2102,14 +2115,11 @@ impl OpenCell {
 
     /// The DAX window's mappings, in order: what a snapshot of the VM records, to map them again
     /// where it is restored, at the same offsets, with [`OpenCell::map_many`]. Without a
-    /// window, none. cladefs: `EBUSY` while the window holds private pages, which no mapping names
-    /// the bytes of, as a snapshot's version is refused then (TASK-203).
+    /// window, none. cladefs: a VM process with private pages, which no mapping names the bytes
+    /// of, asks for none, as it refuses its snapshot then (TASK-203, doc-26).
     pub fn window_mappings(&self) -> Result<Vec<WindowMapping>> {
         let dax = self.dax.lock(&self.halt)?;
-        match dax.as_ref() {
-            Some(dax) if dax.private_pages() > 0 => Err(Errno::EBUSY),
-            dax => Ok(dax.map_or_else(Vec::new, Dax::mappings)),
-        }
+        Ok(dax.as_ref().map_or_else(Vec::new, Dax::mappings))
     }
 
     /// cladefs: the DAX window's mappings, as [`OpenCell::window_mappings`] has them, its private
@@ -2172,17 +2182,6 @@ impl OpenCell {
         let cell = self.new_child(tenant).await?;
         self.fork_at_rest(path.as_ref(), cell).await?;
         Ok(cell)
-    }
-
-    /// cladefs: forks the open cell as [`OpenCell::fork_quiescent`] does, to `cell`, whatever its
-    /// ID, as [`OpenCell::fork_to`] forks it.
-    #[cfg(test)]
-    pub(crate) async fn fork_quiescent_to(
-        &self,
-        path: impl AsRef<Path>,
-        cell: CellId,
-    ) -> Result<(), Error> {
-        self.fork_at_rest(path.as_ref(), cell).await
     }
 
     /// cladefs: makes a version of the cell (doc-18, doc-20): a name for its state as of its
@@ -2327,18 +2326,11 @@ impl OpenCell {
         Ok(id)
     }
 
-    /// cladefs: runs `then` once nothing is open, and none comes between: not while its window
-    /// holds private pages, whose bytes no extent holds (`EBUSY`, TASK-203, backlog doc-13);
-    /// `EBUSY` with an extent open.
+    /// cladefs: runs `then` once nothing is open, and none comes between: `EBUSY` with an extent
+    /// open. Private pages, whose bytes no extent holds (TASK-203, backlog doc-13), are its VM
+    /// process's, which refuses its snapshot while it holds any, before it asks for the version
+    /// (doc-26).
     async fn at_rest<T>(&self, then: impl Future<Output = Result<T, Error>>) -> Result<T, Error> {
-        let private = self.private_pages()?;
-        if private > 0 {
-            let refused = format!(
-                "the DAX window holds {private} private pages, whose bytes no extent holds: \
-                 freeze the guest's filesystem, which rebinds them"
-            );
-            return Err(Error::new(anyhow::Error::new(Errno::EBUSY).context(refused)));
-        }
         self.admit(Changing::Cell)?;
         let _opening = self.opening.write(&self.halt).await?;
         if !self.is_quiescent()? {
@@ -2348,13 +2340,11 @@ impl OpenCell {
         then.await
     }
 
-    /// cladefs: forks the open cell as [`OpenCell::fork_quiescent`] says. Not while its window
-    /// holds private pages (`EBUSY`), whose bytes are the VM's, held by no extent: a fork, or a VM
-    /// snapshot's version, would name their sources, and a VM restored from it
-    /// read their old bytes (TASK-203, backlog doc-13). The guest's freeze writes them back and
-    /// rebinds them first; one it couldn't, as a writeback that found no memory leaves (TASK-207)
-    /// or a rebind refused, it says it left. Checked before the fork's lock, which no write of the
-    /// window's private pages takes: with its VM paused, as a snapshot has it, none comes after.
+    /// cladefs: forks the open cell as [`OpenCell::fork_quiescent`] says. A VM process whose window
+    /// holds private pages, whose bytes are the VM's, held by no extent, asks for no fork: it, or
+    /// a VM snapshot's version, would name their sources, and a VM restored from it read their old
+    /// bytes (TASK-203, backlog doc-13, doc-26). The guest's freeze writes them back and rebinds
+    /// them first.
     async fn fork_at_rest(&self, path: &Path, cell: CellId) -> Result<(), Error> {
         self.fork_span(cell).run_async(self.fork_at_version(path, cell, true)).await
     }
@@ -2663,7 +2653,9 @@ mod tests {
     #[test]
     fn each_open_cell_error_has_its_errno() {
         let extent = ExtentId { cell: 1, sequence: 2 };
-        let cases: [(anyhow::Error, Errno); 14] = [
+        let cases: [(anyhow::Error, Errno); 15] = [
+            // cladefs: one said already, a halt's, as it was (the review of 8cf431e95).
+            (anyhow::Error::new(Errno::EACCES), Errno::EACCES),
             (local_cell::CutOff.into(), Errno::ESTALE),
             (anyhow::Error::new(NoExtent(extent)).context(NotHeld(extent)), Errno::EIO),
             (NoExtent(extent).into(), Errno::ENOENT),
@@ -3102,6 +3094,44 @@ mod tests {
         let fork = OpenCell::open(dir.path().join("fork")).await.unwrap();
         assert!(!fork.local.keys().is_empty());
         assert_eq!(read(&fork, a, 0, 2 * BLOCK).await, Ok(data));
+    }
+
+    /// cladefs: doc-27 (board 6214): a page-in's fetch that read where its extent is before the
+    /// cell's writer relocated it, the relocation acknowledged since and the object it read from
+    /// deleted, as the collector deletes what no state it keeps reads, reads where the extent is
+    /// again, and fetches it there. One whose object is gone where the cell holds it still is lost.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fetches_of_extents_relocated_meanwhile_read_where_they_went() {
+        use bucket_cell::bucket::Bucket as _;
+        let (cell, _dir) = cell(1 << 20).await;
+        let extent = id(&cell, 1);
+        write(&cell, extent, 0, &pattern(6, BLOCK)).await.unwrap();
+        cell.commit(None).await.unwrap();
+        let in_bucket = || match cell.local.place(extent).unwrap() {
+            Some(local_cell::Place::Bucket(at)) => at,
+            place => panic!("{extent:?} at {place:?}"),
+        };
+        let from = in_bucket();
+        let relocating =
+            local_cell::Relocating { extent, from: from.clone(), data: pattern(6, BLOCK) };
+        assert_eq!(cell.local.relocate(vec![relocating]).await.unwrap(), BLOCK as u64);
+        cell.commit(None).await.unwrap();
+        let to = in_bucket();
+        assert_ne!(to.key, from.key);
+        cell.bucket().delete(&from.key).await.unwrap();
+
+        let fetch = async |at: &extent_frame::segment::Location| {
+            let local = Arc::downgrade(&cell.local);
+            cache::fetched(local, cell.fetcher(), extent, at.clone(), 0, BLOCK as u64).await
+        };
+        assert_eq!(fetch(&from).await.unwrap(), pattern(6, BLOCK));
+        cell.bucket().delete(&to.key).await.unwrap();
+        let lost = fetch(&to).await.unwrap_err();
+        let lost = lost.downcast_ref::<local_cell::upload::Failure>();
+        assert!(
+            matches!(lost, Some(local_cell::upload::Failure::Bucket(bucket_cell::Error::Lost(_)))),
+            "{lost:?}"
+        );
     }
 
     /// TASK-165.8: a follower reads what its view's commit holds that the writer freed after it in
@@ -3882,7 +3912,7 @@ mod tests {
             self.0.lock().unwrap().push((offset, len));
         }
 
-        fn unmap(&self, _: u64, _: u64) {}
+        fn unmap(&self, _: u64, _: u64, _: crate::dax::Private) {}
     }
 
     /// cladefs: an open cell of a cell kept in object storage, opened where its data is not, maps
@@ -3938,7 +3968,7 @@ mod tests {
             }
         }
 
-        fn unmap(&self, offset: u64, len: u64) {
+        fn unmap(&self, offset: u64, len: u64, _: crate::dax::Private) {
             let mut ops = self.0.lock().unwrap();
             for page in (0..len).step_by(page_size() as usize) {
                 ops.push(("unmap", offset + page));
@@ -4608,16 +4638,17 @@ mod tests {
         assert!(OpenCell::open(&path).await.unwrap().is_public());
     }
 
-    /// cladefs TASK-164.1 (backlog doc-13): a window that copies on write maps sealed extents and
-    /// zeros alone, read-only: an extent written since the last commit it refuses to map (`EPERM`),
-    /// the open extent's bytes left in the open cell. Sealed, a
-    /// write to its page copies the page, the extent as the open cell's reads have it, and a commit
-    /// leaves the private page. A follower takes no such window.
+    /// cladefs TASK-164.1 (backlog doc-13): a window whose stage copies on write maps sealed
+    /// extents and zeros alone, read-only: an extent written since the last commit it refuses to
+    /// map (`EPERM`), the open extent's bytes left in the open cell. A cell has one window, and a
+    /// follower takes no such window (`EROFS`). Its writes, private pages, are its VM process's
+    /// (doc-26: `dax::uffd`'s tests).
     #[tokio::test(flavor = "multi_thread")]
     async fn copying_windows_map_sealed_extents_alone() {
         let (cell, _dir) = cell(1 << 24).await;
         let ps = page_size();
-        let window = cell.create_copying_dax_window(4 * ps, None, 2).unwrap();
+        let stage = || Arc::new(crate::dax::tests::Recorded::default());
+        let _window = cell.create_copying_dax_window(4 * ps, stage()).unwrap();
         let (sealed, open, never) = (id(&cell, 1), id(&cell, 2), id(&cell, 3));
         write(&cell, sealed, 0, &pattern(1, BLOCK)).await.unwrap();
         cell.commit(None).await.unwrap();
@@ -4627,64 +4658,12 @@ mod tests {
         assert_eq!(cell.map(never, 0, ps, 0).await, Err(Errno::ENOENT));
         assert_eq!(cell.local.extent(open).map_err(errno), Ok(Some((BLOCK as u64, true))));
         assert_eq!(read(&cell, open, 0, BLOCK).await, Ok(pattern(2, BLOCK)));
-
         cell.map(sealed, 0, ps, 0).await.unwrap();
-        block_on(window.fault(0, Access::Write)).unwrap();
-        // SAFETY: The page is mapped, private, and nothing else accesses it.
-        unsafe { *window.host_base() = 0xee };
-        assert_eq!(cell.private_pages(), Ok(1));
-        assert_eq!(read(&cell, sealed, 0, BLOCK).await, Ok(pattern(1, BLOCK)));
-        cell.commit(None).await.unwrap();
-        assert_eq!(cell.private_pages(), Ok(1));
-        // SAFETY: As above.
-        assert_eq!(unsafe { *window.host_base() }, 0xee);
 
-        let again = cell.create_copying_dax_window(ps, None, 1);
+        let again = cell.create_copying_dax_window(ps, stage());
         assert_eq!(again.err().and_then(|error| error.errno()), Some(Errno::EEXIST));
         let follower = Arc::new(cell).follow();
-        let following = follower.create_copying_dax_window(ps, None, 1);
+        let following = follower.create_copying_dax_window(ps, stage());
         assert_eq!(following.err().and_then(|error| error.errno()), Some(Errno::EROFS));
-    }
-
-    /// TASK-203: an open cell whose window holds a private page makes no version nor quiescent fork
-    /// of itself, and lists no mappings of its window, which would name the page's source, not its
-    /// bytes, as a snapshot of the VM would record them: `EBUSY`, saying how many. Rebound to an
-    /// extent of its bytes, as the guest's freeze does, both are made (a VM restored reads them:
-    /// cladefsd's snapshots_after_private_pages_are_rebound_restore_their_bytes).
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_window_holding_private_pages_takes_no_snapshot() {
-        let (cell, dir) = cell(1 << 24).await;
-        let ps = page_size();
-        let window = cell.create_copying_dax_window(4 * ps, None, 2).unwrap();
-        let (sealed, rebound) = (id(&cell, 1), id(&cell, 2));
-        write(&cell, sealed, 0, &pattern(1, BLOCK)).await.unwrap();
-        cell.commit(None).await.unwrap();
-        cell.map(sealed, 0, ps, 0).await.unwrap();
-        block_on(window.fault(0, Access::Write)).unwrap();
-        // SAFETY: The page is mapped, private, and nothing else accesses it.
-        unsafe { *window.host_base() = 0xee };
-        assert_eq!(cell.private_pages(), Ok(1));
-        let refused = cell.make_version(None).await.unwrap_err();
-        assert_eq!(refused.errno(), Some(Errno::EBUSY));
-        assert!(format!("{refused:#}").contains("holds 1 private pages"), "{refused:#}");
-        let forked = cell
-            .fork_quiescent_to(dir.path().join("fork"), crate::host_cell::fork_child(cell.cell()))
-            .await;
-        assert_eq!(forked.err().and_then(|error| error.errno()), Some(Errno::EBUSY));
-        assert_eq!(cell.window_mappings(), Err(Errno::EBUSY));
-
-        // The freeze's rebind: the page's bytes written to an extent, sealed, mapped over it.
-        let mut bytes = pattern(1, ps as usize);
-        bytes[0] = 0xee;
-        write(&cell, rebound, 0, &bytes).await.unwrap();
-        cell.commit(None).await.unwrap();
-        cell.map(rebound, 0, ps, 0).await.unwrap();
-        assert_eq!(cell.private_pages(), Ok(0));
-        let contents = MappingContents::Extent { extent: rebound, offset: 0 };
-        assert_eq!(
-            cell.window_mappings(),
-            Ok(vec![WindowMapping { window_offset: 0, len: ps, contents }])
-        );
-        cell.make_version(None).await.unwrap();
     }
 }

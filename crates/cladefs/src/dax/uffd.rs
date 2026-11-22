@@ -38,9 +38,10 @@
 //! a page a window that doesn't copy on write maps, read-only, is resolved as a read, and the page
 //! made read-only here, so that the worker's write fails and the vCPU's own access decides.
 //!
-//! cladefs: a window that copies on write (backlog doc-13, `CopyOnWrite`) makes a page private for
-//! a store instruction, which a load mustn't: the worker's write, of a page not here, is a load's
-//! as much as a store's. So a fault for writing is the guest's if it write-protected the page here,
+//! cladefs: a window that copies on write (backlog doc-13) makes a page private for a store
+//! instruction, here, a copy of the page the window names there, read from its arena under the
+//! lock the window's changes take (doc-26), which a load mustn't: the worker's write, of a page not
+//! here, is a load's as much as a store's. So a fault for writing is the guest's if it write-protected the page here,
 //! as a load of a page here takes no fault, and if the faulting thread is one of the guest's own
 //! (its vCPUs', [`guest_thread_started`]); a worker's write is resolved as a load, the page made
 //! read-only here so that the worker's write fails: of a page not here, and of one write-protected
@@ -104,7 +105,7 @@
 //! seccomp filter refuses it, killing the process for it, where a device it cannot open is an error
 //! saying so (TASK-308).
 
-use super::{Access, Anew, Faults, Prefault, SecondStage};
+use super::{Access, Anew, Faults, Prefault, Private, SecondStage};
 use crate::error::{Errno, Error, Result};
 use crate::pages::page_size;
 use futures::StreamExt;
@@ -209,6 +210,9 @@ pub(crate) struct UffdSecondStage<H: HostMemory = Syscalls> {
     /// cladefs: its window's private memory, if the window copies on write (backlog doc-13): a
     /// worker's write of a page not here is resolved as a load then (see the module docs).
     private: OnceLock<PrivateMemory>,
+    /// cladefs: the runs of private pages it made, each at once, their pages, and the nanoseconds
+    /// they took it (TASK-164.10, [`Self::private_costs`]).
+    copies: [AtomicU64; 3],
     /// cladefs: whether every write is the guest's, a VM's memory's window's
     /// ([`Self::writes_are_guests`]).
     process_writes: std::sync::atomic::AtomicBool,
@@ -228,6 +232,9 @@ pub(crate) struct UffdSecondStage<H: HostMemory = Syscalls> {
 /// a TLB flush of every CPU of the process's to take away, beside the window's (TASK-276.6).
 pub(crate) struct PrivateMemory {
     fd: OwnedFd,
+    /// How many private pages it holds at most, the VM's `private_max` (doc-26): a write past them
+    /// is refused, and its VM stops.
+    most: u64,
 }
 
 /// cladefs: what a second stage is doing to its memory, holding its pages' lock, and since when, in
@@ -597,6 +604,9 @@ struct Pages {
     /// vCPU's `KVM_RUN`s failing lifts them, thousands a second while the guest strays, which a
     /// look at every page of the window took the fault thread from serving faults for (TASK-187).
     for_workers: Vec<usize>,
+    /// cladefs: how many of its pages are private (backlog doc-13), which [`PrivateMemory`]'s
+    /// `most` bounds (doc-26).
+    private: u64,
 }
 
 impl Pages {
@@ -644,6 +654,7 @@ impl Pages {
             if !std::mem::take(&mut self.pages[at].private) {
                 continue;
             }
+            self.private -= 1;
             match runs.last_mut() {
                 Some(run) if run.end == at => run.end = at + 1,
                 _ => runs.push(at..at + 1),
@@ -654,10 +665,11 @@ impl Pages {
 
     /// cladefs: what a change of `range` takes away from its memory
     /// ([`UffdSecondStage::take_away`]): its pages installed, its private pages, which it ends,
-    /// private no more, and those it made inaccessible or read-only and installed nothing at, which
-    /// it gives back. Recorded before the change counts itself on the pages, which gives back what
-    /// was withheld.
-    fn take_away(&mut self, range: std::ops::Range<usize>) -> Taking {
+    /// private no more, if `private` says they go, and those it made inaccessible or read-only and
+    /// installed nothing at, which it gives back. Recorded before the change counts itself on the
+    /// pages, which gives back what was withheld. The host's own changes keep the private pages
+    /// (doc-26, spec rule evictionKeepsPrivate), and so does a map (mapsKeepPrivate).
+    fn take_away(&mut self, range: std::ops::Range<usize>, private: Private) -> Taking {
         let installed = self.any_installed(range.clone()) && rules().changes_take_away_installed;
         let protected = (range.clone())
             .filter(|&at| {
@@ -667,7 +679,9 @@ impl Pages {
                     && !page.mapped.is_some_and(|mapped| mapped.installed())
             })
             .collect();
-        Taking { installed, private: self.take_private(range), protected }
+        let ends = private == Private::End || !rules().host_changes_keep_private;
+        let private = if ends { self.take_private(range) } else { Vec::new() };
+        Taking { installed, private, protected }
     }
 
     /// cladefs: whether the pages of `range` are each installed, in one run of memory from `phys`
@@ -699,6 +713,18 @@ struct Taking {
     /// The pages among them installed nothing at, private or not, that a fault made inaccessible,
     /// withheld, or read-only, to be made accessible again.
     protected: Vec<usize>,
+}
+
+/// cladefs: what a guest's write to a page found, on a window that copies on write
+/// ([`UffdSecondStage::copy`], doc-26).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Copied {
+    /// The page is private: made so now, or before.
+    Private,
+    /// Past the window's private pages: the write is refused.
+    Past,
+    /// The window names nothing there yet: to read in first.
+    Unnamed,
 }
 
 /// What a second stage maps its host memory with.
@@ -887,6 +913,17 @@ pub(crate) struct Rules {
     /// cladefs: a page left out is installed as the window names it as it is installed, under the
     /// lock its changes take, not as a fault found it before a change since (TASK-276.6).
     pub install_as_named_now: bool,
+    /// cladefs: a guest's write copies the page the window names there under the pages' lock, which
+    /// the change taking the page away takes, so that the copy comes before the unmap's
+    /// acknowledgement, and the daemon frees the page only after it (doc-26, spec rule
+    /// copyUnderLock).
+    pub copy_under_lock: bool,
+    /// cladefs: the host's own unmaps, an eviction's or a free's (`STAGE_KEEP_PRIVATE`), leave the
+    /// private pages there (doc-26, spec rule evictionKeepsPrivate).
+    pub host_changes_keep_private: bool,
+    /// cladefs: a page the window maps where a private page is leaves it private (doc-26, spec rule
+    /// mapsKeepPrivate): after an eviction left it, the window maps the rest of the part over it.
+    pub maps_keep_private: bool,
 }
 
 impl Rules {
@@ -903,6 +940,9 @@ impl Rules {
         private_emptied_as_it_goes: true,
         changes_take_away_installed: true,
         install_as_named_now: true,
+        copy_under_lock: true,
+        host_changes_keep_private: true,
+        maps_keep_private: true,
     };
 }
 
@@ -1171,7 +1211,14 @@ impl<H: HostMemory> UffdSecondStage<H> {
         }
         let pages = WindowPages::new(size / page_size).map_err(Error::new)?;
         let for_workers = Vec::new();
-        let pages = Mutex::new(Pages { pages, runs: 0, clock: 0, released: false, for_workers });
+        let pages = Mutex::new(Pages {
+            pages,
+            runs: 0,
+            clock: 0,
+            released: false,
+            for_workers,
+            private: 0,
+        });
         let budget = budget.max(1);
         let taken = Taken::default();
         let stage = Arc::new(Self {
@@ -1184,6 +1231,7 @@ impl<H: HostMemory> UffdSecondStage<H> {
             budget,
             taken,
             private: OnceLock::new(),
+            copies: Default::default(),
             process_writes: std::sync::atomic::AtomicBool::new(false),
             start: std::time::Instant::now(),
             busy: Busy::default(),
@@ -1204,17 +1252,35 @@ impl<H: HostMemory> UffdSecondStage<H> {
         self.leave_out(self.base, self.size);
     }
 
-    /// cladefs: its window copies on write (backlog doc-13), from now on: told before the window is
-    /// made, as it faults nothing before then. Its memory, all of it, is its private memory from
-    /// now on, none of it filled, which faults as the anonymous memory it replaces did (see the
-    /// module docs).
-    pub(crate) fn copy_on_write(&self) -> Result<(), Error> {
+    /// cladefs: its window copies on write (backlog doc-13), from now on, holding `most` private
+    /// pages at most, one at least, as many as it has pages at most (doc-26: the VM process bounds
+    /// them, not the daemon): told before the window is made, as it faults nothing before then.
+    /// Its memory, all of it, is its private memory from now on, none of it filled, which faults
+    /// as the anonymous memory it replaces did (see the module docs).
+    pub(crate) fn copy_on_write(&self, most: u64) -> Result<(), Error> {
+        let pages = (self.size as u64) / page_size();
+        if most == 0 || most > pages {
+            return Err(Error::new(Errno::EINVAL));
+        }
         let fd = self.host.private_memory(self.size).map_err(Error::new)?;
-        if self.private.set(PrivateMemory { fd }).is_err() {
+        if self.private.set(PrivateMemory { fd, most }).is_err() {
             return Err(Error::msg("the window copies on write already"));
         }
         self.leave_out_untouched();
         Ok(())
+    }
+
+    /// cladefs: how many of its pages are private (backlog doc-13): none unless it copies on write.
+    /// A snapshot of its VM is refused while any is (doc-26), and its daemon's metrics show them.
+    pub(crate) fn private_pages(&self) -> u64 {
+        self.pages.lock().unwrap().private
+    }
+
+    /// cladefs: the runs of private pages it made so far, each at once, their pages, and the
+    /// nanoseconds they took it, which its VM process tells the daemon of (`STAGE_PRIVATE_COUNTS`,
+    /// TASK-164.10).
+    pub(crate) fn private_costs(&self) -> [u64; 3] {
+        self.copies.each_ref().map(|count| count.load(Ordering::Relaxed))
     }
 
     /// cladefs: makes every write the guest's, whoever's: a VM's memory's window (TASK-456.3),
@@ -1333,13 +1399,27 @@ impl<H: HostMemory> UffdSecondStage<H> {
             change(recorded);
             return true;
         }
+        self.made_locked(&mut pages, addr, len, now, || change(recorded));
+        true
+    }
+
+    /// cladefs: makes `change` to the memory of the `len` bytes at `addr`, holding the pages'
+    /// lock, recorded already, counting it for each page, which is withheld no more, as
+    /// [`Self::change`] does.
+    fn made_locked(
+        &self,
+        pages: &mut Pages,
+        addr: usize,
+        len: usize,
+        now: u64,
+        change: impl FnOnce(),
+    ) {
         for page in &mut pages.pages[self.page_range(addr, len)] {
             page.made = page.made.wrapping_add(1);
             page.withheld = false;
         }
         let _busy = self.busy.doing(Doing::Change, now);
-        change(recorded);
-        true
+        change();
     }
 
     /// cladefs: lets go of the memory, as the connection to the daemon whose pages it maps goes,
@@ -1356,7 +1436,7 @@ impl<H: HostMemory> UffdSecondStage<H> {
         let len = pages.pages.len();
         match WindowPages::new(len) {
             Ok(fresh) => {
-                (pages.pages, pages.runs) = (fresh, 0);
+                (pages.pages, pages.runs, pages.private) = (fresh, 0, 0);
                 pages.for_workers.clear();
             }
             Err(err) => {
@@ -1366,6 +1446,7 @@ impl<H: HostMemory> UffdSecondStage<H> {
                         (page.mapped, page.restricted, page.private) = (None, false, false)
                     })
                 });
+                pages.private = 0;
             }
         }
         self.host.map(self.base, self.size, libc::PROT_NONE, Memory::Anonymous);
@@ -1505,25 +1586,30 @@ impl<H: HostMemory> UffdSecondStage<H> {
         // taken as the guest's, made a private page the guest never counted, and its frozen VM's
         // snapshot was refused (TASK-191, GCE r685, r686, r688).
         let for_worker = access == Access::Write && self.copying() && !self.guest_writes(thread);
-        // cladefs: a write of the guest's own to a page not here, on a window that copies on write,
-        // goes to the window as the guest's, which makes the page private in place of nothing,
-        // rather than installed first, to be stored to and replaced by its private copy, a TLB
-        // flush (backlog doc-13: a write's first touch, TASK-276.6). One private already has
-        // nothing to wait for: it was filled after the fault found it unfilled.
-        let first_guest_write =
-            !guest_write && access == Access::Write && self.copying() && !for_worker;
+        // cladefs: a write of the guest's own, on a window that copies on write, is copied here,
+        // from what the window names at the page, under the lock its changes take (doc-26, spec
+        // rule copyUnderLock): the page made private in place of nothing if it isn't here, rather
+        // than installed first, to be stored to and replaced by its private copy, a TLB flush
+        // (backlog doc-13: a write's first touch, TASK-276.6). No probe follows: the guest's
+        // writes there take private pages whether their pages are here or not, a fault either way,
+        // and the probe, made once the faulting thread is woken, installed the pages after it
+        // read-only for a moment (`install`) as that thread stored on to them, which a vCPU's VMM
+        // retries and a thread of the host's dies of: SIGSEGV in
+        // snapshots_after_private_pages_are_rebound_restore_their_bytes, 3 runs in 500.
+        if access == Access::Write && self.copying() && !for_worker {
+            self.copy_for(window, addr, thread).await;
+            self.host.wake(addr, page_size);
+            return;
+        }
         // A page the window maps, left out past the budget, or named and never touched, is
         // installed, as the window names it, without the window; any other fault is the window's
         // to resolve.
-        let reinstalled = match first_guest_write {
-            true => self.is_private(addr),
-            false => !guest_write && self.reinstall(addr),
-        };
+        let reinstalled = !guest_write && self.reinstall(addr);
         if !reinstalled {
-            self.resolve_through(window, addr, access, guest_write, for_worker, thread).await;
+            self.resolve_through(window, addr, access, for_worker, thread).await;
             // cladefs: what the window named for the fault installed now, which the access,
             // retried, finds, rather than faulting again to install it (TASK-276.6).
-            if !guest_write && !first_guest_write {
+            if !guest_write {
                 self.reinstall(addr);
             }
         }
@@ -1541,17 +1627,10 @@ impl<H: HostMemory> UffdSecondStage<H> {
         // pages after it are mapped read-only, the next read in if need be, so that writes to them
         // fault as writes, which dirty runs of pages, and loads do not fault at all. Past the file,
         // or the window, there is nothing to map. cladefs: a probe, whose page the guest may not
-        // map, which the window refuses then without telling of it as of the guest's access.
-        // cladefs: on a window that copies on write, a worker's write alone, which a run of loads
-        // makes: a guest's write there takes a private page whether its page is here or not, a
-        // fault either way, and the probe, made once the faulting thread is woken, installed the
-        // pages after it read-only for a moment (`install`) as that thread stored on to them, which
-        // a vCPU's VMM retries and a thread of the host's dies of: SIGSEGV in
-        // snapshots_after_private_pages_are_rebound_restore_their_bytes, 3 runs in 500.
+        // map, which the window refuses then without telling of it as of the guest's access; on a
+        // window that copies on write, a worker's write alone, which a run of loads makes.
         let next = offset + page_size as u64;
-        let probes = !self.copying() || for_worker;
-        if probes && !reinstalled && !guest_write && access == Access::Write && next < window.size()
-        {
+        if !reinstalled && !guest_write && access == Access::Write && next < window.size() {
             match window.probe(next).await {
                 // cladefs: installed, as the window names it now (TASK-276.6).
                 Ok(()) => {
@@ -1563,29 +1642,33 @@ impl<H: HostMemory> UffdSecondStage<H> {
         }
     }
 
-    /// Resolves the fault at `addr`, an `access`, a `guest_write` to a page here if so, of
-    /// `thread`'s, through `window`, as [`resolve`](Self::resolve) does all but a page left out: a
-    /// worker's write as a load, `for_worker`. A fault the window refuses restricts the page as the
-    /// access found it; one it can't resolve aborts the process, as its faulting thread can't go
-    /// on.
+    /// Resolves the fault at `addr`, an `access` of `thread`'s, through `window`, as
+    /// [`resolve`](Self::resolve) does all but a page left out, and a guest's write on a window
+    /// that copies on write: a worker's write as a load, `for_worker`. A fault the window refuses
+    /// restricts the page as the access found it; one it can't resolve aborts the process, as its
+    /// faulting thread can't go on.
     async fn resolve_through(
         &self,
         window: &dyn Faults,
         addr: usize,
         access: Access,
-        guest_write: bool,
         for_worker: bool,
         thread: u32,
     ) {
         let offset = (addr - self.base) as u64;
         // The page as the access found it, which a fault the window does not resolve restricts.
         let seen = self.seen(addr);
-        let resolved = if for_worker {
-            window.fault_page(offset, Access::Read).await
-        } else if guest_write {
-            window.fault(offset, access).await
-        } else {
-            window.fault_page(offset, access).await
+        // cladefs: a write to a window that doesn't copy on write, a follower's, is refused, as
+        // every page is mapped read-only: here, where the window names the page; once it has read
+        // it in, where it names nothing yet, as the window is asked only to read (doc-26).
+        let resolved = match access == Access::Write && !for_worker && self.named(addr) {
+            true => Err(Errno::EACCES),
+            false => match window.fault_page(offset).await {
+                Ok(()) if access == Access::Write && !for_worker && self.named(addr) => {
+                    Err(Errno::EACCES)
+                }
+                resolved => resolved,
+            },
         };
         let resolved = match resolved {
             // Where the window refuses a write, the page is mapped read-only: make it read-only
@@ -1607,22 +1690,278 @@ impl<H: HostMemory> UffdSecondStage<H> {
             }
             resolved => resolved,
         };
+        if let Err(err) = resolved {
+            self.unresolved(window, offset, access, err).await;
+        }
+    }
+
+    /// cladefs: the fault at `offset`, an `access`, which `window` failed with `err`: the process
+    /// waits to stop, if what resolves the faults went; else it aborts, as its faulting thread
+    /// can't go on.
+    async fn unresolved(&self, window: &dyn Faults, offset: u64, access: Access, err: Errno) {
         // cladefs: failed as what resolves the window's faults went, the daemon: the VM process is
         // stopping, CladefsdLost, as its device was told, and its faulting thread waits for that,
         // which aborting would beat, the VM dying of SIGABRT, where a VM whose daemon goes exits
         // 158 (doc-12; fxfs-guest-soak, GCE r830 round 27; TASK-231).
-        if resolved.is_err() && window.lost() {
+        if window.lost() {
             log::warn!("DAX window fault at offset {offset:#x} unresolved: the extent daemon went");
             std::future::pending::<()>().await;
         }
-        if let Err(err) = resolved {
-            let why =
-                format!("unresolved DAX window fault at offset {offset:#x} ({access:?}): {err}");
-            log::error!("{why}");
-            // cladefs: on standard error too, which a process without a logger, a test's, keeps:
-            // its abort said nothing else (TASK-100).
-            eprintln!("cladefs: {why}");
-            std::process::abort();
+        let why = format!("unresolved DAX window fault at offset {offset:#x} ({access:?}): {err}");
+        log::error!("{why}");
+        // cladefs: on standard error too, which a process without a logger, a test's, keeps: its
+        // abort said nothing else (TASK-100).
+        eprintln!("cladefs: {why}");
+        std::process::abort();
+    }
+
+    /// cladefs: whether the window names something at the page at `addr`, here.
+    fn named(&self, addr: usize) -> bool {
+        let at = self.page_range(addr, 1).start;
+        self.pages.lock().unwrap().pages[at].mapped.is_some()
+    }
+
+    /// cladefs: the guest's write to the page at `addr`, of `thread`'s, on a window that copies on
+    /// write (doc-26): the page copied here ([`Self::copy`]), once `window` has read it in, a read,
+    /// where it names nothing yet, and again if it is evicted or unmapped meanwhile; refused past
+    /// the window's private pages, as one where the window maps nothing is, which its VM stops for.
+    async fn copy_for(&self, window: &dyn Faults, addr: usize, thread: u32) {
+        let offset = (addr - self.base) as u64;
+        loop {
+            let seen = self.seen(addr);
+            match self.copy(addr) {
+                Copied::Private => return,
+                Copied::Past => {
+                    refused("a write past the window's private pages", offset, thread);
+                    if rules().refused_write_read_only {
+                        self.restrict(addr, seen, libc::PROT_READ);
+                    }
+                    return;
+                }
+                Copied::Unnamed => {}
+            }
+            match window.fault_page(offset).await {
+                Ok(()) => {}
+                Err(Errno::ENOENT) => {
+                    refused("an access to a page the window maps nothing at", offset, thread);
+                    self.restrict(addr, seen, libc::PROT_NONE);
+                    return;
+                }
+                Err(err) => return self.unresolved(window, offset, Access::Write, err).await,
+            }
+        }
+    }
+
+    /// cladefs: makes the page at `addr` private for a guest's write (doc-26), unless it is
+    /// already: its private memory filled with what the page the window names there holds, read
+    /// from its arena, and mapped writable in its place ([`Self::privatize`]), all under
+    /// the pages' lock, which the window's changes take: a change taking the page away, an evict
+    /// whose acknowledgement the daemon frees it after, comes after the copy (spec rule
+    /// copyUnderLock). Not past the window's private pages, nor of a page it names nothing at.
+    fn copy(&self, addr: usize) -> Copied {
+        let page_size = page_size() as usize;
+        let at = self.page_range(addr, 1).start;
+        let most = self.private.get().expect("a window that copies on write").most;
+        let mut pages = self.pages.lock().unwrap();
+        if pages.released || pages.pages[at].private {
+            return Copied::Private;
+        }
+        let Some(mapped) = pages.pages[at].mapped else { return Copied::Unnamed };
+        if pages.private >= most {
+            return Copied::Past;
+        }
+        let mut bytes = vec![0u8; page_size];
+        if !rules().copy_under_lock {
+            // Read with the lock let go, as a change may take the page away meanwhile.
+            drop(pages);
+            self.read_page(mapped.phys, &mut bytes);
+            pages = self.pages.lock().unwrap();
+            if pages.released || pages.pages[at].private {
+                return Copied::Private;
+            }
+            if pages.private >= most {
+                return Copied::Past;
+            }
+        } else {
+            self.read_page(mapped.phys, &mut bytes);
+        }
+        self.privatize(&mut pages, at, &bytes);
+        drop(pages);
+        if let Some(prefault) = &self.prefault {
+            prefault.prefault((addr - self.base) as u64, page_size as u64);
+        }
+        Copied::Private
+    }
+
+    /// cladefs: reads the page at `phys`, which the window names, into `bytes`: the shared zeros
+    /// page's too, a page of the default arena as any other (doc-26).
+    fn read_page(&self, phys: crate::pages::PhysLocation, bytes: &mut [u8]) {
+        let (fd, _) = self.memories.fd(phys.arena).expect("a window's page is of its arenas");
+        read_at(fd, bytes, phys.offset);
+    }
+
+    /// cladefs: makes the pages from page `first` on private, one for each page of `bytes`, which
+    /// they hold, with the pages' lock held (`pages`): their private memory filled, then mapped in
+    /// place of what was there, as the memory around them is, with which it merges (see the module
+    /// docs), accessible as soon as it is, as nothing about them faults any more. None of them is
+    /// private yet.
+    ///
+    /// The run at once (TASK-164.10): one fill, one map, registration and wake, where a page each
+    /// took them all, a `PRIVATE`'s pages 65 us each nested, the VM process's receiving thread a
+    /// fifth of a CPU in the kernel under a forked pgbench (GCE r649). And a run with no page
+    /// installed, withheld or restricted maps nothing: the memory there is its private memory,
+    /// accessible and registered for missing faults, as a page left out is, which its filling
+    /// makes the page's; the map over it unmapped it only to map it again, as the pages a guest
+    /// writes and never read, a database's log's, are. Pages the window names are installed only
+    /// as the guest first touches them ([`SecondStage::map`]), so a run the guest writes before it
+    /// reads it is such a run: no `mmap`, and no TLB flush (TASK-276.6).
+    fn privatize(&self, pages: &mut Pages, first: usize, bytes: &[u8]) {
+        let start = std::time::Instant::now();
+        let page_size = page_size() as usize;
+        let range = first..first + bytes.len() / page_size;
+        let (addr, len) = (self.base + first * page_size, bytes.len());
+        let offset = (addr - self.base) as u64;
+        let private = self.private.get().expect("a private page of a window that doesn't copy");
+        Self::took(&self.taken.overwritten, pages.any_installed(range.clone()));
+        let changes = &pages.pages[range.clone()];
+        assert!(
+            !changes.iter().any(|page| page.private),
+            "DAX window offset {offset:#x}, {len:#x} bytes, made private again"
+        );
+        // As a fault saw it, before the change gives back what was withheld.
+        let in_place = changes.iter().all(|page| {
+            !page.withheld
+                && !page.restricted
+                && !page.mapped.is_some_and(|mapped| mapped.installed())
+        });
+        pages.update(range.clone(), |pages| {
+            for page in pages {
+                (page.mapped, page.restricted, page.private) = (None, false, true);
+            }
+        });
+        pages.private += range.len() as u64;
+        let now = self.now();
+        for page in &mut pages.pages[range] {
+            page.changed = now;
+        }
+        self.made_locked(pages, addr, len, now, || {
+            let (memory, writable) = (self.base_memory(addr), libc::PROT_READ | libc::PROT_WRITE);
+            let fd = private.fd.as_raw_fd();
+            if rules().private_filled_before_mapped {
+                self.host.fill(fd, offset, bytes);
+            }
+            if !in_place {
+                self.host.map(addr, len, writable, memory);
+                self.host.register(addr, len, UFFDIO_REGISTER_MODE_MISSING);
+            }
+            if !rules().private_filled_before_mapped {
+                self.host.fill(fd, offset, bytes);
+            }
+            // What faulted on them meanwhile finds them now.
+            self.host.wake(addr, len);
+        });
+        let [runs, made, ns] = &self.copies;
+        runs.fetch_add(1, Ordering::Relaxed);
+        made.fetch_add((len / page_size) as u64, Ordering::Relaxed);
+        ns.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    /// cladefs: makes the `len` bytes at `offset` private now, as the guest's writes to each of
+    /// their pages would ([`Self::copy`]), mapped writable, so for the guest ahead of its accesses:
+    /// doc-13's `PRIVATE`, a `write(2)`'s pages, served here (doc-26), where the daemon made them
+    /// once, a round trip each. `ENOMEM`, nothing made private, if they would take the window past
+    /// its private pages; `EINVAL` for a window that doesn't copy on write, a range not within it,
+    /// or one with a page `window` maps nothing at.
+    ///
+    /// The pages `window` names nothing at yet are read in through it first, a read each, each
+    /// naming the rest of its part with it, which finds a page it maps nothing at; then, holding the pages' lock, each page not private
+    /// yet is made so, of what is named there then, in runs ([`Self::privatize`]); one unnamed
+    /// meanwhile, evicted, is read in again, and made private under the lock after.
+    pub(crate) async fn make_private(
+        &self,
+        window: &dyn Faults,
+        offset: u64,
+        len: u64,
+    ) -> Result<(), Errno> {
+        let page_size = page_size();
+        let most = self.private.get().ok_or(Errno::EINVAL)?.most;
+        let end = offset.checked_add(len).ok_or(Errno::EINVAL)?;
+        if len == 0
+            || !offset.is_multiple_of(page_size)
+            || !len.is_multiple_of(page_size)
+            || end > self.size as u64
+        {
+            return Err(Errno::EINVAL);
+        }
+        let range = self.page_range(self.base + offset as usize, len as usize);
+        let mut first = true;
+        loop {
+            for at in range.clone() {
+                let unnamed = {
+                    let pages = self.pages.lock().unwrap();
+                    let page = &pages.pages[at];
+                    !pages.released && !page.private && page.mapped.is_none()
+                };
+                if unnamed {
+                    let read = window.fault_page(at as u64 * page_size).await;
+                    read.map_err(|err| if err == Errno::ENOENT { Errno::EINVAL } else { err })?;
+                }
+            }
+            // Room for them all, first, as the window maps each: none made private otherwise.
+            if std::mem::take(&mut first) {
+                let pages = self.pages.lock().unwrap();
+                let more = pages.pages[range.clone()].iter().filter(|page| !page.private).count();
+                if pages.private + more as u64 > most {
+                    return Err(Errno::ENOMEM);
+                }
+            }
+            let mut pages = self.pages.lock().unwrap();
+            if pages.released {
+                return Ok(());
+            }
+            // The runs to make private, each its first page and bytes, whatever comes of the rest.
+            let mut runs: Vec<(usize, Vec<u8>)> = Vec::new();
+            let (mut unnamed, mut past) = (false, false);
+            let mut made = pages.private;
+            for at in range.clone() {
+                let page = pages.pages[at];
+                if page.private {
+                    continue;
+                }
+                let Some(mapped) = page.mapped else {
+                    unnamed = true;
+                    continue;
+                };
+                // Past the bound, room taken by writes meanwhile.
+                if made >= most {
+                    past = true;
+                    break;
+                }
+                made += 1;
+                let mut bytes = vec![0u8; page_size as usize];
+                self.read_page(mapped.phys, &mut bytes);
+                match runs.last_mut() {
+                    Some((first, run)) if *first + run.len() / page_size as usize == at => {
+                        run.extend_from_slice(&bytes)
+                    }
+                    _ => runs.push((at, bytes)),
+                }
+            }
+            for (first, bytes) in &runs {
+                self.privatize(&mut pages, *first, bytes);
+            }
+            drop(pages);
+            if let Some(prefault) = &self.prefault {
+                for (first, bytes) in &runs {
+                    prefault.prefault(*first as u64 * page_size, bytes.len() as u64);
+                }
+            }
+            if past {
+                return Err(Errno::ENOMEM);
+            }
+            if !unnamed {
+                return Ok(());
+            }
         }
     }
 
@@ -1727,16 +2066,23 @@ impl<H: HostMemory> SecondStage for UffdSecondStage<H> {
     /// next to install ahead ([`Self::prefault`]). Installed as it was mapped, every page mapped
     /// took an `mmap` there, and a page the guest then stored to without reading it, a write's,
     /// took another over it, its TLB flushed on every CPU of the process's and the guest's.
+    /// cladefs: a private page there stays, named nothing (doc-26, spec rule mapsKeepPrivate): an
+    /// eviction left it, and the window, which knows nothing of it, maps the rest of its part over
+    /// it as it installs the part again.
     fn map(&self, offset: u64, phys: crate::pages::PhysLocation, len: u64) {
         let (addr, len) = self.addr(offset, len);
         let range = self.page_range(addr, len);
         let page_size = page_size();
+        let keeps = if rules().maps_keep_private { Private::Keep } else { Private::End };
         let name = |pages: &mut Pages| {
             let used = pages.tick();
-            let taking = pages.take_away(range.clone());
+            let taking = pages.take_away(range.clone(), keeps);
             Self::took(&self.taken.left_out, taking.installed);
             pages.update(range, |pages| {
                 for (at, page) in pages.iter_mut().enumerate() {
+                    if page.private {
+                        continue;
+                    }
                     let offset = phys.offset + at as u64 * page_size;
                     let phys = crate::pages::PhysLocation { arena: phys.arena, offset };
                     // Left installed as it was, past the rule, what a fault installs next is it.
@@ -1751,11 +2097,11 @@ impl<H: HostMemory> SecondStage for UffdSecondStage<H> {
         self.change(addr, len, name, |taking| self.take_away(addr, len, taking));
     }
 
-    fn unmap(&self, offset: u64, len: u64) {
+    fn unmap(&self, offset: u64, len: u64, private: Private) {
         let (addr, len) = self.addr(offset, len);
         let range = self.page_range(addr, len);
         let forget = |pages: &mut Pages| {
-            let taking = pages.take_away(range.clone());
+            let taking = pages.take_away(range.clone(), private);
             Self::took(&self.taken.left_out, taking.installed);
             pages.update(range, |pages| {
                 pages.iter_mut().for_each(|page| (page.mapped, page.restricted) = (None, false))
@@ -1772,7 +2118,7 @@ impl<H: HostMemory> SecondStage for UffdSecondStage<H> {
     /// ([`SecondStage::map`]), the rest mapping nothing. Made in steps, each page would be left
     /// out, then named again: an unmap of the old memory, flushing the host's TLBs and the
     /// hypervisor's mappings, then the guest's accesses faulting the pages in again.
-    fn remap(&self, offset: u64, len: u64, anew: &[Anew]) {
+    fn remap(&self, offset: u64, len: u64, private: Private, anew: &[Anew]) {
         let (addr, len) = self.addr(offset, len);
         let range = self.page_range(addr, len);
         let page_size = page_size() as usize;
@@ -1812,7 +2158,7 @@ impl<H: HostMemory> SecondStage for UffdSecondStage<H> {
                 while at < range.end && !kept[at - range.start] {
                     at += 1;
                 }
-                let taking = pages.take_away(start..at);
+                let taking = pages.take_away(start..at, private);
                 Self::took(&self.taken.left_out, taking.installed);
                 pages.update(start..at, |pages| {
                     pages.iter_mut().for_each(|page| (page.mapped, page.restricted) = (None, false))
@@ -1826,6 +2172,10 @@ impl<H: HostMemory> SecondStage for UffdSecondStage<H> {
                 }
                 pages.update(mapping, |pages| {
                     for (at, page) in pages.iter_mut().enumerate() {
+                        // A private page stays (spec rule mapsKeepPrivate).
+                        if page.private && rules().maps_keep_private {
+                            continue;
+                        }
                         let offset = phys.offset + (at * page_size) as u64;
                         let phys = crate::pages::PhysLocation { offset, ..phys };
                         page.mapped = Some(Mapped { phys, installed: 0, used });
@@ -1866,77 +2216,6 @@ impl<H: HostMemory> SecondStage for UffdSecondStage<H> {
                 let addr = self.base + (first + at) * page_size;
                 self.host.protect(addr, page_size, libc::PROT_READ | libc::PROT_WRITE);
             }
-        }
-    }
-
-    /// cladefs: the pages from `offset` on are private from now on (backlog doc-13), one for each
-    /// of `from`: their private memory filled with the bytes of each one's page at `from`, its
-    /// source's, or zeros, then mapped in place of what was there, as the memory around them is,
-    /// with which it merges (see the module docs): accessible as soon as they are mapped, as
-    /// nothing about them faults any more.
-    ///
-    /// The run at once (TASK-164.10): one fill, one map, registration and wake, one pre-fault,
-    /// where a page each took them all, a `PRIVATE`'s pages 65 us each nested, the VM process's
-    /// receiving thread a fifth of a CPU in the kernel under a forked pgbench (GCE r649). And a run
-    /// with no page installed, withheld or restricted maps nothing: the memory there is its private
-    /// memory, accessible and registered for missing faults, as a page left out is, which its
-    /// filling makes the page's; the map over it unmapped it only to map it again, as
-    /// the pages a guest writes and never read, a database's log's, are. Pages the window names
-    /// are installed only as the guest first touches them ([`SecondStage::map`]), so a run the
-    /// guest writes before it reads it is such a run: no `mmap`, and no TLB flush (TASK-276.6).
-    fn make_private(&self, offset: u64, from: &[Option<crate::pages::PhysLocation>]) {
-        let page_size = page_size() as usize;
-        let (addr, len) = self.addr(offset, (from.len() * page_size) as u64);
-        let private = self.private.get().expect("a private page of a window that doesn't copy");
-        let mut bytes = vec![0u8; len];
-        for (page, from) in bytes.chunks_mut(page_size).zip(from) {
-            if let Some(from) = from {
-                // The source's page stays as it is until this is made, as it takes access away
-                // from the page installed here: the daemon frees the page only once it is
-                // acknowledged.
-                let (fd, _) =
-                    self.memories.fd(from.arena).expect("a window's page is of its arenas");
-                read_at(fd, page, from.offset);
-            }
-        }
-        let range = self.page_range(addr, len);
-        let record = |pages: &mut Pages| {
-            Self::took(&self.taken.overwritten, pages.any_installed(range.clone()));
-            let changes = &pages.pages[range.clone()];
-            let again = changes.iter().any(|page| page.private);
-            // As a fault saw it, before the change gives back what was withheld.
-            let in_place = changes.iter().all(|page| {
-                !page.withheld
-                    && !page.restricted
-                    && !page.mapped.is_some_and(|mapped| mapped.installed())
-            });
-            pages.update(range.clone(), |pages| {
-                for page in pages {
-                    (page.mapped, page.restricted, page.private) = (None, false, true);
-                }
-            });
-            (again, in_place)
-        };
-        let made = self.change(addr, len, record, |(again, in_place)| {
-            // The window makes a page private once, until a change of it ends it.
-            assert!(!again, "DAX window offset {offset:#x}, {len:#x} bytes, made private again");
-            let (memory, writable) = (self.base_memory(addr), libc::PROT_READ | libc::PROT_WRITE);
-            let fd = private.fd.as_raw_fd();
-            if rules().private_filled_before_mapped {
-                self.host.fill(fd, offset, &bytes);
-            }
-            if !in_place {
-                self.host.map(addr, len, writable, memory);
-                self.host.register(addr, len, UFFDIO_REGISTER_MODE_MISSING);
-            }
-            if !rules().private_filled_before_mapped {
-                self.host.fill(fd, offset, &bytes);
-            }
-            // What faulted on them meanwhile finds them now.
-            self.host.wake(addr, len);
-        });
-        if made && let Some(prefault) = &self.prefault {
-            prefault.prefault(offset, len as u64);
         }
     }
 }
@@ -2069,12 +2348,6 @@ impl<H: HostMemory> UffdSecondStage<H> {
             Self::took(&self.taken.left_out, true);
             self.leave_out(self.base + run.start * page_size, run.len() * page_size);
         }
-    }
-
-    /// cladefs: whether the page at `addr` is private (backlog doc-13).
-    fn is_private(&self, addr: usize) -> bool {
-        let at = self.page_range(addr, 1).start;
-        self.pages.lock().unwrap().pages[at].private
     }
 
     /// Installs the page at `addr`, if the window maps it and it is left out, with those left out
@@ -2457,11 +2730,7 @@ mod tests {
             page_size()
         }
 
-        fn fault(&self, _: u64, _: Access) -> BoxFuture<'_, Result<()>> {
-            Box::pin(std::future::ready(Err(Errno::EIO)))
-        }
-
-        fn fault_page(&self, _: u64, _: Access) -> BoxFuture<'_, Result<()>> {
+        fn fault_page(&self, _: u64) -> BoxFuture<'_, Result<()>> {
             Box::pin(std::future::ready(Err(Errno::EIO)))
         }
 
@@ -2496,7 +2765,7 @@ mod tests {
         // SAFETY: Only the test uses the memory, which outlives the stage.
         let stage = unsafe { UffdSecondStage::in_process(base, ps as u64, None) }.unwrap();
         let window = Failing { lost: true };
-        let fault = stage.resolve_through(&window, base, Access::Read, false, false, 0);
+        let fault = stage.resolve_through(&window, base, Access::Read, false, 0);
         assert!(futures::FutureExt::now_or_never(fault).is_none(), "the fault returned");
         drop(stage);
         // SAFETY: Unmaps the memory, which nothing uses any more.
@@ -2532,7 +2801,7 @@ mod tests {
 
         stage.release();
         dax.window.map(ps as u64, &file, ps as u64, ps as u64);
-        stage.unmap(0, ps as u64);
+        stage.unmap(0, ps as u64, Private::End);
         let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
         let window: Vec<&str> = (maps.lines())
             .filter(|line| {
@@ -2767,8 +3036,7 @@ mod tests {
         let base = memory as usize;
         // SAFETY: Only the test uses the memory, which outlives the window.
         let stage = unsafe { UffdSecondStage::in_process(base, ps as u64, None) }.unwrap();
-        let copying = crate::dax::CopyOnWrite::at_most(1);
-        let (mut dax, window) = Dax::in_host_memory_copying(stage.clone(), Some(copying)).unwrap();
+        let (mut dax, _window) = Dax::in_host_memory_copying(stage.clone(), Some(1)).unwrap();
         // Not in memory as it is mapped, and zeros as it is brought in: not here until a fault.
         let file = TestSource::anonymous(1);
         dax.map(0, &file.source(), 0, ps as u64);
@@ -2789,7 +3057,7 @@ mod tests {
 
         let worker = std::thread::spawn(move || read_into(base)).join().unwrap();
         assert_eq!(worker, Err(libc::EFAULT));
-        assert_eq!(window.private_pages(), 0, "a worker's write copied the page");
+        assert_eq!(stage.private_pages(), 0, "a worker's write copied the page");
         guest_thread_started();
         assert_eq!(read_into(base), Err(libc::EFAULT));
         guest_access_failed();
@@ -2798,7 +3066,7 @@ mod tests {
             std::thread::yield_now();
         }
         assert_eq!(read_into(base), Ok(()));
-        assert_eq!(window.private_pages(), 1);
+        assert_eq!(stage.private_pages(), 1);
         // SAFETY: The window's page, private now, which nothing else accesses.
         assert_eq!(unsafe { (base as *const u8).read_volatile() }, 7);
         assert_eq!(file.byte(0), 0, "the write reached the extent's page");
@@ -2840,8 +3108,7 @@ mod tests {
         let base = memory as usize;
         // SAFETY: Only the test uses the memory, which outlives the window.
         let stage = unsafe { UffdSecondStage::in_process(base, ps as u64, None) }.unwrap();
-        let copying = crate::dax::CopyOnWrite::at_most(1);
-        let (mut dax, window) = Dax::in_host_memory_copying(stage.clone(), Some(copying)).unwrap();
+        let (mut dax, _window) = Dax::in_host_memory_copying(stage.clone(), Some(1)).unwrap();
         // In memory as it is mapped, installed here as a load first touches it.
         let file = TestSource::filled(1, 9);
         dax.map(0, &file.source(), 0, ps as u64);
@@ -2868,7 +3135,7 @@ mod tests {
         // A thread not the guest's, as KVM's worker is.
         let worker = std::thread::spawn(move || read_into(base)).join().unwrap();
         assert_eq!(worker, Err(libc::EFAULT), "a worker's write was made");
-        assert_eq!(window.private_pages(), 0, "a worker's write copied the page");
+        assert_eq!(stage.private_pages(), 0, "a worker's write copied the page");
         assert_eq!(extent_byte(), 9, "the worker's write reached the extent's page");
         // A vCPU's, which fails while the worker's restriction stands, and is a write once lifted.
         let vcpu = std::thread::spawn(move || {
@@ -2878,7 +3145,7 @@ mod tests {
             (restricted, read_into(base))
         });
         assert_eq!(vcpu.join().unwrap(), (Err(libc::EFAULT), Ok(())));
-        assert_eq!(window.private_pages(), 1);
+        assert_eq!(stage.private_pages(), 1);
         // SAFETY: The window's page, private now, which nothing else accesses.
         let page = unsafe { std::slice::from_raw_parts(base as *const u8, ps) };
         assert_eq!(page[0], 7);
@@ -2905,8 +3172,7 @@ mod tests {
         let base = window_memory(3);
         // SAFETY: Only the test uses the memory, which outlives the window.
         let stage = unsafe { UffdSecondStage::in_process(base, (3 * ps) as u64, None) }.unwrap();
-        let copying = crate::dax::CopyOnWrite::at_most(3);
-        let (mut dax, window) = Dax::in_host_memory_copying(stage.clone(), Some(copying)).unwrap();
+        let (mut dax, _window) = Dax::in_host_memory_copying(stage.clone(), Some(3)).unwrap();
         let file = TestSource::filled(3, 9).source();
         dax.map(0, &file, 0, (3 * ps) as u64);
         assert_eq!(stage.installed(), 0, "the window's map installed pages");
@@ -2928,8 +3194,9 @@ mod tests {
             .unwrap()
         };
         assert_eq!(write_byte(base), 1, "the write's first touch failed");
-        futures::executor::block_on(window.make_private(ps as u64, ps as u64)).unwrap();
-        assert_eq!(window.private_pages(), 2);
+        futures::executor::block_on(stage.make_private(dax.window.as_ref(), ps as u64, ps as u64))
+            .unwrap();
+        assert_eq!(stage.private_pages(), 2);
         assert_eq!(stage.taken(), [0, 0], "a first touch took a page installed away");
         let mappings = mappings_within(base, 2 * ps);
         assert_eq!(mappings.len(), 1, "the private pages' mappings: {mappings:#?}");
@@ -2939,7 +3206,12 @@ mod tests {
         assert_eq!((read(base)[0], read(base)[1], read(base + ps)[0]), (7, 9, 9));
         assert_eq!(read(base + 2 * ps)[0], 9);
         assert_eq!(stage.installed(), 1, "a load's first touch installed nothing");
-        futures::executor::block_on(window.make_private((2 * ps) as u64, ps as u64)).unwrap();
+        futures::executor::block_on(stage.make_private(
+            dax.window.as_ref(),
+            (2 * ps) as u64,
+            ps as u64,
+        ))
+        .unwrap();
         assert_eq!(stage.taken(), [1, 0], "a PRIVATE over a page installed, uncounted");
 
         drop(dax);
@@ -2949,6 +3221,46 @@ mod tests {
             libc::close(pipe[1]);
             assert_eq!(libc::munmap(base as *mut libc::c_void, 3 * ps), 0);
         }
+    }
+
+    /// cladefs doc-26 (spec rules evictionKeepsPrivate, mapsKeepPrivate): a guest's write makes its
+    /// page private here, a copy of the extent's page; the eviction of the extent's page, the
+    /// host's unmap, leaves it, the write in it; so does the window's map of a page there after,
+    /// as a page-in of the part's other pages makes, the window knowing nothing of it; the guest's
+    /// own `UNMAP` ends it, its private memory emptied.
+    #[test]
+    fn evictions_and_maps_keep_private_pages_and_unmaps_end_them() {
+        let ps = page_size() as usize;
+        let base = window_memory(2);
+        // SAFETY: Only the test uses the memory, which outlives the window.
+        let stage = unsafe { UffdSecondStage::in_process(base, (2 * ps) as u64, None) }.unwrap();
+        let (mut dax, _window) = Dax::in_host_memory_copying(stage.clone(), Some(2)).unwrap();
+        let file = TestSource::evictable(2, 9);
+        dax.map(0, &file.source(), 0, (2 * ps) as u64);
+        std::thread::spawn(move || {
+            crate::guest_thread_started();
+            // SAFETY: The window's memory, whose faults the fault thread serves.
+            unsafe { (base as *mut u8).write_volatile(7) };
+        })
+        .join()
+        .unwrap();
+        // SAFETY: The window's memory, whose faults the fault thread serves.
+        let read = |at: usize| unsafe { ((base + at) as *const u8).read_volatile() };
+        assert_eq!((stage.private_pages(), read(0), read(1)), (1, 7, 9), "written");
+        assert_eq!(file.byte(0), 9, "the write reached the extent's page");
+
+        file.evict(&dax.window, 0);
+        assert_eq!((stage.private_pages(), read(0), read(1)), (1, 7, 9), "evicted");
+        stage.map(0, file.location(1), ps as u64);
+        assert_eq!((stage.private_pages(), read(0), read(1)), (1, 7, 9), "mapped over");
+
+        dax.unmap(0, ps as u64);
+        assert_eq!(stage.private_pages(), 0, "unmapped by the guest");
+        assert_eq!(stage.private_runs(), Ok(Vec::new()), "its private memory filled still");
+
+        drop(dax);
+        // SAFETY: Unmaps the memory, which nothing uses any more.
+        assert_eq!(unsafe { libc::munmap(base as *mut libc::c_void, 2 * ps) }, 0);
     }
 
     /// The lines of /proc/self/maps of the mappings in the `len` bytes at `base`.
@@ -3054,8 +3366,8 @@ mod tests {
         let size = (PAGES * ps) as u64;
         // SAFETY: Only the test uses the memory, which outlives the window.
         let stage = unsafe { UffdSecondStage::in_process(base, size, None) }.unwrap();
-        let copying = crate::dax::CopyOnWrite::at_most(PAGES as u64);
-        let (mut dax, window) = Dax::in_host_memory_copying(stage.clone(), Some(copying)).unwrap();
+        let (mut dax, _window) =
+            Dax::in_host_memory_copying(stage.clone(), Some(PAGES as u64)).unwrap();
         let tag = |page: usize| (page % 251) as u8 + 1;
         let file = TestSource::scattered(PAGES as u64, |page| tag(page as usize)).source();
         dax.map(0, &file, 0, size);
@@ -3066,9 +3378,10 @@ mod tests {
         assert_eq!(stage.installed(), PAGES as u64, "the loads installed no run each");
         for page in (0..PAGES).rev() {
             let (offset, len) = ((page * ps) as u64, ps as u64);
-            futures::executor::block_on(window.make_private(offset, len)).unwrap();
+            futures::executor::block_on(stage.make_private(dax.window.as_ref(), offset, len))
+                .unwrap();
         }
-        assert_eq!(window.private_pages(), PAGES as u64);
+        assert_eq!(stage.private_pages(), PAGES as u64);
         let mappings = mappings_within(base, PAGES * ps);
         assert_eq!(mappings.len(), 1, "the private pages' mappings: {mappings:#?}");
         assert!(mappings[0].contains("cladefs-private-pages"), "{mappings:#?}");
@@ -3103,15 +3416,16 @@ mod tests {
         let stage =
             unsafe { UffdSecondStage::with_budget(base, size, Memories::InProcess, None, BUDGET) }
                 .unwrap();
-        let copying = crate::dax::CopyOnWrite::at_most(PAGES as u64);
-        let (mut dax, window) = Dax::in_host_memory_copying(stage.clone(), Some(copying)).unwrap();
+        let (mut dax, _window) =
+            Dax::in_host_memory_copying(stage.clone(), Some(PAGES as u64)).unwrap();
         let tag = |page: usize| (page % 251) as u8 + 1;
         let file = TestSource::scattered(PAGES as u64, |page| tag(page as usize)).source();
         dax.map(0, &file, 0, size);
         // Every other page private, stored to.
         for page in (0..PAGES).step_by(2) {
             let (offset, len) = ((page * ps) as u64, ps as u64);
-            futures::executor::block_on(window.make_private(offset, len)).unwrap();
+            futures::executor::block_on(stage.make_private(dax.window.as_ref(), offset, len))
+                .unwrap();
             // SAFETY: The window's private page, which nothing else accesses.
             unsafe { ((base + page * ps + 1) as *mut u8).write_volatile(0xee) };
         }
@@ -3140,7 +3454,7 @@ mod tests {
             }
             assert_eq!(read, [tag(page), 0xee], "page {page}");
         }
-        assert_eq!(window.private_pages(), (PAGES / 2) as u64);
+        assert_eq!(stage.private_pages(), (PAGES / 2) as u64);
 
         drop(dax);
         // SAFETY: Closes the pipe and unmaps the memory, which nothing uses any more.

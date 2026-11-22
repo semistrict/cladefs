@@ -12,7 +12,7 @@
 //! against a model of its cell and window; and the default tenant's bob, whose cell waits. A case
 //! is one to three of mallory's connections at once, each saying anything, of any kind, flags and
 //! words, naming alice's and bob's cells, extents and cells, paths that lead out of its
-//! directory, forks to their cells, transfer areas of any make, storms of `PRIVATE`s and
+//! directory, forks to their cells, transfer areas of any make, storms of
 //! `UNMAP`s, acknowledgements forged, early or never sent, and hanging up as it likes, mid-request
 //! or with its framing broken; or flooding the daemon with reads whose replies it leaves unread;
 //! or filling the host's disk, its tenant's limited a few MiB past what it takes (TASK-94);
@@ -292,8 +292,9 @@ enum Opens {
 #[derive(Clone, Debug)]
 struct Hostile {
     opens: Opens,
-    /// The window it asks for first, and its private pages.
-    window: (u64, u64),
+    /// The window it asks for first, and whether it says it copies on write
+    /// ([`WINDOW_COPYING`], doc-26).
+    window: (u64, bool),
     area: Option<Area>,
     acking: Acking,
     acts: Vec<Act>,
@@ -478,11 +479,13 @@ fn message() -> BoxedStrategy<Said> {
         FREE_MANY,
         STAGE_COUNTS,
         BUILD,
-        PRIVATE,
+        // `PRIVATE`'s, which its VM process serves itself now (doc-26).
+        30,
         REPLY,
         STAGE_MAP,
         STAGE_UNMAP,
-        STAGE_PRIVATE,
+        // `STAGE_PRIVATE`'s.
+        108,
         CAPACITY,
         COMMITTED,
         29,
@@ -536,12 +539,6 @@ fn message() -> BoxedStrategy<Said> {
             [at, Is(0), Is(0), Is(0), Is(0)],
             Payload::Bytes(Vec::new())
         )),
-        (page(), pages()).prop_map(|(at, len)| said(
-            PRIVATE,
-            0,
-            [at, len, Is(0), Is(0), Is(0)],
-            Payload::Bytes(Vec::new())
-        )),
         sequence().prop_map(|extent| said(
             FREE,
             0,
@@ -556,16 +553,19 @@ fn message() -> BoxedStrategy<Said> {
         Just(said(MAPPINGS, 0, [Is(0); 5], Payload::Bytes(Vec::new()))),
         Just(said(INFO, 0, [Is(0); 5], Payload::Bytes(Vec::new()))),
     ];
-    // Storms of the window's own requests, and of transfers as large as its area takes.
+    // Storms of the window's own requests, and of transfers as large as its area takes. cladefs:
+    // `PRIVATE`s are its VM process's own now, which bounds them (doc-26): a storm of them reaches
+    // no daemon.
     let storms = prop_oneof![
-        (prop_oneof![Just(PRIVATE), Just(UNMAP), Just(FAULT)], page(), pages(), 16u16..128)
-            .prop_map(|(kind, at, len, repeat)| {
-                let flags = if kind == FAULT { FAULT_WRITE } else { 0 };
+        (prop_oneof![Just(UNMAP), Just(FAULT)], page(), pages(), 16u16..128).prop_map(
+            |(kind, at, len, repeat)| {
+                let flags = if kind == FAULT { FAULT_PAGE } else { 0 };
                 Said {
                     repeat,
                     ..said(kind, flags, [at, len, Is(0), Is(0), Is(0)], Payload::Bytes(Vec::new()))
                 }
-            }),
+            }
+        ),
         (sequence(), transferred(), transferred(), 2u16..24).prop_map(
             |(extent, at, len, repeat)| {
                 Said {
@@ -651,9 +651,9 @@ fn message() -> BoxedStrategy<Said> {
             area: Some(area),
             ..said(TRANSFER, 0, [len, Is(0), Is(0), Is(0), Is(0)], Payload::Bytes(Vec::new()))
         }),
-        (word(), word()).prop_map(|(size, private)| said(
+        (word(), word(), 0u32..4).prop_map(|(size, private, flags)| said(
             WINDOW,
-            0,
+            flags,
             [size, private, Is(0), Is(0), Is(0)],
             Payload::Bytes(Vec::new())
         )),
@@ -706,9 +706,9 @@ fn act() -> impl Strategy<Value = Act> {
 fn hostile() -> impl Strategy<Value = Hostile> {
     let ps = page_size();
     let window = prop_oneof![4 => Just(WINDOW_BYTES), 1 => Just(MAX_WINDOW), 1 => Just(MAX_WINDOW + ps), 1 => Just(1 << 60)];
-    let private_max = prop_oneof![1 => Just(0u64), 6 => 1u64..16, 1 => Just(u64::MAX)];
-    // One the daemon grants: no larger than it allows, its private pages bounded.
-    let granted = (prop_oneof![4 => Just(WINDOW_BYTES), 1 => Just(MAX_WINDOW)], 1u64..16);
+    let copying = prop_oneof![1 => Just(false), 6 => Just(true)];
+    // One the daemon grants: no larger than it allows, a writer's, which copies on write.
+    let granted = (prop_oneof![4 => Just(WINDOW_BYTES), 1 => Just(MAX_WINDOW)], Just(true));
     let elsewhere = prop_oneof![
         Just(Place::Escaped),
         Just(Place::Linked),
@@ -751,7 +751,7 @@ fn hostile() -> impl Strategy<Value = Hostile> {
     ];
     (
         opens,
-        ((window, private_max), granted),
+        ((window, copying), granted),
         proptest::option::of(area()),
         acking,
         proptest::collection::vec(act(), 1..64),
@@ -1498,7 +1498,6 @@ fn receive(
         // Each page it maps of its tenant's arena, or the public one, as KVM would map it.
         let arena = match header.kind {
             STAGE_MAP => Some(header.args[4]),
-            STAGE_PRIVATE if header.args[2] == 1 => Some(header.args[4]),
             _ => None,
         };
         if let Some(arena) = arena
@@ -1660,7 +1659,9 @@ fn run_hostile(
             shared.answers.wait(id);
         }
     }
-    let window = Header::new(WINDOW, id()).with_args(&[hostile.window.0, hostile.window.1]);
+    let (size, copying) = hostile.window;
+    let flags = if copying { WINDOW_COPYING } else { 0 };
+    let window = Header::new(WINDOW, id()).with_args(&[size]).with_flags(flags);
     let window = send(window, &[], None);
     if let Some(area) = hostile.area {
         let transfer = Header::new(TRANSFER, id()).with_args(&[area_len(area)]);
@@ -1720,7 +1721,7 @@ fn run_hostile(
         for time in 0..u64::from(said.repeat) {
             let own = shared.own.load(Ordering::Relaxed);
             let mut args = said.args.map(|word| names.word(word, own));
-            if said.repeat > 1 && [PRIVATE, UNMAP, FAULT].contains(&said.kind) {
+            if said.repeat > 1 && [UNMAP, FAULT].contains(&said.kind) {
                 args[0] = (args[0].wrapping_add(time * 7 * ps)) % WINDOW_BYTES;
             }
             let id = said.id.unwrap_or_else(&mut id);
@@ -2138,11 +2139,11 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
 }
 
 /// TASK-149.17: a VM process that shrinks the memory it is given as its cell opens crashes
-/// nothing: not its tenant's arena, which it may write, whose pages past a new end would fault the
-/// daemon's own accesses (`SIGBUS`), and every tenant's VMs with it; nor the public one, which it
-/// may only read. It may grow its arena, as the daemon goes on growing it. The memory it reads
-/// alone is its owner's alone to open anew: a VM process, of another user, can't reopen it to
-/// write through `/proc/self/fd`.
+/// nothing: not its tenant's arena, whose pages past a new end would fault the daemon's own
+/// accesses (`SIGBUS`), and every tenant's VMs with it; nor the public one. It may only read
+/// both (doc-26: it copies its guest's writes into memory of its own), and so neither shrinks nor
+/// grows either. The memory it reads is its owner's alone to open anew: a VM process, of another
+/// user, can't reopen it to write through `/proc/self/fd`.
 #[test]
 fn vm_processes_shrinking_their_memory_crash_nothing() {
     host();
@@ -2172,13 +2173,13 @@ fn vm_processes_shrinking_their_memory_crash_nothing() {
     // What the daemon reads of the arena's pages, which it would fault on, had the VM process
     // shrunk it.
     assert_eq!(read(&client, extent(1), 0, BLOCK), Ok(super::pattern(1, BLOCK)));
-    assert_eq!(shrunk, (Err(Some(libc::EPERM)), Err(Some(libc::EINVAL))));
-    // Grown, by a tebibyte, as the daemon grows it further, as its extents take more slabs.
+    assert_eq!(shrunk, (Err(Some(libc::EINVAL)), Err(Some(libc::EINVAL))));
+    // Nor grown, by a tebibyte, as the daemon grows it further, as its extents take more slabs.
     // SAFETY: A stat buffer the call fills, of a descriptor the test holds.
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: a descriptor the test holds open, and the buffer above.
     assert_eq!(unsafe { libc::fstat(own, &mut stat) }, 0);
-    assert_eq!(truncated(own, stat.st_size + (1 << 40)), Ok(()));
+    assert_eq!(truncated(own, stat.st_size + (1 << 40)), Err(Some(libc::EINVAL)));
     let extents = (4 << 20) / (8 * BLOCK);
     for sequence in 2..2 + extents as u64 {
         write(&client, extent(sequence), 0, &super::pattern(sequence as u8, 8 * BLOCK)).unwrap();
@@ -2371,7 +2372,8 @@ async fn page_ins_in_flight_are_bounded() {
             replies.recv_timeout(WAIT).unwrap_or_else(|_| panic!("no reply to request {id}"));
         answered.borrow_mut().insert(replied, status);
     };
-    sender.send(Header::new(WINDOW, 2).with_args(&[EXTENTS * MIB, 1]), &[], &[]).unwrap();
+    let window = Header::new(WINDOW, 2).with_args(&[EXTENTS * MIB]).with_flags(WINDOW_COPYING);
+    sender.send(window, &[], &[]).unwrap();
     assert_eq!(answer(2), 0);
     for sequence in 1..=EXTENTS {
         let mapped = Header::new(MAP, 2 + sequence).with_args(&[
@@ -2533,7 +2535,7 @@ fn mappings_asked_for_past_the_credit_let_their_vm_process_go() {
     // A window every other page of which is mapped, zeros: their reply holds 32 MiB.
     let (ps, count) = (page_size(), (32 << 20) / MAPPING_BYTES);
     let size = 2 * count * ps;
-    let window = Header::new(WINDOW, 2).with_args(&[size, 1]);
+    let window = Header::new(WINDOW, 2).with_args(&[size]).with_flags(WINDOW_COPYING);
     assert_eq!(super::call(&sender, &mut receiver, window, &[]).header.status, 0);
     let mapping = |n: u64| crate::WindowMapping {
         window_offset: 2 * n * ps,
