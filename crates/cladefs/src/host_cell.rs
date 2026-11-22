@@ -29,7 +29,7 @@ use bucket_cell::cell;
 use bucket_cell::layout::{CellId, Child};
 use bucket_cell::object_bucket::{ObjectBucket, RoutedBucket};
 use local_cell::upload::{self, Failure, Uploader};
-use local_cell::{Description, HostDir, LocalCell, Options, Recovering};
+use local_cell::{Description, HostDir, LocalCell, Making, Options, Recovering};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -526,7 +526,8 @@ pub(crate) fn discard(path: &Path) {
 /// cell than the version, which isn't shared (TASK-395.7). Only then is the child's cell made,
 /// at `path`, holding nothing of its own: opening it recovers the child's state from the bucket,
 /// as any cell's opening does (TASK-165.9). `prepare` writes what the caller keeps beside the
-/// cell into its directory first, before its description, which makes it a cell. A fork to
+/// cell into its making first, before its description, which makes it a cell, durable with it
+/// ([`Making`], board 7420). A fork to
 /// another tenant's cell fails with `EACCES` before anything is made, unless the cell is the
 /// default tenant's ([`may_fork_into`], TASK-395.9).
 ///
@@ -545,7 +546,7 @@ pub(crate) async fn fork(
     uploader: &Uploader<HostDir>,
     path: &Path,
     child: Child,
-    prepare: impl FnOnce(&Path) -> anyhow::Result<()> + Send,
+    prepare: impl FnOnce(&mut Making<'_, HostDir>) -> anyhow::Result<()> + Send,
 ) -> Result<(), Error> {
     may_fork_into(local.description().cell, uploader, child.cell.tenant)?;
     let inheriting = uploader.inheriting(child).await?;
@@ -634,7 +635,7 @@ pub(crate) async fn fork_through(
     version: u64,
     path: &Path,
     child: Child,
-    prepare: impl FnOnce(&Path) -> anyhow::Result<()> + Send,
+    prepare: impl FnOnce(&mut Making<'_, HostDir>) -> anyhow::Result<()> + Send,
 ) -> Result<(), Error> {
     let at = version_dir(local.description().cell, version, uploader.options().cache.as_deref());
     let (kind, url) = (local.kind().ok_or(Errno::EINVAL)?, local.bucket().ok_or(Errno::EINVAL)?);
@@ -705,7 +706,7 @@ pub(crate) async fn fork_ephemeral(
     uploader: &Uploader<HostDir>,
     path: &Path,
     child: Child,
-    prepare: impl FnOnce(&Path) -> anyhow::Result<()> + Send,
+    prepare: impl FnOnce(&mut Making<'_, HostDir>) -> anyhow::Result<()> + Send,
 ) -> Result<(), Error> {
     may_fork_into(local.description().cell, uploader, child.cell.tenant)?;
     let origin = uploader.at_version_origin().ok_or(Errno::EINVAL)?;
@@ -728,7 +729,6 @@ pub(crate) async fn fork_ephemeral(
         Ok(()) => match uploader.forked_ephemeral(child, inheriting, host.incarnation()).await {
             Err(err) => Err(fork_failure(cell, err)),
             Ok((checkpoint, ring)) => upload::blocking(|| -> anyhow::Result<()> {
-                prepare(path)?;
                 let capacity = local.description().capacity;
                 let description = Description { block_size: BLOCK_SIZE, capacity, cell };
                 local_cell::create_host_ephemeral(
@@ -738,11 +738,14 @@ pub(crate) async fn fork_ephemeral(
                     kind,
                     &checkpoint,
                     ring.encrypting(),
+                    |making| {
+                        prepare(making)?;
+                        durable_in_parent(making, path);
+                        Ok(())
+                    },
                 )
                 .with_context(|| format!("forking to ephemeral cell {cell}: its cell directory"))?;
                 local_cell::made_host(path)?;
-                let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
-                host_fs::File::open(parent.unwrap_or(Path::new(".")))?.sync_all()?;
                 Ok(())
             }),
         },
@@ -801,17 +804,16 @@ fn taken(cell: CellId) -> anyhow::Error {
 }
 
 /// Makes the cell directory of `cell`, a fork of `parent`'s cell the bucket has the record of, in
-/// the directory at `path`, made empty: `prepare` writes into it first; then the cell directory, of
-/// the parent's capacity, naming the parent's bucket, of the parent's kind, its own cell's, whole
-/// (TASK-364, doc-20). It holds nothing of its own: opening it recovers the child from the
+/// the directory at `path`, made empty: the cell directory, of the parent's capacity, naming the
+/// parent's bucket, of the parent's kind, its own cell's, `prepare` writing into its making first,
+/// whole (TASK-364, doc-20). It holds nothing of its own: opening it recovers the child from the
 /// bucket, as any cell's opening does (TASK-165.9), and holds its cell, making it.
 fn make_child(
     parent: &LocalCell<HostDir>,
     path: &Path,
     cell: CellId,
-    prepare: impl FnOnce(&Path) -> anyhow::Result<()>,
+    prepare: impl FnOnce(&mut Making<'_, HostDir>) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
-    prepare(path)?;
     let capacity = parent.description().capacity;
     let named = || anyhow::anyhow!("{} names no bucket", parent.dir().path().display());
     let url = parent.bucket().map(str::to_owned).ok_or_else(named)?;
@@ -819,11 +821,21 @@ fn make_child(
         .kind()
         .ok_or_else(|| anyhow::anyhow!("{} names no cell's kind", parent.dir().path().display()))?;
     let description = Description { block_size: BLOCK_SIZE, capacity, cell };
-    local_cell::create_host(path, description, &url, kind)?;
+    local_cell::create_host_with(path, description, &url, kind, |making| {
+        prepare(making)?;
+        durable_in_parent(making, path);
+        Ok(())
+    })?;
     local_cell::made_host(path)?;
-    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
-    host_fs::File::open(parent.unwrap_or(Path::new(".")))?.sync_all()?;
     Ok(())
+}
+
+/// cladefs: has `making`, of the cell directory at `path`, make the directory's entry in its parent
+/// durable with the rest of it (board 7420): a fork's, which its maker made.
+fn durable_in_parent(making: &mut Making<'_, HostDir>, path: &Path) {
+    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
+    let parent = parent.unwrap_or(Path::new(".")).to_owned();
+    making.also("the cell directory's parent", move || host_fs::File::open(&parent)?.sync_all());
 }
 
 /// Deletes the cell directory at `path`, which nothing has open: with `bucket`, its cell there

@@ -61,6 +61,7 @@ fn make(dir: &MemDir) {
         Some(Kind::Fxfs),
         &checkpoint,
         ring.encrypting(),
+        |_| Ok(()),
     )
     .unwrap();
 }

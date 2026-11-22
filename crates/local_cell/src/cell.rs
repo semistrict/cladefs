@@ -17,6 +17,7 @@ use crate::layout::{
     extent_path, files_of, list_numbers, log_path, numbered_path, open_extent_path,
     open_segment_path, segment_path, spare_path,
 };
+use crate::making::Making;
 use crate::pool::spawn_or_return;
 use crate::raw::{RawEncryption, RawFile};
 use crate::replicate::{Flushed, Replicator, log_of, own_frame, own_of};
@@ -1587,19 +1588,34 @@ impl<D: Dir> LocalCell<D> {
         kind: Option<Kind>,
         version: Option<u64>,
     ) -> Result<(), Error> {
-        Self::make_described(dir, description, bucket, kind, (version, false), |_| Ok(()))
+        Self::make_with(dir, description, bucket, kind, version, |_| Ok(()))
+    }
+
+    /// cladefs: makes a new cell's directory in `dir` as [`LocalCell::make_copy`] does, `extra`
+    /// writing what else it holds into its making first, before its description, made durable
+    /// with it ([`Making`], board 7420).
+    pub fn make_with(
+        dir: &D,
+        description: Description,
+        bucket: Option<&str>,
+        kind: Option<Kind>,
+        version: Option<u64>,
+        extra: impl FnOnce(&mut Making<'_, D>) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        Self::make_described(dir, description, bucket, kind, (version, false), extra)
     }
 
     /// cladefs: makes a new cell's directory in `dir`, as [`LocalCell::make_copy`] does, its
     /// description saying `version` and whether its cell is ephemeral, as `described` says;
-    /// `extra` writes what else it holds first, before its description (TASK-698.2).
+    /// `extra` writes what else it holds first, before its description (TASK-698.2), into its
+    /// making, which makes it durable with the description at once ([`Making`], board 7420).
     fn make_described(
         dir: &D,
         description: Description,
         bucket: Option<&str>,
         kind: Option<Kind>,
         (version, ephemeral): (Option<u64>, bool),
-        extra: impl FnOnce(&D) -> Result<(), Error>,
+        extra: impl FnOnce(&mut Making<'_, D>) -> Result<(), Error>,
     ) -> Result<(), Error> {
         let Description { block_size, capacity, cell } = description;
         ensure!(
@@ -1614,7 +1630,9 @@ impl<D: Dir> LocalCell<D> {
         let made = || -> Result<(), Error> {
             create_cell_dirs(dir, cell.id)?;
             dir.create(UNMADE, false)?.sync()?;
-            extra(dir)?;
+            // Unmade from here on, durably: what follows is synced at once, its description too.
+            let mut making = Making::new(dir);
+            extra(&mut making)?;
             let file = dir.create(DESCRIPTION, false)?;
             let bucket = bucket.map(str::to_owned);
             let described = CellFile {
@@ -1632,8 +1650,9 @@ impl<D: Dir> LocalCell<D> {
             };
             let text = described.text();
             file.write_at(text.as_bytes(), 0)?;
-            file.sync()?;
-            dir.sync_dir("")?;
+            making.file(DESCRIPTION, file);
+            making.dir_entries("");
+            making.sync()?;
             dir.barrier()?;
             Ok(())
         };

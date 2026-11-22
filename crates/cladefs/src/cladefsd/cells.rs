@@ -620,7 +620,9 @@ pub(super) async fn attach(
     let held = hold(&path).await?;
     blocking(move || {
         let _held = held;
-        if !host_fs::exists(&path) {
+        // An unmade directory is no cell: what its making wrote, plainly, may be torn (board
+        // 7420).
+        if !host_fs::exists(&path) || crate::host_cell::unmade(&path) {
             return Err(Errno::ENOENT);
         }
         crate::cell_dir::attach(&path, &base, &ancestry)

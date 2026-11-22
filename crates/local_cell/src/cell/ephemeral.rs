@@ -539,8 +539,11 @@ impl<D: Dir> LocalCell<D> {
         kind: Option<Kind>,
         checkpoint: &LocalCheckpoint,
         encrypting: (&extent_frame::Secret, extent_frame::KeyId),
+        extra: impl FnOnce(&mut crate::Making<'_, D>) -> Result<(), Error>,
     ) -> Result<(), Error> {
-        Self::make_described(dir, description, bucket, kind, (None, true), |dir| {
+        Self::make_described(dir, description, bucket, kind, (None, true), |making| {
+            extra(making)?;
+            let dir = making.dir();
             checkpoint.write(dir, encrypting)?;
             StartFile::read(dir)?.0.write(dir, checkpoint.last_commit)
         })

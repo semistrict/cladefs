@@ -171,7 +171,7 @@ impl<T> Durability<T> {
 /// Linux, where each is an `fdatasync`, neither the gain nor the bound is measured yet. Each sync
 /// but the flush's own is on a thread of the pool's (`crate::pool`), of [`HELPERS`], which every
 /// flush shares.
-const AT_ONCE: usize = 16;
+pub(crate) const AT_ONCE: usize = 16;
 
 /// cladefs: how many threads, beside the flushes' own, every flush of the process syncs on at once,
 /// at most (TASK-92.49): as many as one flush syncs on beside its own ([`AT_ONCE`]), which a flush

@@ -28,7 +28,20 @@ pub fn create_host(
     bucket: &str,
     kind: Kind,
 ) -> Result<(), Error> {
-    LocalCell::make(&HostDir::new(path)?, description, Some(bucket), Some(kind))
+    create_host_with(path, description, bucket, kind, |_| Ok(()))
+}
+
+/// cladefs: makes a new cell at `path` as [`create_host`] does, `extra` writing what else its
+/// directory holds into its making first, made durable with its description at once
+/// ([`Making`](crate::Making), board 7420).
+pub fn create_host_with(
+    path: &Path,
+    description: Description,
+    bucket: &str,
+    kind: Kind,
+    extra: impl FnOnce(&mut crate::Making<'_, HostDir>) -> Result<(), Error>,
+) -> Result<(), Error> {
+    LocalCell::make_with(&HostDir::new(path)?, description, Some(bucket), Some(kind), None, extra)
 }
 
 /// cladefs: makes a new cell at `path` as [`create_host`] does, a cell at the version `version` of
@@ -305,8 +318,8 @@ pub fn host_local_checkpoint(path: &Path) -> Result<Option<crate::LocalCheckpoin
 
 /// cladefs: makes a new ephemeral cell at `path`, which must be a directory holding no cell
 /// (doc-25, TASK-698.3), as `description` describes, naming `bucket`, its parent's, its cell of
-/// `kind`, its local checkpoint `local-checkpoint`: unmade until its maker says it is whole
-/// ([`made_host`]).
+/// `kind`, its local checkpoint `local-checkpoint`, `extra` writing what else it holds into its
+/// making first ([`create_host_with`]): unmade until its maker says it is whole ([`made_host`]).
 pub fn create_host_ephemeral(
     path: &Path,
     description: Description,
@@ -314,6 +327,7 @@ pub fn create_host_ephemeral(
     kind: Kind,
     checkpoint: &crate::LocalCheckpoint,
     encrypting: (&extent_frame::Secret, extent_frame::KeyId),
+    extra: impl FnOnce(&mut crate::Making<'_, HostDir>) -> Result<(), Error>,
 ) -> Result<(), Error> {
     LocalCell::make_ephemeral(
         &HostDir::new(path)?,
@@ -322,6 +336,7 @@ pub fn create_host_ephemeral(
         Some(kind),
         checkpoint,
         encrypting,
+        extra,
     )
 }
 

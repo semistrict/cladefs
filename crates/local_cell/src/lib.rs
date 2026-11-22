@@ -178,6 +178,8 @@ pub use held::{HeldCounts, HeldParts};
 mod cell;
 mod host;
 mod kept;
+mod making;
+pub use making::Making;
 mod layout;
 mod mem;
 mod metered;
@@ -224,9 +226,9 @@ pub use framing::{
     buffers_bytes as framing_buffers_bytes, evict_buffers_to as evict_framing_buffers_to,
 };
 pub use host::{
-    create_host, create_host_at_version, create_host_ephemeral, delete_host, deleting_host,
-    host_bucket, host_cell, host_ephemeral, host_local_checkpoint, host_token, host_version,
-    made_host, place, place_host, remove_cell_dir, unmade_host,
+    create_host, create_host_at_version, create_host_ephemeral, create_host_with, delete_host,
+    deleting_host, host_bucket, host_cell, host_ephemeral, host_local_checkpoint, host_token,
+    host_version, made_host, place, place_host, remove_cell_dir, unmade_host,
 };
 pub use layout::{Description, Format, Place};
 pub use mem::{Io, MemDir, MemDisk, MemDiskFile, MemFile};

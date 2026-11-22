@@ -5,7 +5,8 @@
 //! cladefs: what cladefs keeps of its own in a cell directory, beside the cell's files
 //! (TASK-160.13): what is attached to it ([`attached`]), what it was forked from ([`ancestry`]),
 //! and the cells marked public ([`public_cells`]). Each record is written one way, durably
-//! ([`write`], [`mark`]): whole or not at all, the file and its directory synced. And each is read
+//! ([`write`], [`mark`]): whole or not at all, the file and its directory synced; or, a fork's,
+//! into its cell's making, with its description ([`inherit`], board 7420). And each is read
 //! by one rule ([`read`]): missing, it is none; unreadable, or not what it says, the cell's opening
 //! fails with `EIO`, logged, rather than going on as if there were none, as a public base opening
 //! private would (TASK-160.10).
@@ -111,12 +112,18 @@ pub(crate) fn attach(dir: &Path, base: &Path, cells: &[u64]) -> Result<()> {
 
 /// Replaces what the cell in `dir` records as attached with `attached`, durably.
 fn write_attached(dir: &Path, attached: &[(Vec<u64>, PathBuf)]) -> Result<()> {
+    let text = attached_text(attached);
+    write(dir, ATTACHED, &text).map_err(|err| failed(dir, "recording what is attached", err))
+}
+
+/// The record of `attached`, as [`attached`] reads it.
+fn attached_text(attached: &[(Vec<u64>, PathBuf)]) -> String {
     let mut text = String::new();
     for (cells, base) in attached {
         let cells: Vec<String> = cells.iter().map(|&cell| Short(cell).to_string()).collect();
         text += &format!("{} {}\n", cells.join(","), base.display());
     }
-    write(dir, ATTACHED, &text).map_err(|err| failed(dir, "recording what is attached", err))
+    text
 }
 
 /// The cells the cell in `dir` was forked from, nearest first: none, if it is no fork.
@@ -150,29 +157,49 @@ pub(crate) fn public_cells(dir: &Path) -> Result<BTreeSet<u64>> {
 
 /// Marks `cells` public in the cell in `dir`, durably.
 pub(crate) fn mark_public(dir: &Path, cells: &[u64]) -> Result<()> {
-    let markers = cells.iter().map(|&cell| format!("{PUBLIC}{}", Padded(cell)));
-    mark(dir, markers).map_err(|err| failed(dir, "marking cells public", err))
+    mark(dir, cells.iter().map(|&cell| public(cell)))
+        .map_err(|err| failed(dir, "marking cells public", err))
+}
+
+/// The name of the record marking `cell` public.
+fn public(cell: u64) -> String {
+    format!("{PUBLIC}{}", Padded(cell))
 }
 
 /// What a fork of the cell in `from`, of `cell`, forked from `forked_from` itself, inherits of
-/// what cladefs keeps beside it, into the directory `to`, its child's, before the child's cell is
-/// made there: what is attached to it, which stays attached to the fork, a restored VM's too; the
-/// cells marked public, its own and those it inherited from, whose pages the fork's are of the
-/// default arena for; and what it was forked from, it nearest (TASK-165.7).
+/// what cladefs keeps beside it, written into the making of its child's cell, `making`, before the
+/// child's description, durable with it at once (board 7420): what is attached to it, which stays
+/// attached to the fork, a restored VM's too; the cells marked public, its own and those it
+/// inherited from, whose pages the fork's are of the default arena for; and what it was forked
+/// from, it nearest (TASK-165.7). Written plainly, not each whole or not at all: a crash before
+/// the child is made whole leaves its directory for deleting.
 pub(crate) fn inherit(
     from: &Path,
     cell: u64,
     forked_from: &[(u64, PathBuf)],
-    to: &Path,
+    making: &mut local_cell::Making<'_, local_cell::HostDir>,
 ) -> Result<()> {
-    inherit_attached(from, to)?;
+    let to = making.dir().path().to_owned();
+    let mut write = |name: &str, text: &str, what: &str| {
+        making.write(name, text.as_bytes()).map_err(|err| {
+            log::error!("cladefs: {what} of {}: {err:#}", to.display());
+            Errno::EIO
+        })
+    };
+    let attached = attached(from)?;
+    if !attached.is_empty() {
+        write(ATTACHED, &attached_text(&attached), "recording what is attached")?;
+    }
+    for public_cell in public_cells(from)? {
+        write(&public(public_cell), "", "marking cells public")?;
+    }
     let from = host_fs::canonicalize(&from)
         .map_err(|err| failed(from, "finding the cell directory", err))?;
     let mut text = format!("{} {}\n", Short(cell), from.display());
     for &(cell, ref dir) in forked_from {
         text += &format!("{} {}\n", Short(cell), dir.display());
     }
-    write(to, ANCESTRY, &text).map_err(|err| failed(to, "recording what it was forked from", err))
+    write(ANCESTRY, &text, "recording what it was forked from")
 }
 
 /// What the cell in `to` inherits of the cell in `from` that its guest reads: what is attached
@@ -230,7 +257,16 @@ mod tests {
         attach(from.path(), Path::new("/cells/base"), &[0x1a]).unwrap();
         mark_public(from.path(), &[5]).unwrap();
         let older = vec![(3, PathBuf::from("/cells/grandparent"))];
-        inherit(from.path(), 4, &older, to.path()).unwrap();
+        let cell = local_cell::CellId { tenant: 0, id: 6 };
+        let description = local_cell::Description { block_size: 4096, capacity: 1 << 20, cell };
+        let made = local_cell::create_host_with(
+            to.path(),
+            description,
+            "memory:///cells",
+            bucket_cell::cell::Kind::Fxfs,
+            |making| Ok(inherit(from.path(), 4, &older, making)?),
+        );
+        made.unwrap();
         assert_eq!(attached(to.path()), attached(from.path()));
         assert_eq!(public_cells(to.path()), Ok(BTreeSet::from([5])));
         let parent = host_fs::canonicalize(&from.path()).unwrap();

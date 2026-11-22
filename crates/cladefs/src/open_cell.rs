@@ -1150,8 +1150,8 @@ impl OpenCell {
         }
         let cell = self.new_child(tenant).await?;
         let child = bucket_cell::layout::Child { cell, owner: rand::random() };
-        let inherited = |to: &Path| -> anyhow::Result<()> {
-            Ok(cell_dir::inherit(&self.path, self.cell().id, &self.forked_from, to)?)
+        let inherited = |making: &mut local_cell::Making<'_, HostDir>| -> anyhow::Result<()> {
+            Ok(cell_dir::inherit(&self.path, self.cell().id, &self.forked_from, making)?)
         };
         let forking =
             host_cell::fork_ephemeral(&self.local, uploader, path.as_ref(), child, inherited);
@@ -1209,8 +1209,8 @@ impl OpenCell {
         let child = bucket_cell::layout::Child { cell, owner: rand::random() };
         // cladefs: what is attached to it stays attached to the fork, a restored VM's too; and what
         // is public of it, and what it was forked from.
-        let inherited = |to: &Path| -> anyhow::Result<()> {
-            Ok(cell_dir::inherit(&self.path, self.cell().id, &self.forked_from, to)?)
+        let inherited = |making: &mut local_cell::Making<'_, HostDir>| -> anyhow::Result<()> {
+            Ok(cell_dir::inherit(&self.path, self.cell().id, &self.forked_from, making)?)
         };
         // Refused before anything is made, the version among it.
         host_cell::may_fork_into(self.cell(), uploader, cell.tenant)?;
