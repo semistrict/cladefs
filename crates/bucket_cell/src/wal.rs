@@ -240,7 +240,7 @@ mod tests {
         let mut commits = Vec::new();
         for (segment, epoch) in named.segments(0) {
             let key = layout::segment(test_cell(1), segment, epoch);
-            let object = crate::bucket::get(&**bucket, &key).await.unwrap();
+            let object = crate::bucket::get(&**bucket, &key).await.unwrap().unwrap();
             commits.extend(layout::Segment::footer(&object.bytes).unwrap().contents.commits);
         }
         commits

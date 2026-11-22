@@ -207,8 +207,11 @@ impl Header {
 /// and a `MAP_MANY`'s stream bytes count what the daemon decodes of them (TASK-614); a transfer
 /// area is written whole by its VM process, which seals it against no more, before it gives it
 /// (TASK-547); a payload on an `ACK`, `STAGE_COUNTS` or `STAGE_PRIVATE_COUNTS` ends its connection
-/// (TASK-581).
-pub(crate) const VERSION: u64 = 12;
+/// (TASK-581). Version 13: a VM process copies on write itself (doc-26): no `FAULT_WRITE`,
+/// `PRIVATE` or `STAGE_PRIVATE`; a [`WINDOW`] says it copies with [`WINDOW_COPYING`], not its
+/// private pages; a [`STAGE_UNMAP`] keeps the private pages there with [`STAGE_KEEP_PRIVATE`];
+/// [`STAGE_COUNTS`] says the private pages.
+pub(crate) const VERSION: u64 = 13;
 
 /// cladefs: a flag of any request, which says the guest request it is a call for, the guest's
 /// number of it (`crate::request`, TASK-260): little-endian, not 0, in the first
@@ -259,15 +262,16 @@ pub(crate) const ROOT: u32 = 8;
 pub(crate) const INFO: u32 = 9;
 /// Creates the cell's window, of `args[0]` bytes, which the VM process maps in its own memory as
 /// the daemon's [stage operations](STAGE_MAP) say. cladefs: a writer's copies on write (backlog
-/// doc-13), of `args[1]` private pages at most, one at least, the VM process's memory, for which
-/// the daemon reserves nothing (TASK-501): a write to a page makes the page private. A follower's
-/// copies nothing, refusing every write, its `args[1]` 0 (`EINVAL` otherwise, as a writer's of
-/// 0). `args[2]` is how many runs of pages the VM process keeps installed at most, each a mapping
+/// doc-13), [`WINDOW_COPYING`], in its VM process, which bounds its private pages, its own memory
+/// (doc-26): a write to a page makes the page private there, which the daemon knows nothing of. A
+/// follower's copies nothing, refusing every write (`EINVAL` otherwise, as a writer's that doesn't
+/// copy). `args[1]` is 0. `args[2]` is how many runs of pages the VM process keeps installed at most, each a mapping
 /// of its own, by the mappings the host lets it make ([`OPEN`]'s reply): 0 if it doesn't say, which
 /// the daemon's metrics show (TASK-111.5).
 pub(crate) const WINDOW: u32 = 10;
-/// Resolves the guest's fault at `args[0]` in the window: a write if [`FAULT_WRITE`], on that page
-/// alone if [`FAULT_PAGE`]. The stage operations it takes come before the reply.
+/// Resolves the guest's fault at `args[0]` in the window, a read, on that page alone if
+/// [`FAULT_PAGE`]: cladefs: a write's too, which its VM process copies or refuses itself once the
+/// window names the page (doc-26). The stage operations it takes come before the reply.
 pub(crate) const FAULT: u32 = 11;
 /// Acknowledges stage operation `id`, which the VM process has made; and says, as
 /// [`STAGE_COUNTS`] does, what its stage operations have cost it so far.
@@ -330,8 +334,9 @@ pub(crate) const MAX_WINDOW: u64 = 64 << 30;
 /// cladefs: the stage operations the VM process has made of the connection's, `args[0]`, the
 /// nanoseconds they took it, `args[1]`, and those of them that took access away from pages it had
 /// installed, by how, `args[2..4]` (`Stats::stage_overwrites`), so far, which the daemon counts as
-/// its own (`Stats::stage_ops`, TASK-91.16); and the runs of pages it has installed now, `args[4]`,
-/// which [`WINDOW`]'s `args[2]` bounds (TASK-111.5): said with each [`ACK`]; otherwise once
+/// its own (`Stats::stage_ops`, TASK-91.16); and the runs of pages it has installed now, `args[4]`'s
+/// low 32 bits, which [`WINDOW`]'s `args[2]` bounds (TASK-111.5), and its window's private pages,
+/// its high 32 (doc-26): said with each [`ACK`]; otherwise once
 /// [`STAGE_COUNTS_EVERY`] has passed since it last said, as it makes them; before each [`STATS`];
 /// and as it closes the connection. Nothing replies.
 pub(crate) const STAGE_COUNTS: u32 = 27;
@@ -349,11 +354,8 @@ pub(crate) const MAX_BUILD: usize = 64;
 /// with its commits, and which each `ROOT` copied into its reply, uncounted: 16 of them at once
 /// held 768 MiB.
 pub(crate) const MAX_ROOT: usize = storage_device::MAX_ROOT;
-/// cladefs: makes the `args[1]` bytes of the window at `args[0]` private now, as writes to each
-/// page would, mapped writable, for the guest ahead of its accesses: doc-4's `PRIVATE` (backlog
-/// doc-13). `ENOMEM`, none made private, past the window's private pages; `EINVAL` of a follower's
-/// window, which copies nothing. The stage operations it takes come before the reply.
-pub(crate) const PRIVATE: u32 = 30;
+// 30 made a window's pages private, doc-4's `PRIVATE`, which a VM process serves itself now
+// (doc-26), not reused.
 /// cladefs: the VM process's answer to the daemon's [`STATS_ASK`] `args[0]`: with [`STATS_GUEST`],
 /// its guest's stats, the payload, UTF-8 text of [`MAX_STATS`] bytes at most, as the guest's
 /// driver said them (backlog doc-4's `STATS`): lines of a name and a value, a number, or a
@@ -374,10 +376,9 @@ pub(crate) const MAX_STATS: usize = 64 << 10;
 /// second stage apiece (TASK-92.14). A request of its own rather than a flag of `MAP`'s, as
 /// [`FREE_MANY`] is: a daemon older than it refuses it (`EINVAL`).
 pub(crate) const MAP_MANY: u32 = 32;
-/// cladefs: of the stage operations the VM process has made of the connection's, the runs of
-/// private pages it made, each at once, `args[0]`, the pages they made, `args[1]`, and the
-/// nanoseconds they took it, `args[2]`; and the [`PRIVATE`] requests it made, `args[3]`, and the
-/// nanoseconds it waited for their replies, `args[4]`, so far (`Stats::stage_private_runs`,
+/// cladefs: the runs of private pages the VM process made, each at once, `args[0]`, the pages
+/// they made, `args[1]`, and the nanoseconds they took it, `args[2]`; and the guest's `PRIVATE`s
+/// it served, `args[3]`, and the nanoseconds they took it, `args[4]`, so far (`Stats::stage_private_runs`,
 /// TASK-164.10): said once [`STAGE_COUNTS_EVERY`] has passed since it last said, as it makes them,
 /// and as it closes the connection. Nothing replies.
 pub(crate) const STAGE_PRIVATE_COUNTS: u32 = 33;
@@ -424,7 +425,7 @@ pub(crate) const WRITE_TRANSFER: u32 = 1 << 4;
 /// with [`WRITE_UPLOADED`]. Not doc-4's.
 pub(crate) const WRITE_LOCAL: u32 = 1 << 5;
 pub(crate) const READ_TRANSFER: u32 = 1 << 0;
-pub(crate) const FAULT_WRITE: u32 = 1 << 0;
+// `FAULT`'s bit 0 said a write (`FAULT_WRITE`), which a VM process copies itself now (doc-26).
 pub(crate) const FAULT_PAGE: u32 = 1 << 1;
 /// cladefs: a [`FAULT`] on a page alone, to read, that is the VM process's own probe of the page,
 /// mapping it ahead of the guest's accesses, not the guest's access: the daemon tells of no
@@ -442,16 +443,13 @@ pub(crate) const REPLY: u32 = 100;
 /// into the window at `args[0]`, read-only.
 pub(crate) const STAGE_MAP: u32 = 101;
 // 102 changed a range's protection, as writable DAX's seals did, not reused.
-/// Unmaps `args[1]` bytes of the window at `args[0]`.
+/// Unmaps `args[1]` bytes of the window at `args[0]`: cladefs: ending the private pages there,
+/// unless [`STAGE_KEEP_PRIVATE`] (doc-26).
 pub(crate) const STAGE_UNMAP: u32 = 103;
 /// cladefs: the window maps `args[1]` bytes at `args[0]` anew (`SecondStage::window_mapped`).
 pub(crate) const STAGE_MAPPED: u32 = 106;
-/// cladefs: the page of the window at `args[0]` is private from now on (backlog doc-13,
-/// `SecondStage::make_private`), the VM process's own memory, holding the bytes of the page at
-/// `args[1]` in arena `args[4]`'s object if `args[2]` is 1, or zeros if it is 0, in place of what
-/// is mapped there. Acknowledged ([`STAGE_ACK`]): it takes the page mapped there away, and the
-/// daemon keeps the page it is copied from until it is made.
-pub(crate) const STAGE_PRIVATE: u32 = 108;
+// 108 made a page private, the daemon's copy on write, which a VM process makes itself now (doc-26),
+// not reused.
 /// The cell's capacity is `args[0]` bytes now, which the guest takes (the control API's
 /// `ResizeCell`); or, with [`CAPACITY_ASK`], the guest is asked to shrink to `args[0]` bytes, and
 /// answers ([`RESIZED`]).
@@ -467,6 +465,12 @@ pub(crate) const STATS_ASK: u32 = 109;
 /// A stage operation the daemon waits for the VM process to acknowledge ([`ACK`]), as it must for
 /// one that takes access to a page away, before it frees the page or shares it.
 pub(crate) const STAGE_ACK: u32 = 1 << 0;
+/// cladefs: a [`STAGE_UNMAP`] of the host's own, an eviction's or a free's, which leaves the
+/// private pages there (doc-26, spec rule evictionKeepsPrivate): without it, the guest's `MAP` or
+/// `UNMAP`, which ends them.
+pub(crate) const STAGE_KEEP_PRIVATE: u32 = 1 << 1;
+/// cladefs: a [`WINDOW`] whose VM process copies on write, a writer's (doc-26).
+pub(crate) const WINDOW_COPYING: u32 = 1 << 0;
 
 /// The most bytes of payload a message carries: a `READ` or `WRITE` of a whole extent, or less.
 pub(crate) const MAX_PAYLOAD: u64 = crate::OpenCell::MAX_EXTENT;
@@ -985,8 +989,10 @@ impl Receiver {
     /// joined, whose acknowledgement is of every ID before it, as IDs reach the wire in order
     /// (TASK-160.11): not a later map's, which takes no access away. Each message is taken as
     /// [`Stage::decode`] has it: one it refuses, it leaves.
+    /// cladefs: unmaps join only those that keep the private pages, or end them, as it does
+    /// (doc-26).
     pub fn take_change(&mut self, unmap: &mut Stage) -> io::Result<Vec<crate::dax::Anew>> {
-        let StageOp::Unmap { offset, len } = unmap.op else { return Ok(Vec::new()) };
+        let StageOp::Unmap { offset, len, keep_private } = unmap.op else { return Ok(Vec::new()) };
         let (mut start, Some(mut end)) = (offset, offset.checked_add(len)) else {
             return Ok(Vec::new());
         };
@@ -998,7 +1004,9 @@ impl Receiver {
         let taken = self.take_waiting(|next| {
             let next = Stage::decode(next).ok()?;
             let (at, len, made) = match next.op {
-                StageOp::Unmap { offset, len } if !anew && len != 0 => {
+                StageOp::Unmap { offset, len, keep_private: keep }
+                    if !anew && len != 0 && keep == keep_private =>
+                {
                     let next_end = offset.checked_add(len)?;
                     if offset > end || next_end < start {
                         return None;
@@ -1020,37 +1028,8 @@ impl Receiver {
             (len != 0 && within).then_some(Some(made))
         })?;
         unmap.id = id;
-        unmap.op = StageOp::Unmap { offset: start, len: end - start };
+        unmap.op = StageOp::Unmap { offset: start, len: end - start, keep_private };
         Ok(taken.into_iter().flatten().collect())
-    }
-
-    /// cladefs: takes the private pages that follow the stage operation `first`, a private page's,
-    /// already waiting whole in the socket, each the next page on from the last: a `PRIVATE`'s
-    /// pages, which the daemon's window makes in one change (TASK-164.10). Returns what each of
-    /// the run holds, `first`'s first, for the VM process to make at once, its memory changed once
-    /// for the run rather than once a page. Up to 63 messages more, as [`Self::take_change`]
-    /// takes them; `first`'s ID becomes the last's, whose acknowledgement is of every ID before
-    /// it. Of another operation, it takes nothing.
-    pub fn take_privates(
-        &mut self,
-        first: &mut Stage,
-    ) -> io::Result<Vec<Option<crate::pages::PhysLocation>>> {
-        let StageOp::Private { offset, from } = first.op else { return Ok(Vec::new()) };
-        let page_size = crate::pages::page_size();
-        let (mut next_offset, mut id) = (offset.checked_add(page_size), first.id);
-        let mut run = vec![from];
-        run.extend(self.take_waiting(|next| {
-            let next = Stage::decode(next).ok()?;
-            match next.op {
-                StageOp::Private { offset, from } if Some(offset) == next_offset => {
-                    (next_offset, id) = (offset.checked_add(page_size), next.id);
-                    Some(from)
-                }
-                _ => None,
-            }
-        })?);
-        first.id = id;
-        Ok(run)
     }
 
     /// cladefs: receives the messages already read or waiting whole in the socket, up to 63, as
@@ -1272,7 +1251,7 @@ mod tests {
     use std::os::fd::AsFd;
 
     fn unmap(id: u64, offset: u64, len: u64) -> Stage {
-        Stage { id, op: StageOp::Unmap { offset, len } }
+        Stage { id, op: StageOp::Unmap { offset, len, keep_private: false } }
     }
 
     fn map(id: u64, offset: u64, len: u64) -> Stage {
@@ -1324,13 +1303,9 @@ mod tests {
     /// one of another kind, or an unmap after them, which begins the next change.
     #[test]
     fn unmaps_take_the_maps_within_them() {
-        let private = StageOp::Private { offset: 4096, from: None };
-        for (after, taken) in [
-            (map(5, 8192, 8192), 3),
-            (unmap(5, 4096, 4096), 3),
-            (Stage { id: 5, op: private }, 3),
-            (map(5, 4096, 8192), 4),
-        ] {
+        for (after, taken) in
+            [(map(5, 8192, 8192), 3), (unmap(5, 4096, 4096), 3), (map(5, 4096, 8192), 4)]
+        {
             let ((sender, _), (_, mut receiver)) = pair();
             let sent = [mapped(2, 4096, 8192), map(3, 4096, 4096), map(4, 8192, 4096), after];
             for stage in sent {
@@ -1346,65 +1321,6 @@ mod tests {
         }
     }
 
-    fn private(id: u64, offset: u64, from: Option<u64>) -> Stage {
-        let arena = crate::pages::ArenaId(0);
-        let from = from.map(|offset| crate::pages::PhysLocation { arena, offset });
-        Stage { id, op: StageOp::Private { offset, from } }
-    }
-
-    /// cladefs TASK-164.10: a private page takes the private pages that follow it on, each the next
-    /// page, whatever each holds, a run the VM process makes at once, up to the first that isn't:
-    /// one not the next page, one of another kind; the run's ID the last's. Of another operation,
-    /// nothing is taken as a run.
-    #[test]
-    fn private_pages_take_the_run_after_them() {
-        let ps = crate::pages::page_size();
-        let other = [
-            private(5, 8 * ps, Some(0)),
-            private(5, 3 * ps, Some(0)),
-            unmap(5, 4 * ps, ps),
-            mapped(5, 4 * ps, ps),
-        ];
-        for after in other {
-            let ((sender, _), (_, mut receiver)) = pair();
-            let sent = [private(2, 2 * ps, None), private(3, 3 * ps, Some(7 * ps)), after];
-            for stage in sent {
-                sender.send(stage.encode(), &[], &[]).unwrap();
-            }
-            let mut first = private(1, ps, Some(ps));
-            let froms = receiver.take_privates(&mut first).unwrap();
-            let location = |offset| {
-                Some(crate::pages::PhysLocation { arena: crate::pages::ArenaId(0), offset })
-            };
-            assert_eq!(froms, [location(ps), None, location(7 * ps)]);
-            assert_eq!(first, private(3, ps, Some(ps)), "the run's ID is its last's");
-            assert_eq!(receiver.receive(|| 0).unwrap().unwrap().header, after.encode());
-        }
-        let ((sender, _), (_, mut receiver)) = pair();
-        sender.send(private(2, 2 * ps, None).encode(), &[], &[]).unwrap();
-        let mut first = unmap(1, ps, ps);
-        assert_eq!(receiver.take_privates(&mut first).unwrap(), []);
-        assert_eq!(first, unmap(1, ps, ps));
-        let next = receiver.receive(|| 0).unwrap().unwrap().header;
-        assert_eq!(next, private(2, 2 * ps, None).encode());
-    }
-
-    /// cladefs TASK-164.10: a run of private pages takes 63 more at most, as a change does.
-    #[test]
-    fn private_runs_bound_the_work_taken_from_the_socket() {
-        let ps = crate::pages::page_size();
-        let ((sender, _), (_, mut receiver)) = pair();
-        for id in 1..=100 {
-            sender.send(private(id, id * ps, None).encode(), &[], &[]).unwrap();
-        }
-        let header = receiver.receive(|| 0).unwrap().unwrap().header;
-        let mut stage = Stage::decode(&header).unwrap();
-        assert_eq!(receiver.take_privates(&mut stage).unwrap().len(), 64);
-        assert_eq!(stage, private(64, ps, None));
-        let header = receiver.receive(|| 0).unwrap().unwrap().header;
-        assert_eq!(header, private(65, 65 * ps, None).encode());
-    }
-
     #[test]
     fn unmap_batches_leave_gaps_other_operations_and_partial_headers_untouched() {
         for variation in 0..6 {
@@ -1414,7 +1330,8 @@ mod tests {
             let mut next = unmap(2, 8192, 4096).encode();
             match variation {
                 0 => next.args[0] += 4096,
-                1 => next.kind = STAGE_PRIVATE,
+                // An unmap keeping the private pages, after one ending them (doc-26).
+                1 => next.flags |= STAGE_KEEP_PRIVATE,
                 2 => next.flags = 0,
                 3 => next.args = [u64::MAX - 1024, 4096, 0, 0, 0],
                 4 => {}

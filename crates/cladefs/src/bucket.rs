@@ -102,7 +102,10 @@ pub fn format_bucket(url: &str, details: Details, asked: Asked) -> Result<Identi
 /// root's registry, which then goes to every bucket's root. Its identity: refused if it is a
 /// bucket already (`EEXIST`), or the root is another bucket (`EINVAL`), or no number is left
 /// (`ENOSPC`), or it is a memory bucket, its process's alone (`EINVAL`). cladefs: its settings the
-/// root's, but those `asked` (TASK-691); refused out of range (`EINVAL`).
+/// root's, but those `asked` (TASK-691); refused out of range (`EINVAL`). cladefs: each bucket
+/// opened with its own number's options, its credentials (`CLADEFSD_BUCKET_<N>_*`), the new one
+/// with the number it is to get (board 5550); `EAGAIN` if another addition took that number
+/// first, added under the next, which an addition again finishes.
 pub fn add_bucket(
     root_url: &str,
     url: &str,
@@ -116,13 +119,27 @@ pub fn add_bucket(
         let refused = anyhow::anyhow!("{url}: a memory bucket is one process's, none to add");
         return Err(crate::Error::new(refused.context(Errno::EINVAL)));
     }
-    let open = |url: &str| crate::host_cell::bucket(url).map_err(crate::Error::new);
-    let (root, new) = (open(root_url)?, open(url)?);
+    use bucket_cell::identity::{self, ROOT};
+    let open =
+        |url: &str, number| crate::host_cell::bucket_of(url, number).map_err(crate::Error::new);
+    let root = open(root_url, ROOT)?;
+    let found = on_buckets(identity::registry(&*root))?;
+    let number = identity::number_for(found.as_ref(), url).map_err(Failure::from)?;
+    let new = open(url, number)?;
     let (identity, registry) =
-        on_buckets(bucket_cell::identity::add(&*root, &root_details, &*new, details, asked))?;
+        on_buckets(identity::add(&*root, &root_details, &*new, details, asked))?;
+    if identity.number != number {
+        let raced = anyhow::anyhow!(
+            "{url}: added as bucket {}, another addition taking {number} first: give it its \
+             CLADEFSD_BUCKET_{}_* and add it again, which finishes it",
+            identity.number,
+            identity.number
+        );
+        return Err(crate::Error::new(raced.context(Errno::EAGAIN)));
+    }
     for entry in &registry.buckets {
         if let Some(url) = &entry.details.url {
-            on_buckets(bucket_cell::identity::spread(&registry, &*open(url)?))?;
+            on_buckets(identity::spread(&registry, &*open(url, entry.number)?))?;
         }
     }
     Ok(identity)
@@ -167,6 +184,12 @@ pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
         Failure::Bucket(Error::Unmade(_)) => Some(Errno::ENOENT),
         Failure::Bucket(Error::IdTaken(_) | Error::OtherKind(_)) => Some(Errno::EEXIST),
         Failure::Bucket(Error::NotShared(_)) => Some(Errno::EACCES),
+        // cladefs: a bucket refusing the host's credentials, for good, or a request of its own:
+        // never retried (board 5861).
+        Failure::Bucket(Error::Refused(refused)) => Some(match refused.refusal {
+            bucket_cell::bucket::Refusal::Denied => Errno::EACCES,
+            bucket_cell::bucket::Refusal::Request => Errno::EIO,
+        }),
         // cladefs: a tenant's KEK the KMS refused, revoked, destroyed, or unreached: its open cells
         // open no more until it is given back (TASK-411.3).
         Failure::Bucket(Error::Kms(_)) => Some(Errno::EACCES),
@@ -452,7 +475,9 @@ pub async fn shred_tenant(
     let shredded = match (keys.and_then(|keys| keys.by_bucket.as_ref()), bucket_kms()) {
         (Some(by_bucket), _) => by_bucket.shred(tenant).await,
         (None, Some(kms)) => {
-            Shredded { destroyed: vec![(0, kms.destroy(tenant).await)], ..Shredded::default() }
+            let mut shredded = Shredded::default();
+            shredded.destroying(0, kms.destroy(tenant).await);
+            shredded
         }
         (None, None) => Shredded::default(),
     };
@@ -600,6 +625,18 @@ pub fn upload_memory() -> UploadMemory {
     UploadMemory { held, max_held, budget: UPLOADS.get().limits().bytes }
 }
 
+/// cladefs: what [`HostFetcher::read_following`] read: fetched bytes, or what the cell holds, found
+/// again, the extent relocated into it.
+pub(crate) enum Followed<T> {
+    Fetched(Vec<u8>),
+    Here(T),
+}
+
+/// cladefs: the most times a fetch looks its extent up again, its object found gone: each one is
+/// another relocation acknowledged meanwhile ([`HostFetcher::read_following`]), which a fetch
+/// outlives seldom (doc-27).
+const RELOCATED_MOST: usize = 8;
+
 /// Reads the extents an open cell holds whose data is in object storage
 /// (`local_cell::LocalCell::adopt`), at their locations there, as the open cell names them: a
 /// fetcher (`bucket_cell::fetch::Fetcher`) that is the host's, its reads on the bucket runtime,
@@ -674,6 +711,43 @@ impl HostFetcher {
         // when this future is polled inside `futures::executor::block_on` from a tokio task
         // (board 6525).
         async move { unconstrained(read).await.map_err(|err| Failure::local(err, "fetching"))? }
+    }
+
+    /// cladefs: `len` bytes at `offset` in `extent`, whose data was at `location` in the bucket,
+    /// as many as it holds; or, its object found gone ([`bucket_cell::Error::Lost`]), what
+    /// `again`, which looks the extent up where its cell holds it now, finds (doc-27, What happens
+    /// to the old segment). Moved in the bucket, as `again` fails saying
+    /// ([`local_cell::BucketData`]), it is fetched there; in the cell, a relocation not
+    /// acknowledged yet, it is what `again` gives ([`Followed::Here`]). Its writer relocated it,
+    /// and the bucket acknowledged that, before the collector could delete where it was, which no
+    /// state the collector keeps reads any more. Where it was, it is lost, as said: a fetch's
+    /// error is a [`Failure`], `again`'s its own.
+    pub(crate) async fn read_following<T>(
+        &self,
+        extent: ExtentId,
+        mut location: Location,
+        (offset, len): (u64, u64),
+        mut again: impl FnMut() -> anyhow::Result<T>,
+    ) -> anyhow::Result<Followed<T>> {
+        let mut lost = String::new();
+        for _ in 0..RELOCATED_MOST {
+            lost = match self.read(extent, location.clone(), offset, len).await {
+                Ok(bytes) => return Ok(Followed::Fetched(bytes)),
+                Err(Failure::Bucket(bucket_cell::Error::Lost(lost))) => lost,
+                Err(failure) => return Err(failure.into()),
+            };
+            let error = match again() {
+                Ok(here) => return Ok(Followed::Here(here)),
+                Err(error) => error,
+            };
+            match error.downcast_ref::<local_cell::BucketData>() {
+                Some(data) if data.location != location => location = data.location.clone(),
+                Some(_) => return Err(Failure::Bucket(bucket_cell::Error::Lost(lost)).into()),
+                None => return Err(error),
+            }
+        }
+        let moved = format!("{lost}: {extent:?} moved {RELOCATED_MOST} times as it was fetched");
+        Err(Failure::Bucket(bucket_cell::Error::Lost(moved)).into())
     }
 
     /// cladefs: whether it keeps the parts it fetches in the host's cache, which
@@ -1847,12 +1921,16 @@ mod tests {
         let fork = reopened(&path, idle()).await.unwrap();
         let held = Ok(Some((BLOCK as u64, false)));
         let mut data = vec![0; BLOCK];
-        // Each read once: into the cache.
-        for sequence in 1..=EXTENTS {
-            assert_eq!(fork.stored_extent(inherited(sequence)), held);
-            assert_eq!(fork.read_from_cache(inherited(sequence), 0, &mut data).await, Ok(true));
-            assert_eq!(data, pattern(sequence as u8, BLOCK), "{sequence}");
-        }
+        // Each read once: into the cache; on the executor the reads counted run on, whose first
+        // use on a thread allocates what it wakes it with.
+        futures::executor::block_on(async {
+            for sequence in 1..=EXTENTS {
+                assert_eq!(fork.stored_extent(inherited(sequence)), held);
+                let read = fork.read_from_cache(inherited(sequence), 0, &mut data).await;
+                assert_eq!(read, Ok(true));
+                assert_eq!(data, pattern(sequence as u8, BLOCK), "{sequence}");
+            }
+        });
         let (asked, ()) = allocations_while(|| {
             for sequence in 1..=EXTENTS {
                 assert_eq!(fork.stored_extent(inherited(sequence)), held);
@@ -3662,6 +3740,50 @@ mod tests {
         assert_eq!(held, Vec::<String>::new(), "files holding a cell's data");
     }
 
+    /// board 5550: an addition of a bucket opens each bucket with its own number's options: the
+    /// environment's own, an endpoint refusing every request (`403`, as credentials no bucket
+    /// takes), of no use to any; each bucket's, its number's (`CLADEFSD_BUCKET_<N>_AWS_ENDPOINT`),
+    /// the server holding it. Buckets 2 and 3 added, numbered so, each bucket's registry the
+    /// root's, of all three.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn additions_open_each_bucket_with_its_own_numbers_options() {
+        use bucket_cell::identity::Details;
+        use bucket_cell::s3_server::{BUCKET, S3Server};
+        let (serving, refusing) = (S3Server::start(None), S3Server::start(None));
+        refusing.answering(Some(403));
+        let endpoint = |server: &S3Server| {
+            let options = server.options().into_iter();
+            options.into_iter().find(|(name, _)| name == "aws_endpoint").unwrap().1
+        };
+        let mut vars: Vec<(String, String)> = (refusing.options().into_iter())
+            .map(|(name, value)| (name.to_ascii_uppercase(), value))
+            .collect();
+        let numbered =
+            |number| (format!("CLADEFSD_BUCKET_{number}_AWS_ENDPOINT"), endpoint(&serving));
+        vars.extend((1..=3).map(numbered));
+        for (name, value) in vars {
+            // SAFETY: nextest runs each test in a process of its own, whose other threads don't
+            // read the environment yet.
+            unsafe { std::env::set_var(name, value) };
+        }
+        let url = |name: &str| format!("s3://{BUCKET}/{name}");
+        let add = |new: &str| {
+            let added =
+                super::add_bucket(&url("one"), &url(new), Details::default(), Default::default());
+            added.unwrap().number
+        };
+        assert_eq!((add("two"), add("three")), (2, 3));
+        let registry = |name: &str| {
+            let bucket = ObjectBucket::new(serving.objects(), name);
+            let read = local_cell::upload::block_on(bucket_cell::identity::registry(&bucket));
+            read.unwrap().unwrap().unwrap()
+        };
+        let root = registry("one");
+        let numbers: Vec<u16> = root.buckets.iter().map(|entry| entry.number).collect();
+        assert_eq!(numbers, [1, 2, 3]);
+        assert_eq!((registry("two"), registry("three")), (root.clone(), root));
+    }
+
     /// TASK-411.27: a host given a master key (`CLADEFS_MASTER_KEY`) and no `CLADEFS_KMS` keeps its
     /// tenants' KEKs in its bucket: every tenant's open cell is encrypted, its KEK made on its
     /// first use at `tenants/<t>/kek`. Shredding a tenant here leaves a tombstone there, halts its
@@ -3706,7 +3828,7 @@ mod tests {
         let kek = |tenant| {
             let key = layout::kek(tenant);
             let got = futures::executor::block_on(bucket_cell::bucket::get(&*bucket, &key));
-            got.map(|object| object.bytes)
+            got.unwrap().map(|object| object.bytes)
         };
         assert_eq!(kek(1).map(|bytes| bytes.len()), Some(extent_keys::kms::bucket::KEK_OBJECT_LEN));
         let read = async |at: usize| {

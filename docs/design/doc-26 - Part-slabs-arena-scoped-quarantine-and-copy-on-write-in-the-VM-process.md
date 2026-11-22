@@ -8,8 +8,13 @@ updated_date: '2026-11-21 20:30'
 # Part slabs, quarantine scoped to what was staged, and copy on write in the VM process
 
 Design, 2026-11-21: Wave 2, track 2A, of the 2026-11-21 first-principles simplification (board
-6124). Nothing here is built yet. Decisions taken without the user are in `OPEN_QUESTIONS.md`
-(# Decisions, "doc-26"). The spec is `specs/part-slabs` (PartSlabs.tla). The implementation tasks
+6124). Steps 1 to 4 are built (boards 6204, 6206, 6208: `cladefs::slabs`, `cache.rs`'s part
+slots, the quarantine in `cladefsd::server`; board 6210: copy on write in `dax::uffd`); where they
+differ from this design, and why, is in `OPEN_QUESTIONS.md` (# Decisions, "doc-26 as built"):
+spares are only recycled, never populated ahead; what a run was staged to is kept on its handle;
+`OPEN` says no zeros page; and the window remembers what the host's changes took away keeping
+private pages, which the guest's next change there ends. Decisions taken without the user are in
+`OPEN_QUESTIONS.md` (# Decisions, "doc-26"). The spec is `specs/part-slabs` (PartSlabs.tla). The implementation tasks
 are listed under Order of work.
 
 Code is cited by file and exact text (`rg -F` finds it), as of main at 967e93b8a.

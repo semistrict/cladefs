@@ -1107,7 +1107,7 @@ impl<B: Bucket> Fetcher<B> {
     /// names it, as the collector and writers follow them ([`crate::moves::MovesMaps`],
     /// TASK-407.1).
     async fn moved(&self, extent: ExtentId, key: &str) -> Result<Option<String>, Error> {
-        let listed = bucket::list(&*self.shared.bucket, &layout::moves_of(key)?).await;
+        let listed = bucket::list(&*self.shared.bucket, &layout::moves_of(key)?).await?;
         trace::note(Some(Source::Bucket));
         for meta in listed.iter().rev() {
             let tail = land(self.shared.tail(&meta.key)).await?;
@@ -1400,9 +1400,10 @@ impl<B: Bucket> Fetching<B> {
             Ok(Some(fetched)) if stored.check(&fetched).is_ok() => Ok(Some(fetched)),
             Ok(None) => Ok(None),
             Ok(Some(_)) => Err(Error::Corrupt(format!("part {part} of {key}, by its CRC"))),
-            Err(bucket::Past { .. }) => {
+            Err(bucket::Unread::Past(_)) => {
                 Err(Error::Corrupt(format!("part {part} of {key}, past its end")))
             }
+            Err(bucket::Unread::Refused(refused)) => Err(refused.into()),
         }
     }
 

@@ -104,7 +104,8 @@ impl Vm {
                 ("mappings", live.mappings),
                 ("mapped_bytes", live.mapped_bytes),
                 ("pages", live.pages),
-                ("private_pages", live.private_pages),
+                // cladefs: as its VM process said, which alone knows of them (doc-26).
+                ("private_pages", self.stage.private),
             ]
         })
     }
@@ -232,9 +233,11 @@ pub(super) struct Report {
     /// installed ([`super::wire::STAGE_COUNTS`]).
     costs: [AtomicU64; 4],
     installed: AtomicU64,
-    /// cladefs: and its runs of private pages, and its `PRIVATE` requests' waits
+    /// cladefs: and its window's private pages (doc-26).
+    private: AtomicU64,
+    /// cladefs: and its runs of private pages, and the `PRIVATE`s it served
     /// ([`super::wire::STAGE_PRIVATE_COUNTS`], TASK-164.10).
-    private: [AtomicU64; 5],
+    private_costs: [AtomicU64; 5],
     /// Its window's gauges, and the runs of pages its VM process said its second stage keeps
     /// installed at most, 0 if it didn't ([`super::wire::WINDOW`]), once it has one.
     window: OnceLock<(Arc<Gauges>, u64)>,
@@ -291,7 +294,8 @@ impl Report {
             build: OnceLock::new(),
             costs: Default::default(),
             installed: AtomicU64::new(0),
-            private: Default::default(),
+            private: AtomicU64::new(0),
+            private_costs: Default::default(),
             window: OnceLock::new(),
             asked: Mutex::new(Vec::new()),
         });
@@ -338,6 +342,7 @@ impl Report {
             crate::stats::add(counter, added);
         }
         self.installed.store(counts.installed, Ordering::Relaxed);
+        self.private.store(counts.private, Ordering::Relaxed);
     }
 
     /// cladefs: counts what its VM process says its runs of private pages have cost it so far,
@@ -353,7 +358,7 @@ impl Report {
             (requests, Counter::VmPrivateRequests),
             (waited, Counter::VmPrivateRequestNs),
         ];
-        for (before, (count, counter)) in self.private.iter().zip(said) {
+        for (before, (count, counter)) in self.private_costs.iter().zip(said) {
             let added = count.saturating_sub(before.fetch_max(count, Ordering::Relaxed));
             crate::stats::add(counter, added);
         }
@@ -364,6 +369,7 @@ impl Report {
         let Opened { path, cell, follower } = self.opened.get()?;
         let costs = self.costs.each_ref().map(|count| count.load(Ordering::Relaxed));
         let installed = self.installed.load(Ordering::Relaxed);
+        let private = self.private.load(Ordering::Relaxed);
         let window = self.window.get();
         Some(Vm {
             connection: self.id,
@@ -371,7 +377,7 @@ impl Report {
             path: path.clone(),
             follower: *follower,
             build: self.build.get().cloned(),
-            stage: StageCounts { costs, installed },
+            stage: StageCounts { costs, installed, private },
             budget: window.and_then(|(_, budget)| (*budget != 0).then_some(*budget)),
             window: window.map(|(gauges, _)| gauges.live()),
             answered: None,

@@ -570,6 +570,7 @@ impl Members for SimMembers {
         configuration: &'a bucket_cell::layout::Configuration,
         member: &'a bucket_cell::layout::Member,
         log: u64,
+        end: u64,
     ) -> futures::future::BoxFuture<'a, Result<Vec<u8>, String>> {
         Box::pin(async move {
             let to = host_of(&member.address);
@@ -581,7 +582,7 @@ impl Members for SimMembers {
                 }
             };
             let of = Self::of(cell, configuration, member);
-            replicas.read(of, log, 0, u64::MAX).map_err(|err| format!("{err:#}"))
+            replicas.read(of, log, 0, end).map_err(|err| format!("{err:#}"))
         })
     }
 
@@ -3075,7 +3076,8 @@ impl World {
                 Entry::Occupied(known) => known.into_mut(),
                 Entry::Vacant(unknown) => {
                     let key = layout::segment(cell, segment, epoch);
-                    let Some(object) = block_on(bucket_cell::bucket::get(direct, &key)) else {
+                    let got = block_on(bucket_cell::bucket::get(direct, &key));
+                    let Some(object) = got.map_err(|err| err.to_string())? else {
                         return Err(format!(
                             "cell {}: segment {segment} gone",
                             Short(cell.id),

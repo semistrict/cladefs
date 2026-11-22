@@ -1,6 +1,6 @@
 # Memory orderings of the host crates' atomics
 
-For whoever changes an atomic in `crates/cladefs`, `physmem`, `local_cell`, `bucket_cell`,
+For whoever changes an atomic in `crates/cladefs`, `local_cell`, `bucket_cell`,
 `follower`, `virtio_extent` or the extent device in `vendor/firecracker`: what each atomic that is
 not `SeqCst` publishes, which access pairs with which, why that is enough, and which loom model
 shows it. A change to one of these orderings, or a new atomic that orders anything but itself,
@@ -15,14 +15,13 @@ store that happens-before doesn't hide from it. A model's verdict counts, not an
 
 - **Models.** The protocols whose orderings carry an argument are small types the production code
   uses, built on a `sync` module that is std's, or loom's with the crate's `loom` feature:
-  `cladefs::sync` (atomics and a `OnceLock` with std's orderings), `virtio_extent::sync`,
-  `physmem::sync::atomic`. The models are `loom` test modules beside them, run by
+  `cladefs::sync` (atomics and a `OnceLock` with std's orderings), `virtio_extent::sync`. The
+  models are `loom` test modules beside them, run by
   `scripts/test.sh`'s shuttle part:
 
   ```
   cargo nextest run -p cladefs --features loom --lib loom::
   cargo nextest run -p virtio_extent --features loom --lib loom::
-  cargo nextest run -p physmem --features loom --lib loom::
   ```
 
   Each runs in well under a second. None needs a preemption bound.
@@ -46,10 +45,9 @@ about 90 more in their tests.
 | `cladefs::hearing::Occurrence::state`: cladefsd client's daemon-lost news (`Client::lost`) | its listener (`OnceLock`), to `happen` | `listen`: set the listener, then `fetch_or(LISTENING, Release)`. `happen`: `fetch_or(HAPPENED, Acquire)`. Two RMWs of one atomic: the later one sees the earlier one's bit and calls the listener, exactly once. If `happen` sees `LISTENING`, its Acquire reads from `listen`'s Release, so the listener's write happens before `get`. `happened()` is `Relaxed`: its readers come after a request failure, which `happen` precedes on the receiving thread. | `hearing::loom::occurrences_are_told_once` | `occurrence-happens-relaxed`, `occurrence-listens-relaxed`: killed. `occurrence-told-by-a-store-and-a-load` (TASK-444.2.1 put back): killed |
 | `cladefs::hearing::Latest::latest`: a follower's writer's latest commit (`Client::committed`) | its listener, to `rise` | `listen`: set the listener, then `fetch_max(0, Release)`, an RMW whose result it returns. `rise`: `fetch_max(value, Acquire)`. If the rise's RMW comes first, `listen` returns at least its value. If it comes after, it reads from `listen`'s RMW (or a later RMW in its release sequence), so it sees the listener. `latest()` is `Relaxed`: only the value. | `hearing::loom::listeners_hear_of_every_rise` | `latest-rises-relaxed`, `latest-listens-relaxed`: killed. `latest-listening-loads` (TASK-444.2.2 put back): killed |
 | `virtio_extent::notices::Resizing::{capacity, asked}` | in `answered`, the ask cleared, to a driver reading the capacity it took | `answered` (under `changing`): `asked.store(0)`, then `capacity.store(c, Release)`. `Resizing::known`, the driver's read (`Device::read_config`): `capacity.load(Acquire)`, then `asked`. A read of the taken capacity is ordered after the ask's clearing, so the guest never reads the capacity it took together with the ask it answered (TASK-79.41). Nothing orders `changed`'s pair of stores against a read in this way: a read may take the new capacity with the old ask. The configuration interrupt that `changed` raises afterwards has the driver read both again. | `notices::loom::capacities_taken_are_read_with_their_asks_answered` | `answers-release-no-capacity`, `capacities-read-relaxed`: killed. `answers-clear-asks-relaxed`, `asks-read-relaxed`: equivalent (class 3) |
-| `physmem::frames::Frame::staged` | that a second stage mapped the page, to its free | `stage` (by the page's holder, no lock) and `take_staged` (`quarantine::sift`, as the page is freed) are both `Relaxed`. The page's handover orders the mark before the free: a window's lock, an `Arc`'s last drop or a move through a channel. `free` sees the mark by coherence. | `frames::loom::staged_marks_reach_the_free_of_their_page` | none: already `Relaxed`, with no fence to delete |
 
-The other `Frame` fields (`state`, `order`, `prev`, `next`) change only under the PMM's lock,
-which orders them. They are atomics only so the array can be shared.
+The slabs (`cladefs::slabs`, doc-26) have no protocol of atomics: what a run was staged to is under
+a lock of its own (`PartSlab::staged`), and arenas' slots under each arena's.
 
 ## Orderings stronger than needed (class 3)
 
@@ -72,8 +70,7 @@ measurable.
 | `dax::uffd::Lift::asked` (fetch_add AcqRel, load Acquire) | the eventfd write that follows the ask, and the read that precedes the load, carry happens-before through the kernel, so the load sees the ask by coherence |
 | `local_cell::durability::Helpers` (`update` AcqRel, fetch_sub AcqRel) | a semaphore count of helper threads: only itself |
 | `bucket_cell::trace::ENABLED` (Release store, Relaxed load) | the Release pairs with no Acquire. `TRACER` is a `OnceLock` with its own ordering, and a span that sees `enabled()` before `TRACER` is set makes none. |
-| `physmem::physmap::PhysMemory::chunks` (Release store in `assign_chunk`/`release_chunk`, Acquire loads) | chunks are assigned and released under the PMM's lock, which also puts their pages on the free lists. Any holder of a page took it under that lock. `is_free` (a test's query) reads the value alone. |
-| `physmem::pmm::relief::Reliever::running` (Release in `Gone::drop`, Acquire in the allocator) | only the bool. The `room` pulse after the store is a lock (`Pulse`) and wakes waiters. |
+| `cladefs::slabs::relief::Reliever::running` (Release in `Gone::drop`, Acquire in the allocator) | only the bool. The `room` pulse after the store is a lock (`Pulse`) and wakes waiters. |
 | `virtio_extent::notices::{Following::committed, StatsAsks::asked, Notices::frozen}`, `Resizing::opened`/`changed` stores | only their values. The configuration interrupt raised after a change carries the order to the guest (an eventfd, through KVM). |
 
 ## Relaxed flags and hints ordered by something else (class-1 candidates, argued safe)
@@ -102,7 +99,11 @@ These publish nothing. Each is an RMW or a load of a value that is read as a num
   `cladefsd::stats`'s `ASKS`, `IDS` and each VM's `costs`, `private` and `installed`; `cladefsd::peers::{SERVED,
   SERVED_MISSING}`; `cladefsd::server::REFUSED`; `cladefsd::cells::{STATS_WRITTEN,
   UPLOADS_WHEN_ASKED}`; `cladefsd::wire::AsyncSender::queued`.
-- physmem: `pmm::{free_count, alloc_failed_no_mem}`; `physmap::create_shared_memory`'s `NEXT`.
+- cladefs's slabs: `Node::{populated, punching, spares, quarantined, peak, total_cap,
+  keep_spares, alloc_failed_no_mem}`, each read as a number or a hint: what reserves room against
+  the total is an RMW (`Node::reserve`), and each arena's own count is under its lock;
+  `object::create`'s `NEXT`; `cache`'s `EvictionToken`'s `NEXT`; `VmProcessId::connected`'s
+  `NEXT`.
 - local_cell: `segments`' timing statics; `written::WRITES`; `framed::{OPENED, UNPACKS}`;
   `framing::SEEN_AHEAD`; `timings`.
 - bucket_cell: `object_bucket::Counts` (requests, bytes, failures); `client::Progress::last`;

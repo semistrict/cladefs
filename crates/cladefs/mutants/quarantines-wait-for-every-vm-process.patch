@@ -1,0 +1,16 @@
+# A run freed waits for every VM process connected, as before doc-26, not for those it was staged
+# to alone: a tenant's frozen VM process holds every other tenant's memory freed (spec rule
+# scopedWaits, board 6208).
+# Kind: memory
+# Killer: cladefsd::tests::frozen_vm_processes_hold_no_other_tenants_memory
+--- a/crates/cladefs/src/cladefsd/server.rs
++++ b/crates/cladefs/src/cladefsd/server.rs
+@@ -2805,7 +2805,7 @@
+     }
+     let staged = freed.staged().to_vec();
+     let freed: Arc<dyn Send + Sync> = Arc::new(Parked { freed: Some(freed), waiting });
+-    for peer in PEERS.get().lock().unwrap().iter().filter(|peer| staged.contains(&peer.id)) {
++    for peer in PEERS.get().lock().unwrap().iter().filter(|_| !staged.is_empty()) {
+         peer.acks.park(&freed);
+     }
+ }

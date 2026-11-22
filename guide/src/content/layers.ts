@@ -67,14 +67,14 @@ export const layers: Layer[] = [
     name: "Physical memory",
     what: "the daemon's pages: arenas of shared memory",
     role:
-      "The extent cache's pages and the windows' private pages are physical memory of the " +
-      "daemon's own: arenas, each a memfd a VM process maps pages of. Arenas take memory 2 MiB at " +
-      "a time, may be capped, ask for relief (evicting cached extents) when starved, and keep a " +
-      "freed page a VM may still reach in quarantine until that VM unmaps it.",
-    dirs: ["crates/physmem", "crates/cladefs/src/cache.rs", "crates/cladefs/src/pages.rs"],
+      "The extent cache's parts are physical memory of the daemon's own: arenas, each a memfd a " +
+      "VM process maps pages of, in 1 MiB part slabs the daemon reads and writes by offset. Arenas " +
+      "may be capped, ask for relief (evicting cached extents) when starved, and keep a freed slab " +
+      "in quarantine until the VM processes it was staged to unmap it.",
+    dirs: ["crates/cladefs/src/slabs.rs", "crates/cladefs/src/cache.rs", "crates/cladefs/src/pages.rs"],
     anchors: ["extent_cache", "cache_cached", "cached_extent", "evict", "relieve", "arena"],
     docs: ["doc-13"],
-    provenance: "cladefs's own: the Zircon kernel port's PMM, lifted out with its tests when the port went.",
+    provenance: "cladefs's own: part slabs (doc-26), in place of the Zircon kernel port's PMM.",
   },
   {
     id: "disk",

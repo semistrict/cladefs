@@ -360,6 +360,12 @@ impl From<Error> for Attempt {
     }
 }
 
+impl From<crate::bucket::Refused> for Attempt {
+    fn from(refused: crate::bucket::Refused) -> Self {
+        Self::Failed(refused.into())
+    }
+}
+
 /// The state of `cell`, forked from `origin`, as its head names it, read holding no key.
 pub async fn recover(
     bucket: &impl Bucket,
@@ -596,11 +602,11 @@ impl<'a, B: Bucket> Checkpoints<'a, B> {
     /// cladefs: the checkpoints of `cell`, in the order of their keys, for a recovery of it, or of
     /// the state of it as of its segment `at` a pass keeps: as the listing of its cell shows them,
     /// the first time one of that is asked, if it has one; listed now otherwise.
-    async fn list(&self, cell: CellId, at: Option<u64>) -> Vec<Meta> {
+    async fn list(&self, cell: CellId, at: Option<u64>) -> Result<Vec<Meta>, bucket::Refused> {
         let prefix = layout::checkpoints(cell);
         match self.listed {
             Some(listed) if self.served.lock().unwrap().insert((cell, at)) => {
-                bucket::under(listed, &prefix)
+                Ok(bucket::under(listed, &prefix))
             }
             _ => bucket::list(self.bucket, &prefix).await,
         }
@@ -629,7 +635,7 @@ impl<'a, B: Bucket> Checkpoints<'a, B> {
                         if let Some(state) = decoded.and_then(|decoded| decoded.get(&key)) {
                             return Ok(Some(state));
                         }
-                        let Some(object) = bucket::get(bucket, &key).await else {
+                        let Some(object) = bucket::get(bucket, &key).await? else {
                             return Ok(None);
                         };
                         let state = checkpoint(&key, &object.bytes, cell, keys)?;
@@ -1195,7 +1201,7 @@ fn states_at<'a, B: Bucket>(
             }
         }
         let Some(&first) = unread.first() else { return Ok(walked) };
-        let listed = checkpoints.list(cell, kept.then_some(first)).await;
+        let listed = checkpoints.list(cell, kept.then_some(first)).await?;
         // The states sharing their newest checkpoint up to them, in order: the newest only grows.
         let mut walks: Vec<(Option<&Meta>, Vec<u64>)> = Vec::new();
         for at in unread {
@@ -1391,7 +1397,7 @@ pub async fn checkpoint_at(
         return Err(Error::Lost(format!("segment {at} of {cell}", at = base32_id::Short(at))));
     };
     let key = layout::checkpoint(cell, at, epoch);
-    let listed = bucket::list(bucket, &layout::checkpoints(cell)).await;
+    let listed = bucket::list(bucket, &layout::checkpoints(cell)).await?;
     if listed.iter().any(|meta| meta.key == key) {
         return Ok(());
     }
@@ -1402,7 +1408,7 @@ pub async fn checkpoint_at(
         match state_at(&checkpoints, cell, at, &mut BTreeSet::new(), false).await {
             Ok(state) => {
                 let checkpoint = crate::checkpoint::encode(&state, keys.encrypting());
-                bucket::create(bucket, &key, checkpoint).await;
+                bucket::create(bucket, &key, checkpoint).await?;
                 return Ok(());
             }
             Err(Attempt::Restart) => {}
@@ -1429,7 +1435,10 @@ async fn unless_checkpointed(
     if !matches!(failed, Attempt::Failed(Error::Lost(_))) {
         return failed;
     }
-    let listed = bucket::list(bucket, &layout::checkpoints(cell)).await;
+    let listed = match bucket::list(bucket, &layout::checkpoints(cell)).await {
+        Ok(listed) => listed,
+        Err(refused) => return Attempt::Failed(refused.into()),
+    };
     if newest_to(&listed, at).is_some() { Attempt::Restart } else { failed }
 }
 
@@ -1792,8 +1801,10 @@ mod tests {
 
             // The parent's checkpoint, at the key the fork's head names, as a bucket corrupting it.
             let parents = parent.checkpoint().await.unwrap().unwrap();
-            let object =
-                bucket::get(&*bucket, &layout::checkpoint(test_cell(1), parents, 1)).await.unwrap();
+            let object = bucket::get(&*bucket, &layout::checkpoint(test_cell(1), parents, 1))
+                .await
+                .unwrap()
+                .unwrap();
             let key = layout::checkpoint(test_cell(2), segment, child.epoch());
             let overwrite = crate::bucket::PutMode::Overwrite;
             crate::bucket::Bucket::put(&*bucket, &key, object.bytes.into(), overwrite)

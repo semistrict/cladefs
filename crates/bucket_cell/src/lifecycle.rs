@@ -70,7 +70,7 @@ pub(crate) async fn transition_leaving<T: Serialize, R>(
     mut step: impl FnMut(Option<T>) -> Result<Step<T, R>, Error>,
 ) -> Result<(R, Option<Object>), Error> {
     let mut found = match start {
-        Start::Read => bucket::get(bucket, key).await,
+        Start::Read => bucket::get(bucket, key).await?,
         Start::Create => None,
         Start::Found(found) => found,
     };
@@ -83,14 +83,14 @@ pub(crate) async fn transition_leaving<T: Serialize, R>(
         let bytes = layout::encode(&next);
         let written = |version| Object::written(key, bytes.clone(), version, bucket.now());
         found = match found {
-            None => match bucket::create(bucket, key, bytes.clone()).await {
+            None => match bucket::create(bucket, key, bytes.clone()).await? {
                 Created::Created(version) => return Ok((result, Some(written(version)))),
                 Created::Exists(object) => Some(object),
             },
             Some(object) => {
-                match bucket::update(bucket, key, bytes.clone(), &object.meta.version).await {
+                match bucket::update(bucket, key, bytes.clone(), &object.meta.version).await? {
                     Updated::Updated(version) => return Ok((result, Some(written(version)))),
-                    Updated::Changed => bucket::get(bucket, key).await,
+                    Updated::Changed => bucket::get(bucket, key).await?,
                 }
             }
         };
@@ -140,17 +140,22 @@ pub async fn create(bucket: &impl Bucket, cell: CellId, owner: u64) -> Result<bo
 ///
 /// cladefs: in the child's bucket, if the version's mirror is marked there; else in the parent's
 /// (doc-23, Forks; TASK-633.8). Where it went.
-async fn refer(bucket: &impl Bucket, origin: Origin, child: CellId, owner: u64) -> Referred {
+async fn refer(
+    bucket: &impl Bucket,
+    origin: Origin,
+    child: CellId,
+    owner: u64,
+) -> Result<Referred, bucket::Refused> {
     let key = layout::reference(origin.parent, origin.at, child);
     let bytes = layout::encode(&layout::Reference::of(owner));
     if let Some(here) = bucket.mirrors()
-        && here.marked(origin.parent, origin.at).await
+        && here.marked(origin.parent, origin.at).await?
     {
-        here.create(&key, bytes).await;
-        return Referred { owner, here: true };
+        here.create(&key, bytes).await?;
+        return Ok(Referred { owner, here: true });
     }
-    bucket::create(bucket, &key, bytes).await;
-    Referred { owner, here: false }
+    bucket::create(bucket, &key, bytes).await?;
+    Ok(Referred { owner, here: false })
 }
 
 /// cladefs: where a fork's reference went ([`refer`]): `here`, in the child's bucket, its version's
@@ -183,16 +188,16 @@ async fn leave_parents(
 ) -> Result<(), Error> {
     let Referred { owner, here: false } = referred else { return Ok(()) };
     let Some(here) = bucket.mirrors() else { return Ok(()) };
-    if !here.marked(origin.parent, origin.at).await {
+    if !here.marked(origin.parent, origin.at).await? {
         return Ok(());
     }
     let key = layout::reference(origin.parent, origin.at, child);
-    here.create(&key, layout::encode(&layout::Reference::of(owner))).await;
+    here.create(&key, layout::encode(&layout::Reference::of(owner))).await?;
     failpoint!("version::rechecked");
     let head = head::get(bucket, origin.parent).await?;
     let named = head.as_ref().filter(|head| !head.deleted()).and_then(|head| head.version(version));
     if named.is_some_and(|named| named.at == origin.at) {
-        retire_one(bucket, &key).await;
+        retire_one(bucket, &key).await?;
     }
     Ok(())
 }
@@ -202,45 +207,53 @@ async fn leave_parents(
 /// TASK-395.14). One a writer whose read of its child's head came before writes again after, the
 /// pass over its parent's cell deletes, by its mark. Without the rule, as a test shows it needed,
 /// deleted alone.
-pub(crate) async fn retire(bucket: &impl Bucket, keys: &[&str]) {
+pub(crate) async fn retire(bucket: &impl Bucket, keys: &[&str]) -> Result<(), bucket::Refused> {
     if rules().retirements_marked {
         let marks: Vec<String> = keys.iter().filter_map(|key| layout::retired_of(key)).collect();
         // The creates' futures made first, as `bucket::delete_all`'s batches are: a stream mapping
         // them in holds the closure in its type, which a future awaiting this one is then not seen
         // to be `Send` with.
         let marking: Vec<_> = marks.iter().map(|mark| mark_retired(bucket, mark)).collect();
-        futures::stream::iter(marking).buffer_unordered(MARKS_AT_ONCE).collect::<()>().await;
+        let marked: Vec<Result<(), bucket::Refused>> =
+            futures::stream::iter(marking).buffer_unordered(MARKS_AT_ONCE).collect().await;
+        marked.into_iter().collect::<Result<(), _>>()?;
     }
-    bucket::delete_all(bucket, keys).await;
+    bucket::delete_all(bucket, keys).await
 }
 
 /// How many references' marks [`retire`] writes at once.
 const MARKS_AT_ONCE: usize = 16;
 
 /// Writes the mark `key` ([`layout::retired`]): there already, it stands, its bytes everyone's.
-async fn mark_retired(bucket: &impl Bucket, key: &str) {
-    bucket::create(bucket, key, layout::encode(&layout::Retired::NOW)).await;
+async fn mark_retired(bucket: &impl Bucket, key: &str) -> Result<(), bucket::Refused> {
+    bucket::create(bucket, key, layout::encode(&layout::Retired::NOW)).await.map(drop)
 }
 
 /// [`retire`]s the reference at `key` alone, a request a step, with no stream of batches, so that a
 /// writer's future, which the uploader's runtime needs `Send`, may await it (TASK-395.10).
-async fn retire_one(bucket: &impl Bucket, key: &str) {
+async fn retire_one(bucket: &impl Bucket, key: &str) -> Result<(), bucket::Refused> {
     if rules().retirements_marked
         && let Some(mark) = layout::retired_of(key)
     {
-        mark_retired(bucket, &mark).await;
+        mark_retired(bucket, &mark).await?;
     }
-    bucket::delete(bucket, key).await;
+    bucket::delete(bucket, key).await
 }
 
 /// cladefs: retires the reference of the fork of `origin` to `child`, whose head, `found`, names
 /// another origin than the fork's, or none (TASK-395.10): the fork made no cell, and no head will
 /// name it, so that no pass would retire it ([`crate::collector`] retires a reference by the origin
 /// its child's deleted head names). Marked ([`retire`]).
-async fn take_back(bucket: &impl Bucket, origin: Origin, child: CellId, found: &Head) {
+async fn take_back(
+    bucket: &impl Bucket,
+    origin: Origin,
+    child: CellId,
+    found: &Head,
+) -> Result<(), bucket::Refused> {
     if rules().references && found.origin() != Some(origin) {
-        retire_one(bucket, &layout::reference(origin.parent, origin.at, child)).await;
+        retire_one(bucket, &layout::reference(origin.parent, origin.at, child)).await?;
     }
+    Ok(())
 }
 
 /// cladefs: a fork of the version `version` of the cell `origin` names, at the segment it names, to
@@ -261,7 +274,7 @@ pub async fn fork_ephemeral(
     origin: Origin,
     (incarnation, keys): (u64, Parents<'_>),
 ) -> Result<(), Error> {
-    refer_ephemeral(bucket, origin, incarnation, child).await;
+    refer_ephemeral(bucket, origin, incarnation, child).await?;
     failpoint!("ephemeral::referred");
     let cell = origin.parent;
     let crosses = cell.tenant != child.tenant && cell.tenant != layout::DEFAULT_TENANT;
@@ -283,7 +296,10 @@ pub async fn fork_ephemeral(
     match refused {
         None => Ok(()),
         Some(error) => {
-            unrefer_ephemeral(bucket, origin, incarnation, child).await;
+            // cladefs: the fork's failure what it fails with, whatever undoing it came to.
+            if let Err(refused) = unrefer_ephemeral(bucket, origin, incarnation, child).await {
+                log::warn!("cladefs: undoing the ephemeral fork {child}: {refused}");
+            }
             Err(error)
         }
     }
@@ -298,11 +314,11 @@ pub async fn refer_ephemeral(
     origin: Origin,
     incarnation: u64,
     child: CellId,
-) {
+) -> Result<(), bucket::Refused> {
     let index = layout::ephemeral_index(incarnation, origin.parent, origin.at, child);
-    bucket::create(bucket, &index, Vec::new()).await;
+    bucket::create(bucket, &index, Vec::new()).await?;
     let reference = layout::ephemeral_reference(origin.parent, origin.at, incarnation, child);
-    bucket::create(bucket, &reference, Vec::new()).await;
+    bucket::create(bucket, &reference, Vec::new()).await.map(drop)
 }
 
 /// cladefs: deletes the reference of `child`, an ephemeral cell of the host of incarnation
@@ -313,22 +329,26 @@ pub async fn unrefer_ephemeral(
     origin: Origin,
     incarnation: u64,
     child: CellId,
-) {
+) -> Result<(), bucket::Refused> {
     let reference = layout::ephemeral_reference(origin.parent, origin.at, incarnation, child);
-    bucket::delete(bucket, &reference).await;
+    bucket::delete(bucket, &reference).await?;
     let index = layout::ephemeral_index(incarnation, origin.parent, origin.at, child);
-    bucket::delete(bucket, &index).await;
+    bucket::delete(bucket, &index).await
 }
 
 /// cladefs: the references of the ephemeral cells of the host of incarnation `incarnation`, by
 /// their index (doc-25): each child, with its origin.
-pub async fn ephemeral_references(bucket: &impl Bucket, incarnation: u64) -> Vec<(Origin, CellId)> {
-    let listed = bucket::list(bucket, &layout::ephemeral_indexes(incarnation)).await;
-    (listed.iter())
+/// cladefs: refused, [`bucket::Refused`] (board 5861).
+pub async fn ephemeral_references(
+    bucket: &impl Bucket,
+    incarnation: u64,
+) -> Result<Vec<(Origin, CellId)>, bucket::Refused> {
+    let listed = bucket::list(bucket, &layout::ephemeral_indexes(incarnation)).await?;
+    Ok((listed.iter())
         .filter_map(|meta| layout::ephemeral_indexed(&meta.key))
         .filter(|&(of, ..)| of == incarnation)
         .map(|(_, parent, at, child)| (Origin { parent, at, epoch: 0 }, child))
-        .collect()
+        .collect())
 }
 
 /// cladefs: decommissions the host of incarnation `incarnation`, gone for good, its disk lost
@@ -336,12 +356,15 @@ pub async fn ephemeral_references(bucket: &impl Bucket, incarnation: u64) -> Vec
 /// holds any more, deleted, each with its index entry. Returns how many. Its operator's to call,
 /// for an incarnation no host has: a host of it still holding its cells would read what it no
 /// longer keeps.
-pub async fn decommission(bucket: &impl Bucket, incarnation: u64) -> usize {
-    let references = ephemeral_references(bucket, incarnation).await;
+pub async fn decommission(
+    bucket: &impl Bucket,
+    incarnation: u64,
+) -> Result<usize, bucket::Refused> {
+    let references = ephemeral_references(bucket, incarnation).await?;
     for &(origin, child) in &references {
-        unrefer_ephemeral(bucket, origin, incarnation, child).await;
+        unrefer_ephemeral(bucket, origin, incarnation, child).await?;
     }
-    references.len()
+    Ok(references.len())
 }
 
 /// cladefs: a restore of the version `version` of the cell `origin` names, at the segment it
@@ -382,7 +405,7 @@ pub async fn fork_version_keyed(
     let refers_first = refers && !rules().clones_record_first;
     let mut referred = None;
     if refers_first {
-        referred = Some(refer(bucket, origin, child, owner).await);
+        referred = Some(refer(bucket, origin, child, owner).await?);
         failpoint!("version::referred");
     }
     let made = match rules().forks_pending {
@@ -412,7 +435,7 @@ pub async fn fork_version_keyed(
     })
     .await;
     if let Some(found) = refused.filter(|_| refers_first) {
-        take_back(bucket, origin, child, &found).await;
+        take_back(bucket, origin, child, &found).await?;
     }
     // cladefs: a head another making is making, or its maker died making, the ID is taken
     // (TASK-691).
@@ -423,7 +446,7 @@ pub async fn fork_version_keyed(
     if making {
         failpoint!("version::recorded");
         if refers && !refers_first {
-            referred = Some(refer(bucket, origin, child, owner).await);
+            referred = Some(refer(bucket, origin, child, owner).await?);
             failpoint!("version::referred");
         }
         let start = Start::Found(left);
@@ -431,7 +454,7 @@ pub async fn fork_version_keyed(
     }
     // Without the rule, as a test shows it needed: once made.
     if rules().references && !rules().clones_refer_first {
-        refer(bucket, origin, child, owner).await;
+        refer(bucket, origin, child, owner).await?;
     }
     Ok(())
 }
@@ -613,7 +636,9 @@ mod tests {
     /// Takes `cell`'s head as `holder`, of token 0, giving it nothing.
     fn take(bucket: &impl Bucket, cell: CellId, holder: u64) -> Result<head::Held, Error> {
         let taking = head::Taking { holder, ..head::Taking::default() };
-        block_on(async { head::take(bucket, cell, head::read(bucket, cell).await, &taking).await })
+        block_on(async {
+            head::take(bucket, cell, head::read(bucket, cell).await.unwrap(), &taking).await
+        })
     }
 
     /// TASK-79.82: a fork's child is deleted only if its cell is the fork's: one whose head names
@@ -674,7 +699,7 @@ mod tests {
         };
         let record = |cell| read(&*bucket, cell);
         let checkpoint = layout::checkpoint(cell, at, writer.epoch());
-        let checkpointed = || block_on(bucket::get(&*bucket, &checkpoint)).is_some();
+        let checkpointed = || block_on(bucket::get(&*bucket, &checkpoint)).unwrap().is_some();
 
         assert_eq!(restore(celled(1, 3), 0xb), Err(Error::Deleted), "no such version");
         assert_eq!(restore(celled(1, 4), 0xa), Ok(()));
@@ -769,8 +794,13 @@ mod tests {
         let taking = head::Taking { holder: 5, token: 7, ..head::Taking::default() };
         block_on(create(&bucket, test_cell(5), 0x55)).unwrap();
         block_on(async {
-            head::take(&bucket, test_cell(5), head::read(&bucket, test_cell(5)).await, &taking)
-                .await
+            head::take(
+                &bucket,
+                test_cell(5),
+                head::read(&bucket, test_cell(5)).await.unwrap(),
+                &taking,
+            )
+            .await
         })
         .unwrap();
         assert_eq!(block_on(delete(&bucket, test_cell(5), 6, 6)), Err(Error::Stale));

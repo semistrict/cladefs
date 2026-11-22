@@ -632,7 +632,7 @@ impl local_cell::upload::Members for ReplicaMembers {
                 Ok(Ok(answer)) => {
                     Ok(answer.into_inner().logs.into_iter().map(|log| (log.log, log.end)).collect())
                 }
-                Ok(Err(status)) => Err(format!("{:?}: {}", status.code(), status.message())),
+                Ok(Err(status)) => Err(said(&status)),
                 Err(_) => Err(format!("no answer within {DEADLINE:?}")),
             }
         })
@@ -644,20 +644,15 @@ impl local_cell::upload::Members for ReplicaMembers {
         configuration: &'a bucket_cell::layout::Configuration,
         whom: &'a bucket_cell::layout::Member,
         log: u64,
+        end: u64,
     ) -> BoxFuture<'a, Result<Vec<u8>, String>> {
         Box::pin(async move {
             let request =
                 ReadLogRequest { of: Some(self.of(cell, configuration, whom)), log, offset: 0 };
             let mut client = member(&self.runtime, &whom.address)?;
-            let reading = async move {
-                let mut pieces = client.read_log(request).await?.into_inner();
-                let mut bytes = Vec::new();
-                while let Some(piece) = pieces.message().await? {
-                    bytes.extend(piece.bytes);
-                }
-                Ok::<_, Status>(bytes)
-            };
-            reading.await.map_err(|status| format!("{:?}: {}", status.code(), status.message()))
+            let answered = tokio::time::timeout(DEADLINE, client.read_log(request)).await;
+            let answered = answered.map_err(|_| format!("no answer within {DEADLINE:?}"))?;
+            read_to(answered.map_err(|status| said(&status))?.into_inner(), end, DEADLINE).await
         })
     }
 
@@ -675,11 +670,38 @@ impl local_cell::upload::Members for ReplicaMembers {
             let mut client = member(&self.runtime, &whom.address)?;
             match tokio::time::timeout(DEADLINE, client.drop_logs(request)).await {
                 Ok(Ok(_)) => Ok(()),
-                Ok(Err(status)) => Err(format!("{:?}: {}", status.code(), status.message())),
+                Ok(Err(status)) => Err(said(&status)),
                 Err(_) => Err(format!("no answer within {DEADLINE:?}")),
             }
         })
     }
+}
+
+/// What `status`, a member's answer, says.
+fn said(status: &Status) -> String {
+    format!("{:?}: {}", status.code(), status.message())
+}
+
+/// cladefs: the bytes of a log a member streams, `pieces`, to `end`, where its fence said the log
+/// ends, and no further, the stream dropped there; each piece within `deadline` of the one before,
+/// as a member's keepalives are answered however long its disk takes (board 5416). Fewer if the
+/// stream ends before, which its caller refuses.
+async fn read_to(
+    mut pieces: impl futures::Stream<Item = Result<ReadLogResponse, Status>> + Unpin,
+    end: u64,
+    deadline: Duration,
+) -> Result<Vec<u8>, String> {
+    use futures::StreamExt as _;
+    let mut bytes = Vec::new();
+    while (bytes.len() as u64) < end {
+        let piece = tokio::time::timeout(deadline, pieces.next()).await;
+        match piece.map_err(|_| format!("no answer within {deadline:?}"))? {
+            Some(piece) => bytes.extend(piece.map_err(|status| said(&status))?.bytes),
+            None => break,
+        }
+    }
+    bytes.truncate(usize::try_from(end).unwrap_or(usize::MAX));
+    Ok(bytes)
 }
 
 impl ReplicaMembers {
@@ -749,7 +771,7 @@ impl ReplicaMembers {
         let asked = IncarnationRequest { bucket: self.bucket.clone() };
         match tokio::time::timeout(DEADLINE, client.incarnation(asked)).await {
             Ok(Ok(answer)) => Ok(answer.into_inner().incarnation),
-            Ok(Err(status)) => Err(format!("{:?}: {}", status.code(), status.message())),
+            Ok(Err(status)) => Err(said(&status)),
             Err(_) => Err(format!("no answer within {DEADLINE:?}")),
         }
     }
@@ -778,7 +800,7 @@ type Appending = (tokio::sync::mpsc::Sender<AppendRequest>, tonic::Streaming<App
 /// cladefs: what the replicator makes of a member's refusal (peer.proto).
 fn link_error(status: &Status) -> local_cell::replicate::LinkError {
     use local_cell::replicate::LinkError;
-    let what = format!("{:?}: {}", status.code(), status.message());
+    let what = said(&status);
     match status.code() {
         Code::FailedPrecondition if status.message().contains("fenced") => LinkError::Fenced(what),
         // A member full for the configuration refuses it until a replacement picks another
@@ -881,9 +903,7 @@ impl Link for Grpc {
                 Err(status) if status.code() == Code::FailedPrecondition => {
                     Err(Refusal::Foreign(status.message().to_owned()))
                 }
-                Err(status) => {
-                    Err(Refusal::Failed(format!("{:?}: {}", status.code(), status.message())))
-                }
+                Err(status) => Err(Refusal::Failed(said(&status))),
             }
         }
         .boxed()

@@ -47,7 +47,7 @@
 //!
 //! A fork into B refers in B once the marker is there ([`Here`], [`crate::lifecycle`]).
 
-use crate::bucket::{self, Bucket, Created, Meta, Updated, Version};
+use crate::bucket::{self, Bucket, Created, Meta, Refused, Updated, Version};
 use crate::layout::{self, CellId, Kind, Mirror, Reference};
 use crate::moves::{Moved, MovesMaps};
 use crate::recovery::{self, Checkpoints};
@@ -98,16 +98,16 @@ pub fn stale(own: &impl Bucket, meta: &Meta) -> bool {
 pub trait Here: Send + Sync {
     /// Whether the mirror of `parent`'s version at `at` is marked in this bucket, read there now:
     /// never for a cell of this bucket's own.
-    fn marked(&self, parent: CellId, at: u64) -> BoxFuture<'_, bool>;
+    fn marked(&self, parent: CellId, at: u64) -> BoxFuture<'_, Result<bool, Refused>>;
 
     /// Creates `bytes` at `key` in this bucket, whatever cell `key` is of ([`bucket::create`]).
-    fn create<'a>(&'a self, key: &'a str, bytes: Vec<u8>) -> BoxFuture<'a, ()>;
+    fn create<'a>(&'a self, key: &'a str, bytes: Vec<u8>) -> BoxFuture<'a, Result<(), Refused>>;
 
     /// Retires the references at `keys` of cells of other buckets in this bucket, marked first
     /// ([`lifecycle::retire`]): those of children of this bucket a mirror moved here, or forks
     /// wrote here, their cells dead. Others it leaves. How many it retired, whether there or not,
     /// as a pass counts its retirements ([`crate::collector::Report::retired`]).
-    fn retire<'a>(&'a self, keys: &'a [&'a str]) -> BoxFuture<'a, usize>;
+    fn retire<'a>(&'a self, keys: &'a [&'a str]) -> BoxFuture<'a, Result<usize, Refused>>;
 }
 
 /// A mirror's pin, held: its bytes, its own, and the version of its last write.
@@ -122,54 +122,55 @@ struct Pin {
 impl Pin {
     /// The pin of the mirror of `parent`'s version at `at` in `own`, made, or taken over from a
     /// mirror whose pin is stale: none if another mirror's stands.
-    async fn take(own: &impl Bucket, parent: CellId, at: u64) -> Option<Self> {
+    async fn take(own: &impl Bucket, parent: CellId, at: u64) -> Result<Option<Self>, Refused> {
         let key = layout::pin(parent, at);
         let bytes = layout::encode(&Reference::of(rand::random()));
-        let version = match bucket::create(own, &key, bytes.clone()).await {
+        let version = match bucket::create(own, &key, bytes.clone()).await? {
             Created::Created(version) => version,
             Created::Exists(found) if stale(own, &found.meta) => {
-                match bucket::update(own, &key, bytes.clone(), &found.meta.version).await {
+                match bucket::update(own, &key, bytes.clone(), &found.meta.version).await? {
                     Updated::Updated(version) => version,
-                    Updated::Changed => return None,
+                    Updated::Changed => return Ok(None),
                 }
             }
-            Created::Exists(_) => return None,
+            Created::Exists(_) => return Ok(None),
         };
-        Some(Self { key, bytes, version, written: own.now() })
+        Ok(Some(Self { key, bytes, version, written: own.now() }))
     }
 
     /// Writes it again, if [`PIN_REFRESH`] passed since it was last written, or `now`: false if it
     /// is no longer this mirror's, taken over or deleted as stale.
-    async fn refresh(&mut self, own: &impl Bucket, now: bool) -> bool {
+    async fn refresh(&mut self, own: &impl Bucket, now: bool) -> Result<bool, Refused> {
         if !now && own.now() < self.written.saturating_add(PIN_REFRESH) {
-            return true;
+            return Ok(true);
         }
-        match bucket::update(own, &self.key, self.bytes.clone(), &self.version).await {
+        Ok(match bucket::update(own, &self.key, self.bytes.clone(), &self.version).await? {
             Updated::Updated(version) => {
                 (self.version, self.written) = (version, own.now());
                 true
             }
             Updated::Changed => false,
-        }
+        })
     }
 
     /// Deletes it, if it is still this mirror's: written again first, conditionally, so that a
     /// mirror that took it over since keeps it.
-    async fn release(self, own: &impl Bucket) {
-        self.release_with(own, |_| async {}).await;
+    async fn release(self, own: &impl Bucket) -> Result<(), Refused> {
+        self.release_with(own, |_| async { Ok(()) }).await
     }
 
     /// [`Pin::release`], doing `first` with the pin written again, its own still: what its mirror
     /// may do alone of what pins share, such as deleting their hold.
-    async fn release_with<F: Future<Output = ()>>(
+    async fn release_with<F: Future<Output = Result<(), Refused>>>(
         mut self,
         own: &impl Bucket,
         first: impl FnOnce(&Self) -> F,
-    ) {
-        if self.refresh(own, true).await {
-            first(&self).await;
-            bucket::delete(own, &self.key).await;
+    ) -> Result<(), Refused> {
+        if self.refresh(own, true).await? {
+            first(&self).await?;
+            bucket::delete(own, &self.key).await?;
         }
+        Ok(())
     }
 }
 
@@ -284,7 +285,7 @@ pub async fn wanted(
     let ours = layout::routed_to(&child.prefix()) == Some(number);
     let theirs = layout::routed_to(&parent.prefix()).is_some_and(|of| of != number);
     let Some(here) = bucket.mirrors().filter(|_| ours && theirs) else { return Ok(None) };
-    if here.marked(parent, at).await {
+    if here.marked(parent, at).await? {
         return Ok(None);
     }
     mirror(bucket, own, number, parent, at).await.map(Some)
@@ -300,12 +301,12 @@ pub async fn mirror(
     parent: CellId,
     at: u64,
 ) -> Result<Mirrored, Error> {
-    let Some(mut pin) = Pin::take(own, parent, at).await else {
+    let Some(mut pin) = Pin::take(own, parent, at).await? else {
         return Ok(Mirrored::UnderWay);
     };
     failpoint!("mirror::pinned");
     let (marker, hold) = (layout::mirror(parent, at), layout::hold(parent, at, number));
-    let copied = match bucket::get(own, &marker).await {
+    let copied = match bucket::get(own, &marker).await? {
         // Marked already, by a mirror begun before: its copy whole, and the hold that mirror wrote
         // standing until B's collector deletes it, with the marker (`mirrorHoldsUnmarked`). One
         // written again here, after that collector listed the copy before this pin and deleted
@@ -313,8 +314,8 @@ pub async fn mirror(
         Some(_) => 0,
         // Its hold in the parent's bucket, before it reads the head there (`mirrorHolds`).
         None => match hold_then_copy(bucket, own, &mut pin, (parent, at), &hold).await {
-            Ok(Copied::Whole { count }) if pin.refresh(own, true).await => {
-                bucket::create(own, &marker, layout::encode(&Mirror::NOW)).await;
+            Ok(Copied::Whole { count }) if pin.refresh(own, true).await? => {
+                bucket::create(own, &marker, layout::encode(&Mirror::NOW)).await?;
                 failpoint!("mirror::marked");
                 count
             }
@@ -323,15 +324,18 @@ pub async fn mirror(
                 return Ok(Mirrored::GaveUp(TAKEN.to_owned()));
             }
             Ok(Copied::Unnamed) => {
-                let_go(bucket, own, pin, &hold).await;
+                let_go(bucket, own, pin, &hold).await?;
                 return Ok(Mirrored::Unnamed);
             }
             Ok(Copied::Short(why)) => {
-                let_go(bucket, own, pin, &hold).await;
+                let_go(bucket, own, pin, &hold).await?;
                 return Ok(Mirrored::GaveUp(why));
             }
             Err(error) => {
-                let_go(bucket, own, pin, &hold).await;
+                // cladefs: the copy's failure what it fails with, whatever letting go came to.
+                if let Err(refused) = let_go(bucket, own, pin, &hold).await {
+                    log::warn!("cladefs: a mirror of {parent} at {at}, letting go: {refused}");
+                }
                 return Err(error);
             }
         },
@@ -340,7 +344,7 @@ pub async fn mirror(
     // stand, and a mirror begun again lists them again.
     let referred = refer_here(bucket, own, number, parent, at).await;
     failpoint!("mirror::referred");
-    pin.release(own).await;
+    pin.release(own).await?;
     let (referred, retired) = referred?;
     Ok(Mirrored::Done { copied, referred, retired })
 }
@@ -353,15 +357,20 @@ async fn hold_then_copy(
     (parent, at): (CellId, u64),
     hold: &str,
 ) -> Result<Copied, Error> {
-    bucket::create(bucket, hold, layout::encode(&Reference::of(0))).await;
+    bucket::create(bucket, hold, layout::encode(&Reference::of(0))).await?;
     failpoint!("mirror::held");
     copy(bucket, own, pin, parent, at).await
 }
 
 /// Gives a mirror up, its pin its own still, written again first: its hold deleted in the
 /// parent's bucket, then its pin. A pin another mirror took over, the hold is that mirror's too.
-async fn let_go(bucket: &impl Bucket, own: &impl Bucket, pin: Pin, hold: &str) {
-    pin.release_with(own, |_| bucket::delete(bucket, hold)).await;
+async fn let_go(
+    bucket: &impl Bucket,
+    own: &impl Bucket,
+    pin: Pin,
+    hold: &str,
+) -> Result<(), Refused> {
+    pin.release_with(own, |_| bucket::delete(bucket, hold)).await
 }
 
 /// Why a mirror whose pin is no longer its own gives up.
@@ -423,7 +432,7 @@ async fn copy(
     let mut moves = Vec::new();
     for key in needed.iter().chain(&before) {
         let prefix = layout::moves_of(key)?;
-        moves.extend(bucket::list(bucket, &prefix).await.into_iter().map(|meta| meta.key));
+        moves.extend(bucket::list(bucket, &prefix).await?.into_iter().map(|meta| meta.key));
     }
     needed.extend(moves);
     before.retain(|key| !needed.contains(key));
@@ -433,12 +442,13 @@ async fn copy(
     use futures::StreamExt as _;
     let mut count = 0;
     for chunk in keys.chunks(COPIES_AT_ONCE * 4) {
-        if !pin.refresh(own, false).await {
+        if !pin.refresh(own, false).await? {
             return Ok(Copied::Taken);
         }
         let copies: Vec<_> = chunk.iter().map(|(key, _)| copy_one(bucket, own, key)).collect();
-        let copied: Vec<bool> =
+        let copied: Vec<Result<bool, Refused>> =
             futures::stream::iter(copies).buffer_unordered(COPIES_AT_ONCE).collect().await;
+        let copied: Vec<bool> = copied.into_iter().collect::<Result<_, _>>()?;
         let short = chunk.iter().zip(&copied).find(|((_, needed), copied)| *needed && !**copied);
         if let Some(((gone, _), _)) = short {
             return Ok(Copied::Short(format!("{gone}: gone from its bucket")));
@@ -453,15 +463,15 @@ async fn copy(
 /// `bucket` reads it. One there already, from an earlier copy, B's collector keeps while the
 /// parent's cell lives ([`crate::collector::Collector::collect_copy`]): no version of it this
 /// mirror copies outlives it.
-async fn copy_one(bucket: &impl Bucket, own: &impl Bucket, key: &str) -> bool {
-    if bucket::get(own, key).await.is_some() {
-        return true;
+async fn copy_one(bucket: &impl Bucket, own: &impl Bucket, key: &str) -> Result<bool, Refused> {
+    if bucket::get(own, key).await?.is_some() {
+        return Ok(true);
     }
-    let Some(object) = bucket::get(bucket, key).await else { return false };
-    bucket::create(own, key, object.bytes).await;
+    let Some(object) = bucket::get(bucket, key).await? else { return Ok(false) };
+    bucket::create(own, key, object.bytes).await?;
     // A crash with some objects copied, others not (a test's).
     fail::fail_point!("mirror::copying");
-    true
+    Ok(true)
 }
 
 /// Moves the references of the children of this bucket, numbered `number`, to `parent`'s version
@@ -477,15 +487,15 @@ async fn refer_here(
     parent: CellId,
     at: u64,
 ) -> Result<(usize, usize), Error> {
-    let listed = bucket::list(bucket, &layout::origin(parent, at)).await;
+    let listed = bucket::list(bucket, &layout::origin(parent, at)).await?;
     let mut moved = Vec::new();
     for meta in listed {
         let Kind::Reference { child, .. } = layout::kind(&meta.key) else { continue };
         if crate::objectid::bucket_of(child.id) != number {
             continue;
         }
-        let Some(object) = bucket::get(bucket, &meta.key).await else { continue };
-        bucket::create(own, &meta.key, object.bytes).await;
+        let Some(object) = bucket::get(bucket, &meta.key).await? else { continue };
+        bucket::create(own, &meta.key, object.bytes).await?;
         moved.push(meta.key);
     }
     // A crash with the references written here, still standing there (a test's).
@@ -497,7 +507,7 @@ async fn refer_here(
     let named = head.as_ref().filter(|head| !head.deleted());
     if named.is_some_and(|head| head.versions.iter().any(|version| version.at == at)) {
         let keys: Vec<&str> = moved.iter().map(String::as_str).collect();
-        lifecycle::retire(bucket, &keys).await;
+        lifecycle::retire(bucket, &keys).await?;
         return Ok((moved.len(), moved.len()));
     }
     Ok((moved.len(), 0))

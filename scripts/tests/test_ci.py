@@ -175,8 +175,8 @@ class Ci(unittest.TestCase):
 
     def test_macos_runs_what_compiles_for_macos(self):
         """TASK-149.20.2: the macos job runs scripts/test.sh's workspace and Shuttle parts on a
-        macOS runner, a part a job, every failure: what cladefs compiles for macOS alone (physmem's
-        physical map, local_cell's syncs, bucket_cell's cache, cladefs's storage I/O) ran on
+        macOS runner, a part a job, every failure: what cladefs compiles for macOS alone (the
+        slabs' arenas' files, local_cell's syncs, bucket_cell's cache, cladefs's storage I/O) ran on
         laptops alone. Board 2912: and the madsim part, the daemon's simulation building on macOS
         too."""
         text = CI.read_text()

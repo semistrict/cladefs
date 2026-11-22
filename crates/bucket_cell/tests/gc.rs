@@ -548,7 +548,7 @@ fn rotates_master_keys_rewrapping_every_tenants_kek() {
     let key = Secret::random();
     let wrapped: Vec<_> =
         (1..=3).map(|tenant| block_on(before.wrap(tenant, &key)).unwrap()).collect();
-    block_on(bucket_kms::destroy(&*bucket, 3));
+    block_on(bucket_kms::destroy(&*bucket, 3)).unwrap();
     let rotate = |given: Option<String>| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cladefs-gc"));
         command.args([url.as_str(), "--rotate-master-key"]);

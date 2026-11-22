@@ -43,7 +43,7 @@ pub struct Sample {
 
 /// The parts of the daemon's anonymous memory, each bounded where it is held: what its design
 /// says the daemon holds (doc-7, Memory). Not its extent cache's, which is shared memory
-/// (`physmem`'s memfd), bounded by `MEMORY_BYTES`.
+/// (arenas' memfds, `crate::slabs`), bounded by `MEMORY_BYTES`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AnonBudget {
     /// Its uploads': its upload memory, `CLADEFSD_UPLOAD_MEMORY` (`crate::bucket::UPLOADS`),
@@ -77,6 +77,9 @@ pub struct AnonBudget {
     /// cells' extents, as many as their guests write, are its density's limit, which the budget
     /// shows rather than hides, an idle fork adding what it writes, not its base (TASK-443.2).
     pub extents: u64,
+    /// Its page-ins' buffers, which a part is read into before it is written into its slab, as
+    /// the daemon maps no slab (doc-26): [`PAGE_INS`].
+    pub page_ins: u64,
     /// Its own: [`OWN`].
     pub own: u64,
 }
@@ -91,6 +94,7 @@ impl AnonBudget {
             + self.held
             + self.pages
             + self.extents
+            + self.page_ins
             + self.own
     }
 }
@@ -115,6 +119,11 @@ pub const FRAMING: u64 = {
 /// 64 MiB) and the parts fetched last (its `RECENT`, 64 MiB), each bounded for the host, however
 /// many of its cells read (TASK-92.21, TASK-92.22).
 pub const FETCHES: u64 = 3 * (64 << 20);
+
+/// What the page-ins' buffers hold at once, at most: a part's (a slab, 1 MiB) for each of the
+/// pager's threads reading a part from a cell, and as many kept for the next (`cache::buffers`);
+/// a page-in fetching from object storage holds none while it waits.
+pub const PAGE_INS: u64 = 2 * crate::cache::PAGER_THREADS as u64 * crate::slabs::SLAB;
 
 /// What the daemon holds of its own, whatever it serves, at most: its threads' stacks, as deep as
 /// they reached, its runtimes', its allocator's arenas' small allocations, its tables of cells,
@@ -172,6 +181,7 @@ fn budget(state: &mut State) -> AnonBudget {
         held: super::memory::held_parts().counts().peak,
         pages: local_cell::pages::shared().usage().peak,
         extents: state.extents,
+        page_ins: PAGE_INS,
         own: OWN,
     }
 }

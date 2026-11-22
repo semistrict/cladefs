@@ -91,7 +91,7 @@ impl Allocator {
             if let Some(id) = self.given() {
                 return Ok(id);
             }
-            let taken = take(bucket, self.number(bucket).await?).await;
+            let taken = take(bucket, self.number(bucket).await?).await?;
             let mut block = self.block.lock().unwrap();
             // Another call's taking may have come first, its block given out by now or not: this
             // one's is given out next, its own wasted otherwise, which no ID of is given.
@@ -125,13 +125,13 @@ impl Allocator {
 
 /// Takes a block of the bucket numbered `number`, `bucket`, that no allocator took, at random, and
 /// returns it.
-async fn take(bucket: &impl Bucket, number: u16) -> u64 {
+async fn take(bucket: &impl Bucket, number: u16) -> Result<u64, crate::bucket::Refused> {
     assert!(identity::given(number), "bucket number {number} is no bucket's");
     let bytes = layout::encode(&BlockTaker { taker: rand::random() });
     loop {
         let block = u64::from(number) * BUCKET_BLOCKS + rand::random::<u64>() % BUCKET_BLOCKS;
-        match bucket::create(bucket, &layout::objectid_block(block), bytes.clone()).await {
-            Created::Created(_) => return block,
+        match bucket::create(bucket, &layout::objectid_block(block), bytes.clone()).await? {
+            Created::Created(_) => return Ok(block),
             // Another's: another block.
             Created::Exists(_) => {}
         }
@@ -171,12 +171,13 @@ mod tests {
             let next = one.next(&bucket).await.unwrap();
             assert_ne!(next / ID_BLOCK, first / ID_BLOCK);
             assert_eq!(bucket_of(next), number);
-            let blocks: BTreeSet<u64> = (bucket::list(&bucket, "objectid/").await.into_iter())
-                .map(|meta| match layout::kind(&meta.key) {
-                    layout::Kind::ObjectIds { block } => block,
-                    kind => panic!("{} is a {kind:?}", meta.key),
-                })
-                .collect();
+            let blocks: BTreeSet<u64> =
+                (bucket::list(&bucket, "objectid/").await.unwrap().into_iter())
+                    .map(|meta| match layout::kind(&meta.key) {
+                        layout::Kind::ObjectIds { block } => block,
+                        kind => panic!("{} is a {kind:?}", meta.key),
+                    })
+                    .collect();
             let expected = BTreeSet::from([first / ID_BLOCK, theirs / ID_BLOCK, next / ID_BLOCK]);
             assert_eq!(blocks, expected);
         });
@@ -190,11 +191,11 @@ mod tests {
             let bucket = memory();
             let mut taken = BTreeSet::new();
             for _ in 0..64 {
-                taken.insert(take(&bucket, 5).await);
+                taken.insert(take(&bucket, 5).await.unwrap());
             }
             assert_eq!(taken.len(), 64);
             assert!(taken.iter().all(|block| block / BUCKET_BLOCKS == 5), "{taken:x?}");
-            assert_eq!(bucket::list(&bucket, "objectid/").await.len(), 64);
+            assert_eq!(bucket::list(&bucket, "objectid/").await.unwrap().len(), 64);
         });
     }
 
@@ -209,10 +210,10 @@ mod tests {
                 id: 1,
                 settings: Default::default(),
             };
-            bucket::create(&bucket, layout::IDENTITY, layout::encode(&other)).await;
+            bucket::create(&bucket, layout::IDENTITY, layout::encode(&other)).await.unwrap();
             let refused = Allocator::new().next(&bucket).await;
             assert_eq!(refused, Err(Error::BucketFormat(layout::FORMAT - 1)));
-            assert_eq!(bucket::list(&bucket, "objectid/").await.len(), 0);
+            assert_eq!(bucket::list(&bucket, "objectid/").await.unwrap().len(), 0);
         });
     }
 }

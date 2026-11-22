@@ -48,23 +48,44 @@ impl Kind {
 /// it holds no more than a page of each, a tenant of millions of cells as one of a few. A request
 /// for every [`LIST_PAGE`](bucket::LIST_PAGE) tenants, and one for every
 /// [`LIST_PAGE`](bucket::LIST_PAGE) cells of each.
-pub fn listed<B: Bucket>(bucket: &B) -> impl Stream<Item = CellId> + Send + '_ {
-    tenants(bucket).flat_map(move |tenant| of_tenant(bucket, tenant))
+/// cladefs: a listing refused, the stream's last item, [`bucket::Refused`] (board 5861).
+pub fn listed<B: Bucket>(
+    bucket: &B,
+) -> impl Stream<Item = Result<CellId, bucket::Refused>> + Send + '_ {
+    tenants(bucket).flat_map(move |tenant| match tenant {
+        Ok(tenant) => of_tenant(bucket, tenant).boxed(),
+        Err(refused) => futures::stream::once(std::future::ready(Err(refused))).boxed(),
+    })
 }
 
 /// cladefs: every tenant of `bucket` with a cell, in order: by a delimiter listing of `tenants/`, a
-/// page at a time, listing none of their cells' objects.
-pub fn tenants<B: Bucket>(bucket: &B) -> impl Stream<Item = u64> + Send + '_ {
+/// page at a time, listing none of their cells' objects. A page refused, its last item.
+pub fn tenants<B: Bucket>(
+    bucket: &B,
+) -> impl Stream<Item = Result<u64, bucket::Refused>> + Send + '_ {
     let tenants = bucket::prefixes(bucket, layout::TENANTS.to_owned());
-    tenants.filter_map(|prefix| std::future::ready(layout::tenant_of_prefix(&prefix)))
+    tenants.filter_map(|prefix| {
+        std::future::ready(match prefix {
+            Ok(prefix) => layout::tenant_of_prefix(&prefix).map(Ok),
+            Err(refused) => Some(Err(refused)),
+        })
+    })
 }
 
 /// cladefs: every cell of `tenant` with an object under its prefix, in order: by a delimiter
 /// listing of the tenant's `cells/`, a page at a time, listing none of their objects (`cladefs-gc
-/// --usage`, TASK-395.8).
-pub fn of_tenant<B: Bucket>(bucket: &B, tenant: u64) -> impl Stream<Item = CellId> + Send + '_ {
+/// --usage`, TASK-395.8). A page refused, its last item.
+pub fn of_tenant<B: Bucket>(
+    bucket: &B,
+    tenant: u64,
+) -> impl Stream<Item = Result<CellId, bucket::Refused>> + Send + '_ {
     let cells = bucket::prefixes(bucket, layout::cells_of(tenant));
-    cells.filter_map(|prefix| std::future::ready(layout::cell_of_prefix(&prefix)))
+    cells.filter_map(|prefix| {
+        std::future::ready(match prefix {
+            Ok(prefix) => layout::cell_of_prefix(&prefix).map(Ok),
+            Err(refused) => Some(Err(refused)),
+        })
+    })
 }
 
 #[cfg(test)]
@@ -112,7 +133,7 @@ mod tests {
             rest
         });
         taken.extend(rest);
-        assert_eq!(taken, cells);
+        assert_eq!(taken, cells.iter().copied().map(Ok).collect::<Vec<_>>());
         let tenant = "tenants/0000000000002/cells/";
         let after = |id: u64| {
             format!("list-delimited {tenant} after {tenant}{id}/", id = base32_id::Padded(id))

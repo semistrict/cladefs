@@ -137,7 +137,8 @@ fn tenants_reach_their_own_bases_and_public_ones() {
     let next = ExtentId { cell: writer.cell(), sequence: 2 };
     writer.write(next, 0, &[cladefs::VolatileSlice::from(&pattern(7)[..])]).unwrap();
     writer.commit(None).unwrap();
-    assert_eq!(copies(cladefs::pages::physical_memory(), &pattern(6)), 1, "of one copy");
+    let memory = cladefs::pages::physical_memory();
+    assert_eq!(copies(std::os::fd::AsFd::as_fd(&*memory), &pattern(6)), 1, "of one copy");
     assert_eq!(copies(acme_vm.physical_memory(), &pattern(6)), 0, "in acme's arena");
     assert_eq!(copies(globex_vm.physical_memory(), &pattern(6)), 0, "in globex's arena");
 }

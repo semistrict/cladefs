@@ -51,7 +51,7 @@ impl MovesMaps {
             unread.iter().map(|key| &key[..key.rfind('/').map_or(0, |slash| slash + 1)]).collect();
         let mut moved: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for prefix in prefixes {
-            for meta in bucket::list(bucket, &layout::moves_under(prefix)?).await {
+            for meta in bucket::list(bucket, &layout::moves_under(prefix)?).await? {
                 if let Some(from) = layout::moved_from(&meta.key) {
                     moved.entry(from).or_default().push(meta.key);
                 }
@@ -104,7 +104,7 @@ impl MovesMaps {
         key: &str,
     ) -> Result<Moved, Error> {
         if !self.maps.contains_key(key) {
-            let listed = bucket::list(bucket, &layout::moves_of(key)?).await;
+            let listed = bucket::list(bucket, &layout::moves_of(key)?).await?;
             let moves: Vec<String> = listed.into_iter().map(|meta| meta.key).collect();
             let map = merged(bucket, &moves).await?;
             self.maps.insert(key.to_owned(), map);

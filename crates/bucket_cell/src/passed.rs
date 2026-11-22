@@ -235,9 +235,9 @@ pub(crate) struct Listed {
 }
 
 /// Lists `cell`, once.
-pub(crate) async fn list(bucket: &impl Bucket, cell: CellId) -> Listed {
+pub(crate) async fn list(bucket: &impl Bucket, cell: CellId) -> Result<Listed, bucket::Refused> {
     let measured = bucket.now();
-    let mut listed = bucket::list(bucket, &cell.prefix()).await;
+    let mut listed = bucket::list(bucket, &cell.prefix()).await?;
     listed.sort_by(|a, b| a.key.cmp(&b.key));
     let lease = layout::collector_lease(cell);
     let digest = digest(cell, &listed);
@@ -260,7 +260,7 @@ pub(crate) async fn list(bucket: &impl Bucket, cell: CellId) -> Listed {
     let stale = (references.into_iter())
         .filter(|key| layout::retired_of(key).is_some_and(|mark| objects.contains_key(&mark)))
         .collect();
-    Listed { objects, digest, usage, stale, references: count }
+    Ok(Listed { objects, digest, usage, stale, references: count })
 }
 
 /// The digest of a listing of `cell`, `listed`, in the order of their keys ([`Listed::digest`]):
@@ -307,7 +307,10 @@ pub(crate) struct LeaseTaking {
 
 /// The collector lease of `cell` as a read finds it, if there is one, for a taking of it after
 /// ([`take`]).
-pub(crate) async fn found(bucket: &impl Bucket, cell: CellId) -> Option<bucket::Object> {
+pub(crate) async fn found(
+    bucket: &impl Bucket,
+    cell: CellId,
+) -> Result<Option<bucket::Object>, bucket::Refused> {
     bucket::get(bucket, &layout::collector_lease(cell)).await
 }
 
@@ -370,7 +373,7 @@ pub(crate) async fn change(
 
 /// The collector lease of `cell`, if there is one: [`Error::Format`] if of another format.
 pub async fn read(bucket: &impl Bucket, cell: CellId) -> Result<Option<CollectorLease>, Error> {
-    found(bucket, cell).await.map(|object| CollectorLease::decode(cell, &object.bytes)).transpose()
+    found(bucket, cell).await?.map(|object| CollectorLease::decode(cell, &object.bytes)).transpose()
 }
 
 /// The epoch of the last taking of the collector lease of `cell`: 0 if none took it.

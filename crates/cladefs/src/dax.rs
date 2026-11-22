@@ -21,15 +21,13 @@
 //! ([`DaxWindow::fault`]). A window without a second stage, as tests' are, has its pages mapped at
 //! its host address.
 //!
-//! cladefs: a writer's window copies on write (backlog doc-13, [`CopyOnWrite`]): a write to a page,
-//! a sealed extent's or zeros, gives the page a private copy holding what the page held, mapped
-//! writable at the same offset; the mapping stays the source's. Only the guest's `MAP` or `UNMAP`
-//! over a private page ends it: a source evicting its pages and a free mapping zeros leave it. A
-//! window holds a bound of them, past which a write is refused, as every write is to a window that
-//! doesn't copy, a follower's. The private pages are the second stage's memory
-//! ([`SecondStage::make_private`]): the VM process's own, laid out as the window is, so that they
-//! cost it no mapping each (`dax::uffd`), and charged to it, not to the daemon (TASK-501); the
-//! window keeps where they are and how many.
+//! cladefs: a writer's window copies on write (backlog doc-13), in its second stage, the VM
+//! process's (doc-26): a write to a page the window names there, a sealed extent's or zeros, gives
+//! the page a private copy holding what the page held, mapped writable at the same offset, the VM
+//! process's own memory (`dax::uffd`), which the window knows nothing of. The mapping stays the
+//! source's. Only the guest's `MAP` or `UNMAP` over a private page ends it ([`Private::End`]):
+//! a source evicting its pages and a free mapping zeros leave it ([`Private::Keep`]), and so does
+//! a page mapped there anew. A window that doesn't copy, a follower's, refuses every write.
 
 pub(crate) mod failures;
 #[cfg(all(test, feature = "shuttle"))]
@@ -40,6 +38,7 @@ pub(crate) mod uffd;
 use crate::error::{Errno, Result};
 use crate::open_cell::{MappingContents, WindowMapping};
 use crate::pages::{PhysLocation, page_size};
+use crate::slabs::{PartSlab, VmProcessId};
 use futures::future::BoxFuture;
 use local_cell::shared::SharedLock;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -76,8 +75,11 @@ pub trait SecondStage: Send + Sync {
     /// a write to them must fault.
     fn map(&self, offset: u64, phys: PhysLocation, len: u64);
 
-    /// Unmaps the mapped `len` bytes at `offset`.
-    fn unmap(&self, offset: u64, len: u64);
+    /// Unmaps the mapped `len` bytes at `offset`. cladefs: the private pages there, a stage's that
+    /// copies on write, go or stay as `private` says (doc-26): the guest's `MAP` or `UNMAP` ends
+    /// them; the host's own changes, an eviction or a free's zeros, leave them. A window that
+    /// copies sends a guest's over the whole range, as it knows nothing of which pages are private.
+    fn unmap(&self, offset: u64, len: u64, private: Private);
 
     /// cladefs: the window maps the `len` bytes at `offset` anew; called once it has, before any of
     /// the pages it maps there now are mapped here, as the window maps a page here only once it is
@@ -97,12 +99,13 @@ pub trait SecondStage: Send + Sync {
     /// cladefs: ends [`begin_change`](Self::begin_change).
     fn end_change(&self) {}
 
-    /// cladefs: unmaps the mapped `len` bytes at `offset`, then makes `anew`, each within them, in
-    /// order: as [`unmap`](Self::unmap), then [`window_mapped`](Self::window_mapped) or
-    /// [`map`](Self::map) for each, would one after another, the window's change of a range it
-    /// mapped, which a stage may make at once rather than in steps (TASK-91.16).
-    fn remap(&self, offset: u64, len: u64, anew: &[Anew]) {
-        self.unmap(offset, len);
+    /// cladefs: unmaps the mapped `len` bytes at `offset`, as `private` says, then makes `anew`,
+    /// each within them, in order: as [`unmap`](Self::unmap), then
+    /// [`window_mapped`](Self::window_mapped) or [`map`](Self::map) for each, would one after
+    /// another, the window's change of a range it mapped, which a stage may make at once rather
+    /// than in steps (TASK-91.16).
+    fn remap(&self, offset: u64, len: u64, private: Private, anew: &[Anew]) {
+        self.unmap(offset, len, private);
         for anew in anew {
             match *anew {
                 Anew::Mapped { offset, len } => self.window_mapped(offset, len),
@@ -111,15 +114,11 @@ pub trait SecondStage: Send + Sync {
         }
     }
 
-    /// cladefs: makes the pages from `offset` on private (backlog doc-13), one for each of `from`,
-    /// in place of what is mapped there, if anything: each a page of the stage's own memory,
-    /// holding the bytes of the page at its `from`, the source's, which stays in memory until the
-    /// change is made, or zeros, mapped writable: the only memory of a window a write changes. An
-    /// unmap or a map over one ends it. Only a window that copies on write makes them, and only a
-    /// stage of such a window need know how. A run at once, as a `PRIVATE` makes them, so that a
-    /// stage may change its memory once for the run rather than once a page (TASK-164.10).
-    fn make_private(&self, offset: u64, from: &[Option<PhysLocation>]) {
-        unimplemented!("{offset:#x} made private ({from:?}) in a stage that doesn't copy");
+    /// The VM process it is in, which makes its changes after they return: the runs the window
+    /// maps here are staged to it (`PartSlab::stage_to`), and wait for it once freed (doc-26).
+    /// None for a stage that makes each change before it returns, as tests' do.
+    fn vm_process(&self) -> Option<VmProcessId> {
+        None
     }
 }
 
@@ -170,15 +169,13 @@ pub(crate) trait Faults: Send + Sync {
     /// The window's size in bytes.
     fn size(&self) -> u64;
 
-    /// As [`DaxWindow::fault`], for a write to a page the stage has, which only the guest makes.
-    fn fault(&self, offset: u64, access: Access) -> BoxFuture<'_, Result<()>>;
-
-    /// As [`DaxWindow::fault`], for a fault on a page the stage hasn't, whose access may not be
-    /// the guest's: what the daemon counts apart from the guest's writes (`Stats::fault_stores`).
-    fn fault_page(&self, offset: u64, access: Access) -> BoxFuture<'_, Result<()>>;
+    /// As [`DaxWindow::fault`], for a load of the page at `offset`, which the stage hasn't: cladefs:
+    /// or a write's, which the stage copies once the window has named the page (doc-26), or
+    /// refuses.
+    fn fault_page(&self, offset: u64) -> BoxFuture<'_, Result<()>>;
 
     /// cladefs: maps the page at `offset`, to read, ahead of the guest's accesses, as
-    /// [`fault_page`](Self::fault_page) does a load's: a probe of the stage's own, of a page the
+    /// [`fault_page`](Self::fault_page) does: a probe of the stage's own, of a page the
     /// guest may map nothing at, which fails then as quietly as it may (`ENOENT`), as no access of
     /// the guest's was refused.
     fn probe(&self, offset: u64) -> BoxFuture<'_, Result<()>>;
@@ -197,12 +194,8 @@ impl Faults for Window {
         Window::size(self)
     }
 
-    fn fault(&self, offset: u64, access: Access) -> BoxFuture<'_, Result<()>> {
-        Box::pin(Window::fault(self, offset, access))
-    }
-
-    fn fault_page(&self, offset: u64, access: Access) -> BoxFuture<'_, Result<()>> {
-        Box::pin(Window::fault(self, offset, access))
+    fn fault_page(&self, offset: u64) -> BoxFuture<'_, Result<()>> {
+        Box::pin(Window::fault(self, offset, Access::Read))
     }
 
     fn probe(&self, offset: u64) -> BoxFuture<'_, Result<()>> {
@@ -227,6 +220,17 @@ impl Drop for Change<'_> {
     }
 }
 
+/// What of a [`Source`]'s pages is in memory ([`Source::each_present`]): `count` pages from its
+/// page `page`, consecutive in physical memory from `at`, of `slab`, which a window that maps them
+/// in another process's second stage stages to it; or of memory never freed, which needs none
+/// (zeros).
+pub(crate) struct Present<'a> {
+    pub page: u64,
+    pub count: u64,
+    pub at: PhysLocation,
+    pub slab: Option<&'a PartSlab>,
+}
+
 /// What a window's mapping maps pages of (`crate::cache`): a sealed extent's pages, or zeros. Its
 /// pages are numbered from its first, each a page of physical memory once it is in memory, which
 /// the source keeps until it lets go of it: a page it evicts, it first unmaps from each window it
@@ -235,9 +239,9 @@ impl Drop for Change<'_> {
 /// Its lock is taken after a window's, never before: a window looks its pages up, and maps them,
 /// under its own.
 pub(crate) trait Source: Send + Sync {
-    /// Calls `found` with each page of `pages` in memory, by number, under the source's lock, so
-    /// that it stays in memory while `found` maps it.
-    fn each_present(&self, pages: Range<u64>, found: &mut dyn FnMut(u64, &physmem::Page));
+    /// Calls `found` with each run of the pages of `pages` in memory, in order, under the source's
+    /// lock, so that they stay in memory while `found` maps them.
+    fn each_present(&self, pages: Range<u64>, found: &mut dyn FnMut(Present<'_>));
 
     /// Brings page `page` into memory: completes once it is in, holding no thread meanwhile,
     /// returning whether it waited for it; or fails, the page not in memory.
@@ -250,7 +254,7 @@ pub(crate) trait Source: Send + Sync {
     }
 
     /// `window` maps it from now on, until [`Source::unmapped`]: a page it evicts, it unmaps there
-    /// first.
+    /// first. Told again, it is so once.
     fn mapped(&self, _window: &Arc<Window>) {}
 
     /// `window` maps it no more.
@@ -331,18 +335,6 @@ impl DaxWindow {
         !self.0.state.with(Mutex::lock).ptes.is_empty()
     }
 
-    /// cladefs: makes the `len` bytes at `offset` private now, as writes to each page would, and
-    /// maps them writable (doc-13's `PRIVATE`). See [`Window::make_private`].
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub(crate) async fn make_private(&self, offset: u64, len: u64) -> Result<()> {
-        self.0.make_private(offset, len).await
-    }
-
-    /// cladefs: the private pages it holds (backlog doc-13): none unless it copies on write.
-    pub fn private_pages(&self) -> u64 {
-        self.0.private_pages()
-    }
-
     /// cladefs: its gauges, which follow its mappings as they change, and fall to nothing as it
     /// goes: one window's of what [`live`] counts of them all (TASK-111.5).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -376,77 +368,45 @@ struct Mapping {
     page: u64,
 }
 
-/// A page the window has mapped.
-#[derive(Clone, Copy)]
-enum Pte {
-    /// A page of its mapping's source: which page of physical memory it is.
-    Source { frame: u32 },
-    /// cladefs: a private page (backlog doc-13), of the second stage's memory, or, without one, of
-    /// this process's, mapped in place ([`Window::map_private`]).
-    Private,
-}
-
 /// A window's mappings and the pages it has mapped, under its lock.
 struct WindowState {
     /// The mapped ranges of the window, by start. They do not overlap.
     mappings: BTreeMap<u64, Mapping>,
     /// The starts of the mappings, by the identity of their source ([`source_identity`]).
     by_source: HashMap<usize, BTreeSet<u64>>,
-    /// The pages mapped, by offset: each within a mapping, and its source's, or a private page.
-    ptes: BTreeMap<u64, Pte>,
-    /// cladefs: the private pages' offsets, of a window that copies on write ([`CopyOnWrite`]):
-    /// each mapped there, writable, in `ptes`, within a mapping, which is still its source's.
-    private: BTreeSet<u64>,
+    /// The pages mapped, by offset, each within a mapping: where in physical memory its source's
+    /// page is.
+    ptes: BTreeMap<u64, PhysLocation>,
+    /// cladefs: of a window whose stage copies on write, the runs of pages, by start and end, that
+    /// the host's own changes took away from the stage keeping its private pages there
+    /// ([`Private::Keep`]): where the stage may have a private page the window has mapped nothing
+    /// at, which the guest's next change there ends (doc-26). Elsewhere, a private page is where
+    /// the window has a page mapped.
+    kept: BTreeMap<u64, u64>,
     /// cladefs: what those are, counted, for whoever reads them without the lock: the daemon's
     /// gauges (TASK-131.6, TASK-111.5).
     gauges: Arc<Gauges>,
 }
 
-/// cladefs: what a private page holds of its source's page ([`Window::private_bytes`]).
-enum Held {
-    /// The page at a location of physical memory, which the second stage copies.
-    At(PhysLocation),
-    /// The page's bytes, copied, for a window without a second stage.
-    Bytes(Box<[u8]>),
-}
-
-/// cladefs: what a change to a window's range does to the private pages in it (backlog doc-13).
+/// cladefs: what a change to a window's range does to the private pages in it, its second stage's
+/// that copies on write (backlog doc-13, doc-26).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Private {
+pub enum Private {
     /// They go, as the guest's `MAP` or `UNMAP` over them ends them.
-    Free,
-    /// They stay, as the host's own changes leave them: a free's zeros.
+    End,
+    /// They stay, as the host's own changes leave them: an eviction, a free's zeros.
     Keep,
 }
 
-/// cladefs: how a window copies on write (backlog doc-13): how many private pages it holds at most.
-/// The pages are its second stage's memory ([`SecondStage::make_private`]), its VM process's, not
-/// the daemon's: nothing is reserved for them against an arena (TASK-501), as the daemon never
-/// holds them; the bound and the VM process's own limits are what bound them, as its guest memory
-/// is.
-pub(crate) struct CopyOnWrite {
-    most: u64,
-}
-
-impl CopyOnWrite {
-    /// A window's private pages, `most` of them at most, which the window refuses unless it has
-    /// that many pages, one at least ([`Window::new`]).
-    pub(crate) fn at_most(most: u64) -> Self {
-        Self { most }
-    }
-}
-
 /// A window's mappings, their bytes, and the pages it has mapped, as its state changes: the extent
-/// daemon's gauges (`crate::cladefsd::metrics`, TASK-131.6), read without the window's lock.
-/// cladefs: and its private pages, of those (backlog doc-13); one window's, which the daemon
-/// reports of each VM's (TASK-111.5), and which add up to all windows' ([`live`]). Nothing once the
-/// window goes.
+/// daemon's gauges (`crate::cladefsd::metrics`, TASK-131.6), read without the window's lock: one
+/// window's, which the daemon reports of each VM's (TASK-111.5), and which add up to all windows'
+/// ([`live`]). Nothing once the window goes.
 #[derive(Default)]
 pub(crate) struct Gauges {
     mappings: AtomicU64,
     mapped_bytes: AtomicU64,
     pages: AtomicU64,
-    private_pages: AtomicU64,
 }
 
 impl Gauges {
@@ -457,7 +417,6 @@ impl Gauges {
             mappings: self.mappings.load(Ordering::Relaxed),
             mapped_bytes: self.mapped_bytes.load(Ordering::Relaxed),
             pages: self.pages.load(Ordering::Relaxed),
-            private_pages: self.private_pages.load(Ordering::Relaxed),
         }
     }
 }
@@ -479,8 +438,6 @@ pub(crate) struct Live {
     /// without the window, a fault on each, if any, resolved by the stage alone, which may install
     /// a page as the guest first touches it (`dax::uffd`, TASK-276.6).
     pub pages: u64,
-    /// cladefs: of those pages, the private ones of windows that copy on write (backlog doc-13).
-    pub private_pages: u64,
 }
 
 /// The process's windows' mappings, as of now: every window's gauges, added up.
@@ -494,7 +451,6 @@ pub(crate) fn live() -> Live {
             mappings: all.mappings + window.mappings,
             mapped_bytes: all.mapped_bytes + window.mapped_bytes,
             pages: all.pages + window.pages,
-            private_pages: all.private_pages + window.private_pages,
         }
     })
 }
@@ -503,8 +459,7 @@ impl Drop for WindowState {
     /// Its gauges fall to nothing, which whoever holds them reads from now on.
     fn drop(&mut self) {
         let gauges = &self.gauges;
-        for gauge in [&gauges.mappings, &gauges.mapped_bytes, &gauges.pages, &gauges.private_pages]
-        {
+        for gauge in [&gauges.mappings, &gauges.mapped_bytes, &gauges.pages] {
             gauge.store(0, Ordering::Relaxed);
         }
     }
@@ -519,35 +474,63 @@ impl WindowState {
             mappings: BTreeMap::new(),
             by_source: HashMap::new(),
             ptes: BTreeMap::new(),
-            private: BTreeSet::new(),
+            kept: BTreeMap::new(),
             gauges,
         }
     }
 
-    /// Records that the window has mapped `pte` at `offset`, where it had mapped nothing.
-    fn insert_pte(&mut self, offset: u64, pte: Pte) {
-        let previous = self.ptes.insert(offset, pte);
+    /// Records that the window has mapped the page at `at` at `offset`, where it had mapped nothing.
+    fn insert_pte(&mut self, offset: u64, at: PhysLocation) {
+        let previous = self.ptes.insert(offset, at);
         debug_assert!(previous.is_none(), "a page mapped over another at {offset:#x}");
         self.gauges.pages.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// cladefs: records that the window has mapped a private page at `offset`, where it had mapped
-    /// nothing.
-    fn insert_private(&mut self, offset: u64) {
-        self.insert_pte(offset, Pte::Private);
-        let inserted = self.private.insert(offset);
-        debug_assert!(inserted, "a private page over another at {offset:#x}");
-        self.gauges.private_pages.fetch_add(1, Ordering::Relaxed);
+    /// cladefs: records that the pages at `offsets`, in order, were taken away keeping the private
+    /// pages there ([`WindowState::kept`]), in runs, joined with those around them.
+    fn keep(&mut self, offsets: &[u64]) {
+        let ps = page_size();
+        for &offset in offsets {
+            let (mut start, mut end) = (offset, offset + ps);
+            if let Some((&before, &before_end)) = self.kept.range(..=start).next_back()
+                && before_end >= start
+            {
+                start = before;
+                end = end.max(before_end);
+            }
+            while let Some((&after, &after_end)) = self.kept.range(start..).next()
+                && after <= end
+            {
+                end = end.max(after_end);
+                self.kept.remove(&after);
+            }
+            self.kept.insert(start, end);
+        }
     }
 
-    /// cladefs: forgets the private pages of `start..end`, which the window has unmapped, the stage
-    /// letting go of them with what it unmapped.
-    fn forget_private(&mut self, start: u64, end: u64) {
-        let offsets: Vec<u64> = self.private.range(start..end).copied().collect();
-        self.gauges.private_pages.fetch_sub(offsets.len() as u64, Ordering::Relaxed);
-        for offset in offsets {
-            self.private.remove(&offset);
+    /// cladefs: the runs of [`WindowState::kept`] within `start..end`, forgotten: what the guest's
+    /// change of `start..end` ends.
+    /// The runs don't overlap: those within it are the last to start before it, if it ends past
+    /// its start, and those starting in it, looked up so, whatever else is kept (no scan of what
+    /// is kept before it, a lookup each).
+    fn take_kept(&mut self, start: u64, end: u64) -> Vec<Range<u64>> {
+        let before = (self.kept.range(..start).next_back())
+            .filter(|(_, run_end)| **run_end > start)
+            .map(|(run, run_end)| (*run, *run_end));
+        let within = self.kept.range(start..end).map(|(run, run_end)| (*run, *run_end));
+        let overlapping: Vec<(u64, u64)> = before.into_iter().chain(within).collect();
+        let mut taken = Vec::new();
+        for (run, run_end) in overlapping {
+            self.kept.remove(&run);
+            if run < start {
+                self.kept.insert(run, start);
+            }
+            if run_end > end {
+                self.kept.insert(end, run_end);
+            }
+            taken.push(run.max(start)..run_end.min(end));
         }
+        taken
     }
 
     /// Records that the window has unmapped the page at `offset`, which it had mapped.
@@ -626,29 +609,22 @@ pub(crate) struct Window {
     /// cladefs: shared with its connection's [`DaxWindow`] and the guest's faults, beyond what
     /// halts its cell: a panic holding it aborts the daemon (`local_cell::shared`, TASK-149.24).
     state: SharedLock<Mutex<WindowState>>,
-    /// cladefs: how it copies on write, if it does (backlog doc-13): a write to a window that
-    /// doesn't, a follower's, is refused.
-    copy_on_write: Option<CopyOnWrite>,
+    /// cladefs: whether its second stage copies on write (backlog doc-13, doc-26), as a writer's
+    /// does: the guest's `MAP` and `UNMAP` then end the private pages over the whole range they
+    /// change ([`Private::End`]), which the window can't tell from the rest.
+    copying: bool,
 }
 
 impl Window {
     /// A window of `size` bytes, which must be a multiple of the page size, whose pages are mapped
-    /// in `second_stage`, or, without one, in this process's memory; copying on write as
-    /// `copy_on_write` says, if given.
-    fn new(
-        size: u64,
-        second_stage: Option<Arc<dyn SecondStage>>,
-        copy_on_write: Option<CopyOnWrite>,
-    ) -> Result<Self> {
+    /// in `second_stage`, or, without one, in this process's memory; whose stage copies on write
+    /// if `copying`, which a window in this process's memory has none to.
+    fn new(size: u64, second_stage: Option<Arc<dyn SecondStage>>, copying: bool) -> Result<Self> {
         if size == 0 || !size.is_multiple_of(page_size()) {
             return Err(Errno::EINVAL);
         }
         let len = usize::try_from(size).map_err(|_| Errno::EINVAL)?;
-        // cladefs: some private pages, no more than the window has pages.
-        if copy_on_write
-            .as_ref()
-            .is_some_and(|copying| copying.most == 0 || copying.most > size / page_size())
-        {
+        if copying && second_stage.is_none() {
             return Err(Errno::EINVAL);
         }
         let translation = match second_stage {
@@ -656,7 +632,7 @@ impl Window {
             None => Translation::Host { base: reserve(None, len).map_err(|_| Errno::ENOMEM)? },
         };
         let state = SharedLock::new("window", Mutex::new(WindowState::new()));
-        Ok(Self { size, translation, state, copy_on_write })
+        Ok(Self { size, translation, state, copying })
     }
 
     fn size(&self) -> u64 {
@@ -689,17 +665,16 @@ impl Window {
     }
 
     /// Resolves the guest's fault at `offset` for `access`: a load's maps the page
-    /// ([`Window::resolve`]); cladefs: a write's makes it private, as every page is mapped
-    /// read-only, in a window that copies on write ([`Window::copy`]), and is refused in one that
-    /// doesn't.
+    /// ([`Window::resolve`]); a write's is refused, as every page is mapped read-only: cladefs: a
+    /// stage that copies on write makes its own private copies (doc-26), and asks the window only
+    /// to read.
     pub(crate) async fn fault(&self, offset: u64, access: Access) -> Result<()> {
         use crate::stats::{self, Counter};
         let page = offset - offset % page_size();
         let start = std::time::Instant::now();
-        let faulted = match (access, &self.copy_on_write) {
-            (Access::Read, _) => self.resolve(page).await,
-            (Access::Write, Some(_)) => self.copy(page).await,
-            (Access::Write, None) => match self.is_mapped(page) {
+        let faulted = match access {
+            Access::Read => self.resolve(page).await,
+            Access::Write => match self.is_mapped(page) {
                 true => Err(Errno::EACCES),
                 false => Err(Errno::ENOENT),
             },
@@ -744,249 +719,16 @@ impl Window {
         }
     }
 
-    /// cladefs: makes the page at `offset` private, as a write to it does in a window that copies
-    /// on write (backlog doc-13), unless it is already: a page holding what the page held, its
-    /// source's bytes, brought in first, or, of zeros, zeros, nothing copied; mapped writable in
-    /// its place ([`Window::map_private`]), one change of the second stage, the mapping still its
-    /// source's. The guest's view doesn't change: what it read there it reads, and no write was
-    /// lost, as the page was read-only. Returns whether it waited for the source's page. `EACCES`
-    /// past the window's private pages, which the guest keeps within: the write is refused, as one
-    /// to a window that doesn't copy is, and its VM stops.
-    async fn copy(&self, offset: u64) -> Result<bool> {
-        let ps = page_size();
-        let copying = self.copy_on_write.as_ref().expect("a window that copies on write");
-        let mut waited = false;
-        loop {
-            let (source, page) = {
-                let state = self.state.with(Mutex::lock);
-                let (start, mapping) = state.mapping_at(offset).ok_or(Errno::ENOENT)?;
-                if state.private.contains(&offset) {
-                    return Ok(waited);
-                }
-                if state.private.len() as u64 >= copying.most {
-                    return Err(Errno::EACCES);
-                }
-                (mapping.source.clone(), mapping.page + (offset - start) / ps)
-            };
-            let zeros = source.origin() == Origin::Zeros;
-            if !zeros {
-                waited |= source.clone().bring_in(page).await?;
-            }
-            let mut state = self.state.with(Mutex::lock);
-            let _change = self.change();
-            // Mapped anew meanwhile, by the guest's MAP or a free's zeros, the write is to what is
-            // mapped now.
-            let same = state.mapping_at(offset).is_some_and(|(start, mapping)| {
-                source_identity(&mapping.source) == source_identity(&source)
-                    && mapping.page + (offset - start) / ps == page
-            });
-            if !same && rules().copy_rechecks_mapping {
-                continue;
-            }
-            if state.private.contains(&offset) {
-                return Ok(waited);
-            }
-            // Counted as it is mapped: two writes may have found room for one.
-            if state.private.len() as u64 >= copying.most && rules().copy_counts_under_lock {
-                return Err(Errno::EACCES);
-            }
-            // What it holds: the source's page, in memory still, which the window's lock keeps so,
-            // as a source evicting it unmaps it here first, under the lock; or zeros.
-            let mut held = None;
-            if !zeros {
-                source.each_present(page..page + 1, &mut |_, frame| {
-                    held = Some(self.private_bytes(frame));
-                });
-                // Evicted since it was brought in: brought in again.
-                if held.is_none() {
-                    continue;
-                }
-            }
-            if state.ptes.contains_key(&offset) {
-                state.remove_pte(offset);
-            }
-            state.insert_private(offset);
-            self.map_private(offset, vec![held]);
-            return Ok(waited);
-        }
-    }
-
-    /// cladefs: what a private page copies of the source's page `frame` ([`Window::map_private`]):
-    /// where it is, for the second stage to copy it, which it keeps from being freed until the
-    /// stage has made the copy, as it took the page away; or, without a stage, its bytes.
-    fn private_bytes(&self, frame: &physmem::Page) -> Held {
-        match self.translation {
-            Translation::Stage(_) => {
-                // Once freed, it waits for the stage to copy it (`physmem::quarantine_with`).
-                frame.mark_staged();
-                Held::At(frame.location())
-            }
-            Translation::Host { .. } => {
-                let ps = page_size() as usize;
-                // SAFETY: The source's page is in memory while its lock is held, and never changes,
-                // a sealed extent's.
-                Held::Bytes(unsafe { std::slice::from_raw_parts(frame.as_ptr(), ps) }.into())
-            }
-        }
-    }
-
-    /// cladefs: maps private pages from `offset` on (backlog doc-13), one for each of `held`,
-    /// writable, in place of what was mapped there: in the second stage, its own memory, holding
-    /// what each `held` says, or zeros, the run at once ([`SecondStage::make_private`]); or,
-    /// without a stage, anonymous memory of this process.
-    fn map_private(&self, offset: u64, held: Vec<Option<Held>>) {
-        match &self.translation {
-            Translation::Stage(stage) => {
-                let from: Vec<Option<PhysLocation>> = (held.into_iter())
-                    .map(|held| {
-                        held.map(|held| match held {
-                            Held::At(location) => location,
-                            Held::Bytes(_) => unreachable!("a stage's private page held as bytes"),
-                        })
-                    })
-                    .collect();
-                stage.make_private(offset, &from);
-            }
-            Translation::Host { base } => {
-                let ps = page_size() as usize;
-                let at = (base + offset as usize) as *mut libc::c_void;
-                let (prot, flags) = (
-                    libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_FIXED,
-                );
-                // SAFETY: Anonymous memory over the window's reservation, which only the guest, a
-                // test, accesses: zeros.
-                let addr = unsafe { libc::mmap(at, ps * held.len(), prot, flags, -1, 0) };
-                assert_eq!(addr, at, "map private pages: {}", std::io::Error::last_os_error());
-                for (page, held) in held.into_iter().enumerate() {
-                    if let Some(Held::Bytes(bytes)) = held {
-                        // SAFETY: page `page` of the `held.len()` pages just mapped at `at`.
-                        let to = unsafe { at.cast::<u8>().add(page * ps) };
-                        // SAFETY: `to` is `ps` writable bytes the mapping above made, which no
-                        // other thread reaches yet; `bytes` is a heap copy of `ps` bytes
-                        // (Held::Bytes, above), so the two don't overlap.
-                        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), to, ps) };
-                    }
-                }
-            }
-        }
-    }
-
-    /// cladefs: makes the `len` bytes at `offset` private now, as writes to each of their pages
-    /// would ([`Window::copy`]), mapped writable, so for the guest ahead of its accesses as the
-    /// stage maps private pages: doc-13's `PRIVATE`, a `write(2)`'s pages in one round trip
-    /// rather than a host fault each. `ENOMEM`, nothing made private, if they would take the
-    /// window past its private pages; `EINVAL` for a window that doesn't copy on write, a range
-    /// not within it, or one with a page mapped nothing at, none made private.
-    ///
-    /// The pages are made in one change of the second stage, each run of them at once
-    /// ([`SecondStage::make_private`]), where each was a change of its own once, the VM process
-    /// changing its memory once a page: three of a `PRIVATE`'s pages took it some 200 us, nested,
-    /// of the 470 a forked pgbench's `write(2)` spent asking (TASK-164.10, GCE r649). Their
-    /// sources' pages are brought in first; then, holding the lock, each page not private yet is
-    /// made so, of what is mapped there then, if its source's page is still in memory; one evicted
-    /// meanwhile is brought in again, and made private in a change after.
-    async fn make_private(&self, offset: u64, len: u64) -> Result<()> {
-        let copying = self.copy_on_write.as_ref().ok_or(Errno::EINVAL)?;
-        self.check_range(offset, len)?;
-        let ps = page_size();
-        let pages = (offset..offset + len).step_by(ps as usize);
-        {
-            let state = self.state.with(Mutex::lock);
-            let mut more = 0;
-            for at in pages.clone() {
-                state.mapping_at(at).ok_or(Errno::EINVAL)?;
-                more += u64::from(!state.private.contains(&at));
-            }
-            if state.private.len() as u64 + more > copying.most {
-                return Err(Errno::ENOMEM);
-            }
-        }
-        loop {
-            // The sources' pages of those not private yet, as mapped now.
-            let wanted: Vec<(Arc<dyn Source>, u64)> = {
-                let state = self.state.with(Mutex::lock);
-                (pages.clone())
-                    .filter(|at| !state.private.contains(at))
-                    .filter_map(|at| {
-                        let (start, mapping) = state.mapping_at(at)?;
-                        let zeros = mapping.source.origin() == Origin::Zeros;
-                        (!zeros).then(|| (mapping.source.clone(), mapping.page + (at - start) / ps))
-                    })
-                    .collect()
-            };
-            for (source, page) in wanted {
-                source.bring_in(page).await?;
-            }
-            let mut state = self.state.with(Mutex::lock);
-            let _change = self.change();
-            // The runs made private, each mapped as one, whatever comes of the rest.
-            let mut runs: Vec<(u64, Vec<Option<Held>>)> = Vec::new();
-            let mut evicted = false;
-            let made = (|| {
-                for at in pages.clone() {
-                    if state.private.contains(&at) {
-                        continue;
-                    }
-                    // Unmapped meanwhile, by the guest's UNMAP, as a write's fault finds it.
-                    let (source, page) = (state.mapping_at(at))
-                        .map(|(start, mapping)| {
-                            (mapping.source.clone(), mapping.page + (at - start) / ps)
-                        })
-                        .ok_or(Errno::ENOENT)?;
-                    // Past the bound, room taken by writes meanwhile.
-                    if state.private.len() as u64 >= copying.most {
-                        return Err(Errno::ENOMEM);
-                    }
-                    let mut held = None;
-                    if source.origin() != Origin::Zeros {
-                        source.each_present(page..page + 1, &mut |_, frame| {
-                            held = Some(self.private_bytes(frame));
-                        });
-                        // Evicted since it was brought in: brought in again.
-                        if held.is_none() {
-                            evicted = true;
-                            continue;
-                        }
-                    }
-                    if state.ptes.contains_key(&at) {
-                        state.remove_pte(at);
-                    }
-                    state.insert_private(at);
-                    match runs.last_mut() {
-                        Some((first, run)) if *first + run.len() as u64 * ps == at => {
-                            run.push(held)
-                        }
-                        _ => runs.push((at, vec![held])),
-                    }
-                }
-                Ok(())
-            })();
-            for (first, run) in runs {
-                self.map_private(first, run);
-            }
-            made?;
-            if !evicted {
-                return Ok(());
-            }
-        }
-    }
-
-    /// cladefs: the private pages it holds (backlog doc-13): none unless it copies on write.
-    pub(crate) fn private_pages(&self) -> u64 {
-        self.state.with(Mutex::lock).private.len() as u64
-    }
-
     /// Maps as [`Window::map_as`] does, as the guest's `MAP`, which ends the private pages there.
     #[cfg(test)]
     fn map(self: &Arc<Self>, offset: u64, source: &Arc<dyn Source>, source_offset: u64, len: u64) {
-        self.map_as(offset, source, source_offset, len, Private::Free);
+        self.map_as(offset, source, source_offset, len, Private::End);
     }
 
     /// Maps `len` bytes of `source`'s pages from `source_offset` into the window at `offset`,
     /// read-only, replacing what was mapped there, and then its pages in memory: one change to the
     /// second stage, if there is one (`SecondStage::begin_change`). cladefs: the private pages
-    /// there go or stay as `private` says: the guest's `MAP` ends them (`Private::Free`), the
+    /// there go or stay as `private` says: the guest's `MAP` ends them (`Private::End`), the
     /// host's own changes leave them, a free's zeros.
     fn map_as(
         self: &Arc<Self>,
@@ -1033,7 +775,7 @@ impl Window {
         let _change = self.change();
         let mut anew: Vec<Range<u64>> = Vec::new();
         for &Piece { offset, source, page, len } in pieces {
-            let forgotten = self.place(&mut state, offset, source, page, len, Private::Free);
+            let forgotten = self.place(&mut state, offset, source, page, len, Private::End);
             self.unmapped(&state, forgotten);
             match anew.last_mut() {
                 Some(run) if run.end == offset => run.end += len,
@@ -1067,9 +809,11 @@ impl Window {
         private: Private,
     ) -> Vec<Arc<dyn Source>> {
         let end = offset + len;
+        // Whether the window mapped it before, whatever of it this replaces: the guest's MAP of
+        // an extent over its own range tells it nothing (TASK-602).
+        let first = !state.by_source.contains_key(&source_identity(source));
         self.unmap_ptes(state, offset, end, private);
         let forgotten = state.forget(offset, end);
-        let first = !state.by_source.contains_key(&source_identity(source));
         state.insert(offset, Mapping { end, source: source.clone(), page });
         if first {
             source.mapped(self);
@@ -1122,7 +866,7 @@ impl Window {
     /// private pages there.
     fn unmap(&self, offset: u64, len: u64) {
         let mut state = self.state.with(Mutex::lock);
-        self.unmap_locked(&mut state, offset, len, Private::Free);
+        self.unmap_locked(&mut state, offset, len, Private::End);
     }
 
     /// cladefs: unmaps as [`Window::unmap`] does, with the window's lock held, its private pages
@@ -1155,17 +899,13 @@ impl Window {
         let mut gone = Vec::new();
         for start in &starts {
             let end = state.mappings[start].end;
-            gone.extend(
-                (state.ptes.range(*start..end))
-                    .filter(|(_, pte)| matches!(pte, Pte::Source { .. }))
-                    .map(|(offset, _)| *offset),
-            );
+            gone.extend(state.ptes.range(*start..end).map(|(offset, _)| *offset));
             state.mappings.get_mut(start).expect("a mapping's start").source = to.clone();
         }
         for offset in &gone {
             state.remove_pte(*offset);
         }
-        self.unmap_runs(&gone);
+        self.kept(&mut state, &gone);
         state.by_source.entry(source_identity(&to)).or_default().extend(starts);
         drop(state);
         from.unmapped(self);
@@ -1173,9 +913,10 @@ impl Window {
     }
 
     /// Unmaps the pages the window has mapped of `source`, by its identity, that `evicted` says
-    /// are of the frames it evicts: before it lets go of them. cladefs: a private page within its
-    /// mappings is none of its pages, and stays (backlog doc-13).
-    pub(crate) fn unmap_pages_of(&self, source: usize, evicted: &dyn Fn(u32) -> bool) {
+    /// are of the runs it evicts, by where they are: before it lets go of them. cladefs: a private
+    /// page within its mappings, its stage's, stays (backlog doc-13, spec rule
+    /// evictionKeepsPrivate).
+    pub(crate) fn unmap_pages_of(&self, source: usize, evicted: &dyn Fn(PhysLocation) -> bool) {
         let mut state = self.state.with(Mutex::lock);
         let Some(starts) = state.by_source.get(&source) else { return };
         let ranges: Vec<(u64, u64)> =
@@ -1184,17 +925,24 @@ impl Window {
         for (start, end) in ranges {
             gone.extend(
                 (state.ptes.range(start..end))
-                    .filter(|(_, pte)| match pte {
-                        Pte::Source { frame, .. } => evicted(*frame),
-                        Pte::Private => !rules().eviction_skips_private,
-                    })
+                    .filter(|(_, at)| evicted(**at))
                     .map(|(offset, _)| *offset),
             );
         }
         for offset in &gone {
             state.remove_pte(*offset);
         }
-        self.unmap_runs(&gone);
+        self.kept(&mut state, &gone);
+    }
+
+    /// cladefs: unmaps the pages at `offsets`, in order, which the window took away keeping the
+    /// private pages there ([`Private::Keep`]), and, if its stage copies, records them so
+    /// ([`WindowState::kept`]).
+    fn kept(&self, state: &mut WindowState, offsets: &[u64]) {
+        if self.copying {
+            state.keep(offsets);
+        }
+        self.unmap_runs(offsets, Private::Keep);
     }
 
     /// Maps, where nothing is mapped, the pages in memory of the mappings of `start..end`: in runs
@@ -1217,28 +965,36 @@ impl Window {
         pages: &mut Vec<(u64, PhysLocation)>,
     ) {
         let ps = page_size();
-        let staged = self.stage().is_some();
+        let vm = self.stage().and_then(|stage| stage.vm_process());
         for mapping_start in state.overlapping(start, end) {
             let mapping = &state.mappings[&mapping_start];
             let (from, to) = (start.max(mapping_start), end.min(mapping.end));
             let first = mapping.page + (from - mapping_start) / ps;
             let ptes = &state.ptes;
             let mut found = Vec::new();
-            mapping.source.each_present(first..first + (to - from) / ps, &mut |page, frame| {
-                let offset = from + (page - first) * ps;
-                if ptes.contains_key(&offset) {
-                    return;
+            mapping.source.each_present(first..first + (to - from) / ps, &mut |present| {
+                let mut staged = false;
+                for page in present.page..present.page + present.count {
+                    let offset = from + (page - first) * ps;
+                    if ptes.contains_key(&offset) {
+                        continue;
+                    }
+                    let within = (page - present.page) * ps;
+                    found.push((
+                        offset,
+                        PhysLocation { offset: present.at.offset + within, ..present.at },
+                    ));
+                    staged = true;
                 }
-                // Once freed, it waits for the stage to take it away (`physmem::quarantine_with`,
-                // TASK-79.9).
-                if staged {
-                    frame.mark_staged();
+                // Once freed, it waits for the VM process to take it away
+                // (`slabs::quarantine_with`, TASK-79.9, doc-26).
+                if staged && let (Some(vm), Some(slab)) = (vm, present.slab) {
+                    slab.stage_to(vm);
                 }
-                found.push((offset, frame.location(), frame.frame()));
             });
-            for (offset, location, frame) in found {
-                state.insert_pte(offset, Pte::Source { frame });
-                pages.push((offset, location));
+            for (offset, at) in found {
+                state.insert_pte(offset, at);
+                pages.push((offset, at));
             }
         }
     }
@@ -1275,25 +1031,40 @@ impl Window {
         }
     }
 
-    /// Unmaps the pages the window has mapped of `start..end`. cladefs: its private pages there
-    /// too, which the stage lets go of as it unmaps them, if `private` says they go; else they stay
-    /// mapped.
+    /// Unmaps the pages the window has mapped of `start..end`. cladefs: its stage's private pages
+    /// there go or stay as `private` says (doc-26). A private page is at a page the window mapped,
+    /// or one the host's changes took away keeping it ([`WindowState::kept`]): the guest's changes
+    /// ([`Private::End`]) unmap those too, which the window maps nothing at.
     fn unmap_ptes(&self, state: &mut WindowState, start: u64, end: u64, private: Private) {
-        let gone: Vec<u64> = (state.ptes.range(start..end))
-            .map(|(offset, _)| *offset)
-            .filter(|offset| private == Private::Free || !state.private.contains(offset))
-            .collect();
+        let gone: Vec<u64> = state.ptes.range(start..end).map(|(offset, _)| *offset).collect();
         for offset in &gone {
             state.remove_pte(*offset);
         }
-        self.unmap_runs(&gone);
-        if private == Private::Free {
-            state.forget_private(start, end);
+        match private {
+            Private::Keep => self.kept(state, &gone),
+            Private::End if self.copying && rules().guests_changes_end_private => {
+                let ps = page_size();
+                let mut runs: Vec<Range<u64>> = state.take_kept(start, end);
+                runs.extend(gone.iter().map(|offset| *offset..offset + ps));
+                runs.sort_by_key(|run| run.start);
+                let mut joined: Vec<Range<u64>> = Vec::new();
+                for run in runs {
+                    match joined.last_mut() {
+                        Some(last) if last.end >= run.start => last.end = last.end.max(run.end),
+                        _ => joined.push(run),
+                    }
+                }
+                for run in joined {
+                    self.unmap_range(run.start, run.end - run.start, private);
+                }
+            }
+            Private::End => self.unmap_runs(&gone, private),
         }
     }
 
-    /// Unmaps the pages at `offsets`, in order, in runs of consecutive pages.
-    fn unmap_runs(&self, offsets: &[u64]) {
+    /// Unmaps the pages at `offsets`, in order, in runs of consecutive pages, the private pages
+    /// among them going or staying as `private` says.
+    fn unmap_runs(&self, offsets: &[u64], private: Private) {
         let ps = page_size();
         let mut runs: Vec<(u64, u64)> = Vec::new();
         for &offset in offsets {
@@ -1303,12 +1074,18 @@ impl Window {
             }
         }
         for (start, len) in runs {
-            match &self.translation {
-                Translation::Stage(stage) => stage.unmap(start, len),
-                Translation::Host { base } => {
-                    let at = base + start as usize;
-                    reserve(Some(at), len as usize).expect("the window's memory reserved again");
-                }
+            self.unmap_range(start, len, private);
+        }
+    }
+
+    /// Unmaps the `len` bytes at `start`, the private pages there going or staying as `private`
+    /// says.
+    fn unmap_range(&self, start: u64, len: u64, private: Private) {
+        match &self.translation {
+            Translation::Stage(stage) => stage.unmap(start, len, private),
+            Translation::Host { base } => {
+                let at = base + start as usize;
+                reserve(Some(at), len as usize).expect("the window's memory reserved again");
             }
         }
     }
@@ -1380,23 +1157,13 @@ pub(crate) struct Rules {
     /// A freed extent's mappings map zeros rather than nothing: a write racing the free faults on
     /// them as on any read-only page.
     pub free_maps_zeros: bool,
-    /// cladefs: a write's private copy is mapped only if the page still maps what it copied: a
-    /// `MAP` meanwhile maps what the write is to (backlog doc-13).
-    pub copy_rechecks_mapping: bool,
-    /// cladefs: a private copy is counted against the window's bound as it is mapped, not only
-    /// before it is made: two writes at once may each have found room for one.
-    pub copy_counts_under_lock: bool,
-    /// cladefs: a source evicting its pages leaves the private pages within its mappings.
-    pub eviction_skips_private: bool,
+    /// cladefs: the guest's `MAP` or `UNMAP` of a window that copies unmaps in its stage, ending the
+    /// private pages there, the pages the host's changes took away keeping them too.
+    pub guests_changes_end_private: bool,
 }
 
 impl Rules {
-    pub const ALL: Self = Self {
-        free_maps_zeros: true,
-        copy_rechecks_mapping: true,
-        copy_counts_under_lock: true,
-        eviction_skips_private: true,
-    };
+    pub const ALL: Self = Self { free_maps_zeros: true, guests_changes_end_private: true };
 }
 
 #[cfg(not(feature = "shuttle"))]
@@ -1429,17 +1196,21 @@ impl Dax {
     /// A window of `size` bytes whose pages are mapped in `second_stage`, or, without one, in this
     /// process's memory, and a handle to it.
     pub fn new(size: u64, second_stage: Option<Arc<dyn SecondStage>>) -> Result<(Self, DaxWindow)> {
-        Self::copying(size, second_stage, None)
+        Self::with_stage(size, second_stage, false)
     }
 
-    /// cladefs: as [`Dax::new`], a window that copies on write as `copy_on_write` says, if given
-    /// (backlog doc-13).
-    pub fn copying(
+    /// cladefs: as [`Dax::new`], a window whose `second_stage` copies on write (backlog doc-13,
+    /// doc-26): a writer's.
+    pub fn copying(size: u64, second_stage: Arc<dyn SecondStage>) -> Result<(Self, DaxWindow)> {
+        Self::with_stage(size, Some(second_stage), true)
+    }
+
+    fn with_stage(
         size: u64,
         second_stage: Option<Arc<dyn SecondStage>>,
-        copy_on_write: Option<CopyOnWrite>,
+        copying: bool,
     ) -> Result<(Self, DaxWindow)> {
-        let window = Arc::new(Window::new(size, second_stage, copy_on_write)?);
+        let window = Arc::new(Window::new(size, second_stage, copying)?);
         let dax = Self {
             window: window.clone(),
             zeros: crate::cache::zeros()?,
@@ -1459,24 +1230,20 @@ impl Dax {
         Self::in_host_memory_copying(stage, None)
     }
 
-    /// cladefs: as [`Dax::in_host_memory`], a window that copies on write as `copy_on_write` says,
-    /// if given, its stage told so.
+    /// cladefs: as [`Dax::in_host_memory`], a window whose stage copies on write, holding `most`
+    /// private pages at most, if given (doc-26).
     #[cfg(all(test, target_os = "linux"))]
     pub fn in_host_memory_copying(
         stage: Arc<uffd::UffdSecondStage>,
-        copy_on_write: Option<CopyOnWrite>,
+        most: Option<u64>,
     ) -> crate::error::Result<(Self, DaxWindow), crate::Error> {
-        if copy_on_write.is_some() {
-            stage.copy_on_write()?;
+        if let Some(most) = most {
+            stage.copy_on_write(most)?;
         }
-        let (mut dax, window) = Self::copying(stage.size(), Some(stage.clone()), copy_on_write)?;
+        let copying = most.is_some();
+        let (mut dax, window) = Self::with_stage(stage.size(), Some(stage.clone()), copying)?;
         dax._faults = Some(stage.serve(dax.window.clone())?);
         Ok((dax, window))
-    }
-
-    /// cladefs: the private pages the window holds (backlog doc-13).
-    pub fn private_pages(&self) -> u64 {
-        self.window.private_pages()
     }
 
     /// Checks the window's range for a mapping of `len` bytes at `offset`.
@@ -1487,12 +1254,12 @@ impl Dax {
     /// Maps `len` bytes of `source` at `source_offset` into the window at `offset`, read-only:
     /// the guest's `MAP`, which ends the private pages there.
     pub fn map(&mut self, offset: u64, source: &Arc<dyn Source>, source_offset: u64, len: u64) {
-        self.window.map_as(offset, source, source_offset, len, Private::Free);
+        self.window.map_as(offset, source, source_offset, len, Private::End);
     }
 
     /// Maps zeros, read-only, at `len` bytes of the window at `offset`, as [`Dax::map`] does.
     pub fn map_zeros(&mut self, offset: u64, len: u64) {
-        self.window.map_as(offset, &self.zeros, 0, len, Private::Free);
+        self.window.map_as(offset, &self.zeros, 0, len, Private::End);
     }
 
     /// cladefs: maps each of `mappings`, in order, as [`Dax::map`] would, or zeros, as
@@ -1548,6 +1315,9 @@ pub(crate) mod tests {
         Paged,
         /// Each comes in, zeros, as it is first brought in, as a file's blocks never written do.
         Anonymous,
+        /// cladefs: each is in memory from the start, its bytes the value, and comes in again so
+        /// once evicted ([`TestSource::evict`]).
+        Again(u8),
     }
 
     /// A test's source of pages, of physical memory's default arena.
@@ -1555,7 +1325,7 @@ pub(crate) mod tests {
         kind: Kind,
         /// The extent it says its pages are, its own.
         extent: ExtentId,
-        pages: Mutex<Vec<Option<physmem::Page>>>,
+        pages: Mutex<Vec<Option<PartSlab>>>,
         /// The pages asked for, and not yet taken ([`TestSource::request`]).
         requests: Mutex<Vec<u64>>,
         asked: Condvar,
@@ -1565,7 +1335,7 @@ pub(crate) mod tests {
     }
 
     impl TestSource {
-        fn new(kind: Kind, pages: Vec<Option<physmem::Page>>) -> Arc<Self> {
+        fn new(kind: Kind, pages: Vec<Option<PartSlab>>) -> Arc<Self> {
             static SEQUENCE: AtomicU64 = AtomicU64::new(0);
             let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
             Arc::new(Self {
@@ -1579,11 +1349,24 @@ pub(crate) mod tests {
         }
 
         /// A page of physical memory, its bytes `value`.
-        fn page_of(value: u8) -> physmem::Page {
-            let page = physmem::alloc(physmem::ArenaId::DEFAULT, physmem::Wait::No).unwrap();
-            // SAFETY: The page is allocated, and only this test's.
-            unsafe { std::ptr::write_bytes(page.as_ptr(), value, page_size() as usize) };
+        fn page_of(value: u8) -> PartSlab {
+            let page =
+                crate::slabs::alloc(crate::slabs::ArenaId::DEFAULT, 1, crate::slabs::Wait::No);
+            let page = page.unwrap();
+            page.write(0, &vec![value; page_size() as usize]).unwrap();
             page
+        }
+
+        /// Where its page `page` is, in memory.
+        pub fn location(&self, page: u64) -> PhysLocation {
+            let pages = self.pages.lock().unwrap();
+            pages[page as usize].as_ref().expect("the page in memory").location()
+        }
+
+        /// The first byte of its page `page`, in memory.
+        #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+        pub fn byte(&self, page: u64) -> u8 {
+            read_page(self.location(page))[0]
         }
 
         /// `pages` pages in memory, each its number plus `first`.
@@ -1596,6 +1379,24 @@ pub(crate) mod tests {
         #[cfg_attr(not(any(target_os = "linux", feature = "shuttle")), allow(dead_code))]
         pub fn filled(pages: u64, value: u8) -> Arc<Self> {
             Self::new(Kind::Filled, (0..pages).map(|_| Some(Self::page_of(value))).collect())
+        }
+
+        /// cladefs: `pages` pages in memory, each its bytes `value`, which come in again so once
+        /// evicted ([`TestSource::evict`]).
+        #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+        pub fn evictable(pages: u64, value: u8) -> Arc<Self> {
+            Self::new(Kind::Again(value), (0..pages).map(|_| Some(Self::page_of(value))).collect())
+        }
+
+        /// cladefs: evicts its page `page`, as the cache evicts a part: in memory no more, which a
+        /// window's fault finds from now on, then unmapped from `window`, then freed, its run free
+        /// for the next allocation.
+        #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+        pub fn evict(self: &Arc<Self>, window: &Window, page: u64) {
+            let at = self.location(page);
+            let slab = self.pages.lock().unwrap()[page as usize].take();
+            window.unmap_pages_of(source_identity(self), &|location| location == at);
+            drop(slab);
         }
 
         /// `pages` pages in memory, page `page`'s bytes `tag(page)`, scattered over physical
@@ -1666,17 +1467,28 @@ pub(crate) mod tests {
         }
     }
 
+    /// The bytes of the page of physical memory at `at`, read through its arena's object, as a VM
+    /// process mapping it reads them.
+    pub(crate) fn read_page(at: PhysLocation) -> Vec<u8> {
+        use std::os::unix::fs::FileExt;
+        let fd = crate::slabs::arena_fd(at.arena).expect("the page's arena");
+        let file = std::fs::File::from(fd.try_clone().expect("the arena's object, again"));
+        let mut bytes = vec![0; page_size() as usize];
+        file.read_exact_at(&mut bytes, at.offset).expect("the page read");
+        bytes
+    }
+
     /// A mapping of zeros, `len` bytes at `window_offset`, as [`Dax::mappings`] records it.
     pub(crate) fn zeros_at(window_offset: u64, len: u64) -> WindowMapping {
         WindowMapping { window_offset, len, contents: MappingContents::Zeros }
     }
 
     impl Source for TestSource {
-        fn each_present(&self, pages: Range<u64>, found: &mut dyn FnMut(u64, &physmem::Page)) {
+        fn each_present(&self, pages: Range<u64>, found: &mut dyn FnMut(Present<'_>)) {
             let held = self.pages.lock().unwrap();
             for page in pages {
-                if let Some(Some(frame)) = held.get(page as usize) {
-                    found(page, frame);
+                if let Some(Some(slab)) = held.get(page as usize) {
+                    found(Present { page, count: 1, at: slab.location(), slab: Some(slab) });
                 }
             }
         }
@@ -1692,6 +1504,10 @@ pub(crate) mod tests {
                     Kind::Filled => panic!("page {page} of a filled source is not in memory"),
                     Kind::Anonymous => {
                         pages[index] = Some(Self::page_of(0));
+                        return Box::pin(std::future::ready(Ok(false)));
+                    }
+                    Kind::Again(value) => {
+                        pages[index] = Some(Self::page_of(value));
                         return Box::pin(std::future::ready(Ok(false)));
                     }
                     Kind::Paged => {}
@@ -1766,49 +1582,31 @@ pub(crate) mod tests {
         assert_eq!(bytes, [1, 2]);
     }
 
-    /// How a test's second stage has a page of the window mapped: read-only, a source's; or
-    /// writable, a private page (backlog doc-13).
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub(crate) enum Protection {
-        Read,
-        ReadWrite,
-    }
-
     /// A second stage that keeps the window's pages as the window maps them in it, and the ranges
-    /// the window maps anew. cladefs: and its private pages, with what each was made of (backlog
-    /// doc-13).
+    /// the window maps anew. cladefs: and each unmap, with what it does to the private pages there
+    /// (doc-26).
     #[derive(Default)]
     pub(crate) struct Recorded {
         pages: std::sync::Mutex<BTreeMap<u64, PhysLocation>>,
-        private: std::sync::Mutex<BTreeMap<u64, Option<PhysLocation>>>,
         mapped: std::sync::Mutex<Vec<(u64, u64)>>,
-        /// cladefs: the runs of pages made private together, by offset and how many.
-        runs: std::sync::Mutex<Vec<(u64, u64)>>,
+        unmaps: std::sync::Mutex<Vec<(u64, u64, Private)>>,
     }
 
     impl Recorded {
-        /// The pages mapped, by their numbers, read-only: cladefs: private pages too, writable.
-        pub fn pages(&self) -> Vec<(u64, Protection)> {
+        /// The pages mapped, by their numbers.
+        pub fn pages(&self) -> Vec<u64> {
             let pages = self.pages.lock().unwrap();
-            let private = self.private.lock().unwrap();
-            let mut all: Vec<(u64, Protection)> = (pages.keys())
-                .map(|offset| (*offset, Protection::Read))
-                .chain(private.keys().map(|offset| (*offset, Protection::ReadWrite)))
-                .collect();
-            all.sort_by_key(|(offset, _)| *offset);
-            all.into_iter().map(|(offset, protection)| (offset / page_size(), protection)).collect()
+            pages.keys().map(|offset| offset / page_size()).collect()
         }
 
-        /// Where the pages mapped are, by their numbers: those of physical memory alone.
-        pub fn locations(&self) -> Vec<(u64, PhysLocation)> {
-            let pages = self.pages.lock().unwrap();
-            pages.iter().map(|(offset, location)| (offset / page_size(), *location)).collect()
-        }
-
-        /// cladefs: the private pages, by their numbers, with the page each copied, if any.
-        pub fn private(&self) -> Vec<(u64, Option<PhysLocation>)> {
-            let private = self.private.lock().unwrap();
-            private.iter().map(|(offset, from)| (offset / page_size(), *from)).collect()
+        /// cladefs: the unmaps since it was last asked, by their pages' numbers and how many.
+        pub fn unmaps(&self) -> Vec<(u64, u64, Private)> {
+            let ps = page_size();
+            let unmaps = std::mem::take(&mut *self.unmaps.lock().unwrap());
+            unmaps
+                .into_iter()
+                .map(|(offset, len, private)| (offset / ps, len / ps, private))
+                .collect()
         }
 
         fn each_page(offset: u64, len: u64) -> impl Iterator<Item = u64> {
@@ -1819,36 +1617,23 @@ pub(crate) mod tests {
     impl SecondStage for Recorded {
         fn map(&self, offset: u64, phys: PhysLocation, len: u64) {
             let mut pages = self.pages.lock().unwrap();
-            let private = self.private.lock().unwrap();
             for page in Self::each_page(offset, len) {
                 let at = PhysLocation { arena: phys.arena, offset: phys.offset + (page - offset) };
                 let before = pages.insert(page, at);
                 assert!(before.is_none(), "{page:#x} mapped twice");
-                assert!(!private.contains_key(&page), "{page:#x} mapped over a private page");
             }
         }
 
-        fn unmap(&self, offset: u64, len: u64) {
+        fn unmap(&self, offset: u64, len: u64, private: Private) {
             let mut pages = self.pages.lock().unwrap();
-            let mut private = self.private.lock().unwrap();
             for page in Self::each_page(offset, len) {
-                let unmapped = pages.remove(&page).is_some() || private.remove(&page).is_some();
-                assert!(unmapped, "{page:#x} unmapped, not mapped");
+                pages.remove(&page);
             }
+            self.unmaps.lock().unwrap().push((offset, len, private));
         }
 
         fn window_mapped(&self, offset: u64, len: u64) {
             self.mapped.lock().unwrap().push((offset, len));
-        }
-
-        fn make_private(&self, offset: u64, from: &[Option<PhysLocation>]) {
-            self.runs.lock().unwrap().push((offset, from.len() as u64));
-            for (at, from) in Self::each_page(offset, from.len() as u64 * page_size()).zip(from) {
-                // In place of what is mapped there.
-                self.pages.lock().unwrap().remove(&at);
-                let before = self.private.lock().unwrap().insert(at, *from);
-                assert!(before.is_none(), "{at:#x} made private twice");
-            }
         }
     }
 
@@ -1885,30 +1670,7 @@ pub(crate) mod tests {
             futures::executor::block_on(window.fault(page * ps, Access::Read)).unwrap();
         }
         dax.window.rebind(&old.source(), new.source());
-        assert_eq!(stage.pages(), []);
-    }
-
-    /// cladefs: a window of `pages` pages that copies on write, holding `most` private pages at
-    /// most, through `stage`, or in this process's memory without one.
-    pub(crate) fn copying(
-        pages: u64,
-        most: u64,
-        stage: Option<Arc<dyn SecondStage>>,
-    ) -> (Dax, DaxWindow) {
-        Dax::copying(pages * page_size(), stage, Some(CopyOnWrite::at_most(most))).unwrap()
-    }
-
-    /// The byte at `at` in page `page` of a window with no second stage, as it maps it now, after
-    /// storing `write` there, if given.
-    fn byte_of(window: &DaxWindow, page: u64, at: usize, write: Option<u8>) -> u8 {
-        // SAFETY: The page is mapped, as the test faulted it in, and nothing else accesses it.
-        unsafe {
-            let byte = window.host_base().add((page * page_size()) as usize + at);
-            if let Some(value) = write {
-                byte.write_volatile(value);
-            }
-            byte.read_volatile()
-        }
+        assert_eq!(stage.pages(), Vec::<u64>::new());
     }
 
     /// The write fault at `offset` of `window`, resolved.
@@ -1916,94 +1678,56 @@ pub(crate) mod tests {
         futures::executor::block_on(window.fault(offset, Access::Write))
     }
 
-    /// cladefs TASK-164.1 (backlog doc-13): in a window that copies on write, a write to a page
-    /// mapped read-only, a sealed extent's, gives it a private copy, holding what the page held,
-    /// mapped writable in its place, once; the source's page is as it was, as another mapping of
-    /// it reads. A write to zeros gives the page a private page of zeros, the shared zeros as they
-    /// were. A window that doesn't copy, a follower's, refuses the write (`EACCES`).
+    /// cladefs (doc-26): a window refuses every write, as its stage, a writer's, makes its own
+    /// private copies: `EACCES` where it maps something, `ENOENT` where nothing.
     #[test]
-    fn writes_to_read_only_pages_copy_them_once() {
+    fn windows_refuse_writes() {
         let ps = page_size();
         let source = TestSource::numbered(2, 1);
-        let zeros = crate::cache::zeros().unwrap();
-        let (mut dax, window) = copying(4, 3, None);
-        dax.map(0, &source.source(), 0, 2 * ps);
-        dax.map(2 * ps, &zeros, 0, ps);
-        assert_eq!(load(&window, 1), 2);
-
-        assert_eq!(write_fault(&window, ps + 5), Ok(()));
-        assert_eq!(window.private_pages(), 1);
-        assert_eq!(byte_of(&window, 1, 0, None), 2, "the copy holds other bytes");
-        assert_eq!(byte_of(&window, 1, 7, Some(9)), 9);
-        dax.map(3 * ps, &source.source(), ps, ps);
-        assert_eq!(load(&window, 3), 2);
-        assert_eq!(byte_of(&window, 3, 7, None), 2, "the write reached the source's page");
-        // A second write's fault finds the page private, and copies nothing.
-        assert_eq!(write_fault(&window, ps), Ok(()));
-        assert_eq!(window.private_pages(), 1);
-        assert_eq!(byte_of(&window, 1, 7, None), 9);
-
-        assert_eq!(write_fault(&window, 2 * ps), Ok(()));
-        assert_eq!(window.private_pages(), 2);
-        assert_eq!(byte_of(&window, 2, 100, Some(4)), 4);
-        assert_eq!(byte_of(&window, 2, 101, None), 0);
-        let mut shared = 1;
-        // SAFETY: The zeros' page is in memory while its lock is held.
-        zeros.each_present(0..1, &mut |_, frame| shared = unsafe { *frame.as_ptr().add(100) });
-        assert_eq!(shared, 0, "the write reached the shared zeros");
-
-        let (mut plain, plain_window) = Dax::new(2 * ps, None).unwrap();
-        plain.map(0, &source.source(), 0, ps);
-        assert_eq!(write_fault(&plain_window, 0), Err(Errno::EACCES));
-        assert_eq!(write_fault(&plain_window, ps), Err(Errno::ENOENT), "a write to nothing mapped");
-        assert_eq!(plain_window.private_pages(), 0);
+        let (mut dax, window) = Dax::new(2 * ps, None).unwrap();
+        dax.map(0, &source.source(), 0, ps);
+        assert_eq!(write_fault(&window, 0), Err(Errno::EACCES));
+        assert_eq!(write_fault(&window, ps), Err(Errno::ENOENT), "a write to nothing mapped");
+        assert_eq!(load(&window, 0), 1, "the page as it was");
     }
 
-    /// cladefs TASK-164.1: a window's private pages are the guest's until its own `MAP` or `UNMAP`
-    /// over them ends them: a source evicting its pages leaves those within its mappings, which
-    /// aren't its own, and so does a free mapping zeros where the freed extent was mapped. Shown
-    /// red by unmap_pages_of taking private pages too (`Rules::eviction_skips_private`), or
-    /// map_zeros_over mapping with `Private::Free`.
+    /// cladefs TASK-164.1, doc-26 (spec rule evictionKeepsPrivate): a window whose stage copies
+    /// unmaps for a source evicting its pages, a free mapping zeros and a rebind only the pages it
+    /// mapped, keeping the private pages there, and remembers them; for the guest's own `MAP` and
+    /// `UNMAP`, ending the private pages there, the pages it mapped and those it remembers, which
+    /// it maps nothing at, once. Shown red by `Rules::guests_changes_end_private` off, or
+    /// map_zeros_over mapping with `Private::End`.
     #[test]
-    fn private_pages_end_with_the_guests_maps_alone() {
+    fn guests_changes_end_private_pages_and_the_hosts_keep_them() {
+        use Private::{End, Keep};
         let ps = page_size();
         let (old, new) = (TestSource::numbered(4, 1), TestSource::numbered(4, 0x11));
         let stage = Arc::new(Recorded::default());
-        let (mut dax, window) = copying(4, 4, Some(stage.clone()));
-        dax.map(0, &old.source(), 0, 2 * ps);
-        dax.map(2 * ps, &old.source(), 2 * ps, 2 * ps);
-        for page in 0..4 {
-            assert_eq!(write_fault(&window, page * ps), Ok(()), "page {page}");
+        let (mut dax, window) = Dax::copying(8 * ps, stage.clone()).unwrap();
+        dax.map(0, &old.source(), 0, 4 * ps);
+        assert_eq!(stage.unmaps(), [], "the guest's MAP over nothing");
+        for page in [0, 2] {
+            futures::executor::block_on(window.fault(page * ps, Access::Read)).unwrap();
         }
-        assert_eq!(window.private_pages(), 4);
-        let writable: Vec<_> = (0..4).map(|page| (page, Protection::ReadWrite)).collect();
-        assert_eq!(stage.pages(), writable);
-        // Each a copy of the source's page, which is mapped no more.
-        let mut sources = Vec::new();
-        old.each_present(0..4, &mut |page, frame| sources.push((page, Some(frame.location()))));
-        assert_eq!(stage.private(), sources);
-        assert_eq!(stage.locations(), [], "a source's page mapped");
+        assert_eq!(stage.pages(), [0, 1, 2, 3]);
 
-        // Every page of the source evicted.
         dax.window.unmap_pages_of(source_identity(&old), &|_| true);
-        assert_eq!(stage.private(), sources, "evicted");
-        assert_eq!(dax.map_zeros_over(&old), [0..2 * ps, 2 * ps..4 * ps]);
-        assert_eq!(stage.private(), sources, "freed");
-        assert_eq!(stage.locations(), [], "zeros mapped over private pages");
-        assert_eq!(window.private_pages(), 4);
+        assert_eq!(stage.unmaps(), [(0, 4, Keep)], "evicted");
+        dax.unmap(0, ps);
+        assert_eq!(stage.unmaps(), [(0, 1, End)], "the guest's UNMAP of a page an eviction left");
+        dax.unmap(0, ps);
+        assert_eq!(stage.unmaps(), [], "the guest's UNMAP of nothing");
+        assert_eq!(dax.map_zeros_over(&old), [ps..4 * ps]);
+        assert_eq!(stage.unmaps(), [], "freed, nothing mapped");
+        dax.map(ps, &new.source(), 0, 2 * ps);
+        assert_eq!(stage.unmaps(), [(1, 2, End)], "the guest's MAP over zeros and what was left");
 
-        dax.map(0, &new.source(), 0, ps);
-        assert_eq!(window.private_pages(), 3);
-        dax.unmap(3 * ps, ps);
-        assert_eq!(window.private_pages(), 2);
-        let pages = [(0, Protection::Read), (1, Protection::ReadWrite), (2, Protection::ReadWrite)];
-        assert_eq!(stage.pages(), pages);
-        assert_eq!(stage.private(), sources[1..3]);
-        let mut first = None;
-        new.each_present(0..1, &mut |_, frame| first = Some(frame.location()));
-        assert_eq!(stage.locations(), [(0, first.unwrap())]);
-        assert_eq!(live().private_pages, 2);
-        drop((dax, window));
-        assert_eq!(live().private_pages, 0);
+        let plain = Arc::new(Recorded::default());
+        let (mut dax, _window) = Dax::new(4 * ps, Some(plain.clone())).unwrap();
+        dax.map(0, &new.source(), 0, 2 * ps);
+        dax.window.unmap_pages_of(source_identity(&new), &|_| true);
+        let _ = plain.unmaps();
+        dax.map(0, &new.source(), 0, 2 * ps);
+        assert_eq!(plain.unmaps(), [], "a window that doesn't copy unmaps what it mapped alone");
     }
 }

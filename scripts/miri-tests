@@ -45,14 +45,6 @@ follower_history tests::reads_going_back_fail
 follower_history tests::reads_no_model_may_show_fail
 follower_history tests::reads_past_their_commit_fail
 follower_history tests::renames_keep_their_object
-physmem frames::tests::frames_are_allocated_and_freed
-physmem frames::tests::frames_are_listed_once
-physmem frames::tests::free_blocks_join_their_buddies_and_split_for_runs
-physmem frames::tests::lists_keep_their_frames_in_order
-physmem sync::tests::pulses_past_the_count_read_end_waits
-physmem sync::tests::signals_release_one_wait
-physmem tests::config::pages_are_the_hosts
-physmem tests::config::sizes_past_what_the_host_maps_are_invalid
 virtio_extent buffers::tests::chains_writing_past_u32_are_refused
 virtio_extent buffers::tests::headers_are_the_first_bytes
 virtio_extent buffers::tests::requests_read_and_write_across_descriptors

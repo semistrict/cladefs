@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The process's physical memory (`physmem`), which the pages of cached sealed extents
+//! The process's physical memory (`crate::slabs`), which the parts of cached sealed extents
 //! (`crate::cache`) and the zeros DAX windows map are of: host shared memory, in arenas, each its
 //! own object (a memfd on Linux), which a process given an arena's object maps the arena's pages
-//! from (TASK-43). As an arena runs out, its relief evicts cached extents' pages. Open extents are
+//! from (TASK-43). As an arena runs out, its relief evicts cached extents' parts. Open extents are
 //! written to their cells' segments (`local_cell`), and a window's private pages, copy-on-write
 //! DAX's, are of its VM's memory (`crate::dax`): neither is of it.
 //!
@@ -14,12 +14,12 @@
 
 use crate::error::{Errno, Error};
 
-pub use physmem::{ArenaId, PhysLocation};
+pub use crate::slabs::{ArenaId, PhysLocation};
 
 /// The physical memory's configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Config {
-    /// Bytes of physical memory: the most host memory extents' pages take.
+    /// Bytes of physical memory: the most host memory extents' parts take.
     pub memory_bytes: u64,
 }
 
@@ -38,15 +38,13 @@ impl Config {
 }
 
 /// Configures the physical memory, which fails with `EBUSY` if it has already been configured or
-/// used, and with `EINVAL` if the memory is not whole chunks of `physmem::CHUNK_SIZE`, or more than
-/// the host maps (`vm.max_map_count` on Linux, TASK-79.37).
+/// used, and with `EINVAL` if the memory is not whole slabs ([`crate::slabs::SLAB`]).
 pub fn configure(config: Config) -> Result<(), Error> {
-    // cladefs: under madsim, each simulated host's own memory, as physmem keeps it (doc-24,
-    // TASK-685.14).
-    physmem::configure(config.memory_bytes).map_err(|error| {
+    // cladefs: under madsim, each simulated host's own memory (doc-24, TASK-685.14).
+    crate::slabs::configure(config.memory_bytes).map_err(|error| {
         let errno = match error {
-            physmem::ConfigError::InUse => Errno::EBUSY,
-            physmem::ConfigError::Invalid(_) => Errno::EINVAL,
+            crate::slabs::ConfigError::InUse => Errno::EBUSY,
+            crate::slabs::ConfigError::Invalid(_) => Errno::EINVAL,
         };
         Error::new(anyhow::Error::new(errno).context(error.to_string()))
     })
@@ -55,20 +53,20 @@ pub fn configure(config: Config) -> Result<(), Error> {
 /// The physical memory of the default arena: a shared memory object (a memfd on Linux), which the
 /// pages of everything but tenants' extents are of (TASK-43), and which a process sharing it maps
 /// them from.
-pub fn physical_memory() -> std::os::fd::BorrowedFd<'static> {
-    physmem::default_fd()
+pub fn physical_memory() -> std::sync::Arc<std::os::fd::OwnedFd> {
+    crate::slabs::default_fd()
 }
 
 /// The shared memory object of the physical memory of `arena`, while it exists.
 pub fn arena_memory(arena: ArenaId) -> Option<std::sync::Arc<std::os::fd::OwnedFd>> {
-    physmem::arena_fd(arena)
+    crate::slabs::arena_fd(arena)
 }
 
 /// An arena of physical memory of its own (TASK-43), a tenant's, held by what allocates in it: its
 /// tenant, the cells opened in it ([`OpenCell::open_in`]), and what reads into the extent cache
-/// for them (TASK-79.36). Once none of them holds it, the extents
-/// cached in it go, and it goes, its memory once the pages of it still allocated, those page-ins in
-/// flight hold, are freed: nothing allocates in it after, which would fail.
+/// for them (TASK-79.36). Once none of them holds it, the extents cached in it go, and it goes,
+/// its memory once its runs still allocated, those page-ins in flight hold, are freed: nothing
+/// allocates in it after, which would fail.
 ///
 /// [`OpenCell::open_in`]: crate::OpenCell::open_in
 pub struct Arena(ArenaId);
@@ -76,7 +74,7 @@ pub struct Arena(ArenaId);
 impl Arena {
     /// A new arena, which holds no page.
     pub fn new() -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self(physmem::create_arena()))
+        std::sync::Arc::new(Self(crate::slabs::create_arena()))
     }
 
     /// Its id, which its pages' locations name ([`PhysLocation`]).
@@ -88,14 +86,33 @@ impl Arena {
 impl Drop for Arena {
     fn drop(&mut self) {
         crate::cache::evict_arena(self.0);
-        physmem::remove_arena(self.0);
+        crate::slabs::remove_arena(self.0);
     }
 }
 
 /// The page size, which DAX windows and mappings are aligned to: the host's, such as 16 KiB on
 /// Apple silicon.
 pub fn page_size() -> u64 {
-    physmem::page_size()
+    crate::slabs::page_size()
+}
+
+/// Linux's `vm.max_map_count` unless raised.
+pub const DEFAULT_MAX_MAP_COUNT: u64 = 65_530;
+
+/// How many mappings the host lets a process make, if it limits them, as Linux does:
+/// `vm.max_map_count` ([`DEFAULT_MAX_MAP_COUNT`] unless raised), which only /proc says; macOS does
+/// not. A process without /proc can't learn it, and fails: a VM process in its jail is told it by
+/// its daemon, which reads it here (TASK-172), as the default in its place would be wrong wherever
+/// the host raised it. What a VM process's window budgets its runs by (`dax::uffd::budget`); the
+/// daemon maps none of its memory, which it bounds nothing of (doc-26).
+pub fn max_map_count() -> std::io::Result<Option<u64>> {
+    if !cfg!(target_os = "linux") {
+        return Ok(None);
+    }
+    // procfs, the host kernel's: outside the simulation.
+    let max = std::fs::read_to_string("/proc/sys/vm/max_map_count")?;
+    let invalid = |err| std::io::Error::new(std::io::ErrorKind::InvalidData, err);
+    Ok(Some(max.trim().parse().map_err(invalid)?))
 }
 
 /// Fails with `EINVAL` unless a window of `block`-byte blocks, as a cell's extents hold them, maps

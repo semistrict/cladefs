@@ -19,9 +19,8 @@
 //! the second `cell CELL opened MS`, then a line a read, `AT_US KIND EXTENT_CELL EXTENT_SEQUENCE
 //! EXTENT_LEN OFFSET LEN WAITED_US`: times in decimal microseconds, the extent's ID in base 32, its
 //! length (0 where the cell can't say, as for an attached base's) and the range read in
-//! hexadecimal, and the kind `read` (a `READ`), `map` (a `MAP`), `fault` (a read's fault) or
-//! `store` (a write's fault, which makes the page private). `scripts/read_prediction.py` reads
-//! them.
+//! hexadecimal, and the kind `read` (a `READ`), `map` (a `MAP`) or `fault` (a fault, a read's, or
+//! a write's its VM process copies the page for, doc-26). `scripts/read_prediction.py` reads them.
 
 use crate::ExtentId;
 use base32_id::Short;
@@ -65,8 +64,6 @@ pub(super) enum Kind {
     Read,
     /// A read's fault on its window.
     Fault,
-    /// A write's fault on its window, which made the page private, `store` in a trace.
-    Write,
     /// A `MAP` of an extent's bytes into its window: the guest's mapping of a file's range it
     /// touches, whose pages a warm host installs without a fault.
     Map,
@@ -77,7 +74,6 @@ impl Kind {
         match self {
             Kind::Read => "read",
             Kind::Fault => "fault",
-            Kind::Write => "store",
             Kind::Map => "map",
         }
     }
@@ -201,7 +197,7 @@ mod tests {
             0x1000,
         );
         trace.record(Kind::Read, opened + Duration::from_millis(9), extent, 0x30_0000, 0, 0x200);
-        trace.record(Kind::Write, opened + WINDOW + Duration::from_secs(1), extent, 1, 0, 1);
+        trace.record(Kind::Map, opened + WINDOW + Duration::from_secs(1), extent, 1, 0, 1);
         let text = trace.text();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], HEADER);

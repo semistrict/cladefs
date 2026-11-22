@@ -199,6 +199,10 @@ pub enum Error {
     /// said ([`passed::CollectorLease`], TASK-395.5): nothing failed.
     #[error("the cell is left to another pass of the collector, which {0}")]
     Left(Left),
+    /// cladefs: a request the bucket refuses for good, retried no more (board 5861): its
+    /// credentials not let in, or the request itself refused.
+    #[error("the bucket refuses {0}")]
+    Refused(bucket::Refused),
     /// cladefs: the bucket's identity says another format than this one's, newer or older
     /// ([`identity`], TASK-633.9; doc-11, rule 1).
     #[error(

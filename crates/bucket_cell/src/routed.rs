@@ -389,40 +389,52 @@ impl<B: Bucket> Bucket for RoutedBucket<B> {
 }
 
 impl<B: Bucket> crate::mirror::Here for RoutedBucket<B> {
-    fn marked(&self, parent: layout::CellId, at: u64) -> futures::future::BoxFuture<'_, bool> {
+    fn marked(
+        &self,
+        parent: layout::CellId,
+        at: u64,
+    ) -> futures::future::BoxFuture<'_, Result<bool, crate::bucket::Refused>> {
         Box::pin(async move {
-            let Some(route) = &self.route else { return false };
-            let Some(of) = layout::routed_to(&parent.prefix()) else { return false };
+            let Some(route) = &self.route else { return Ok(false) };
+            let Some(of) = layout::routed_to(&parent.prefix()) else { return Ok(false) };
             if self.own_number(route).await.ok().flatten().is_none_or(|number| number == of) {
-                return false;
+                return Ok(false);
             }
             let marker = layout::mirror(parent, at);
-            if crate::bucket::get(&*self.home, &marker).await.is_none() {
-                return false;
+            if crate::bucket::get(&*self.home, &marker).await?.is_none() {
+                return Ok(false);
             }
             self.mirrored.lock().unwrap().insert(parent, (true, Instant::now()));
             self.mirrors.marked(parent, at);
-            true
+            Ok(true)
         })
     }
 
-    fn create<'a>(&'a self, key: &'a str, bytes: Vec<u8>) -> futures::future::BoxFuture<'a, ()> {
+    fn create<'a>(
+        &'a self,
+        key: &'a str,
+        bytes: Vec<u8>,
+    ) -> futures::future::BoxFuture<'a, Result<(), crate::bucket::Refused>> {
         Box::pin(async move {
-            crate::bucket::create(&*self.home, key, bytes).await;
+            crate::bucket::create(&*self.home, key, bytes).await?;
+            Ok(())
         })
     }
 
-    fn retire<'a>(&'a self, keys: &'a [&'a str]) -> futures::future::BoxFuture<'a, usize> {
+    fn retire<'a>(
+        &'a self,
+        keys: &'a [&'a str],
+    ) -> futures::future::BoxFuture<'a, Result<usize, crate::bucket::Refused>> {
         Box::pin(async move {
-            let Some(route) = &self.route else { return 0 };
-            let Ok(Some(number)) = self.own_number(route).await else { return 0 };
+            let Some(route) = &self.route else { return Ok(0) };
+            let Ok(Some(number)) = self.own_number(route).await else { return Ok(0) };
             let theirs: Vec<&str> = (keys.iter().copied())
                 .filter(|key| layout::routed_to(key).is_some_and(|of| of != number))
                 .collect();
             if !theirs.is_empty() {
-                crate::lifecycle::retire(&*self.home, &theirs).await;
+                crate::lifecycle::retire(&*self.home, &theirs).await?;
             }
-            theirs.len()
+            Ok(theirs.len())
         })
     }
 }

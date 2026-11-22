@@ -35,7 +35,7 @@
 //! of its own.
 
 use crate::bucket::{
-    Bucket, ByteRange, Error, LIST_PAGE, Listing, Meta, Object, Page, PutMode, Version,
+    Bucket, ByteRange, Error, LIST_PAGE, Listing, Meta, Object, Page, PutMode, Refusal, Version,
 };
 use crate::client::Client;
 use crate::layout::{self, Kind};
@@ -918,30 +918,32 @@ impl Registered {
         let reached = reach(url, options, &Client::DEFAULT)
             .map_err(|err| crate::Error::Read(format!("bucket {number} at {url}: {err}")))?;
         let bucket = ObjectBucket::reached(reached);
-        crate::identity::verified(entry, crate::identity::get(&bucket).await?)?;
+        crate::identity::verified(entry, crate::identity::get_once(&bucket).await?)?;
         Ok(bucket)
     }
 
     /// What the registry records of the bucket numbered `number`, as `home` reaches it: its copy
     /// in `home`'s root, or, for a number that copy lacks, the root bucket's registry, the
-    /// authority. `NoBucket` for a number neither records.
+    /// authority. `NoBucket` for a number neither records. cladefs: each read asked once, a bucket
+    /// out of reach failing it, as it fails the request it is for, which goes on without it or
+    /// tries again (board 5528); never waiting for that bucket.
     pub async fn entry(
         &self,
         home: &impl Bucket,
         number: u16,
     ) -> Result<crate::identity::Entry, crate::Error> {
         use crate::identity::{self, ROOT};
-        let copy = identity::registry(home).await?;
+        let copy = identity::registry_once(home).await?;
         if let Some(entry) = copy.as_ref().and_then(|copy| copy.bucket(number)) {
             return Ok(entry.clone());
         }
-        let ours = identity::get(home).await?.ok_or(crate::Error::NoBucket(number))?;
+        let ours = identity::get_once(home).await?.ok_or(crate::Error::NoBucket(number))?;
         let root = copy.as_ref().and_then(|copy| copy.bucket(ROOT));
         let root = match (ours.number, root) {
             (ROOT, _) | (_, None) => return Err(crate::Error::NoBucket(number)),
             (_, Some(root)) => self.reach(root).await?,
         };
-        let registry = identity::registry(&root).await?;
+        let registry = identity::registry_once(&root).await?;
         let entry = registry.as_ref().and_then(|registry| registry.bucket(number));
         entry.cloned().ok_or(crate::Error::NoBucket(number))
     }
@@ -1072,37 +1074,71 @@ fn error(error: &object_store::Error) -> Error {
         object_store::Error::NotImplemented { .. } | object_store::Error::NotSupported { .. } => {
             Error::Unsupported
         }
-        // cladefs: refused, every time until an operator changes something (board 5736).
-        object_store::Error::Unauthenticated { .. }
-        | object_store::Error::PermissionDenied { .. } => Error::Refused,
-        object_store::Error::Generic { source, .. } => client_error(&**source),
+        // cladefs: refusals no retry changes (board 5861): the credentials, or the request; a
+        // probe fails on one at once (board 5736).
+        object_store::Error::PermissionDenied { .. }
+        | object_store::Error::Unauthenticated { .. } => Error::Refused(Refusal::Denied),
+        object_store::Error::InvalidPath { .. } => Error::Refused(Refusal::Request),
+        object_store::Error::Generic { source, .. } => failure_of(source.as_ref()),
         _ => Error::Unavailable,
     }
 }
 
-/// cladefs: what a generic failure of `object_store`'s says, by the status and body its request
-/// was answered with, which it says only in its text (board 5736): credentials expired; another
-/// client error but a timeout, too many requests or a range past the object's end, which
-/// [`crate::bucket::get_range`] tells by the object's size, refused; anything else, the backend out
-/// of reach or failing, unavailable.
-fn client_error(source: &(dyn std::error::Error + 'static)) -> Error {
-    let mut said = source.to_string();
-    let mut cause = source.source();
-    while let Some(next) = cause {
-        said.push_str(": ");
-        said.push_str(&next.to_string());
-        cause = next.source();
-    }
+/// cladefs: what a generic failure of `object_store`'s, `source`, says (board 5736, 5861): the
+/// store's credentials expired, which a cheap request refreshes, [`Error::Expired`]; a refusal no
+/// retry changes ([`refusal_of`]); anything else, the backend out of reach or failing,
+/// [`Error::Unavailable`].
+fn failure_of(source: &(dyn std::error::Error + 'static)) -> Error {
     let expired = ["ExpiredToken", "TokenRefreshRequired", "RequestExpired"];
-    if expired.iter().any(|code| said.contains(code)) {
-        return Error::Expired;
+    let mut cause = Some(source);
+    while let Some(error) = cause {
+        let said = error.to_string();
+        if expired.iter().any(|code| said.contains(code)) {
+            return Error::Expired;
+        }
+        cause = error.source();
     }
-    let Some((_, status)) = said.split_once("status code: ") else { return Error::Unavailable };
-    match status.get(..3) {
-        Some("408" | "416" | "429") => Error::Unavailable,
-        Some(code) if code.starts_with('4') => Error::Refused,
-        _ => Error::Unavailable,
+    refusal_of(source).map_or(Error::Unavailable, Error::Refused)
+}
+
+/// cladefs: the refusal `source`, a failed request's cause, is, if it is one no retry changes:
+/// a client error of HTTP's (4xx) but those that go away, a timeout's, a throttle's and a conflict's
+/// (408, 429, 409), and a range past an object's end (416), which [`crate::bucket::get_range`]
+/// tells by the object's size; or a file bucket's file system refusing it, its permissions or a name too long
+/// (board 5861). A server's error, a network's, anything else, is the bucket out of reach.
+fn refusal_of(source: &(dyn std::error::Error + 'static)) -> Option<Refusal> {
+    let mut cause = Some(source);
+    while let Some(error) = cause {
+        if let Some(status) = http_status(error) {
+            let passes = [408, 409, 416, 429].contains(&status);
+            return match status {
+                401 | 403 => Some(Refusal::Denied),
+                400..=499 if !passes => Some(Refusal::Request),
+                _ => None,
+            };
+        }
+        if let Some(io) = error.downcast_ref::<std::io::Error>() {
+            return match io.kind() {
+                std::io::ErrorKind::PermissionDenied => Some(Refusal::Denied),
+                std::io::ErrorKind::InvalidFilename | std::io::ErrorKind::InvalidInput => {
+                    Some(Refusal::Request)
+                }
+                _ => None,
+            };
+        }
+        cause = error.source();
     }
+    None
+}
+
+/// cladefs: the HTTP status `error` says a response had, if it is object_store's error of one: its
+/// `RequestError::Status`, whose type is private to object_store, which says it as `Server returned
+/// non-2xx status code: 400 Bad Request: ...` (object_store 0.14, client/retry.rs). Pinned by
+/// `refusals_are_told_from_failures` against a server of its own.
+fn http_status(error: &(dyn std::error::Error + 'static)) -> Option<u16> {
+    let text = error.to_string();
+    let status = text.strip_prefix("Server returned non-2xx status code: ")?;
+    status.get(..3)?.parse().ok()
 }
 
 /// cladefs: its requests of its own objects: those [`Bucket`]'s, routed, send here, or to another
@@ -1447,7 +1483,7 @@ pub async fn probe(bucket: &impl Bucket, nonce: u64) -> Result<(), String> {
             Probed::Expired(key) => {
                 failures += 1;
                 match bucket.head(&key).await {
-                    Err(error @ (Error::Expired | Error::Refused)) => {
+                    Err(error @ (Error::Expired | Error::Refused(_))) => {
                         return Err(format!("probing conditional writes at {key}: {error}"));
                     }
                     _ => log::info!("object storage: probing: credentials expired, again"),
@@ -1484,8 +1520,8 @@ async fn probe_once(bucket: &impl Bucket, nonce: u64) -> Probed {
     let failed = |result: &Result<Version, Error>| match result {
         Err(Error::Unavailable) => Some(Probed::Unavailable(key.clone())),
         Err(Error::Expired) => Some(Probed::Expired(key.clone())),
-        Err(Error::Refused) => {
-            let refused = format!("probing conditional writes at {key}: {}", Error::Refused);
+        Err(error @ Error::Refused(_)) => {
+            let refused = format!("probing conditional writes at {key}: {error}");
             Some(Probed::Answered(Err(refused)))
         }
         _ => None,
@@ -2144,26 +2180,12 @@ pub(crate) mod tests {
         });
     }
 
-    /// TASK-633.8: a resolver opening every other bucket as the one at `url`, empty: what a host
-    /// asks of a bucket out of reach then finds nothing there, at once, and its counts show it.
-    struct Emptied(String);
-
-    impl Resolve for Emptied {
-        fn open<'a>(
-            &'a self,
-            _: &'a ObjectBucket,
-            _: u16,
-        ) -> futures::future::BoxFuture<'a, Result<Arc<ObjectBucket>, crate::Error>> {
-            Box::pin(async move { Ok(Arc::new(ObjectBucket::from_url(&self.0).unwrap())) })
-        }
-    }
-
     /// TASK-633.8 (AC #4): a version mirrored here, its children here live with its bucket out of
     /// reach: a host started since, which knows nothing of the version but what this bucket holds,
     /// recovers a child and reads what it inherited, takes it, commits, and forks its own version
     /// into another child, which reads both; it asks the version's bucket nothing but listings of
     /// moves (a mirrored cell's are listed in both buckets, those of the other skipped when it
-    /// fails).
+    /// fails). board 5528: found as a host finds it, by the registry, out of reach at once.
     #[test]
     fn children_of_a_mirrored_version_live_with_its_bucket_out_of_reach() {
         use crate::mirror::{Mirrored, mirror};
@@ -2180,10 +2202,16 @@ pub(crate) mod tests {
             let mirrored = mirror(&*bucket, &*bucket.own(), 1, parent, at).await.unwrap();
             assert!(matches!(mirrored, Mirrored::Done { referred: 1, .. }), "{mirrored:?}");
 
-            std::fs::create_dir(dir.path().join("emptied")).unwrap();
-            let emptied = Emptied(format!("file://{}", dir.path().join("emptied").display()));
+            // board 5528: the version's bucket out of reach, as the registry finds it, every
+            // request of a bucket opened from now on failing as one out of service.
             let home = ObjectBucket::from_url(&two.home_url).unwrap();
-            let cut = Arc::new(home.routed(Arc::new(emptied)));
+            let faults = dir.path().join("faults");
+            std::fs::write(&faults, "failing=unavailable").unwrap();
+            // SAFETY: nextest runs each test in a process of its own, whose other threads don't
+            // read the environment.
+            unsafe { std::env::set_var("CLADEFS_BUCKET_FAULTS", &faults) };
+            let cut =
+                Arc::new(home.routed(Arc::new(Registered::new(Vec::<(String, String)>::new()))));
             let inherited = recovery::recover(&*cut, child, Some(origin)).await.unwrap().state;
             let ring = ring_of(&*cut, child).await.unwrap();
             let read = |ring, extent, location| crate::fetch::read(&cut, ring, extent, location);
@@ -2602,8 +2630,9 @@ pub(crate) mod tests {
     }
 
     /// Board 5736: a bucket whose store refuses its requests, `401` or `403`, fails its probe at
-    /// once, as its opening then does, rather than retrying for ever; one whose credentials
-    /// expired, and stay so after a cheap request, fails it too. A create under way, its
+    /// once, as its opening then does, rather than retrying for ever, as every request does (board
+    /// 5861, `refusals_are_told_from_failures`); one whose credentials expired, and stay so after a
+    /// cheap request, fails it too. A create under way, its
     /// credentials expired, sends its object again only once a cheap request is answered: once
     /// failed, once landed, the HEADs between failing.
     #[tokio::test(start_paused = true)]
@@ -2613,7 +2642,8 @@ pub(crate) mod tests {
         let objects = Arc::new(object_store::memory::InMemory::new());
         let bucket = ObjectBucket::new(Arc::new(Faulty::new(objects, faults.clone())), "");
         let key = format!("probe/{}", base32_id::Padded(1));
-        let refused = format!("probing conditional writes at {key}: {}", Error::Refused);
+        let refused = Error::Refused(crate::bucket::Refusal::Denied);
+        let refused = format!("probing conditional writes at {key}: {refused}");
         let expired = format!("probing conditional writes at {key}: {}", Error::Expired);
         for (failing, said) in [
             (Failing::Unauthenticated, &refused),
@@ -2633,7 +2663,7 @@ pub(crate) mod tests {
         };
         let (created, ()) =
             tokio::join!(crate::bucket::create(&bucket, "segment", vec![7; 1 << 20]), refreshed);
-        assert!(matches!(created, crate::bucket::Created::Created(_)));
+        assert!(matches!(created.unwrap(), crate::bucket::Created::Created(_)));
         let since = |(requests, failures): (u64, u64), (before, failed_before): (u64, u64)| {
             (requests - before, failures - failed_before)
         };
@@ -2662,7 +2692,8 @@ pub(crate) mod tests {
             .map(|segment| {
                 let (bucket, key) = (bucket.clone(), layout::segment(test_cell(1), segment, 1));
                 tokio::spawn(async move {
-                    let created = crate::bucket::create(&*bucket, &key, vec![1, 2, 3]).await;
+                    let created =
+                        crate::bucket::create(&*bucket, &key, vec![1, 2, 3]).await.unwrap();
                     assert!(matches!(created, crate::bucket::Created::Created(_)), "{key}");
                     start.elapsed()
                 })
@@ -2714,7 +2745,7 @@ pub(crate) mod tests {
         assert_eq!(bucket.get("other").await.map(|object| object.bytes), Err(Error::NotFound));
         tokio::time::sleep(std::time::Duration::from_secs(55)).await;
         faults.set(Fault::default());
-        assert!(matches!(creating.await.unwrap(), crate::bucket::Created::Created(_)));
+        assert!(matches!(creating.await.unwrap().unwrap(), crate::bucket::Created::Created(_)));
         assert_eq!(bucket.get(&key).await.unwrap().bytes, [1, 2, 3]);
 
         // Failed at 0 s, 50 ms, 150 ms, ... 3.15 s, 6.35 s, then every 5 s to 91.35 s; landed at
@@ -3213,6 +3244,117 @@ pub(crate) mod tests {
         tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap()
     }
 
+    /// board 5861: what a bucket refuses for good, its helpers that retry failures till they pass
+    /// return at once, saying it, a request each: a key past S3's 1,024 bytes, the request's
+    /// (`400 Bad Request`, as the collector's moves of moves once made, TASK-572); and every
+    /// request, credentials the bucket no longer takes (`403 Forbidden`, S3's; `401
+    /// Unauthorized`, GCS's), the credentials'. A failure that passes, a server's (5xx), stays
+    /// one: `object_store` retries it first, for minutes, which this test waits for no more than
+    /// the collector does.
+    #[test]
+    fn refusals_are_told_from_failures() {
+        use crate::bucket::{Refusal, Refused};
+        let serving = runtime();
+        let server = serving.block_on(async { S3Server::start(None) });
+        let bucket = s3(&server, "refusals", &Client::DEFAULT);
+        let refused = |key: &str, refusal| Err(Refused { key: key.to_owned(), refusal });
+
+        // Its key, under the bucket's prefix, one byte past S3's longest.
+        let long = "k".repeat(layout::MAX_KEY - "refusals/".len() + 1);
+        let created = serving.block_on(crate::bucket::create(&*bucket, &long, vec![1]));
+        assert_eq!(created.err(), refused(&long, Refusal::Request).err());
+        let fits = &long[1..];
+        let created = serving.block_on(crate::bucket::create(&*bucket, fits, vec![1]));
+        assert!(matches!(created, Ok(crate::bucket::Created::Created(_))));
+
+        server.answering(Some(403));
+        let got = serving.block_on(crate::bucket::get(&*bucket, fits)).map(|_| ());
+        assert_eq!(got, refused(fits, Refusal::Denied));
+        server.answering(Some(401));
+        let listed = serving.block_on(crate::bucket::list(&*bucket, "")).map(|_| ());
+        assert_eq!(listed, refused("", Refusal::Denied));
+        server.answering(Some(400));
+        let deleted = serving.block_on(crate::bucket::delete(&*bucket, fits));
+        assert_eq!(deleted, refused(fits, Refusal::Request));
+        // None retried: the get's two, its own and its read of the collector's marking, the
+        // bucket's first get; the listing's one; the delete's one.
+        let answered = [("too-long", 1), ("put", 1), ("answered", 4)];
+        assert_eq!(server.requests(), std::collections::BTreeMap::from(answered));
+    }
+
+    /// board 5528: what the registry records of a bucket, found by a bucket whose copy of it lacks
+    /// that bucket, is read in the root bucket's, asked once: the root out of reach, it fails at
+    /// once, as the request it is for does, rather than waiting for the root; the root back, it
+    /// finds it.
+    #[test]
+    fn registry_misses_needing_a_root_out_of_reach_fail_at_once() {
+        use crate::identity::{self, Asked, Details};
+        runtime().block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = |number: u16| dir.path().join(format!("bucket-{number}"));
+            let url = |number| format!("file://{}", path(number).display());
+            let [root, second, third] = [1, 2, 3].map(|number| {
+                std::fs::create_dir(path(number)).unwrap();
+                ObjectBucket::from_url(&url(number)).unwrap()
+            });
+            let root_details = Details { url: Some(url(1)), ..Details::default() };
+            identity::format(&root, &root_details, Asked::default()).await.unwrap();
+            let added = |number| Details { url: Some(url(number)), ..Details::default() };
+            let (_, registry) =
+                identity::add(&root, &root_details, &second, added(2), Asked::default())
+                    .await
+                    .unwrap();
+            identity::spread(&registry, &second).await.unwrap();
+            identity::add(&root, &root_details, &third, added(3), Asked::default()).await.unwrap();
+            let registered = Registered::new(Vec::new());
+
+            // Buckets reached from now on out of reach, the root among them, as their faults say:
+            // each request failing as a bucket out of service answers it.
+            let faults = dir.path().join("faults");
+            std::fs::write(&faults, "failing=unavailable").unwrap();
+            // SAFETY: nextest runs each test in a process of its own, whose other threads don't
+            // read the environment.
+            unsafe { std::env::set_var("CLADEFS_BUCKET_FAULTS", &faults) };
+            let found = registered.entry(&second, 3).await.map(|entry| entry.number);
+            let unread = |found: &Result<u16, crate::Error>| match found {
+                Err(crate::Error::Read(why)) => why.starts_with(layout::IDENTITY),
+                _ => false,
+            };
+            assert!(unread(&found), "{found:?}");
+
+            std::fs::write(&faults, "").unwrap();
+            let found = registered.entry(&second, 3).await.map(|entry| entry.number);
+            assert_eq!(found, Ok(3));
+        });
+    }
+
+    /// board 5861, TASK-572: a sweep over a bucket refusing its requests, as one whose credentials
+    /// were revoked, ends, its listing of the cells or its pass over one failed, rather than
+    /// retrying either for ever, as `cladefs-gc --every` would have, collecting nothing more.
+    #[test]
+    fn sweeps_end_on_a_bucket_refusing_them() {
+        use crate::sweep::{Mode, Sweep};
+        let serving = runtime();
+        let server = serving.block_on(async { S3Server::start(None) });
+        let bucket = s3(&server, "refused-sweeps", &Client::DEFAULT);
+        let cell = test_cell(1);
+        serving.block_on(lifecycle::create(&*bucket, cell, 1)).unwrap();
+        server.answering(Some(403));
+        let sweep = Sweep {
+            options: collector::Options { compact_below: 0.5, grace: 0 },
+            mode: Mode::Delete,
+            at_once: 1,
+            lease: 60_000,
+            slowest: 0,
+            spawned: false,
+            kms: Some(crate::keys::testing::kms()),
+        };
+        let swept = serving.block_on(sweep.run(&bucket, |_| {}));
+        assert_eq!((swept.visited, swept.failed), (0, 1));
+        let swept = serving.block_on(sweep.run_cell(&bucket, cell, |_| {}));
+        assert_eq!((swept.visited, swept.failed), (1, 1));
+    }
+
     /// cladefs: a bucket's connections are tasks of the runtime that opened them (`reqwest`, as
     /// `object_store` uses it, spawns each on the runtime it is asked on): requests each on a
     /// runtime of their own, dropped after, as `local_cell::upload::block_on`'s were, connect anew
@@ -3226,7 +3368,7 @@ pub(crate) mod tests {
         let get = || async { crate::bucket::get(&*bucket, "absent").await };
         let own = || {
             let own = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-            assert!(own.block_on(get()).is_none());
+            assert!(own.block_on(get()).unwrap().is_none());
         };
         // The first, which looks at the collector's marking too, at once.
         own();
@@ -3237,7 +3379,7 @@ pub(crate) mod tests {
         };
         assert_eq!([(); 3].map(|()| connects(&own)), [1, 1, 1]);
         let shared = runtime();
-        let on_shared = || assert!(shared.block_on(get()).is_none());
+        let on_shared = || assert!(shared.block_on(get()).unwrap().is_none());
         assert_eq!([(); 3].map(|()| connects(&on_shared)), [1, 0, 0]);
     }
 
@@ -3289,7 +3431,7 @@ pub(crate) mod tests {
             third.sort();
             assert_eq!(pages.concat(), third);
             let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
-            crate::bucket::delete_all(&*bucket, &keys).await;
+            crate::bucket::delete_all(&*bucket, &keys).await.unwrap();
             assert_eq!(bucket.list("cells/").await.unwrap(), vec![]);
             let served = server.requests();
             let served = ["list-delimited", "delete-objects", "delete"]

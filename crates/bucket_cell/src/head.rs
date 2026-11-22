@@ -207,19 +207,23 @@ impl Read {
 
 /// Reads `cell`'s head for a taking of it after ([`take`]), as with other reads a taking needs,
 /// at once (TASK-165.11): every slot, one GET each, at once (TASK-691).
-pub async fn read(bucket: &impl Bucket, cell: CellId) -> Read {
+/// cladefs: a slot's read refused, [`bucket::Refused`] (board 5861).
+pub async fn read(bucket: &impl Bucket, cell: CellId) -> Result<Read, bucket::Refused> {
     let n = bucket.head_slots(cell).await;
     let gets = (0..n).map(|slot| async move {
-        bucket::get(bucket, &layout::head(cell, slot)).await.map(|object| (slot, object))
+        Ok::<_, bucket::Refused>(
+            bucket::get(bucket, &layout::head(cell, slot)).await?.map(|object| (slot, object)),
+        )
     });
-    let objects = futures::future::join_all(gets).await;
-    Read(Slots::of(cell, n, objects.into_iter().flatten()))
+    let objects: Vec<_> =
+        futures::future::join_all(gets).await.into_iter().collect::<Result<_, _>>()?;
+    Ok(Read(Slots::of(cell, n, objects.into_iter().flatten())))
 }
 
 /// `cell`'s head, if it has one: [`Error::Format`] if it is of another format than this one,
 /// whose objects this reads none of.
 pub async fn get(bucket: &impl Bucket, cell: CellId) -> Result<Option<Head>, Error> {
-    read(bucket, cell).await.head(cell)
+    read(bucket, cell).await?.head(cell)
 }
 
 /// `cell`'s head, if it says the cell is live: an operator's look, to compare with what hosts
@@ -315,8 +319,9 @@ pub async fn take(
         }
         match write(bucket, cell, &slots, &head, next).await {
             Ok(held) => return Ok(held),
-            Err(Unwritten::Changed) => slots = read(bucket, cell).await.0,
+            Err(Unwritten::Changed) => slots = read(bucket, cell).await?.0,
             Err(Unwritten::Unmade) => return Err(Error::NoCell),
+            Err(Unwritten::Refused(refused)) => return Err(refused.into()),
         }
     }
 }
@@ -331,17 +336,30 @@ pub async fn swap(
     held: &Held,
     next: Head,
 ) -> Result<Held, Error> {
-    write(bucket, cell, &held.slots, &held.head, next).await.map_err(|_| Error::Fenced)
+    write(bucket, cell, &held.slots, &held.head, next).await.map_err(|unwritten| match unwritten {
+        // cladefs: refused by the bucket, not fenced (board 5861).
+        Unwritten::Refused(refused) => refused.into(),
+        Unwritten::Changed | Unwritten::Unmade => Error::Fenced,
+    })
 }
 
 /// Why a [`write`] wrote nothing.
-enum Unwritten {
+#[derive(Debug)]
+pub(crate) enum Unwritten {
     /// Another's write came first, or the slot is no longer there, removed: no write but its
     /// maker's creates a slot.
     Changed,
     /// The slot was never there: the head is its maker's, unmade, as a read without the rule
     /// `whole_or_final` takes it.
     Unmade,
+    /// cladefs: the bucket refused the write, for good (board 5861).
+    Refused(bucket::Refused),
+}
+
+impl From<bucket::Refused> for Unwritten {
+    fn from(refused: bucket::Refused) -> Self {
+        Self::Refused(refused)
+    }
 }
 
 /// Writes `next`, the head after `head`, which `slots` hold: in the slot after `head`'s, its
@@ -361,19 +379,19 @@ async fn write(
     let bytes = layout::encode(&next);
     let version = match rules().head_swap {
         true => match slots.versions.get(&slot) {
-            Some(seen) => match bucket::update(bucket, &key, bytes, seen).await {
+            Some(seen) => match bucket::update(bucket, &key, bytes, seen).await? {
                 bucket::Updated::Updated(version) => version,
                 bucket::Updated::Changed => return Err(Unwritten::Changed),
             },
             // A head read whole holds every slot (rule `slots_at_birth`); without the rule, as a
             // test shows it needed, the swap whose turn it is creates its slot.
             None if rules().slots_at_birth => return Err(Unwritten::Unmade),
-            None => match bucket::create(bucket, &key, bytes).await {
+            None => match bucket::create(bucket, &key, bytes).await? {
                 Created::Created(version) => version,
                 Created::Exists(_) => return Err(Unwritten::Changed),
             },
         },
-        false => overwrite(bucket, &key, Bytes::from(bytes)).await,
+        false => overwrite(bucket, &key, Bytes::from(bytes)).await?,
     };
     let slots = slots.clone().wrote(slot, &next, version);
     Ok(Held { head: next, slots })
@@ -387,13 +405,18 @@ async fn write(
 /// the slots it returns then say. Without the rule, as a test shows it needed, the first slot
 /// alone: the others created by the swaps whose turns they are, so that a writer that held the
 /// cell, removed since, creates its next slot, bringing back a live head.
-pub(crate) async fn birth(bucket: &impl Bucket, cell: CellId, head: Head) -> Result<Slots, Object> {
+/// cladefs: [`Unwritten::Changed`] for a first slot another's; refused, [`Unwritten::Refused`].
+pub(crate) async fn birth(
+    bucket: &impl Bucket,
+    cell: CellId,
+    head: Head,
+) -> Result<Slots, Unwritten> {
     let n = bucket.head_slots(cell).await;
     let head = Head { swaps: 0, ..head };
     let first = layout::head(cell, 0);
-    let version = match bucket::create(bucket, &first, layout::encode(&head)).await {
+    let version = match bucket::create(bucket, &first, layout::encode(&head)).await? {
         Created::Created(version) => version,
-        Created::Exists(object) => return Err(object),
+        Created::Exists(_) => return Err(Unwritten::Changed),
     };
     let mut objects = vec![(0, written(bucket, &first, &head, version))];
     if rules().slots_at_birth {
@@ -401,14 +424,16 @@ pub(crate) async fn birth(bucket: &impl Bucket, cell: CellId, head: Head) -> Res
             let copy = Head { swaps: slot, ..head.clone() };
             async move {
                 let key = layout::head(cell, slot);
-                let object = match bucket::create(bucket, &key, layout::encode(&copy)).await {
+                let object = match bucket::create(bucket, &key, layout::encode(&copy)).await? {
                     Created::Created(version) => written(bucket, &key, &copy, version),
                     Created::Exists(object) => object,
                 };
-                (slot, object)
+                Ok::<_, bucket::Refused>((slot, object))
             }
         });
-        objects.extend(futures::future::join_all(rest).await);
+        let rest: Vec<_> =
+            futures::future::join_all(rest).await.into_iter().collect::<Result<_, _>>()?;
+        objects.extend(rest);
     }
     Ok(Slots::of(cell, n, objects))
 }
@@ -435,7 +460,7 @@ pub(crate) async fn fail(
     ours: impl Fn(&Head) -> bool,
 ) -> Result<Failing, Error> {
     loop {
-        let slots = read(bucket, cell).await.0;
+        let slots = read(bucket, cell).await?.0;
         if let Some(error) = slots.unreadable {
             return Err(error);
         }
@@ -451,15 +476,19 @@ pub(crate) async fn fail(
         let marked = empty.map(|slot| {
             let mark = mark.clone();
             async move {
-                match bucket::create(bucket, &layout::head(cell, slot), mark).await {
-                    Created::Created(_) => true,
-                    Created::Exists(object) => {
-                        Head::decode(cell, &object.bytes).is_ok_and(|found| found.failed)
-                    }
-                }
+                Ok::<_, bucket::Refused>(
+                    match bucket::create(bucket, &layout::head(cell, slot), mark).await? {
+                        Created::Created(_) => true,
+                        Created::Exists(object) => {
+                            Head::decode(cell, &object.bytes).is_ok_and(|found| found.failed)
+                        }
+                    },
+                )
             }
         });
-        if futures::future::join_all(marked).await.into_iter().all(|marked| marked) {
+        let marked: Vec<bool> =
+            futures::future::join_all(marked).await.into_iter().collect::<Result<_, _>>()?;
+        if marked.into_iter().all(|marked| marked) {
             return Ok(Failing::Failed);
         }
     }
@@ -482,7 +511,7 @@ pub(crate) async fn change_leaving<R>(
     mut step: impl FnMut(Option<Head>) -> Result<Step<Head, R>, Error>,
 ) -> Result<(R, Slots), Error> {
     let mut slots = match start {
-        Start::Read => read(bucket, cell).await.0,
+        Start::Read => read(bucket, cell).await?.0,
         Start::Create => Slots::none(bucket.head_slots(cell).await),
         Start::Found(found) => found,
     };
@@ -496,23 +525,31 @@ pub(crate) async fn change_leaving<R>(
             Step::Write(next, result) => (next, result),
         };
         let written = match &current {
-            None => birth(bucket, cell, next).await.map_err(|_| Unwritten::Changed),
+            None => birth(bucket, cell, next).await,
             Some(head) => write(bucket, cell, &slots, head, next).await.map(|held| held.slots),
         };
         match written {
             Ok(written) => return Ok((result, written)),
-            Err(Unwritten::Changed) => slots = read(bucket, cell).await.0,
+            Err(Unwritten::Changed) => slots = read(bucket, cell).await?.0,
             Err(Unwritten::Unmade) => return Err(Error::Unmade(cell)),
+            Err(Unwritten::Refused(refused)) => return Err(refused.into()),
         }
     }
 }
 
-/// Writes `bytes` at `key` whatever is there: its version.
-async fn overwrite(bucket: &impl Bucket, key: &str, bytes: Bytes) -> Version {
+/// Writes `bytes` at `key` whatever is there: its version; refused, [`bucket::Refused`].
+async fn overwrite(
+    bucket: &impl Bucket,
+    key: &str,
+    bytes: Bytes,
+) -> Result<Version, bucket::Refused> {
     let mut failures = 0;
     loop {
         match bucket.put(key, bytes.clone(), PutMode::Overwrite).await {
-            Ok(version) => return version,
+            Ok(version) => return Ok(version),
+            Err(bucket::Error::Refused(refusal)) => {
+                return Err(bucket::Refused { key: key.to_owned(), refusal });
+            }
             Err(_) => {
                 failures += 1;
                 bucket.pause(failures).await;
@@ -541,9 +578,9 @@ mod tests {
 
     /// The keys of `cell`'s head's slots that hold something, and the swaps each holds.
     fn slots(bucket: &impl Bucket, cell: CellId) -> Vec<(u64, u64)> {
-        let listed = block_on(bucket::list(bucket, &layout::heads(cell)));
+        let listed = block_on(bucket::list(bucket, &layout::heads(cell))).unwrap();
         let swaps = |meta: &bucket::Meta| {
-            let object = block_on(bucket::get(bucket, &meta.key))?;
+            let object = block_on(bucket::get(bucket, &meta.key)).unwrap()?;
             let layout::Kind::Head { slot, .. } = layout::kind(&meta.key) else { return None };
             Some((slot, Head::decode(cell, &object.bytes).unwrap().swaps))
         };
@@ -568,7 +605,8 @@ mod tests {
         assert_eq!((head.owner, head.swaps, head.epoch), (7, N - 1, 0));
 
         let mut held =
-            block_on(take(&bucket, CELL, block_on(read(&bucket, CELL)), &taking(1))).unwrap();
+            block_on(take(&bucket, CELL, block_on(read(&bucket, CELL)).unwrap(), &taking(1)))
+                .unwrap();
         assert_eq!((held.head.swaps, held.head.epoch), (N, 1));
         let behind = held.clone();
         for end in 1..=N + 2 {
@@ -593,14 +631,16 @@ mod tests {
         let bucket = multi_slot();
         block_on(crate::lifecycle::create(&bucket, CELL, 7)).unwrap();
         let held =
-            block_on(take(&bucket, CELL, block_on(read(&bucket, CELL)), &taking(1))).unwrap();
+            block_on(take(&bucket, CELL, block_on(read(&bucket, CELL)).unwrap(), &taking(1)))
+                .unwrap();
         block_on(crate::lifecycle::delete(&bucket, CELL, 2, 0)).unwrap();
-        for key in block_on(bucket::list(&bucket, &layout::heads(CELL))) {
-            block_on(bucket::delete(&bucket, &key.key));
+        for key in block_on(bucket::list(&bucket, &layout::heads(CELL))).unwrap() {
+            block_on(bucket::delete(&bucket, &key.key)).unwrap();
         }
         let next = Head { end: 5, ..held.head.clone() };
         let swapped = block_on(swap(&bucket, CELL, &held, next)).map(drop);
         let found = block_on(bucket::get(&bucket, &held.next_key(CELL)))
+            .unwrap()
             .map(|object| Head::decode(CELL, &object.bytes).unwrap());
         (swapped, found)
     }
@@ -628,9 +668,10 @@ mod tests {
     fn unmade() -> (Result<Option<Head>, Error>, Result<u64, Error>) {
         let bucket = multi_slot();
         let first = Head::of(Made::Root, 7);
-        block_on(bucket::create(&bucket, &layout::head(CELL, 0), layout::encode(&first)));
+        block_on(bucket::create(&bucket, &layout::head(CELL, 0), layout::encode(&first))).unwrap();
         let found = block_on(get(&bucket, CELL));
-        let taken = block_on(take(&bucket, CELL, block_on(read(&bucket, CELL)), &taking(1)));
+        let taken =
+            block_on(take(&bucket, CELL, block_on(read(&bucket, CELL)).unwrap(), &taking(1)));
         (found, taken.map(|held| held.head.epoch))
     }
 
@@ -639,12 +680,12 @@ mod tests {
         assert_eq!(unmade(), (Ok(None), Err(Error::NoCell)));
         let bucket = multi_slot();
         let first = Head::of(Made::Root, 7);
-        block_on(bucket::create(&bucket, &layout::head(CELL, 0), layout::encode(&first)));
+        block_on(bucket::create(&bucket, &layout::head(CELL, 0), layout::encode(&first))).unwrap();
         // Deleted, it is failed: a mark in each slot after the first.
         let deleted = block_on(crate::lifecycle::delete(&bucket, CELL, 2, 0));
         assert_eq!(deleted, Ok(()));
         assert_eq!(slots(&bucket, CELL).len() as u64, N);
-        assert_eq!(*block_on(read(&bucket, CELL)).slots().found(), Found::Failed);
+        assert_eq!(*block_on(read(&bucket, CELL)).unwrap().slots().found(), Found::Failed);
         assert_eq!(block_on(crate::lifecycle::create(&bucket, CELL, 8)), Ok(false));
     }
 
@@ -668,15 +709,16 @@ mod tests {
         let bucket = multi_slot();
         let origin = layout::Origin { parent: test_cell(1), at: 3, epoch: 1 };
         let forking = Head::of(Made::Forking { origin, version: 9 }, 0x33);
-        block_on(bucket::create(&bucket, &layout::head(CELL, 0), layout::encode(&forking)));
+        block_on(bucket::create(&bucket, &layout::head(CELL, 0), layout::encode(&forking)))
+            .unwrap();
         let unfork = |owner| block_on(crate::lifecycle::delete_fork(&bucket, CELL, owner, (2, 0)));
         assert_eq!(unfork(0x44), Ok(false));
         assert_eq!(slots(&bucket, CELL), [(0, 0)]);
         assert_eq!(unfork(0x33), Ok(true));
         assert_eq!(block_on(get(&bucket, CELL)), Ok(None));
-        assert_eq!(*block_on(read(&bucket, CELL)).slots().found(), Found::Failed);
+        assert_eq!(*block_on(read(&bucket, CELL)).unwrap().slots().found(), Found::Failed);
         let copy = layout::encode(&Head { swaps: 1, ..forking });
-        let late = block_on(bucket::create(&bucket, &layout::head(CELL, 1), copy));
+        let late = block_on(bucket::create(&bucket, &layout::head(CELL, 1), copy)).unwrap();
         assert!(matches!(late, Created::Exists(_)), "the maker's late create landed");
         assert_eq!(unfork(0x33), Ok(true), "gone already");
         assert_eq!(block_on(crate::lifecycle::delete(&bucket, CELL, 2, 0)), Ok(()));
@@ -689,7 +731,7 @@ mod tests {
     fn unmade_heads_are_failed_by_their_deletions_need_marks_fail() {
         let bucket = multi_slot();
         let made = Head::of(Made::Root, 7);
-        block_on(bucket::create(&bucket, &layout::head(CELL, 0), layout::encode(&made)));
+        block_on(bucket::create(&bucket, &layout::head(CELL, 0), layout::encode(&made))).unwrap();
         assert_eq!(block_on(fail(&bucket, CELL, |_| true)), Ok(Failing::Failed));
         crate::set_rules(crate::Rules { marks_fail: false, ..crate::Rules::ALL });
         let found = block_on(get(&bucket, CELL));
@@ -707,7 +749,8 @@ mod tests {
         block_on(crate::identity::format(&bucket, &Default::default(), three)).unwrap();
         block_on(crate::lifecycle::create(&bucket, CELL, 7)).unwrap();
         assert_eq!(slots(&bucket, CELL), [(0, 0), (1, 1), (2, 2)]);
-        let held = block_on(take(&bucket, CELL, block_on(read(&bucket, CELL)), &taking(1)));
+        let held =
+            block_on(take(&bucket, CELL, block_on(read(&bucket, CELL)).unwrap(), &taking(1)));
         assert_eq!(held.map(|held| held.next_key(CELL)), Ok(layout::head(CELL, 1)));
         assert_eq!(slots(&bucket, CELL), [(0, 3), (1, 1), (2, 2)]);
         let unformatted = Direct(SimBucket::new());
@@ -723,14 +766,14 @@ mod tests {
         block_on(crate::lifecycle::delete(&bucket, CELL, 2, 0)).unwrap();
         // The deletion's, the slot after the maker's last.
         let deletion = layout::head(CELL, 0);
-        for meta in block_on(bucket::list(&bucket, &layout::heads(CELL))) {
+        for meta in block_on(bucket::list(&bucket, &layout::heads(CELL))).unwrap() {
             if meta.key != deletion {
-                block_on(bucket::delete(&bucket, &meta.key));
+                block_on(bucket::delete(&bucket, &meta.key)).unwrap();
                 let found = block_on(get(&bucket, CELL)).unwrap().unwrap();
                 assert!(found.deleted(), "{found:?}");
             }
         }
-        block_on(bucket::delete(&bucket, &deletion));
+        block_on(bucket::delete(&bucket, &deletion)).unwrap();
         assert_eq!(block_on(get(&bucket, CELL)), Ok(None));
     }
 }

@@ -562,7 +562,13 @@ impl Cladefsd for Control {
         let DecommissionHostRequest { incarnation } = request.into_inner();
         let decommissioned = async {
             let bucket = cells::daemon_bucket()?;
-            Ok(bucket_cell::lifecycle::decommission(&*bucket, incarnation).await as u64)
+            let decommissioned = bucket_cell::lifecycle::decommission(&*bucket, incarnation).await;
+            let retired = decommissioned.map_err(|refused| {
+                let failure = local_cell::upload::Failure::from(refused);
+                log::error!("cladefsd: decommissioning host {incarnation}: {failure}");
+                crate::bucket::errno(&failure).unwrap_or(Errno::EIO)
+            })?;
+            Ok(retired as u64)
         };
         reply(decommissioned.await.map(|retired| DecommissionHostResponse { retired }))
     }

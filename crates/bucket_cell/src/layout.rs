@@ -261,6 +261,10 @@ pub fn moves_under(prefix: &str) -> Result<String, crate::Error> {
     Ok(format!("{}{MOVES}{rest}", cell.prefix()))
 }
 
+/// cladefs: the longest key, in bytes, the buckets cells live in take (S3, GCS, Azure; a macOS file
+/// bucket's PATH_MAX): a request of a longer one each refuses, for good (board 5861).
+pub const MAX_KEY: usize = 1024;
+
 /// cladefs: how many times the object at `key` is moves of moves: 0 for one not moves, 1 for
 /// an object's moves, 2 for their moves, and so on, each in its key once more ([`moves`]).
 pub fn moves_depth(key: &str) -> usize {
@@ -1228,7 +1232,7 @@ mod tests {
     }
 
     /// TASK-572: how deep moves of moves are, each a level more, at the key the collector would
-    /// make for the deepest it compacts within the 1024 bytes buckets take, its hops within those
+    /// make for the deepest it compacts within the [`MAX_KEY`] bytes buckets take, its hops within those
     /// a read follows.
     #[test]
     fn moves_are_as_deep_as_their_chains() {
@@ -1239,7 +1243,7 @@ mod tests {
             key = super::moves(&key, u64::MAX).unwrap();
             assert_eq!(moves_depth(&key), depth);
         }
-        assert!(key.len() <= 1024, "{} bytes: {key}", key.len());
+        assert!(key.len() <= MAX_KEY, "{} bytes: {key}", key.len());
         assert!(crate::collector::MOVES_DEPTH < crate::moves::MOVES);
     }
 

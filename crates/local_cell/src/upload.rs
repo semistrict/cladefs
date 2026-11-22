@@ -315,6 +315,13 @@ impl From<anyhow::Error> for Failure {
     }
 }
 
+/// cladefs: a request the bucket refuses for good, as `bucket_cell` says it (board 5861).
+impl From<bucket_cell::bucket::Refused> for Failure {
+    fn from(refused: bucket_cell::bucket::Refused) -> Self {
+        Self::Bucket(refused.into())
+    }
+}
+
 /// cladefs: how long a take waits for the members of its new configuration to hold what the one
 /// before held, before it fails (doc-21, TASK-537.3.4).
 const SEEDING: Duration = Duration::from_secs(60);
@@ -412,13 +419,16 @@ pub trait Members: Send + Sync + 'static {
         member: &'a bucket_cell::layout::Member,
         epoch: u64,
     ) -> BoxFuture<'a, Result<Vec<(u64, u64)>, String>>;
-    /// Log `log` that `member` holds of `configuration`, from its start.
+    /// Log `log` that `member` holds of `configuration`, from its start to `end`, where its fence
+    /// said it ends: no further, whatever more the member sends; failing if the member stalls
+    /// (board 5416).
     fn read<'a>(
         &'a self,
         cell: CellId,
         configuration: &'a bucket_cell::layout::Configuration,
         member: &'a bucket_cell::layout::Member,
         log: u64,
+        end: u64,
     ) -> BoxFuture<'a, Result<Vec<u8>, String>>;
     /// Has `member` drop what it holds of `cell`'s configurations before `configuration`.
     fn drop_before<'a>(
@@ -2367,14 +2377,16 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// member's logs are prefixes of the writer's (doc-21, TASK-537.3.4). Of a segment's records,
     /// the longest copy `keys`, the cell's, find authentic, cut to what of it is whole: what a
     /// member answers is unauthenticated, and a longer copy garbled, or forged, would otherwise
-    /// hide an honest one (TASK-684). Only a copy found not authentic is passed over: one that
-    /// can't be read, or reads shorter than its member's fence said, fails the take, as it may be
-    /// the only one holding commits told replicated; and so does a log none of whose copies is
+    /// hide an honest one (TASK-684). A copy found not authentic is passed over; so is one that
+    /// can't be read, a member stalled or gone, if another as long is read (board 5416): else it
+    /// fails the take, as it may be the only one holding commits told replicated, as does one that
+    /// reads shorter than its member's fence said; and so does a log none of whose copies is
     /// authentic, as a log missing would look like a writer's base, given up
-    /// (`replicate::trimmed`). A copy its member's fence says ends at nothing holds nothing, as
-    /// one it never made: a member makes a log's file at its first append, which may fail after
-    /// (board 5914: its write failing, ENOSPC, it held the file empty, which, no header of its own,
-    /// was no authentic copy, and every take failed).
+    /// (`replicate::trimmed`). Each copy is read to its fence's end, no further. A copy its
+    /// member's fence says ends at nothing holds nothing, as one it never made: a member makes a
+    /// log's file at its first append, which may fail after (board 5914: its write failing,
+    /// ENOSPC, it held the file empty, which, no header of its own, was no authentic copy, and
+    /// every take failed).
     async fn read_longest(
         &self,
         cell: CellId,
@@ -2398,12 +2410,23 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             for (log, held) in copies {
                 let segment = crate::layout::SegmentId { cell: cell.id, number: log >> 1 };
                 let (mut best, mut refused) = (None::<Vec<u8>>, Vec::new());
+                // The longest copy read whole, and the longest that could not be read, with why.
+                let (mut read, mut unread) = (0, None::<(u64, String)>);
                 for (end, member) in held {
                     if best.as_ref().is_some_and(|best| best.len() as u64 >= end) {
                         break;
                     }
-                    let bytes = members.read(cell, old, &member, log).await;
-                    let mut bytes = bytes.map_err(Failure::msg)?;
+                    let mut bytes = match members.read(cell, old, &member, log, end).await {
+                        Ok(bytes) => bytes,
+                        Err(err) => {
+                            let err =
+                                format!("{} reading log {log} of {cell:?}: {err}", member.address);
+                            log::warn!("cladefs: {err}: passed over if another copy as long reads");
+                            unread = unread.or(Some((end, err)));
+                            continue;
+                        }
+                    };
+                    bytes.truncate(usize::try_from(end).unwrap_or(usize::MAX));
                     if (bytes.len() as u64) < end {
                         return Err(Failure::msg(format!(
                             "{} gave {} bytes of log {log}, fenced at {end}",
@@ -2411,6 +2434,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                             bytes.len()
                         )));
                     }
+                    read = read.max(end);
                     // A segment's records, as far as they are whole and authentic; its own
                     // extents' files, whose records name them, as they are.
                     if log & 1 == 0 {
@@ -2429,6 +2453,13 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                     if best.as_ref().is_none_or(|best| bytes.len() > best.len()) {
                         best = Some(bytes);
                     }
+                }
+                // A copy that could not be read, longer than every copy read: the commits it alone
+                // may hold are not to be had.
+                if let Some((end, err)) = unread.filter(|(end, _)| *end > read) {
+                    return Err(Failure::msg(format!(
+                        "{err}, fenced at {end}: no other copy as long"
+                    )));
                 }
                 match best {
                     Some(bytes) => logs.push((log, bytes)),
@@ -2620,7 +2651,7 @@ async fn first_read<B: bucket_cell::Bucket>(
 ) -> Result<head::Read, Failure> {
     let read = match initial_head {
         Some(read) => read,
-        None => head::read(bucket, cell).await,
+        None => head::read(bucket, cell).await?,
     };
     if read.head(cell)?.is_some_and(|head| !head.deleted() && head.forking().is_some()) {
         return Err(bucket_cell::Error::Unmade(cell).into());

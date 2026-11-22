@@ -7,18 +7,17 @@
 //! every interleaving Shuttle's scheduler chooses (TASK-44.3).
 //!
 //! The race of a guest's writes and loads with a free is run against a [`Guest`]: a guest's view
-//! of the window through a second stage, here one that records what the window maps
-//! ([`FakeStage`]), and, on Linux, the userfaultfd second stage over a model of its host memory
-//! (`uffd::shuttle_tests`).
+//! of the window through a second stage, on Linux the userfaultfd second stage over a model of its
+//! host memory (`uffd::shuttle_tests`), which copies on write itself (doc-26).
 
 use super::tests::TestSource;
 use super::*;
 use crate::pages::PhysLocation;
-use crate::shuttle_testing::{BATCHES, config, fails_with, runs};
+use crate::shuttle_testing::{BATCHES, config, runs};
 use futures::future::LocalBoxFuture;
-use shuttle::scheduler::{PctScheduler, RandomScheduler, Scheduler};
+use shuttle::scheduler::{RandomScheduler, Scheduler};
 use shuttle::{Runner, future, thread};
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::RawFd;
 
 /// The schedules each test runs, before `SHUTTLE_SOAK`.
 pub(super) const RUNS: usize = 100;
@@ -94,6 +93,9 @@ pub(super) trait Guest: Send + Sync + 'static {
 
     /// Where the page of physical memory at `phys` is, as a page mapped of it is.
     fn place(&self, phys: PhysLocation) -> Self::Where;
+
+    /// cladefs: how many pages its stage made private (backlog doc-13, doc-26).
+    fn private_pages(&self) -> u64;
 }
 
 /// The first byte of the page at `offset` of `fd`'s memory, read, or written with `write` first,
@@ -187,14 +189,14 @@ pub(super) fn reaching<S: Scheduler + 'static>(
 /// page for ever: a few races' worth.
 pub(super) const ATTEMPTS: usize = 100;
 
-/// A vCPU's access of `kind` to the page at `offset` through `guest`, of `window`, storing
-/// [`STORED`] if it is a write, retried as each fault is resolved, and as it fails: the page's
-/// first byte after it; or none, for a write the window refused, past its private pages, which
-/// one of the guest's that faults says (`EACCES`), and one of a guest's own memory by failing.
-fn access<G: Guest>(guest: &G, window: &DaxWindow, offset: u64, kind: Access) -> Option<u8> {
+/// A vCPU's access of `kind` to the page at `offset` through `guest`, storing [`STORED`] if it is
+/// a write, retried as each fault is resolved, and as it fails: the page's first byte after it; or
+/// none, for a write the stage refused, past its private pages, which one of the guest's that
+/// faults says (`EACCES`), and one of a guest's own memory by failing.
+fn access<G: Guest>(guest: &G, offset: u64, kind: Access) -> Option<u8> {
     let write = (kind == Access::Write).then_some(STORED);
-    // Once a page is private, the window holds as many as it may: a write to another is refused.
-    let refused = || kind == Access::Write && window.private_pages() > 0;
+    // Once a page is private, the stage holds as many as it may: a write to another is refused.
+    let refused = || kind == Access::Write && guest.private_pages() > 0;
     for _ in 0..ATTEMPTS {
         match guest.access(offset, kind, write) {
             Outcome::Made(read) => return Some(read),
@@ -235,23 +237,22 @@ fn access<G: Guest>(guest: &G, window: &DaxWindow, offset: u64, kind: Access) ->
 pub(super) fn writes_race_frees<G: Guest>(mut dax: Dax, guest: Arc<G>) {
     let ps = page_size();
     let sealed = TestSource::filled(2, SEALED);
-    let window = DaxWindow(dax.window.clone());
     dax.map(0, &sealed.source(), 0, 2 * ps);
     let mut extent = Vec::new();
-    sealed.each_present(0..2, &mut |_, frame| extent.push(guest.place(frame.location())));
+    sealed.each_present(0..2, &mut |present| extent.push(guest.place(present.at)));
 
     let vcpus: Vec<_> = [[Access::Write, Access::Read], [Access::Read, Access::Write]]
         .into_iter()
         .map(|kinds| {
-            let (guest, window) = (guest.clone(), window.clone());
+            let guest = guest.clone();
             thread::spawn(move || {
                 let mut seen = [rank(SEALED); 2];
                 while seen.iter().any(|seen| *seen < rank(0)) {
                     for (page, kind) in kinds.into_iter().enumerate() {
                         let offset = page as u64 * ps;
-                        let read = access(&*guest, &window, offset, kind).unwrap_or_else(|| {
+                        let read = access(&*guest, offset, kind).unwrap_or_else(|| {
                             reached(Event::WriteRefused);
-                            let read = access(&*guest, &window, offset, Access::Read);
+                            let read = access(&*guest, offset, Access::Read);
                             read.expect("a load refused")
                         });
                         assert!(rank(read) >= seen[page], "read {read:#x} after a newer page");
@@ -277,288 +278,7 @@ pub(super) fn writes_race_frees<G: Guest>(mut dax: Dax, guest: Arc<G>) {
         vcpu.join().unwrap();
     }
     let _dax = freer.join().unwrap();
-    assert_eq!(window.private_pages(), 1, "writes made");
+    assert_eq!(guest.private_pages(), 1, "writes made");
     let writable = guest.writable();
     assert_eq!(writable.len(), 1, "writable but the private page: {writable:#x?}");
-}
-
-/// Where a page of a [`FakeStage`] is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Frame {
-    /// A page of physical memory, read-only.
-    Phys(PhysLocation),
-    /// cladefs: a private page (backlog doc-13), the stage's own, writable, by the number it was
-    /// made as, which tells copies apart.
-    Private(u64),
-}
-
-/// A guest's second stage, as the window makes it.
-#[derive(Default)]
-struct Fake {
-    /// Each page's memory.
-    pages: BTreeMap<u64, Frame>,
-    /// cladefs: the private pages' bytes, by their numbers.
-    private: BTreeMap<u64, Vec<u8>>,
-}
-
-#[derive(Default)]
-struct FakeStage(shuttle::sync::Mutex<Fake>);
-
-impl SecondStage for FakeStage {
-    fn map(&self, offset: u64, phys: PhysLocation, len: u64) {
-        let mut fake = self.0.lock().unwrap();
-        for at in (0..len).step_by(page_size() as usize) {
-            let page = PhysLocation { arena: phys.arena, offset: phys.offset + at };
-            let replaced = fake.pages.insert(offset + at, Frame::Phys(page));
-            assert!(replaced.is_none(), "mapped over the page at {:#x}", offset + at);
-        }
-    }
-
-    fn unmap(&self, offset: u64, len: u64) {
-        let mut fake = self.0.lock().unwrap();
-        for at in (offset..offset + len).step_by(page_size() as usize) {
-            match fake.pages.remove(&at) {
-                Some(Frame::Private(number)) => drop(fake.private.remove(&number)),
-                Some(Frame::Phys(_)) => {}
-                None => panic!("unmapped unmapped {at:#x}"),
-            }
-        }
-    }
-
-    /// cladefs: the pages from `offset` private pages, in place of what was there, each holding the
-    /// page's at its `from`, or zeros.
-    fn make_private(&self, offset: u64, from: &[Option<PhysLocation>]) {
-        let mut fake = self.0.lock().unwrap();
-        for (at, from) in from.iter().enumerate() {
-            let offset = offset + at as u64 * page_size();
-            let bytes = from.map_or_else(|| vec![0; page_size() as usize], page_bytes);
-            let number = fake.private.keys().next_back().map_or(0, |last| last + 1);
-            fake.private.insert(number, bytes);
-            if let Some(Frame::Private(was)) = fake.pages.insert(offset, Frame::Private(number)) {
-                panic!("{offset:#x} made private over private page {was}");
-            }
-        }
-    }
-}
-
-/// cladefs: the bytes of the page at `phys`.
-fn page_bytes(phys: PhysLocation) -> Vec<u8> {
-    let arena = crate::pages::arena_memory(phys.arena).expect("the page's arena");
-    let len = page_size() as usize;
-    let (prot, flags, fd) = (libc::PROT_READ, libc::MAP_SHARED, arena.as_raw_fd());
-    // SAFETY: A new mapping of a page of the memory, which outlives it.
-    let page = unsafe { libc::mmap(std::ptr::null_mut(), len, prot, flags, fd, phys.offset as _) };
-    assert_ne!(page, libc::MAP_FAILED, "{}", std::io::Error::last_os_error());
-    // SAFETY: `page` is the mapping, `len` bytes.
-    let bytes = unsafe { std::slice::from_raw_parts(page.cast::<u8>(), len) }.to_vec();
-    // SAFETY: The mapping made above.
-    assert_eq!(unsafe { libc::munmap(page, len) }, 0);
-    bytes
-}
-
-/// A guest whose second stage is a [`FakeStage`], as the extent daemon's connection to a VM
-/// process is: an access the stage doesn't allow, a write to a page of physical memory or an
-/// access to nothing mapped, faults, and the VM process passes the fault to the window.
-struct StageGuest {
-    stage: Arc<FakeStage>,
-    window: DaxWindow,
-}
-
-impl Guest for StageGuest {
-    type Where = Frame;
-
-    fn access(&self, offset: u64, kind: Access, write: Option<u8>) -> Outcome<'_> {
-        let mut fake = self.stage.0.lock().unwrap();
-        match (fake.pages.get(&offset).copied(), kind) {
-            (Some(Frame::Phys(phys)), Access::Read) => {
-                let arena = crate::pages::arena_memory(phys.arena).expect("the page's arena");
-                Outcome::Made(byte(arena.as_raw_fd(), phys.offset, None))
-            }
-            (Some(Frame::Private(number)), _) => {
-                let bytes = fake.private.get_mut(&number).expect("a private page's bytes");
-                if let Some(value) = write {
-                    bytes[0] = value;
-                }
-                Outcome::Made(bytes[0])
-            }
-            _ => Outcome::Faulted(Box::pin(self.window.fault(offset, kind))),
-        }
-    }
-
-    fn writable(&self) -> Vec<u64> {
-        let fake = self.stage.0.lock().unwrap();
-        (fake.pages.iter())
-            .filter(|(_, frame)| matches!(frame, Frame::Private(_)))
-            .map(|(at, _)| *at)
-            .collect()
-    }
-
-    fn mapped(&self) -> Vec<(u64, Frame)> {
-        let fake = self.stage.0.lock().unwrap();
-        fake.pages.iter().map(|(at, frame)| (*at, *frame)).collect()
-    }
-
-    fn place(&self, phys: PhysLocation) -> Frame {
-        Frame::Phys(phys)
-    }
-}
-
-fn frees_on_a_fake_stage() {
-    let stage = Arc::new(FakeStage::default());
-    let (dax, window) = super::tests::copying(2, 1, Some(stage.clone()));
-    writes_race_frees(dax, Arc::new(StageGuest { stage, window }));
-}
-
-const STAGE_EVENTS: [Event; 5] =
-    [Event::ReadSealed, Event::ReadZeros, Event::ReadStored, Event::Faulted, Event::WriteRefused];
-
-#[test]
-fn writes_race_frees_randomly() {
-    reaching(|| RandomScheduler::new(runs(RUNS)), frees_on_a_fake_stage, &STAGE_EVENTS);
-}
-
-#[test]
-fn writes_race_frees_by_pct() {
-    reaching(|| PctScheduler::new(3, runs(RUNS)), frees_on_a_fake_stage, &STAGE_EVENTS);
-}
-
-/// A freed extent's mappings unmapped, rather than mapping zeros: an access racing the free
-/// faults on a page the window maps nothing at.
-#[test]
-fn needs_frees_to_map_zeros() {
-    *RULES.lock().unwrap() = Rules { free_maps_zeros: false, ..Rules::ALL };
-    fails_with("ENOENT", || {
-        Runner::new(PctScheduler::new(3, runs(10 * RUNS)), config()).run(frees_on_a_fake_stage);
-    });
-}
-
-/// cladefs: what pages of a window that copies on write hold (backlog doc-13): an extent's, and
-/// another mapped after it.
-const FIRST: u8 = 0x1a;
-const SECOND: u8 = 0x1b;
-
-/// cladefs: a vCPU's write of [`STORED`] to the page at `offset`, retried as each fault is
-/// resolved: whether it was made, or refused (`EACCES`).
-fn stored(guest: &StageGuest, offset: u64) -> bool {
-    for _ in 0..ATTEMPTS {
-        match guest.access(offset, Access::Write, Some(STORED)) {
-            Outcome::Made(read) => {
-                assert_eq!(read, STORED, "the write at {offset:#x} read back otherwise");
-                return true;
-            }
-            Outcome::Faulted(fault) => match future::block_on(fault) {
-                Ok(()) => {}
-                Err(Errno::EACCES) => return false,
-                Err(err) => panic!("a write's fault at {offset:#x}: {err:?}"),
-            },
-            Outcome::Failed => unreachable!("a fake stage's accesses fault"),
-        }
-    }
-    panic!("a write at {offset:#x} never completed");
-}
-
-/// cladefs TASK-164.1: a vCPU writes to a page that a window copying on write maps read-only, an
-/// extent's, while the guest's `MAP` maps another's there: as the guest doesn't (it holds its
-/// file's semaphore), but the host stays whole whatever it does. Checked once both are done: the
-/// page maps the `MAP`'s, read-only, the copy the write made before ended; or a private copy of
-/// it, holding the write: never a copy of what the `MAP` replaced. The window counts the private
-/// pages the stage maps writable.
-fn copies_race_maps() {
-    let ps = page_size();
-    let stage = Arc::new(FakeStage::default());
-    let (mut dax, window) = super::tests::copying(1, 1, Some(stage.clone()));
-    let (first, second) = (TestSource::filled(1, FIRST), TestSource::filled(1, SECOND));
-    dax.map(0, &first.source(), 0, ps);
-    let guest = Arc::new(StageGuest { stage: stage.clone(), window: window.clone() });
-    let storing = guest.clone();
-    let vcpu = thread::spawn(move || assert!(stored(&storing, 0), "the write was refused"));
-    let mapped = second.source();
-    let map = thread::spawn(move || {
-        dax.map(0, &mapped, 0, ps);
-        dax
-    });
-    vcpu.join().unwrap();
-    let _dax = map.join().unwrap();
-
-    let mut shared = None;
-    second.each_present(0..1, &mut |_, frame| shared = Some(Frame::Phys(frame.location())));
-    let frame = stage.0.lock().unwrap().pages[&0];
-    let writable = guest.writable();
-    assert_eq!(window.private_pages(), writable.len() as u64, "private pages miscounted");
-    match frame {
-        Frame::Phys(_) => {
-            assert_eq!(Some(frame), shared, "the page maps neither the MAP's nor a copy");
-            reached(Event::MapEndedCopy);
-        }
-        Frame::Private(number) => {
-            let bytes = stage.0.lock().unwrap().private[&number].clone();
-            assert_eq!(bytes[0], STORED, "the private page lost the write");
-            assert_eq!(bytes[1], SECOND, "a copy of what the MAP replaced");
-            reached(Event::CopiedAfterMap);
-        }
-    }
-}
-
-const COPY_EVENTS: [Event; 2] = [Event::MapEndedCopy, Event::CopiedAfterMap];
-
-/// For the invariants alone: a random schedule practically never lets the write's copy finish
-/// before the `MAP` (none of 800), which the PCT schedules below reach.
-#[test]
-fn copies_race_maps_randomly() {
-    Runner::new(RandomScheduler::new(runs(RUNS)), config()).run(copies_race_maps);
-}
-
-#[test]
-fn copies_race_maps_by_pct() {
-    reaching(|| PctScheduler::new(3, runs(RUNS)), copies_race_maps, &COPY_EVENTS);
-}
-
-/// cladefs: a write's copy mapped whatever the window maps by then: one of what a `MAP` replaced
-/// meanwhile is mapped in place of the `MAP`'s pages.
-#[test]
-fn needs_copies_to_recheck_their_mappings() {
-    *RULES.lock().unwrap() = Rules { copy_rechecks_mapping: false, ..Rules::ALL };
-    fails_with("a copy of what the MAP replaced", || {
-        Runner::new(PctScheduler::new(3, runs(10 * RUNS)), config()).run(copies_race_maps);
-    });
-}
-
-/// cladefs TASK-164.1: two vCPUs write to two pages of a window that holds one private page at
-/// most: one write is made, in a private copy, and the other refused, never both copied.
-fn copies_race_their_bound() {
-    let ps = page_size();
-    let stage = Arc::new(FakeStage::default());
-    let (mut dax, window) = super::tests::copying(2, 1, Some(stage.clone()));
-    let source = TestSource::filled(2, FIRST);
-    dax.map(0, &source.source(), 0, 2 * ps);
-    let guest = Arc::new(StageGuest { stage, window: window.clone() });
-    let vcpus: Vec<_> = (0..2)
-        .map(|page| {
-            let guest = guest.clone();
-            thread::spawn(move || stored(&guest, page * ps))
-        })
-        .collect();
-    let made: Vec<bool> = vcpus.into_iter().map(|vcpu| vcpu.join().unwrap()).collect();
-    let (private, writable) = (window.private_pages(), guest.writable().len());
-    assert!(
-        private <= 1 && writable <= 1,
-        "past the window's private pages: {private}, {writable}"
-    );
-    assert_eq!(made.iter().filter(|made| **made).count(), 1, "writes made: {made:?}");
-    drop(dax);
-}
-
-#[test]
-fn copies_race_their_bound_by_pct() {
-    Runner::new(PctScheduler::new(3, runs(RUNS)), config()).run(copies_race_their_bound);
-}
-
-/// cladefs: copies counted against the bound before they are made alone: two writes each find room
-/// for one, and both are mapped.
-#[test]
-fn needs_copies_counted_as_they_are_mapped() {
-    *RULES.lock().unwrap() = Rules { copy_counts_under_lock: false, ..Rules::ALL };
-    fails_with("past the window's private pages", || {
-        Runner::new(PctScheduler::new(3, runs(10 * RUNS)), config()).run(copies_race_their_bound);
-    });
 }

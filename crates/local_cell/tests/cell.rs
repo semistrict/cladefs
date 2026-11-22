@@ -11,7 +11,8 @@ use common::noise;
 use extent_frame::segment::{Chain, Contents, Location, NewVersion};
 use local_cell::{
     BucketData, Closed, Description, Dir, File as _, HostDir, LocalCell, Located, MemDir, MemFile,
-    NoSpace, Opening, Options, Place, Sparse, SpentExtent, TooLong, TooSmall, Unsectored,
+    NoSpace, Opening, Options, Place, Relocating, Sparse, SpentExtent, TooLong, TooSmall,
+    Unsectored,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -329,6 +330,243 @@ async fn segments_freed_past_half_are_sparse() {
     }
     cell.commit(None).await.unwrap();
     assert_eq!(sparse(false), [], "freed whole");
+}
+
+/// cladefs: doc-27 (board 6214): a relocation copies the extents its writer read from the cell's
+/// segments in the bucket into the open segment, in a commit of its own, which names them there.
+/// The guest's extent open stays open, and takes its next write; its free not yet committed is
+/// for its own next commit. Those freed since they were read, or read where the cell holds them
+/// no more, are passed over; bytes of another length are refused, the cell unchanged. Once
+/// acknowledged, the extent is in the bucket where the relocation put it, and the segment it
+/// was read from holds less live.
+#[tokio::test(flavor = "multi_thread")]
+async fn relocations_commit_alone_and_leave_the_guests_extents_open() {
+    let dir = MemDir::new();
+    let cell = create(dir.clone(), 1 << 20);
+    for sequence in 0..4 {
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+    }
+    cell.commit(None).await.unwrap();
+    assert!(cell.close_now().await.unwrap());
+    let first = closed_one(&cell).await;
+    let read_from = bucket_cell::layout::segment(CELL, first.footer.segment, first.footer.epoch);
+    cell.acknowledged(first.number).await.unwrap();
+    let located = |sequence| match cell.place(extent(sequence)).unwrap() {
+        Some(Place::Bucket(at)) => at,
+        place => panic!("{:?} at {place:?}", extent(sequence)),
+    };
+    let at: Vec<Location> = (0..4).map(located).collect();
+    cell.free(extent(2)).unwrap();
+    cell.commit(None).await.unwrap();
+    // The guest's, since its last commit: an extent open, and a free. Its run ends before the
+    // open segment's end, where an extent the guest freed open wrote: a relocation yields to a run
+    // the guest's next write would go on with (relocations_leave_the_guests_writes_to_seal_in_place).
+    cell.write(extent(10), 0, &pattern(10, 0, BLOCK)).await.unwrap();
+    cell.write(extent(11), 0, &pattern(11, 0, BLOCK)).await.unwrap();
+    cell.free(extent(11)).unwrap();
+    cell.free(extent(3)).unwrap();
+
+    let relocating = |sequence: u64, from: &Location, len: usize| Relocating {
+        extent: extent(sequence),
+        from: from.clone(),
+        data: pattern(sequence as u8, 0, len),
+    };
+    let wrong = cell.relocate(vec![relocating(1, &at[1], 10)]).await;
+    assert!(wrong.is_err(), "{wrong:?}");
+    let relocated = cell.relocate(vec![
+        relocating(0, &at[0], BLOCK),
+        relocating(1, &at[0], BLOCK),
+        relocating(2, &at[2], BLOCK),
+        relocating(3, &at[3], BLOCK),
+    ]);
+    assert_eq!(relocated.await.unwrap(), BLOCK as u64);
+    assert_eq!(
+        cell.place(extent(0)).unwrap(),
+        Some(Place::Run { cell: CELL.id, number: 1, offset: 2 * BLOCK as u64 })
+    );
+    let mut read = vec![0; BLOCK];
+    cell.read(extent(0), 0, &mut read).unwrap();
+    assert_eq!(read, pattern(0, 0, BLOCK));
+    // Closed between commits, its segment names the relocation's commit and those before: the
+    // extent relocated, and the free committed before it, not the guest's since.
+    assert!(cell.close_now().await.unwrap());
+    let second = closed_one(&cell).await;
+    let sealed = |closed: &Closed<MemFile>| -> BTreeSet<(ExtentId, u64)> {
+        let extents = closed.footer.contents.extents.iter();
+        extents.map(|&(extent, _, len)| (extent, len)).collect()
+    };
+    assert_eq!(sealed(&second), BTreeSet::from([(extent(0), BLOCK as u64)]));
+    assert_eq!(second.footer.contents.frees, [extent(2)]);
+    cell.write(extent(10), BLOCK as u64, &pattern(10, BLOCK, BLOCK)).await.unwrap();
+    cell.commit(None).await.unwrap();
+    assert!(cell.close_now().await.unwrap());
+    let third = closed_one(&cell).await;
+    assert_eq!(sealed(&third), BTreeSet::from([(extent(10), 2 * BLOCK as u64)]));
+    assert_eq!(third.footer.contents.frees, [extent(3)]);
+
+    for closed in [&second, &third] {
+        cell.acknowledged(closed.number).await.unwrap();
+    }
+    let key = bucket_cell::layout::segment(CELL, second.footer.segment, second.footer.epoch);
+    assert_eq!(located(0).key, key);
+    assert_eq!(located(1), at[1]);
+    let live = |at: &str| {
+        let sparse = cell.sparse(|_| false).unwrap();
+        sparse.into_iter().find(|sparse| sparse.key == at).map(|sparse| sparse.live)
+    };
+    assert_eq!(live(&read_from), Some(BLOCK as u64), "extent 1 alone held there");
+}
+
+/// cladefs: doc-27 (board 6214): an extent the cell holds as it opened from the bucket, in the
+/// bucket's layer of its map, relocates as one it acknowledged does: its own layer holds it in the
+/// open segment from then on. Placing it there took an entry of its own layer it hadn't, and
+/// aborted the process (the verifying review of 6a7f60008).
+#[tokio::test(flavor = "multi_thread")]
+async fn extents_the_cell_opened_with_relocate() {
+    let key = bucket_cell::layout::segment(CELL, 3, 1);
+    let location = Location { key, offset: 0, len: BLOCK as u64 };
+    let mut state = bucket_cell::State::new(CELL);
+    state.extents.insert(extent(5), location.clone());
+    state.next_sequence = 6;
+    let cell = created_on(MemDir::new(), 1 << 20, state, WRITER);
+    let relocating = Relocating { extent: extent(5), from: location, data: pattern(5, 0, BLOCK) };
+    assert_eq!(cell.relocate(vec![relocating]).await.unwrap(), BLOCK as u64);
+    let place = cell.place(extent(5)).unwrap();
+    assert_eq!(place, Some(Place::Run { cell: CELL.id, number: 0, offset: 0 }));
+    let mut read = vec![0; BLOCK];
+    cell.read(extent(5), 0, &mut read).unwrap();
+    assert_eq!(read, pattern(5, 0, BLOCK));
+}
+
+/// cladefs: doc-27 (board 6214): a guest's free, not yet committed when its writer's relocation
+/// commits, is freed by the guest's next commit, not the relocation's: a view as of the
+/// relocation's commit holds the extent, as that commit does. A free was numbered as the next
+/// commit's when made, which the relocation's took (the reviews of 6a7f60008; a resize's did too).
+#[tokio::test(flavor = "multi_thread")]
+async fn frees_pending_across_a_relocation_are_the_next_commits() {
+    let dir = MemDir::new();
+    let cell = create(dir.clone(), 1 << 20);
+    for sequence in 0..2 {
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+    }
+    cell.commit(None).await.unwrap();
+    assert!(cell.close_now().await.unwrap());
+    let closed = closed_one(&cell).await;
+    cell.acknowledged(closed.number).await.unwrap();
+    let Some(Place::Bucket(from)) = cell.place(extent(1)).unwrap() else { panic!("in the bucket") };
+    cell.free(extent(0)).unwrap();
+    let relocating = Relocating { extent: extent(1), from, data: pattern(1, 0, BLOCK) };
+    assert_eq!(cell.relocate(vec![relocating]).await.unwrap(), BLOCK as u64);
+    let view = cell.view();
+    assert_eq!(cell.view_extent(&view, extent(0)).unwrap(), BLOCK as u64);
+    cell.commit(None).await.unwrap();
+    assert_eq!(cell.view_extent(&view, extent(0)).unwrap(), BLOCK as u64, "freed after its commit");
+    let after = cell.view();
+    error_is(cell.view_extent(&after, extent(0)).map(drop), NoExtent(extent(0)));
+}
+
+/// cladefs: doc-27 (board 6214): a relocation between the guest's commits leaves what the guest
+/// wrote in the open segment to its next commit to seal in place, copying none of it; and while
+/// the guest has filled a segment since its last commit, it relocates nothing, closing none of the
+/// segments the guest writes in. A relocation's commit closed the segments filled since, and the
+/// guest's next commit copied out what it wrote in them (the verifying review of 6a7f60008).
+#[tokio::test(flavor = "multi_thread")]
+async fn relocations_leave_the_guests_writes_to_seal_in_place() {
+    let dir = MemDir::new();
+    // Its segments filled in a few dozen writes.
+    let options = Options { max_extent: 64 << 10, ..OPTIONS };
+    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
+    let cell = LocalCell::create(dir.clone(), description, options).unwrap();
+    for sequence in 0..2 {
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+    }
+    cell.commit(None).await.unwrap();
+    assert!(cell.close_now().await.unwrap());
+    let closed = closed_one(&cell).await;
+    cell.acknowledged(closed.number).await.unwrap();
+    let from = |sequence| match cell.place(extent(sequence)).unwrap() {
+        Some(Place::Bucket(at)) => at,
+        place => panic!("{place:?}"),
+    };
+    let relocating = |sequence: u64| Relocating {
+        extent: extent(sequence),
+        from: from(sequence),
+        data: pattern(sequence as u8, 0, BLOCK),
+    };
+    // An extent the guest has open, its run ended, which an extent it freed open wrote after.
+    cell.write(extent(10), 0, &pattern(10, 0, BLOCK)).await.unwrap();
+    cell.write(extent(12), 0, &pattern(12, 0, BLOCK)).await.unwrap();
+    cell.free(extent(12)).unwrap();
+    let copied = local_cell::written().copied;
+    assert_eq!(cell.relocate(vec![relocating(0)]).await.unwrap(), BLOCK as u64);
+    cell.commit(None).await.unwrap();
+    assert_eq!(local_cell::written().copied, copied, "the guest's commit copied");
+    assert_eq!(
+        cell.place(extent(10)).unwrap(),
+        Some(Place::Run { cell: CELL.id, number: 1, offset: 0 })
+    );
+
+    // A run the guest writes on, which a copy at its end would split: the relocation yields.
+    cell.write(extent(11), 0, &pattern(11, 0, BLOCK)).await.unwrap();
+    assert_eq!(cell.relocate(vec![relocating(1)]).await.unwrap(), 0);
+    cell.write(extent(11), BLOCK as u64, &pattern(11, BLOCK, BLOCK)).await.unwrap();
+    cell.commit(None).await.unwrap();
+    assert_eq!(local_cell::written().copied, copied, "the guest's commit copied");
+
+    // The guest fills the open segment, and writes on in the next.
+    let filled = options.segment_limit() / BLOCK as u64 + 1;
+    for sequence in 20..20 + filled {
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+    }
+    assert_eq!(cell.relocate(vec![relocating(1)]).await.unwrap(), 0);
+    assert_eq!(cell.place(extent(1)).unwrap(), Some(Place::Bucket(from(1))));
+    cell.commit(None).await.unwrap();
+    assert_eq!(local_cell::written().copied, copied, "the guest's commit copied");
+}
+
+/// cladefs: doc-27 (board 6214): a relocation's copy that fails, as a disk's write would, fails the
+/// relocation, not the cell: what it copied before is committed, the rest stays in the bucket, and
+/// the guest goes on writing and committing (the verifying review of 6a7f60008).
+#[tokio::test(flavor = "multi_thread")]
+async fn relocations_failing_leave_the_cell_whole() {
+    let scenario = fail::FailScenario::setup();
+    let dir = MemDir::new();
+    let cell = create(dir.clone(), 1 << 20);
+    for sequence in 0..2 {
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+    }
+    cell.commit(None).await.unwrap();
+    assert!(cell.close_now().await.unwrap());
+    let closed = closed_one(&cell).await;
+    cell.acknowledged(closed.number).await.unwrap();
+    let from: Vec<Location> = (0..2)
+        .map(|sequence| match cell.place(extent(sequence)).unwrap() {
+            Some(Place::Bucket(at)) => at,
+            place => panic!("{place:?}"),
+        })
+        .collect();
+    let relocating = (0..2)
+        .map(|sequence| Relocating {
+            extent: extent(sequence),
+            from: from[sequence as usize].clone(),
+            data: pattern(sequence as u8, 0, BLOCK),
+        })
+        .collect();
+    fail::cfg("relocate::write", "1*off->return").unwrap();
+    let failed = cell.relocate(relocating).await.unwrap_err();
+    assert_eq!(
+        format!("{failed:#}"),
+        "relocating, 4096 bytes relocated: relocating ExtentId { cell: 7, sequence: 1 }: failpoint relocate::write"
+    );
+    fail::remove("relocate::write");
+    assert!(matches!(cell.place(extent(0)).unwrap(), Some(Place::Run { .. })));
+    assert_eq!(cell.place(extent(1)).unwrap(), Some(Place::Bucket(from[1].clone())));
+    cell.write(extent(10), 0, &pattern(10, 0, BLOCK)).await.unwrap();
+    cell.commit(None).await.unwrap();
+    let mut read = vec![0; BLOCK];
+    cell.read(extent(0), 0, &mut read).unwrap();
+    assert_eq!(read, pattern(0, 0, BLOCK));
+    scenario.teardown();
 }
 
 /// cladefs: a commit that fills the open segment closes it, and leaves its framing to a thread of

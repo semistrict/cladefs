@@ -265,7 +265,7 @@ mod tests {
         let read = block_on(read(&bucket, VERSION, &ring.of(cell.id)));
         assert_eq!(read, Some(Read { recordings: vec![units(1)], refused: 0 }));
 
-        let bytes = block_on(bucket::get(&bucket, &key)).unwrap().bytes;
+        let bytes = block_on(bucket::get(&bucket, &key)).unwrap().unwrap().bytes;
         let elsewhere = layout::evidence(cell, 7, 5, 1);
         let copied = decode(&elsewhere, &bytes, &ring.of(cell.id)).map(drop);
         assert!(matches!(copied, Err(Error::Corrupt(ref why)) if why.contains("written at")));

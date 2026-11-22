@@ -182,7 +182,11 @@ The new writer `W'`, at the VM manager's take, on any host:
    garbled or forged, would otherwise hide an honest one. Only a copy found not authentic is
    passed over; one that can't be read, or reads shorter than its fence said, fails the take,
    as it may be the only copy of commits told Replicated, and so does a log with no authentic
-   copy.
+   copy. *Added 2026-11-21 (board 5416):* each copy is read to the end its member's fence said,
+   no further, the stream dropped there (a faulty member streaming on grew memory without
+   bound), and each piece within the peer deadline (5 s) of the one before (a member whose disk
+   stalled answered its keepalives and held the take for ever). A copy that can't be read so is
+   passed over if another as long is read; else it fails the take, as above.
 4. **Rebase** with the existing code (`Wal::rebase`, `bucket_cell/src/wal.rs:148`): the records
    through the head's `last_commit` are the bucket's already, and the rest is restamped onto
    `W'`'s chain. Members may have dropped segments the head acknowledged, so the replica tail can
