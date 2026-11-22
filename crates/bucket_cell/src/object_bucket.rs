@@ -3378,7 +3378,10 @@ pub(crate) mod tests {
             server.connections() - before
         };
         assert_eq!([(); 3].map(|()| connects(&own)), [1, 1, 1]);
-        let shared = runtime();
+        // A thread's, as each own runtime is: on a multi-threaded one, a connection's task, on a
+        // worker of its own, could still be ending the last response when the next request looked
+        // for an idle connection, and that one connected anew on a loaded host (board 7058).
+        let shared = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let on_shared = || assert!(shared.block_on(get()).unwrap().is_none());
         assert_eq!([(); 3].map(|()| connects(&on_shared)), [1, 0, 0]);
     }
