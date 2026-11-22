@@ -648,6 +648,12 @@ impl HostFetcher {
         async move { read.await.map_err(|err| Failure::local(err, "fetching"))? }
     }
 
+    /// cladefs: whether it keeps the parts it fetches in the host's cache, which
+    /// [`HostFetcher::fetch_ahead`] fetches into (`Fetcher::keeps_parts`, board 6225).
+    pub(crate) fn keeps_parts(&self) -> bool {
+        self.parts.keeps_parts()
+    }
+
     /// cladefs: fetches the parts holding the `len` bytes at `offset` in `extent`, whose data is
     /// at `location` in the bucket, into the host's cache, as read-ahead, behind reads waiting for
     /// theirs (`Fetcher::fetch_ahead`, TASK-702.3): how many it fetched itself. On the runtime its
