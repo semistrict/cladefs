@@ -461,9 +461,21 @@ impl<'a> Request<'a> {
         };
         let has = |flag: u32| flags & flag != 0;
         let nothing = || if payload.is_empty() { Ok(()) } else { Err(Errno::EINVAL) };
+        // A body's words its flags give no meaning are 0: decoded into what it means, a request
+        // holds nothing it ignores.
+        let unused = |words: &[u64]| match words.iter().all(|&word| word == 0) {
+            true => Ok(()),
+            false => Err(Errno::EINVAL),
+        };
         Ok(match kind {
             OPEN => {
                 let body: OpenBody = header.decode_body()?;
+                let OpenBody { capacity, cell, cell_version, tenant, .. } = body;
+                match flags {
+                    OPEN_FORK => {}
+                    flags if flags & OPEN_CREATE != 0 => unused(&[cell, cell_version, tenant])?,
+                    _ => unused(&[capacity, cell, cell_version, tenant])?,
+                }
                 let opening = match flags {
                     0 => Opening::Existing,
                     OPEN_CREATE => Opening::Create(body.capacity, Kind::Fxfs),
@@ -492,7 +504,10 @@ impl<'a> Request<'a> {
                     true => ReadInto::Transfer { at: body.transfer_at },
                     // cladefs: a reply holds no more (TASK-79.16).
                     false if body.len > MAX_PAYLOAD => return Err(Errno::EINVAL),
-                    false => ReadInto::Reply,
+                    false => {
+                        unused(&[body.transfer_at])?;
+                        ReadInto::Reply
+                    }
                 };
                 check_range_ends(body.offset, body.len)?;
                 let extent = check_extent_id(body.cell, body.sequence)?;
@@ -505,12 +520,13 @@ impl<'a> Request<'a> {
                 // The data, and the root after it in the payload, if any.
                 let (data, root) = match has(WRITE_TRANSFER) {
                     true => (Data::Transfer { at: body.transfer_at, len: body.data_len }, payload),
-                    false if has_root => {
+                    false => {
+                        unused(&[body.transfer_at])?;
+                        // An inline write's data is data_len bytes, its root what follows.
                         let len = usize::try_from(body.data_len).map_err(|_| Errno::EINVAL)?;
                         let (data, root) = payload.split_at_checked(len).ok_or(Errno::EINVAL)?;
                         (Data::Inline(data), root)
                     }
-                    false => (Data::Inline(payload), &[][..]),
                 };
                 if !has_root && !root.is_empty() {
                     return Err(Errno::EINVAL);
@@ -549,7 +565,10 @@ impl<'a> Request<'a> {
                         extent: check_extent_id(body.cell, body.sequence)?,
                         offset: body.offset,
                     },
-                    true => MappingContents::Zeros,
+                    true => {
+                        unused(&[body.cell, body.sequence, body.offset])?;
+                        MappingContents::Zeros
+                    }
                 };
                 Request::Map(check_mapping(WindowMapping {
                     window_offset: body.window_offset,
@@ -1174,7 +1193,12 @@ pub(crate) fn mappings(payload: &[u8]) -> Result<Vec<WindowMapping>, Errno> {
                     extent: check_extent_id(entry.cell.get(), entry.sequence.get())?,
                     offset: entry.offset.get(),
                 },
-                MAPPING_ZEROS => MappingContents::Zeros,
+                // cladefs: zeros name no extent.
+                MAPPING_ZEROS
+                    if [entry.cell, entry.sequence, entry.offset].iter().all(|w| w.get() == 0) =>
+                {
+                    MappingContents::Zeros
+                }
                 _ => return Err(Errno::EINVAL),
             };
             check_mapping(WindowMapping {
@@ -1399,16 +1423,19 @@ mod tests {
             Header::new(WRITE, 1).with_body(&WriteBody {
                 cell: 1,
                 sequence: 1,
+                data_len: 4096,
                 ..Default::default()
             }),
             Header::new(WRITE, 1).with_body(&WriteBody {
                 cell: 1,
                 sequence: last,
+                data_len: 4096,
                 ..Default::default()
             }),
             Header::new(WRITE, 1).with_body(&WriteBody {
                 cell: 1,
                 sequence: last - 1,
+                data_len: 4096,
                 ..Default::default()
             }),
             vec![7; 4096],
@@ -1766,6 +1793,32 @@ mod tests {
             .with_flags(WRITE_TRANSFER);
         refused(transfer, b"no root", vec![]);
         refused(Header::new(COMMIT, 1), b"no root", vec![]);
+        // board 6917: words a request's flags give no meaning are 0.
+        let inline = WriteBody { cell: 1, sequence: 1, offset: 0, transfer_at: 0, data_len: 4 };
+        refused(Header::new(WRITE, 1).with_body(&inline), b"data and more", vec![]);
+        let aimed = WriteBody { transfer_at: 0xdead, ..inline };
+        refused(Header::new(WRITE, 1).with_body(&aimed), b"data", vec![]);
+        let aimed = ReadBody { transfer_at: 0xdead, ..read_body };
+        refused(Header::new(READ, 1).with_body(&aimed), b"", vec![]);
+        let zeros = MapBody { cell: 1, sequence: 1, offset: 0, len: 4096, window_offset: 0 };
+        refused(Header::new(MAP, 1).with_body(&zeros).with_flags(MAP_ZEROS), b"", vec![]);
+        let zeros_many = MappingWire {
+            window_offset: 0u64.into(),
+            len: 4096u64.into(),
+            cell: 0u64.into(),
+            sequence: 0u64.into(),
+            offset: 4096u64.into(),
+            flags: MAPPING_ZEROS.into(),
+        };
+        refused(Header::new(MAP_MANY, 1), zeros_many.as_bytes(), vec![]);
+        for (flags, body) in [
+            (0, OpenBody { tenant: 1, ..Default::default() }),
+            (OPEN_READ_ONLY, OpenBody { capacity: 4096, ..Default::default() }),
+            (OPEN_CREATE, OpenBody { capacity: 4096, cell: 1, ..Default::default() }),
+        ] {
+            let body = OpenBody { version: VERSION, ..body };
+            refused(Header::new(OPEN, 1).with_flags(flags).with_body(&body), b"s", vec![]);
+        }
         let open = |flags| with_version(Header::new(OPEN, 1).with_flags(flags));
         for path in [&b""[..], &b"a\0b"[..]] {
             refused(Header::new(FORK, 1), path, vec![]);

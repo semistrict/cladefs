@@ -1743,6 +1743,7 @@ fn run_hostile(
                     let written = Header::new(WRITE, id()).with_body(&WriteBody {
                         cell: own,
                         sequence,
+                        data_len: 1 << 20,
                         ..Default::default()
                     });
                     let written = send(written, &noise(own ^ sequence, 1 << 20), None);
@@ -1792,6 +1793,7 @@ fn run_hostile(
             let written = Header::new(WRITE, id()).with_body(&WriteBody {
                 cell: own,
                 sequence: FLOOD_EXTENT,
+                data_len: FLOOD_READ,
                 ..Default::default()
             });
             let written = send(written, &vec![0x3c; FLOOD_READ as usize], None);
@@ -2268,8 +2270,12 @@ fn what_requests_hold_is_within_the_credit() {
     sender.send(transfer, &[], &[area.as_fd()]).unwrap();
     let transferred = receiver.receive(|| 0).unwrap().unwrap().header;
     assert_eq!((transferred.id, transferred.status), (1, 0));
-    let written =
-        Header::new(WRITE, 2).with_body(&WriteBody { cell, sequence: 1, ..Default::default() });
+    let written = Header::new(WRITE, 2).with_body(&WriteBody {
+        cell,
+        sequence: 1,
+        data_len: len,
+        ..Default::default()
+    });
     assert_eq!(
         super::call(&sender, &mut receiver, written, &vec![7; len as usize]).header.status,
         0
@@ -2345,6 +2351,7 @@ fn what_requests_hold_is_within_the_credit() {
         Header::new(WRITE, 300 + id).with_body(&WriteBody {
             cell,
             sequence: 20 + id,
+            data_len: len,
             ..Default::default()
         })
     });
@@ -2551,8 +2558,12 @@ fn connections_lost_mid_payload_hold_none_of_their_tenants_bytes_in_flight() {
     {
         let (sender, receiver, stream, cell) =
             super::raw_connection(&socket, &cells.join("store"), 1 << 30);
-        let mut written =
-            Header::new(WRITE, 2).with_body(&WriteBody { cell, sequence: 1, ..Default::default() });
+        let mut written = Header::new(WRITE, 2).with_body(&WriteBody {
+            cell,
+            sequence: 1,
+            data_len: MAX_PAYLOAD,
+            ..Default::default()
+        });
         written.len = MAX_PAYLOAD;
         let mut sent = &stream;
         std::io::Write::write_all(&mut sent, zerocopy::IntoBytes::as_bytes(&written)).unwrap();
@@ -2575,8 +2586,12 @@ fn connections_lost_mid_payload_hold_none_of_their_tenants_bytes_in_flight() {
     assert_eq!(mallory.in_flight().held(), 0, "the lost connection's bytes in flight");
     let (sender, mut receiver, _stream, cell) =
         super::raw_connection(&socket, &cells.join("other"), 1 << 30);
-    let written =
-        Header::new(WRITE, 2).with_body(&WriteBody { cell, sequence: 1, ..Default::default() });
+    let written = Header::new(WRITE, 2).with_body(&WriteBody {
+        cell,
+        sequence: 1,
+        data_len: 1 << 20,
+        ..Default::default()
+    });
     let data = super::pattern(1, 1 << 20);
     let answered = within(WAIT, move || super::call(&sender, &mut receiver, written, &data))
         .expect("the write answered");
@@ -2709,6 +2724,7 @@ fn a_tenants_in_flight_data_is_bounded() {
             let written = Header::new(WRITE, 2).with_body(&WriteBody {
                 cell,
                 sequence: 1,
+                data_len: MIB,
                 ..Default::default()
             });
             sender.send(written, &super::pattern(1, MIB as usize), &[]).unwrap();
@@ -2761,6 +2777,7 @@ fn a_tenants_in_flight_data_is_bounded() {
     let awritten = Header::new(WRITE, 2).with_body(&WriteBody {
         cell: acell,
         sequence: 1,
+        data_len: MIB,
         ..Default::default()
     });
     let alice_write =

@@ -2949,8 +2949,12 @@ fn vm_processes_that_stop_reading_hold_up_no_other() {
     // An extent, read back whole in one reply, many times what the socket holds, which it never
     // reads.
     let len = 4 << 20;
-    let written =
-        Header::new(WRITE, 2).with_body(&WriteBody { cell, sequence: 1, ..Default::default() });
+    let written = Header::new(WRITE, 2).with_body(&WriteBody {
+        cell,
+        sequence: 1,
+        data_len: len as u64,
+        ..Default::default()
+    });
     sender.send(written, &pattern(1, len), &[]).unwrap();
     assert_eq!(receiver.receive(|| 0).unwrap().unwrap().header.status, 0);
     let read = Header::new(READ, 3).with_body(&ReadBody {
@@ -2994,8 +2998,12 @@ fn vm_processes_that_leave_replies_unread_are_let_go() {
     let (sender, mut receiver, stream, cell) =
         raw_connection(&socket, &dir.path().join("store"), 1 << 24);
     let len = 8 << 20;
-    let written =
-        Header::new(WRITE, 2).with_body(&WriteBody { cell, sequence: 1, ..Default::default() });
+    let written = Header::new(WRITE, 2).with_body(&WriteBody {
+        cell,
+        sequence: 1,
+        data_len: len as u64,
+        ..Default::default()
+    });
     sender.send(written, &pattern(1, len), &[]).unwrap();
     assert_eq!(receiver.receive(|| 0).unwrap().unwrap().header.status, 0);
     let reads = (3..67).map(|id| {
@@ -3030,8 +3038,12 @@ fn vm_processes_naming_vast_windows_are_let_go_all_the_same() {
         .with_flags(WINDOW_COPYING);
     let answered = call(&sender, &mut receiver, window, &[]).header.status;
     let len = 8 << 20;
-    let written =
-        Header::new(WRITE, 3).with_body(&WriteBody { cell, sequence: 1, ..Default::default() });
+    let written = Header::new(WRITE, 3).with_body(&WriteBody {
+        cell,
+        sequence: 1,
+        data_len: len as u64,
+        ..Default::default()
+    });
     assert_eq!(call(&sender, &mut receiver, written, &pattern(1, len)).header.status, 0);
     let reads = (4..68).map(|id| {
         Header::new(READ, id).with_body(&ReadBody {
@@ -4229,6 +4241,7 @@ async fn shrinks_return_once_the_pages_they_evict_are_free() {
         let written = Header::new(WRITE, sequence).with_body(&WriteBody {
             cell,
             sequence,
+            data_len: CHUNK,
             ..Default::default()
         });
         served(written, &pattern(sequence as u8, CHUNK as usize));
@@ -4350,7 +4363,7 @@ impl HandVm {
         let cell = self.cell;
         self.call(
             WRITE,
-            &WriteBody { cell, sequence: 1, ..Default::default() },
+            &WriteBody { cell, sequence: 1, data_len: len, ..Default::default() },
             &pattern(1, len as usize),
             true,
         );
@@ -4806,8 +4819,12 @@ fn window_mappings_are_answered_beside_the_stream_data_in_flight() {
     // window's mappings, their replies unread, which the daemon holds.
     let id = 3 + count;
     let extent = pattern(4, MAX_PAYLOAD as usize);
-    let written =
-        Header::new(WRITE, id).with_body(&WriteBody { cell, sequence: 1, ..Default::default() });
+    let written = Header::new(WRITE, id).with_body(&WriteBody {
+        cell,
+        sequence: 1,
+        data_len: MAX_PAYLOAD,
+        ..Default::default()
+    });
     assert_eq!(call(&sender, &mut receiver, written, &extent).header.status, 0);
     let reads = MAX_STREAM_BYTES / MAX_PAYLOAD;
     for n in 1..=reads {
