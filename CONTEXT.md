@@ -161,13 +161,23 @@ _Avoid_: PMM, page pool
 One shared memory object of physical memory, one per tenant plus the default one.
 
 **Chunk**:
-The 2 MiB unit an arena takes from and gives back to physical memory.
+The 2 MiB unit an arena takes from and gives back to physical memory. Slabs replace it (doc-26).
+
+**Slab**:
+The 1 MiB unit of an arena, a part's size, at an offset of its memory object: a part in the extent cache holds a whole one, or a run of a small slab's pages (doc-26; not in the code yet).
+_Avoid_: chunk (the 2 MiB unit it replaces), frame
+
+**Staged** (a slab, to a VM process):
+Named to the VM process's window by a `STAGE_MAP` since the slab was filled: the VM processes its quarantine waits for (doc-26).
+
+**Eviction token**:
+What an evicted part's slot holds while one eviction, which alone holds the slab, takes it from the windows (doc-26; not in the code yet).
 
 **Relief**:
 Eviction of cached pages for an arena starved at its cap.
 
 **Quarantine**:
-Where a freed page waits until no VM process may still map it.
+Where a freed page waits until no VM process may still map it: since doc-26, a slab, until each VM process it was staged to acknowledged what took it away, or died.
 
 **Governor**:
 What bounds the daemon's one memory budget, which every cache of its holds under; and, the disk
@@ -304,13 +314,13 @@ What forks of a version read of it as they opened, each tenant's apart: a **reco
 _Avoid_: working set, boot profile (TASK-38's per-host file, which it replaces)
 
 **Prediction**:
-What a version's next fork will read, as its tenant's newest recordings say: every unit any of them read, the earliest read first. A host fetches it into its part cache as the fork opens, behind the guest's reads, and counts how well each boot was predicted (TASK-702.3).
+What a version's next fork will read, as its tenant's newest recordings say: every unit any of them read, the earliest read first. A host fetches it into its part cache as the fork opens, behind the guest's reads, then reads it from there into the extent cache, as the guest's page-ins would (board 6225), and counts how well each boot was predicted (TASK-702.3). One read of no recordings is not kept: the next fork reads it again (board 5337).
 
 **Head**:
 A cell's one record that changes: what made it, its keys, who writes it, the commit it ends at, and its versions, kept in its head slots. Taking it is taking the cell.
 
 **Head slot**:
-One of the objects a head is kept in, its bucket's setting of them, 10 by default: version k in slot k mod N, each swap conditional on its slot, so that the head is swapped as often as the bucket takes writes of N objects.
+One of the objects a head is kept in, its bucket's setting of them, 10 by default: version k in slot k mod N, each swap conditional on its slot, so that the head is swapped as often as the bucket takes writes of N objects. doc-27 retires them: one head object everywhere, its swaps coalesced.
 _Avoid_: shard, replica, copy
 
 **Mark** (of a head):
@@ -379,6 +389,10 @@ How far a cell's uploads may fall behind its commits before commits stall.
 A cell's state as of a segment, so recovery reads from it rather than from the beginning. An
 ephemeral cell's is a **local checkpoint**, in its directory.
 _Avoid_: checkpoint for Fxfs's (say **journal checkpoint**)
+
+**Relocation**:
+A writer's commit copying live extents of its own cell's sparse segments into its open segment, which the head names as any: compaction, done by writers (doc-27; not in the code yet).
+_Avoid_: moves (the collector's, which relocations replace), cleaning
 
 **Collector**:
 The only thing that deletes from the bucket; **gc** is its short name, in its binary (`cladefs-gc`), keys and metrics.

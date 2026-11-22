@@ -785,6 +785,61 @@ impl CachedExtent {
         Ok(())
     }
 
+    /// cladefs: reads the parts of it holding its `len` bytes at `offset` into memory, ahead of
+    /// any reader, as page-ins read them: those of which a page is neither in memory nor being
+    /// read in. Not as a reader reading on: what a page-in reads ahead of one it reads nothing of.
+    /// How many parts it read in, once none of their pages is being read in any more. What a fork
+    /// reads ahead of its guest of what its version's evidence predicts (`crate::evidence`, board
+    /// 6225).
+    pub(crate) async fn read_ahead(self: &Arc<Self>, offset: u64, len: u64) -> u64 {
+        self.used();
+        let ps = page_size();
+        let parts = {
+            let mut table = self.pages.with(Mutex::lock);
+            let count = table.slots.len() as u64;
+            let end = offset.saturating_add(len).div_ceil(ps).min(count);
+            let mut parts = Vec::new();
+            let mut page = offset / ps;
+            while page < end {
+                let part = self.part_of(page, count);
+                let mut wanted = false;
+                for page in part.clone() {
+                    let slot = &mut table.slots[page as usize];
+                    if matches!(slot, Slot::Absent | Slot::Failed(_)) {
+                        *slot = Slot::Filling;
+                        wanted = true;
+                    }
+                }
+                page = part.end;
+                if wanted {
+                    parts.push(part);
+                }
+            }
+            parts
+        };
+        // Read in by the pager, as a page-in is, so that the reader's going leaves none of them
+        // filling, which a fault would wait on for good.
+        for part in &parts {
+            let span = self.page_in_span(part);
+            extent_cache().pager.spawn(self.clone().read_part(part.clone(), span, None));
+        }
+        loop {
+            let listener = {
+                let table = self.pages.with(Mutex::lock);
+                let filling = |part: &Range<u64>| {
+                    part.clone().any(|page| matches!(table.slots[page as usize], Slot::Filling))
+                };
+                if !parts.iter().any(filling) {
+                    break;
+                }
+                // Listened for under the lock, which what changes a page takes.
+                self.changed.listen()
+            };
+            listener.await;
+        }
+        parts.len() as u64
+    }
+
     /// Copies its bytes at `offset` into `data`, if its pages they are of are all in memory:
     /// whether they were (TASK-234).
     fn copy_present(&self, offset: u64, data: &mut [u8]) -> bool {

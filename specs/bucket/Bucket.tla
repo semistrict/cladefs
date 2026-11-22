@@ -23,13 +23,14 @@
 (* will be named, and the collector deletes it. No key is written twice,   *)
 (* so readers need no versions of a key (KeysWrittenOnce).                 *)
 (*                                                                         *)
-(* The head is one object here: read whole, swapped with a condition. The  *)
-(* bucket keeps it in N objects, its slots, version k in slot k mod N, as  *)
-(* GCS takes about one write a second of an object (TASK-690): a swap is   *)
-(* conditional on its slot, a read reads every slot and takes the newest.  *)
-(* specs/head-slots shows the slots are the one object: a swap succeeds    *)
-(* only for the holder of the newest version, and a read finds a version  *)
-(* that was the newest at some moment of it.                               *)
+(* The head is one object: read whole, swapped in place with a condition  *)
+(* on the version its writer last saw (swapsInPlace), at most as often as  *)
+(* its bucket's store takes writes of one object (TASK-690: GCS's one a    *)
+(* second), each swap naming all that landed since, and a checkpoint       *)
+(* landed meanwhile: a group commit, which changes no step's effect here.  *)
+(* The bucket kept it in N slots for GCS (TASK-691, specs/head-slots), one *)
+(* again since doc-27; the head is never a create-only key per version,    *)
+(* which a writer of a cell removed would create anew.                     *)
 (*                                                                         *)
 (* The bucket holds, per cell: segments, at <<seq, epoch>>, each a footer  *)
 (* naming its writer's epoch, one commit (or none), an extent sealed into  *)
@@ -38,9 +39,9 @@
 (* on with, which a later segment ends; extents stored on their own, at    *)
 (* keys naming their writer's epoch and the segment that names them;       *)
 (* checkpoints, a state as of a segment, at <<seq, epoch>>; its record;    *)
-(* its head; the collector's moves; and the references of its versions'    *)
-(* forks, and their marks. A segment's PUT is in flight from its upload    *)
-(* until it lands, whenever, though its writer has gone.                   *)
+(* its head; and the references of its versions' forks, and their marks.   *)
+(* A segment's PUT is in flight from its upload until it lands, whenever,  *)
+(* though its writer has gone.                                             *)
 (*                                                                         *)
 (* Hosts run writers. Opening a cell swaps its head to the next epoch and  *)
 (* starts its recovery (the head's checkpoint, or the origin's state),     *)
@@ -79,13 +80,22 @@
 (* collector lease, at once with other cells' and with writers: the cell's *)
 (* listing, its record, the cell recovered from its head if it lives, its  *)
 (* state at each version the head names kept, its references listed again, *)
-(* each one's origin's state kept, then compaction and deletion within the *)
-(* cell; the cell's own reference retired once it is deleted and nothing   *)
+(* each one's origin's state kept, then deletion within the cell; the      *)
+(* cell's own reference retired once it is deleted and nothing             *)
 (* in it lives, and the cell removed whole once dead (TASK-455). A         *)
 (* reference is under the cell of the version forked, its parent, and      *)
 (* names the parent, the version's segment and the child: it keeps the     *)
 (* parent's whole state there while it stands, whatever the child frees of *)
 (* it since: the collector is conservative.                                *)
+(*                                                                         *)
+(* Writers compact (doc-27): a writer relocates live extents of its own    *)
+(* cell's acknowledged segments into a new segment of its own, a commit    *)
+(* like any other, which the head names as it names any; the collector     *)
+(* moves nothing, holds no key, and deletes what no state it keeps reads.  *)
+(* Gone with the collector's moves: their keys naming their passes, the    *)
+(* collector keeping every moves on the way from an extent's seal, and     *)
+(* writers naming what their checkpoints moved before writing them         *)
+(* (movesByPass, waysFromSeals, movesTakenFirst; TASK-407.1, TASK-175).    *)
 (*                                                                         *)
 (* Each rule is a member of Rules; specs/bucket/mutations removes one      *)
 (* each, and must find the violation it prevents (each mutation's model    *)
@@ -95,6 +105,14 @@
 (*   swapping the head with a condition, its own taking's: without it, a   *)
 (*   writer taken over writes the head over its successor's, and the       *)
 (*   successor's acknowledged commits are gone (TASK-407).                 *)
+(* - swapsInPlace (NoSwapsInPlace): a swap rewrites the one head object,   *)
+(*   conditional on the version there, so that a swap of a head removed    *)
+(*   with its dead cell fails. Without it, each version of the head is a   *)
+(*   create-only key of its own (head/<k>), which a create of the next     *)
+(*   finds free once the collector removed the cell whole, no tombstone    *)
+(*   left: a writer slow to swap brings the removed cell back              *)
+(*   (RemovedStayGone; specs/head-slots's slotsAtBirth found the same of   *)
+(*   slots created as their turns came).                                   *)
 (* - epochKeys (NoEpochKeys): a segment's and a checkpoint's key names its *)
 (*   writer's epoch: without it, two writers' PUTs land at one key, the    *)
 (*   later over the earlier, which a head names (KeysWrittenOnce).         *)
@@ -103,12 +121,6 @@
 (*   it may yet name: segments and extents of their own at or past its     *)
 (*   end, checkpoints newer than its own; all others are deleted, of an    *)
 (*   epoch no swap of whose can succeed.                                   *)
-(* - movesByPass (NoMovesByPass): the key of moves names the pass that     *)
-(*   made them (the cell's collector lease epoch), so that two passes'     *)
-(*   compactions of one object never write one key; readers find them by   *)
-(*   listing the object's moves. Without it, a pass slow to land its       *)
-(*   create, after later passes made the same moves, then deleted them,    *)
-(*   makes them again at their key, other bytes (TASK-407.1).              *)
 (* - epochSequences (NoEpochSequences): a writer mints from its epoch's    *)
 (*   range, having found the head its taking's after recovering.           *)
 (* - candidatesFirst (NoCandidatesFirst): the collector lists before it    *)
@@ -124,12 +136,6 @@
 (*   made until then.                                                      *)
 (* - collectorAbandons (NoCollectorAbandons): the collector gives up on    *)
 (*   forks being made of versions dropped.                                 *)
-(* - waysFromSeals (NoWaysFromSeals): the collector keeps every moves on   *)
-(*   the way to an extent from where it was sealed, unless the state       *)
-(*   naming it is from a checkpoint of the head's epoch (TASK-175).        *)
-(* - movesTakenFirst (NoMovesTakenFirst): a writer names what its          *)
-(*   checkpoint moves where it went before it writes the checkpoint, only  *)
-(*   forward along the way (TASK-175).                                     *)
 (* - walFollows (NoWalFollows): a WAL is put after the cell only if the    *)
 (*   head's last segment is the WAL's last it names, or, naming none of    *)
 (*   them, the cell's last commit is the commit the WAL started from.      *)
@@ -223,32 +229,40 @@
 (* - doc-14 put the WAL after the cell by segments: WAL segments whose     *)
 (*   footers recovery read were acknowledged. Here by commits, as doc-7's  *)
 (*   recovery on the same host was.                                        *)
+(* - Ahead of the code (doc-27, Wave 2): writers relocate, the collector   *)
+(*   compacts nothing and keeps no moves, an acknowledgement names a       *)
+(*   checkpoint landed, and the head is one object everywhere. Until       *)
+(*   doc-27's steps land, bucket_cell's collector still compacts into      *)
+(*   moves (the spec before this change has their rules), and GCS buckets  *)
+(*   keep their head in slots (specs/head-slots).                          *)
 (*                                                                         *)
 (* Steps are what the code does between two requests, or merged: a         *)
 (* writer's taking swaps the head, the one object saying whether its cell *)
 (* lives (TASK-515), in one step; it reads the head's checkpoint then, and *)
-(* the segments the head names in a step after. The collector's recoveries     *)
-(* read the bucket at once. A checkpoint's PUT lands after its writer took *)
-(* its moves, in a step of its own, while its writer's session lasts, and  *)
-(* its swap into the head in another. Passes overlap if "overlap" is in    *)
+(* the segments the head names in a step after. The collector's recoveries *)
+(* read the bucket at once. A checkpoint's PUT lands in a step of its own, *)
+(* while its writer's session lasts, and the head names it in another: a   *)
+(* swap of its own, or the acknowledgement after it. A relocation is a     *)
+(* commit, made, uploaded and acknowledged as any. Passes overlap if       *)
+(* "overlap" is in                                                         *)
 (* Can, of any cells, a later one of a cell taking its collector lease;    *)
 (* MaxPasses bounds them all. A pass lists its cell; reads its head,       *)
 (* giving up on a fork being made, and recovers the cell in a step after;  *)
-(* lists its references in the next (referencesRelisted); then compacts    *)
-(* and deletes. Reads of other cells' objects (a parent's state, a         *)
+(* lists its references in the next (referencesRelisted); then deletes.    *)
+(* Reads of other cells' objects (a parent's state, a                      *)
 (* version's head) are a pass's GETs; it lists only its own cell, and      *)
 (* deletes only there, but for the reference it retires, whose key its     *)
 (* record gives. Listings are atomic, as before.                           *)
 (*                                                                         *)
 (* Can bounds what happens: each kind of step needs its name in it, so     *)
 (* that a model checks some at a time and a mutation only what it needs.   *)
-(* Moves go two hops at most: a segment's, then those moves'. A commit     *)
-(* spans three segments at most, two going on with it, each a run of one   *)
+(* A commit spans three segments at most, two going on with it, each a     *)
+(* run of one                                                              *)
 (* extent, the one ending it holding nothing else (the code's may hold its *)
 (* frees and more). A segment ends a commit and goes on with the next only *)
-(* with "spanOn" in Can. Not modelled: the collector's grace period        *)
-(* (correctness does not depend on it, doc-7) and its compaction threshold *)
-(* (it compacts any object it may, by choice), and PUTs failing.           *)
+(* with "spanOn" in Can. Not modelled: a writer's compaction threshold and *)
+(* budget (it relocates any extent of its own segments it may, by choice), *)
+(* the spacing of a head's swaps, and PUTs failing.                        *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets, TLC
 
@@ -267,16 +281,16 @@ CONSTANTS
     None,           \* a model value: nothing
     Rules           \* the protocol's rules in force (all, but in a mutation)
 
-AllRules == {"headSwap", "epochKeys", "collectorEpochs", "epochSequences", "candidatesFirst",
-             "tokens", "deleteTokens", "forksCheck", "forksPending", "collectorAbandons",
-             "waysFromSeals", "movesTakenFirst", "walFollows", "acksBetweenCommits",
-             "wholeCommitsKept", "references", "forksReferFirst", "referencesHeld",
-             "referencesRelisted", "originsKept", "forksRecordFirst", "retirementsMarked",
-             "movesByPass", "versionsKept", "versionsCarried", "versionsAcked"}
+AllRules == {"headSwap", "swapsInPlace", "epochKeys", "collectorEpochs", "epochSequences",
+             "candidatesFirst", "tokens", "deleteTokens", "forksCheck", "forksPending",
+             "collectorAbandons", "walFollows", "acksBetweenCommits", "wholeCommitsKept",
+             "references", "forksReferFirst", "referencesHeld", "referencesRelisted",
+             "originsKept", "forksRecordFirst", "retirementsMarked",
+             "versionsKept", "versionsCarried", "versionsAcked"}
 
-AllCan == {"commit", "mint", "seg", "own", "free", "restore", "delete", "place", "checkpoint",
-           "collect", "compact", "compactMoves", "crash", "disk", "overlap", "span",
-           "spanOn", "cut", "deleteRoot", "landInOrder", "version", "dropVersion"}
+AllCan == {"commit", "mint", "seg", "own", "free", "relocate", "restore", "delete", "place",
+           "checkpoint", "collect", "crash", "disk", "overlap", "span", "spanOn", "cut",
+           "deleteRoot", "landInOrder", "version", "dropVersion"}
 
 ASSUME Rules \subseteq AllRules
 ASSUME Can \subseteq AllCan
@@ -303,10 +317,6 @@ VARIABLES
                 \* chain[s + 1] the epoch of s; ckpt the newest checkpoint, <<s, e>>, or <<>>; vers
                 \* its versions, each [id, at]: the ID its commit's footer names (its tag), and the
                 \* segment it is at
-    moves,      \* moves[b][s][e][p]: the moves the collector's passes p made of segment <<s, e>> of
-                \* b: p = <<i>>, pass i's moves of the segment; <<i, j>>, pass j's of those; or None.
-                \* Each [pass, names]: its pass, and the extents it holds
-    mflight,    \* the moves' PUTs in flight: [k, o], at the key k, the moves o
     inflight,   \* the segments' PUTs in flight: [h, b, g, s, o]
     refs,       \* the references of versions' forks, [p, at, c]: under p's cell, naming p, the
                 \* version's segment at, and the child c
@@ -314,8 +324,8 @@ VARIABLES
                 \* (retirementsMarked): a reference marked is garbage, written again or not
     retired,    \* what happened: the references retired (kept with the bucket's variables, as it
                 \* changes with them)
-    written,    \* what happened: every <<key, object>> written at a segment's, a checkpoint's or
-                \* moves' key (KeysWrittenOnce)
+    written,    \* what happened: every <<key, object>> written at a segment's or a checkpoint's
+                \* key (KeysWrittenOnce)
     gone,       \* what happened: the cells a pass removed whole, whose IDs, an allocator's, no
                 \* restore takes again
     \* The hosts.
@@ -335,15 +345,17 @@ VARIABLES
     twice,      \* whether an ID was minted twice
     makers,     \* makers[b]: the makings of b told they made it
     doomed,     \* the makings a deletion of was asked by whoever may
+    relocated,  \* what happened: the segments a writer relocated an extent out of
     taken,      \* taken[b]: the highest token that took b's head, -1 if none did
     placed,     \* placed[b]: the last placement's token
     errors,     \* what failed that must not
     \* Bounds.
     gen, takes, passes, places, crashes, mints
 
-bucketVars == <<seg, own, ckpt, head, moves, mflight, inflight, refs, marked, retired, written, gone>>
+bucketVars == <<seg, own, ckpt, head, inflight, refs, marked, retired, written, gone>>
 hostVars == <<ses, wal, tok, proc>>
-truthVars == <<commits, nextTag, acked, minted, twice, makers, doomed, taken, placed, errors>>
+truthVars == <<commits, nextTag, acked, minted, twice, makers, doomed, relocated, taken, placed,
+              errors>>
 countVars == <<gen, takes, passes, places, crashes, mints>>
 vars == <<bucketVars, hostVars, gc, truthVars, countVars>>
 
@@ -371,28 +383,14 @@ Record(kind, origin, o, base) ==
 \* Whether the head x is a deleted cell's: of the final epoch.
 Deleted(x) == x.epoch = Final
 
-\* How many times the collector moves what was in a segment: into its moves, then those moves'.
-Hops == 2
-\* The passes that may make moves, one after another from a segment: <<i>>, then <<i, j>>.
-Passes == 1..MaxPasses
-Ways == {<<i>> : i \in Passes} \cup {<<i, j>> : i, j \in Passes}
-\* The pass a moves' key names: the one that made them (movesByPass); without the rule, none,
-\* every pass's moves of an object at one key, as before TASK-407.1.
-KP(i) == IF R("movesByPass") THEN i ELSE 1
-
-\* The keys of segment s of b by the writer of epoch e, of its moves along the way p from it
-\* (p = <<>>, the segment itself), and of b's checkpoint as of s by that writer; a key's way, and
-\* its depth.
+\* The keys of segment s of b by the writer of epoch e, and of b's checkpoint as of s by that
+\* writer.
 SegKey(b, s, e) == <<"seg", b, s, KE(e)>>
-Key(b, s, e, p) == IF p = <<>> THEN <<"seg", b, s, e>> ELSE <<"moves", b, s, e, p>>
 CkptKey(b, s, e) == <<"ckpt", b, s, KE(e)>>
-Way(loc) == IF loc[1] = "seg" THEN <<>> ELSE loc[5]
-Depth(loc) == Len(Way(loc))
 
-\* The object at the key k of a segment, a checkpoint or moves, or None.
+\* The object at the key k of a segment or a checkpoint, or None.
 Obj(k) == CASE k[1] = "seg" -> seg[k[2]][k[3]][k[4]]
             [] k[1] = "ckpt" -> ckpt[k[2]][k[3]][k[4]]
-            [] k[1] = "moves" -> moves[k[2]][k[3]][k[4]][k[5]]
 
 \* A state: its extents' locations (the keys holding them), its last commit, its next sequence
 \* number, the last segment applied, the runs of the commit the segments applied last went on with
@@ -520,46 +518,10 @@ Taking(s, b) == head[b] # None /\ head[b].epoch = s.epoch /\ head[b].holder = s.
 \* goes on with (Contents::runs).
 Runs(o, x) == o.ext = x \/ (o.cont # None /\ o.cont.ext = x)
 
-\* Whether the object along the way p from segment <<s, e>> of b names x: the segment's footer, or
-\* the moves' map.
-Names(b, s, e, p, x) ==
-    IF p = <<>> THEN seg[b][s][e] # None /\ Runs(seg[b][s][e], x)
-    ELSE moves[b][s][e][p] # None /\ x \in moves[b][s][e][p].names
-
-\* The ways one hop on from p: the moves of it any pass may have made.
-On(p) == IF Len(p) >= Hops THEN {} ELSE {p \o <<KP(i)>> : i \in Passes}
-
-\* Whether a reader of extent x at loc reads x's bytes: the object at loc's key names it, or, that
-\* object gone, moves of it that do, listed (fetch's read), one hop at a time.
+\* Whether a reader of extent x at loc reads x's bytes: the object at loc's key, there, names it.
 Readable(x, loc) ==
     IF loc[1] = "own" THEN [b |-> loc[2], e |-> loc[3], s |-> loc[4], x |-> x] \in own
-    ELSE \E p \in {Way(loc)} \cup On(Way(loc)) : Names(loc[2], loc[3], loc[4], p, x)
-
-RECURSIVE Followed(_, _, _, _, _)
-\* The way from segment <<s, e>> of b to x, following moves that name it on from p.
-Followed(x, b, s, e, p) ==
-    LET next == {q \in On(p) : Names(b, s, e, q, x)} IN
-    IF next = {} THEN p ELSE Followed(x, b, s, e, CHOOSE q \in next : TRUE)
-
-\* Where a checkpoint records x, at loc, to be: where the collector moved it.
-Moved(x, loc) ==
-    IF loc[1] = "own" THEN loc
-    ELSE Key(loc[2], loc[3], loc[4], Followed(x, loc[2], loc[3], loc[4], Way(loc)))
-
-\* Whether loc2 is further along an extent's way than loc (layout::further): moves of it, or of
-\* those moves.
-Further(loc, loc2) == /\ loc[1] # "own" /\ loc2[1] = "moves"
-                      /\ loc2[2] = loc[2] /\ loc2[3] = loc[3] /\ loc2[4] = loc[4]
-                      /\ Depth(loc2) > Depth(loc)
-                      /\ SubSeq(Way(loc2), 1, Depth(loc)) = Way(loc)
-
-\* The state st, its extents named where the state ckptSt names them if that is further along their
-\* ways (Writer::take_moves).
-TakeMoves(st, ckptSt) ==
-    [st EXCEPT !.ext = [x \in DOMAIN st.ext |->
-                          IF x \in DOMAIN ckptSt.ext /\ Further(st.ext[x], ckptSt.ext[x])
-                          THEN ckptSt.ext[x]
-                          ELSE st.ext[x]]]
+    ELSE Obj(loc) # None /\ Runs(Obj(loc), x)
 
 -----------------------------------------------------------------------------
 (* The truth. *)
@@ -603,9 +565,17 @@ RefsUnder(c) == {r \in refs : r.p = c}
 
 Stopped(h, b) == ses' = [ses EXCEPT ![h][b].pc = "stopped"]
 
-\* The head of b the writer whose session is s writes: its taking, with what it committed.
-HeadOf(s, b) == [head[b] EXCEPT !.epoch = s.epoch, !.token = s.token, !.holder = s.gen,
-                                !.end = s.end, !.chain = s.chain, !.ckpt = s.hckpt, !.vers = s.vers]
+\* The head of b the writer whose session is s writes: its taking, with what it committed. Without
+\* swapsInPlace, a create of the next version's key where the head was removed: the head the writer
+\* took, with what it committed.
+HeadOf(s, b) == [IF head[b] = None THEN s.rec ELSE head[b]
+                    EXCEPT !.epoch = s.epoch, !.token = s.token, !.holder = s.gen, !.end = s.end,
+                           !.chain = s.chain, !.ckpt = s.hckpt, !.vers = s.vers]
+
+\* Whether the writer whose session is s may swap b's head: it is its taking still (headSwap); or,
+\* without swapsInPlace, the head is gone, removed with its cell, and the create of the next
+\* version's key finds it free.
+Swappable(s, b) == Taking(s, b) \/ (~R("swapsInPlace") /\ head[b] = None)
 
 \* s, the session of a writer of b, its recovery started from b's head H as it swapped it: from
 \* the head's checkpoint, or its origin's state; stopped, what that needs gone.
@@ -637,7 +607,8 @@ Open(h, b) ==
            s == [gen |-> gen + 1, pc |-> "read", epoch |-> e, token |-> tok[h][b],
                  origin |-> head[b].origin, st |-> Fresh, at |-> 0, end |-> 0, chain |-> <<>>,
                  hckpt |-> <<>>, seq |-> 0, next |-> <<0, 0>>, up |-> {}, done |-> {}, open |-> {},
-                 ckptThrough |-> -1, ckptPut |-> None, durable |-> None, vers |-> {}]
+                 ckptThrough |-> -1, ckptPut |-> None, durable |-> None, vers |-> {},
+                 rec |-> head[b]]
        IN /\ head' = [head EXCEPT ![b] = [@ EXCEPT !.epoch = e, !.token = tok[h][b],
                                                    !.holder = gen + 1,
                                                    !.vers = IF R("versionsCarried") THEN @ ELSE {}]]
@@ -645,9 +616,9 @@ Open(h, b) ==
     /\ taken' = [taken EXCEPT ![b] = IF tok[h][b] > @ THEN tok[h][b] ELSE @]
     /\ gen' = gen + 1
     /\ takes' = takes + 1
-    /\ UNCHANGED <<seg, own, ckpt, moves, mflight, inflight, refs, marked, retired, written, gone, wal, tok,
+    /\ UNCHANGED <<seg, own, ckpt, inflight, refs, marked, retired, written, gone, wal, tok,
                    proc, gc>>
-    /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, doomed, placed, errors>>
+    /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, relocated, doomed, placed, errors>>
     /\ UNCHANGED <<passes, places, crashes, mints>>
 
 RECURSIVE Restamp(_, _, _, _)
@@ -721,7 +692,7 @@ RecoverRead(h, b) ==
        /\ IF ~r.ok THEN Stopped(h, b) /\ UNCHANGED <<wal, acked, errors>>
           ELSE Opened(h, b, [s EXCEPT !.st = r.st, !.seq = s.end])
        /\ UNCHANGED <<bucketVars, tok, proc, gc, countVars>>
-       /\ UNCHANGED <<commits, nextTag, minted, twice, makers, doomed, taken, placed>>
+       /\ UNCHANGED <<commits, nextTag, minted, twice, makers, relocated, doomed, taken, placed>>
 
 Ready(h, b) == ses[h][b] # None /\ ses[h][b].pc = "ready"
 
@@ -735,7 +706,7 @@ Mint(h, b) ==
        /\ ses' = [ses EXCEPT ![h][b].open = @ \cup {x}, ![h][b].next = <<@[1], @[2] + 1>>]
        /\ mints' = mints + 1
        /\ UNCHANGED <<bucketVars, wal, tok, proc, gc>>
-       /\ UNCHANGED <<commits, nextTag, acked, makers, doomed, taken, placed, errors>>
+       /\ UNCHANGED <<commits, nextTag, acked, makers, relocated, doomed, taken, placed, errors>>
        /\ UNCHANGED <<gen, takes, passes, places, crashes>>
 
 \* What a commit does, besides committing: make a version, the cell quiescent, sealing nothing;
@@ -755,10 +726,18 @@ Ops(h, b) ==
                                  /\ ws[Len(ws)].s \notin s.up /\ ws[Len(ws)].o.cont = None
                               THEN {TRUE} ELSE {})
         open == IF "span" \in Can THEN s.open ELSE {}
+        \* What the writer may relocate (doc-27): extents of its own cell's segments acknowledged,
+        \* live in its guest's view, where its state acknowledged has them.
+        movable == IF "relocate" \notin Can THEN {}
+                   ELSE {x \in DOMAIN s.st.ext \cap DOMAIN v.ext :
+                           s.st.ext[x][1] = "seg" /\ s.st.ext[x][2] = b /\ v.ext[x] = s.st.ext[x]}
     IN (IF "commit" \in Can THEN {op("plain", None)} ELSE {})
        \* A version's commit (TASK-476): of a quiescent cell, sealing nothing.
        \cup (IF "version" \in Can /\ s.open = {} THEN {op("version", None)} ELSE {})
        \cup {op("seg", x) : x \in IF "seg" \in Can THEN s.open ELSE {}}
+       \* A relocation (doc-27): the writer's own commit, copying a live extent's bytes into its
+       \* segment, which names it there, as a seal does; its guest's state unchanged.
+       \cup {op("relocate", x) : x \in movable}
        \cup {op("own", x) : x \in IF "own" \in Can THEN s.open ELSE {}}
        \cup {op("free", x) : x \in IF "free" \in Can THEN DOMAIN v.ext ELSE {}}
        \cup {span(<<x>>, on) : x \in open, on \in ons}
@@ -766,7 +745,8 @@ Ops(h, b) ==
 
 \* A commit: segments of the WAL, stamped by the chain: those going on with it, if it spans
 \* segments (Contents::continued, each naming the commit and its run there), the first perhaps
-\* the WAL's last, then the one it ends in.
+\* the WAL's last, then the one it ends in. A relocation's commit names the extent it copies, as a
+\* seal does, which held it already: the commits' extents are the same.
 Commit(h, b) ==
     LET s == ses[h][b]
         t == nextTag
@@ -783,7 +763,7 @@ Commit(h, b) ==
                 before == IF op.on THEN [ws EXCEPT ![Len(ws)].o.cont = cont(1)] ELSE ws
                 o == [epoch |-> s.epoch,
                       commit |-> t,
-                      ext |-> IF op.k = "seg" THEN op.x ELSE None,
+                      ext |-> IF op.k \in {"seg", "relocate"} THEN op.x ELSE None,
                       own |-> IF op.k = "own" THEN op.x ELSE None,
                       free |-> IF op.k = "free" THEN op.x ELSE None,
                       next |-> s.next,
@@ -801,11 +781,13 @@ Commit(h, b) ==
                             [s EXCEPT !.seq = @ + n + 1, !.open = @ \ ({op.x} \cup xs),
                                       !.vers = @ \cup early]]
                /\ commits' = [commits EXCEPT ![t] = [cell |-> b, parent |-> View(h, b).tip,
-                                                      seals |-> IF op.k \in {"seg", "own"}
+                                                      seals |-> IF op.k \in {"seg", "own", "relocate"}
                                                                 THEN {op.x} ELSE xs,
                                                       free |-> o.free,
                                                       ver |-> op.k = "version",
                                                       dropped |-> FALSE]]
+               /\ relocated' = IF op.k = "relocate" THEN relocated \cup {s.st.ext[op.x]}
+                               ELSE relocated
        /\ nextTag' = t + 1
        /\ UNCHANGED <<bucketVars, tok, proc, gc>>
        /\ UNCHANGED <<acked, minted, twice, makers, doomed, taken, placed, errors, countVars>>
@@ -821,7 +803,7 @@ Upload(h, b) ==
                  ELSE own \cup {[b |-> b, e |-> w.o.epoch, s |-> w.s, x |-> w.o.own]}
        /\ inflight' = inflight \cup {[h |-> h, b |-> b, g |-> s.gen, s |-> w.s, o |-> w.o]}
        /\ ses' = [ses EXCEPT ![h][b].up = @ \cup {w.s}]
-       /\ UNCHANGED <<seg, ckpt, head, moves, mflight, refs, marked, retired, written, gone, wal, tok, proc,
+       /\ UNCHANGED <<seg, ckpt, head, refs, marked, retired, written, gone, wal, tok, proc,
                       gc, truthVars, countVars>>
 
 \* A PUT lands, whenever, though its writer has gone: at its key, its writer's alone, over what
@@ -838,7 +820,7 @@ Land(m) ==
        /\ seg' = [seg EXCEPT ![m.b][m.s][k[4]] = m.o]
        /\ written' = written \cup {<<k, m.o>>}
        /\ ses' = IF mine THEN [ses EXCEPT ![m.h][m.b].done = @ \cup {m.s}] ELSE ses
-       /\ UNCHANGED <<own, ckpt, head, moves, mflight, refs, marked, retired, gone, wal, tok, proc, gc,
+       /\ UNCHANGED <<own, ckpt, head, refs, marked, retired, gone, wal, tok, proc, gc,
                       truthVars, countVars>>
 
 \* The acknowledgement of the WAL's prefix landed: the head swapped to name it, with the
@@ -846,7 +828,8 @@ Land(m) ==
 \* over. Without the rule, written whatever is there. Then its commits told durable. To the last
 \* segment going on with no commit (acksBetweenCommits, Writer::acknowledge): a commit spanning
 \* segments is acknowledged with the one it ends in, so that the state acknowledged, which heads
-\* and checkpoints name, holds no commit begun, and the WAL keeps it whole.
+\* and checkpoints name, holds no commit begun, and the WAL keeps it whole. The swap names the
+\* writer's checkpoint landed since, if any, too (TASK-690's open end: no swap of its own).
 Ack(h, b) ==
     LET s == ses[h][b]
         ws == wal[h][b]
@@ -857,20 +840,23 @@ Ack(h, b) ==
         V == IF R("versionsAcked")
              THEN {[id |-> P[i].o.ver, at |-> P[i].s] : i \in {i \in 1..n : P[i].o.ver # None}}
              ELSE {}
+        named == s.ckptPut # None /\ s.ckptPut.landed
         s2 == [s EXCEPT !.st = ApplyAll(s.st, b, P),
                         !.end = P[n].s + 1,
                         !.chain = @ \o [i \in 1..n |-> P[i].o.epoch],
-                        !.vers = @ \cup V]
+                        !.vers = @ \cup V,
+                        !.hckpt = IF named THEN <<s.ckptPut.q, s.epoch>> ELSE @,
+                        !.ckptPut = IF named THEN None ELSE @]
     IN /\ Ready(h, b) /\ n > 0
-       /\ IF R("headSwap") /\ ~Taking(s, b) THEN
+       /\ IF R("headSwap") /\ ~Swappable(s, b) THEN
              Stopped(h, b) /\ UNCHANGED <<head, wal, acked>>
           ELSE /\ head' = [head EXCEPT ![b] = HeadOf(s2, b)]
                /\ wal' = [wal EXCEPT ![h][b] = SubSeq(ws, n + 1, Len(ws))]
                /\ ses' = [ses EXCEPT ![h][b] = s2]
                /\ acked' = [acked EXCEPT ![b] = @ \cup CommitsOf(P)]
-       /\ UNCHANGED <<seg, own, ckpt, moves, mflight, inflight, refs, marked, retired, written, gone, tok,
+       /\ UNCHANGED <<seg, own, ckpt, inflight, refs, marked, retired, written, gone, tok,
                       proc, gc, countVars>>
-       /\ UNCHANGED <<commits, nextTag, minted, twice, makers, doomed, taken, placed, errors>>
+       /\ UNCHANGED <<commits, nextTag, minted, twice, makers, relocated, doomed, taken, placed, errors>>
 
 \* The writer drops a version (Writer::drop_versions): the head swapped to name it no more, with
 \* the condition that it is the writer's taking still (headSwap); failing, the writer stops. A
@@ -879,27 +865,22 @@ DropVersion(h, b) ==
     LET s == ses[h][b] IN
     /\ "dropVersion" \in Can /\ Ready(h, b)
     /\ \E v \in s.vers :
-         IF R("headSwap") /\ ~Taking(s, b) THEN Stopped(h, b) /\ UNCHANGED <<head, commits>>
+         IF R("headSwap") /\ ~Swappable(s, b) THEN Stopped(h, b) /\ UNCHANGED <<head, commits>>
          ELSE LET s2 == [s EXCEPT !.vers = @ \ {v}] IN
               /\ head' = [head EXCEPT ![b] = HeadOf(s2, b)]
               /\ ses' = [ses EXCEPT ![h][b] = s2]
               /\ commits' = [commits EXCEPT ![v.id].dropped = TRUE]
-    /\ UNCHANGED <<seg, own, ckpt, moves, mflight, inflight, refs, marked, retired, written, gone,
+    /\ UNCHANGED <<seg, own, ckpt, inflight, refs, marked, retired, written, gone,
                    wal, tok, proc, gc, countVars>>
-    /\ UNCHANGED <<nextTag, acked, minted, twice, makers, doomed, taken, placed, errors>>
+    /\ UNCHANGED <<nextTag, acked, minted, twice, makers, relocated, doomed, taken, placed, errors>>
 
-\* A checkpoint as of the last segment acknowledged: the extents the collector moved where they
-\* went; its PUT then made. The writer names those extents where they went now, before it writes
-\* it (movesTakenFirst), only forward along their ways; without the rule, once it is in the head.
+\* A checkpoint as of the last segment acknowledged: its PUT made.
 Checkpoint(h, b) ==
     LET s == ses[h][b]
         q == s.st.through
-        st == [s.st EXCEPT !.ext = [x \in DOMAIN s.st.ext |-> Moved(x, s.st.ext[x])]]
     IN /\ "checkpoint" \in Can /\ Ready(h, b) /\ q >= 0 /\ q > s.ckptThrough /\ s.ckptPut = None
-       /\ ses' = [ses EXCEPT ![h][b].st = IF R("movesTakenFirst") THEN TakeMoves(@, st) ELSE @,
-                             ![h][b].ckptThrough = q,
-                             ![h][b].ckptPut = [q |-> q, st |-> st, landed |-> FALSE,
-                                            swapped |-> FALSE]]
+       /\ ses' = [ses EXCEPT ![h][b].ckptThrough = q,
+                             ![h][b].ckptPut = [q |-> q, st |-> s.st, landed |-> FALSE]]
        /\ UNCHANGED <<bucketVars, wal, tok, proc, gc, truthVars, countVars>>
 
 \* The checkpoint's PUT lands, at its writer's key, whenever while its writer's session lasts,
@@ -911,36 +892,26 @@ CheckpointLand(h, b) ==
        /\ ckpt' = [ckpt EXCEPT ![b][s.ckptPut.q][k[4]] = s.ckptPut.st]
        /\ written' = written \cup {<<k, s.ckptPut.st>>}
        /\ ses' = [ses EXCEPT ![h][b].ckptPut.landed = TRUE]
-       /\ UNCHANGED <<seg, own, head, moves, mflight, inflight, refs, marked, retired, gone, wal, tok, proc,
-                      gc, truthVars, countVars>>
+       /\ UNCHANGED <<seg, own, head, inflight, refs, marked, retired, gone, wal, tok, proc, gc,
+                      truthVars, countVars>>
 
-\* The checkpoint landed swapped into the head, with the condition that it is the writer's taking
-\* still (headSwap); failing, the writer stops.
+\* The checkpoint landed named in the head by a swap of its own, with the condition that it is the
+\* writer's taking still (headSwap); failing, the writer stops. An acknowledgement names it too.
 CheckpointSwap(h, b) ==
     LET s == ses[h][b]
-        s2 == [s EXCEPT !.hckpt = <<s.ckptPut.q, s.epoch>>,
-                        !.ckptPut = IF R("movesTakenFirst") THEN None
-                                    ELSE [@ EXCEPT !.swapped = TRUE]]
-    IN /\ Ready(h, b) /\ s.ckptPut # None /\ s.ckptPut.landed /\ ~s.ckptPut.swapped
-       /\ IF R("headSwap") /\ ~Taking(s, b) THEN Stopped(h, b) /\ UNCHANGED head
+        s2 == [s EXCEPT !.hckpt = <<s.ckptPut.q, s.epoch>>, !.ckptPut = None]
+    IN /\ Ready(h, b) /\ s.ckptPut # None /\ s.ckptPut.landed
+       /\ IF R("headSwap") /\ ~Swappable(s, b) THEN Stopped(h, b) /\ UNCHANGED head
           ELSE /\ head' = [head EXCEPT ![b] = HeadOf(s2, b)]
                /\ ses' = [ses EXCEPT ![h][b] = s2]
-       /\ UNCHANGED <<seg, own, ckpt, moves, mflight, inflight, refs, marked, retired, written, gone, wal,
+       /\ UNCHANGED <<seg, own, ckpt, inflight, refs, marked, retired, written, gone, wal,
                       tok, proc, gc, truthVars, countVars>>
-
-\* The swap answered, the writer names what the checkpoint moved where it went, only forward
-\* along their ways (without movesTakenFirst).
-CheckpointTaken(h, b) ==
-    LET s == ses[h][b] IN
-    /\ s # None /\ s.ckptPut # None /\ s.ckptPut.swapped
-    /\ ses' = [ses EXCEPT ![h][b].st = TakeMoves(s.st, s.ckptPut.st), ![h][b].ckptPut = None]
-    /\ UNCHANGED <<bucketVars, wal, tok, proc, gc, truthVars, countVars>>
 
 WriterNext ==
     \E h \in Hosts, b \in Cells :
         \/ Open(h, b) \/ RecoverRead(h, b) \/ Mint(h, b) \/ Commit(h, b)
         \/ Upload(h, b) \/ Ack(h, b) \/ Checkpoint(h, b) \/ CheckpointLand(h, b)
-        \/ CheckpointSwap(h, b) \/ CheckpointTaken(h, b) \/ DropVersion(h, b)
+        \/ CheckpointSwap(h, b) \/ DropVersion(h, b)
 
 -----------------------------------------------------------------------------
 (* Hosts and placements. *)
@@ -985,7 +956,7 @@ Place(h, b) ==
     /\ placed' = [placed EXCEPT ![b] = @ + 1]
     /\ places' = places + 1
     /\ UNCHANGED <<bucketVars, ses, wal, proc, gc, gen, takes, passes, crashes, mints>>
-    /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, doomed, taken, errors>>
+    /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, relocated, doomed, taken, errors>>
 
 -----------------------------------------------------------------------------
 (* Deletions and forks of versions: a host's work, one at a time. *)
@@ -1001,7 +972,7 @@ StartDelete(h, b) ==
                                     tk |-> tok[h][b], og |-> <<>>, bs |-> 0, v |-> <<>>]]
     /\ doomed' = IF tok[h][b] >= taken[b] THEN doomed \cup {head[b].maker} ELSE doomed
     /\ UNCHANGED <<bucketVars, ses, wal, tok, gc, countVars>>
-    /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, taken, placed, errors>>
+    /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, relocated, taken, placed, errors>>
 
 \* The reference of the fork of a version, the restore q, to its child: under the cell of the
 \* version.
@@ -1025,7 +996,7 @@ Restoring(h, q) ==
              /\ head' = [head EXCEPT ![q.b] = Forking(q)]
              /\ proc' = [proc EXCEPT ![h] = [q EXCEPT !.pc = IF refers THEN "refer" ELSE "check"]]
              /\ UNCHANGED refs
-       /\ UNCHANGED <<seg, own, ckpt, moves, mflight, inflight, marked, retired, written, gone, ses, wal,
+       /\ UNCHANGED <<seg, own, ckpt, inflight, marked, retired, written, gone, ses, wal,
                       tok, gc, truthVars, countVars>>
 
 \* A restore of a version of b to c (TASK-476): of b at the version's segment, its base the
@@ -1064,24 +1035,24 @@ ProcStep(h) ==
                     THEN UNCHANGED head
                     ELSE Ended(h, b)
                  /\ Done(h)
-                 /\ UNCHANGED <<refs, makers>>
+                 /\ UNCHANGED <<refs, makers, relocated>>
             [] q.op = "restore" /\ q.pc = "refer" ->
                  \* Its reference, its head made (forksRecordFirst), before the version's read.
                  /\ refs' = refs \cup ForkRefs(q)
                  /\ proc' = [proc EXCEPT ![h].pc = "check"]
-                 /\ UNCHANGED <<head, makers>>
+                 /\ UNCHANGED <<head, makers, relocated>>
             [] q.op = "restore" /\ q.pc = "fork" ->
                  \* Without forksRecordFirst: the child's head, its reference made, unless the
                  \* ID was taken since, the reference then left for good.
                  /\ IF head[b] = None THEN /\ head' = [head EXCEPT ![b] = Forking(q)]
                                            /\ proc' = [proc EXCEPT ![h].pc = "check"]
                     ELSE Done(h) /\ UNCHANGED head
-                 /\ UNCHANGED <<refs, makers>>
+                 /\ UNCHANGED <<refs, makers, relocated>>
             [] q.op = "restore" /\ q.pc = "check" ->
                  \* The head naming the version read after the child's record (forksCheck): the
                  \* version named no more, the fork fails, and its host deletes the child.
                  /\ IF failed THEN Deleting(h) ELSE proc' = [proc EXCEPT ![h].pc = "make"]
-                 /\ UNCHANGED <<head, refs, makers>>
+                 /\ UNCHANGED <<head, refs, makers, relocated>>
             [] q.op = "restore" /\ q.pc = "make" ->
                  \* No longer being made, with a condition: unless deleted, given up on. Without
                  \* forksReferFirst, its reference made now, after the version's read.
@@ -1089,12 +1060,12 @@ ProcStep(h) ==
                        /\ head' = [head EXCEPT ![b].kind = IF @ = "forking" THEN "fork" ELSE @]
                        /\ makers' = [makers EXCEPT ![b] = @ \cup {q.o}]
                        /\ refs' = IF R("forksReferFirst") THEN refs ELSE refs \cup ForkRefs(q)
-                    ELSE UNCHANGED <<head, makers, refs>>
+                    ELSE UNCHANGED <<head, makers, relocated, refs>>
                  /\ Done(h)
        /\ doomed' = IF failed THEN doomed \cup {q.o} ELSE doomed
-       /\ UNCHANGED <<seg, own, ckpt, moves, mflight, inflight, marked, retired, written, gone, ses, wal,
+       /\ UNCHANGED <<seg, own, ckpt, inflight, marked, retired, written, gone, ses, wal,
                       tok, gc, countVars>>
-       /\ UNCHANGED <<commits, nextTag, acked, minted, twice, taken, placed, errors>>
+       /\ UNCHANGED <<commits, nextTag, acked, minted, twice, relocated, taken, placed, errors>>
 
 HostNext ==
     \/ \E h \in Hosts : Crash(h) \/ ProcStep(h)
@@ -1119,8 +1090,6 @@ Listing(c) ==
     \cup {<<"own", o.b, o.e, o.s, o.x>> : o \in {o \in own : o.b = c}}
     \cup {<<"ckpt", c, k[1], k[2]>> : k \in {k \in Seqs \X Epochs : ckpt[c][k[1]][k[2]] # None}}
     \cup (IF head[c] # None THEN {<<"head", c>>} ELSE {})
-    \cup {<<"moves", c, k[1], k[2], k[3]>> :
-            k \in {k \in Seqs \X Epochs \X Ways : moves[c][k[1]][k[2]][k[3]] # None}}
 
 \* The state of p at its origin at, as a pass keeps it for a reference, or a version: the extents
 \* it names, and what recovering it reads (originsKept); without the rule, the extents alone.
@@ -1138,12 +1107,6 @@ RefOrigins(Rs) ==
                     /\ \E r \in Rs : <<r.p, r.at>> = pt /\ LiveRec(r.c)
     IN [pts |-> {Kept(Origin(pt[1], pt[2])) : pt \in {pt \in P : Origin(pt[1], pt[2]).ok}},
         lost |-> \E pt \in P : lost(pt)]
-
-\* Whether the writer of b may name the extents of its state, recovered from its head's checkpoint
-\* newest (<<>> if none), anywhere on their ways from where they were sealed (waysFromSeals): unless
-\* the checkpoint is of the head's epoch (collector::behind). A fork's inherited extents, which a
-\* fork with no checkpoint holds, always.
-Behind(b, newest) == R("waysFromSeals") /\ (newest = <<>> \/ newest[2] # HeadEpoch(b))
 
 \* Whether a later pass of its cell took the cell's collector lease from pass i.
 Fenced(i) == \E j \in (i + 1)..passes : gc[j].cell = gc[i].cell
@@ -1198,14 +1161,13 @@ GcRecover(i) ==
                                             ELSE Put(Nothing, c,
                                                      [ext |-> got.st.ext, end |-> got.end,
                                                       epoch |-> HeadEpoch(c), ckpt |-> got.ckpt,
-                                                      touched |-> got.touched,
-                                                      behind |-> Behind(c, got.ckpt)]),
+                                                      touched |-> got.touched]),
                                    !.pts = IF live THEN {Kept(fp) : fp \in vs} ELSE {},
                                    !.pc = "relist"]]
              /\ UNCHANGED errors
-       /\ UNCHANGED <<seg, own, ckpt, moves, mflight, inflight, refs, marked, retired, written, gone,
+       /\ UNCHANGED <<seg, own, ckpt, inflight, refs, marked, retired, written, gone,
                       hostVars, countVars>>
-       /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, doomed, taken, placed>>
+       /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, relocated, doomed, taken, placed>>
 
 \* After the states: the cell's references listed (referencesRelisted), each origin's state kept.
 \* A reference written after this listing is of a fork whose parent's state at its origin this
@@ -1226,19 +1188,19 @@ GcRelist(i) ==
                                                  !.pc = "finish"]]
              /\ UNCHANGED errors
        /\ UNCHANGED <<bucketVars, hostVars, countVars>>
-       /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, doomed, taken, placed>>
+       /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, relocated, doomed, taken, placed>>
 
 \* Whether the reference of the fork whose record is r is retired unmarked (retirementsMarked): its
 \* fork made, by its one restore, having written it before it made it.
 Unmarked(r) == r.kind = "fork"
 
-\* Compaction, then deletion, unless a later pass of the cell took its lease: of what was listed,
-\* what the live cell and the origins and versions kept do not need, nor its head may yet name
-\* (collectorEpochs). An origin's state is behind (waysFromSeals): the child names what it
-\* inherited where it read it. Then the cell's reference, the cell deleted, retired, under its
-\* parent's cell, once the cell has no reference of its own (referencesHeld): no cell anywhere
-\* inherits from it then; without the rule, once it is deleted. A dead cell, no mark under it,
-\* goes whole (TASK-455): its record and head too, the rest of it doomed already.
+\* Deletion, unless a later pass of the cell took its lease: of what was listed, what the live
+\* cell and the origins and versions kept do not read, nor its head may yet name
+\* (collectorEpochs). Then the cell's reference, the cell deleted, retired, under its parent's
+\* cell, once the cell has no reference of its own (referencesHeld): no cell anywhere inherits
+\* from it then; without the rule, once it is deleted. A dead cell, no mark under it, goes whole
+\* (TASK-455): its record and head too, the rest of it doomed already. It reads no object's data
+\* and writes none (doc-27): it holds no key.
 GcFinish(i) ==
     LET g == gc[i]
         c == g.cell
@@ -1248,27 +1210,8 @@ GcFinish(i) ==
         touched == UNION {L[k].touched : k \in DOMAIN L} \cup UNION {p.touched : p \in g.pts}
         locs == UNION {{<<x, L[k].ext[x]>> : x \in DOMAIN L[k].ext} : k \in DOMAIN L}
                 \cup UNION {{<<x, p.ext[x]>> : x \in DOMAIN p.ext} : p \in g.pts}
-        \* The key along the way p from the segment of a location of a segment's or moves'.
-        along(loc, p) == Key(loc[2], loc[3], loc[4], p)
-        chained == {l \in locs : l[2][1] # "own"}
-        \* The ways to each extent named, from where a state says it is: the objects listed, and
-        \* the moves listed of each, whose maps say it moved there, any pass's.
-        reached(l) ==
-            LET step(P) == {q \in UNION {On(p) : p \in P} :
-                              along(l[2], q) \in objs /\ Names(l[2][2], l[2][3], l[2][4], q, l[1])}
-                r0 == {Way(l[2])}
-            IN r0 \cup step(r0) \cup step(step(r0))
-        namedAt(k) == {l[1] : l \in {l \in chained : \E p \in reached(l) : along(l[2], p) = k}}
-        \* And the moves on the ways there from where they were sealed, of the states whose
-        \* writers may be behind them (waysFromSeals).
-        behind == UNION {{L[k].ext[x] : x \in DOMAIN L[k].ext} :
-                            k \in {k \in DOMAIN L : L[k].behind}}
-                  \cup (IF R("waysFromSeals")
-                        THEN UNION {{p.ext[x] : x \in DOMAIN p.ext} : p \in g.pts} ELSE {})
-        hops == UNION {{along(l[2], q) : q \in UNION {On(p) : p \in reached(l)}} : l \in chained}
-                \cup UNION {{along(l, SubSeq(Way(l), 1, n)) : n \in 1..Depth(l)} :
-                              l \in {l \in behind : l[1] = "moves"}}
-        named == UNION {{along(l[2], p) : p \in reached(l)} : l \in chained}
+        \* The objects the states kept name their extents in: segments, and extents of their own.
+        named == {l[2] : l \in {l \in locs : l[2][1] = "seg"}}
                  \cup {<<"own", l[2][2], l[2][3], l[2][4], l[1]>> :
                          l \in {l \in locs : l[2][1] = "own"}}
         \* Whether b's head, as the recovery of b read it, may yet name its segment or extent of
@@ -1281,33 +1224,14 @@ GcFinish(i) ==
         ckptAhead(b, s, e) ==
             /\ b \in DOMAIN L /\ R("collectorEpochs") /\ e >= L[b].epoch
             /\ L[b].ckpt = <<>> \/ ~GE2(L[b].ckpt, <<s, e>>)
-        \* The moves of the object at k listed, any pass's: each holds what was named there as
-        \* its pass read it, which no later state names more of.
-        movesOf(k) == {Key(k[2], k[3], k[4], q) : q \in On(Way(k))} \cap objs
-        \* Segments no recovery reads, which no head may yet name; moves, but the last hop's
-        \* (compactMoves): each into moves of this pass's, if none are listed.
-        compactable == {k \in named \cap objs :
-                          /\ k[1] # "own" /\ Obj(k) # None
-                          /\ IF k[1] = "seg"
-                             THEN /\ "compact" \in Can /\ k \notin touched
-                                  /\ ~ahead(k[2], k[3], k[4])
-                             ELSE "compactMoves" \in Can /\ Depth(k) < Hops
-                          /\ movesOf(k) = {}}
         dead == (r = None \/ Deleted(r)) /\ g.refs = {}
         \* Removed whole: dead, and no mark of a reference under it, which a slow restore's
         \* reference written again goes by.
         removed == dead /\ \A m \in marked : m.p # c
         doomedKey(k) ==
             CASE k[1] = "ckpt" -> k \notin touched /\ ~ckptAhead(k[2], k[3], k[4])
-              [] k[1] = "seg" -> /\ ~ahead(k[2], k[3], k[4]) /\ k \notin touched
-                                 /\ (k \notin named \/ movesOf(k) # {})
+              [] k[1] = "seg" -> ~ahead(k[2], k[3], k[4]) /\ k \notin touched /\ k \notin named
               [] k[1] = "own" -> k \notin named /\ ~ahead(k[2], k[4], k[3])
-              \* Moves go once no state's way goes through them, and they are moved in turn, or
-              \* what they are of is gone.
-              [] k[1] = "moves" ->
-                   /\ k \notin hops
-                   /\ IF k \in named THEN Depth(k) < Hops /\ movesOf(k) # {}
-                      ELSE Key(k[2], k[3], k[4], SubSeq(Way(k), 1, Depth(k) - 1)) \notin objs
               \* The head only with the cell: a deleted cell's final head fences its writers.
               [] k[1] = "head" -> removed
         D == IF Fenced(i) THEN {} ELSE {k \in objs : doomedKey(k)}
@@ -1320,12 +1244,6 @@ GcFinish(i) ==
         \* The cell's own references listed marked: retired before.
         stale == IF Fenced(i) THEN {} ELSE g.stale
     IN /\ g.pc = "finish"
-       \* Its compactions' PUTs in flight, landing whenever (GcLand), though the pass ended.
-       /\ \E C \in SUBSET compactable :
-             mflight' = mflight \cup {[k |-> Key(k[2], k[3], k[4], Way(k) \o <<KP(i)>>),
-                                       o |-> [pass |-> i, names |-> namedAt(k)]] : k \in C}
-       /\ moves' = [b \in Cells |-> [s \in Seqs |-> [e \in Epochs |-> [p \in Ways |->
-                      IF Key(b, s, e, p) \in D THEN None ELSE moves[b][s][e][p]]]]]
        /\ seg' =[b \in Cells |-> [s \in Seqs |-> [e \in Epochs |->
                     IF <<"seg", b, s, e>> \in D THEN None ELSE seg[b][s][e]]]]
        /\ own' = {o \in own : <<"own", o.b, o.e, o.s, o.x>> \notin D}
@@ -1340,22 +1258,9 @@ GcFinish(i) ==
        /\ gc' = [gc EXCEPT ![i] = Idle(g)]
        /\ UNCHANGED <<inflight, written, hostVars, truthVars, countVars>>
 
-\* A compaction's PUT lands, whenever, though its pass ended, or a later one took the cell's
-\* collector lease: created, unless moves are at its key (collector::compact_object's create).
-\* Its key names its pass (movesByPass), so that none is ever there, nor was.
-GcLand(m) ==
-    /\ mflight' = mflight \ {m}
-    /\ IF Obj(m.k) = None THEN
-          /\ moves' = [moves EXCEPT ![m.k[2]][m.k[3]][m.k[4]][m.k[5]] = m.o]
-          /\ written' = written \cup {<<m.k, m.o>>}
-       ELSE UNCHANGED <<moves, written>>
-    /\ UNCHANGED <<seg, own, ckpt, head, inflight, refs, marked, retired, gone, hostVars, gc,
-                   truthVars, countVars>>
-
 GcNext ==
     \/ \E c \in Cells : GcStart(c)
     \/ \E i \in DOMAIN gc : GcRecover(i) \/ GcRelist(i) \/ GcFinish(i)
-    \/ \E m \in mflight : GcLand(m)
 
 -----------------------------------------------------------------------------
 
@@ -1365,8 +1270,6 @@ Init ==
     /\ ckpt = [b \in Cells |-> [s \in Seqs |-> [e \in Epochs |-> None]]]
     /\ head = [b \in Cells |-> IF b = Root THEN Record("root", <<>>, <<"root", Root>>, 0)
                                ELSE None]
-    /\ moves = [b \in Cells |-> [s \in Seqs |-> [e \in Epochs |-> [p \in Ways |-> None]]]]
-    /\ mflight = {}
     /\ inflight = {}
     /\ refs = {}
     /\ marked = {}
@@ -1386,6 +1289,7 @@ Init ==
     /\ twice = FALSE
     /\ makers = [b \in Cells |-> IF b = Root THEN {<<"root", Root>>} ELSE {}]
     /\ doomed = {}
+    /\ relocated = {}
     /\ taken = [b \in Cells |-> -1]
     /\ placed = [b \in Cells |-> 0]
     /\ errors = {}
@@ -1474,11 +1378,15 @@ DeletedOnlyByDeletes ==
 \* One making, not deleted, is told it made each cell.
 OneMaker == \A b \in Cells : Cardinality(makers[b] \ doomed) <= 1
 
+\* Not a rule's: a segment a writer relocated an extent out of is never deleted. Its violation is
+\* reached (mutations/ReachesRelocatedFreed): writers' compaction frees what it copied out of.
+NothingRelocatedFreed == \A k \in relocated : Obj(k) # None
+
 \* Nothing failed that must not: a pass of the collector, a cell opened (its log ending inside a
 \* commit), a WAL diverging from a cell whose last commit is its own.
 NoErrors == errors = {}
 
-\* A key names one object, ever (TASK-407): every PUT at a segment's, a checkpoint's or moves' key
+\* A key names one object, ever (TASK-407): every PUT at a segment's or a checkpoint's key
 \* writes what every other at it did, if any did, deleted since or not. Readers need no versions of
 \* a key: what the host keeps of it, in memory, in its part cache, or asked of its peers, is of
 \* the one object.

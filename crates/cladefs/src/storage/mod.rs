@@ -376,5 +376,5 @@ async fn on_bucket_runtime<T: Send + 'static>(
     };
     // cladefs: `unconstrained` prevents coop-budget livelock when polled from `block_on` inside
     // a tokio task (board 6525).
-    tokio::task::unconstrained(runtime.spawn(work)).await.map_err(Error::new)?
+    crate::bucket::unconstrained(runtime.spawn(work)).await.map_err(Error::new)?
 }

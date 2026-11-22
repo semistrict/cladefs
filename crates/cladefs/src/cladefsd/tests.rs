@@ -2190,21 +2190,6 @@ fn cells_open_in_another_arena_are_busy() {
     served.join().unwrap();
 }
 
-/// The names of this process's threads alive as they are read: one that ends between the listing of
-/// `/proc/self/task` and the read of its name, as an idle blocking thread of the daemon's runtimes
-/// does, is gone, and holds nothing: its name not found, or, as it exits, its process no more
-/// (`ESRCH`), as for the threads a cell's flush syncs its files on (`local_cell`'s `AT_ONCE`).
-fn thread_comms() -> impl Iterator<Item = String> {
-    std::fs::read_dir("/proc/self/task").unwrap().filter_map(|task| {
-        match std::fs::read_to_string(task.unwrap().path().join("comm")) {
-            Ok(comm) => Some(comm.trim().to_owned()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-            Err(err) if err.raw_os_error() == Some(libc::ESRCH) => None,
-            Err(err) => panic!("reading a thread's name: {err}"),
-        }
-    })
-}
-
 /// TASK-79.27: the daemon's metrics server answers a request line longer than it reads with `431`,
 /// holding no more of it than it reads (`HEAD_MAX`): what the client sends after that it reads and
 /// drops, until the client is done, as the connection, closed with bytes unread, would be reset,
@@ -2446,6 +2431,67 @@ fn a_restored_vms_reads_are_its_versions_evidence() {
         read.recordings.concat().iter().map(|unit| (unit.extent, unit.mib)).collect();
     assert_eq!((units, read.refused), (vec![(extent(1), 0), (extent(2), 0)], 0));
     drop((again, client));
+}
+
+/// Board 6225, 5337: a host that keeps parts in its part cache, a version's parts there and not in
+/// its memory, reads what its tenant's evidence predicts a fork reads into memory ahead of the
+/// fork's guest, as its first fork's recording, written seconds after the host read the
+/// version's evidence of none, predicts: the guest's reads then wait on no page-in.
+#[test]
+fn forks_read_their_prediction_into_memory_from_the_part_cache() {
+    use bucket_cell::evidence::UNIT;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
+    // environment yet.
+    unsafe { std::env::set_var("CLADEFSD_PART_CACHE", dir.path().join("parts")) };
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let client = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    let data = pattern(3, 2 * UNIT as usize);
+    for (at, chunk) in data.chunks(64 << 10).enumerate() {
+        write(&client, extent, at as u64 * (64 << 10), chunk).unwrap();
+    }
+    client.commit(None).unwrap();
+    let version = client.make_version().unwrap();
+    // Its cell's prefetch, done: awaited holding nothing of the daemon's.
+    let prefetched = |path: &Path| {
+        let held = super::cells::table().writer(&super::cells::cell_dir_key(path)).unwrap();
+        let prefetching = held.cell().unwrap().evidence().unwrap().prefetched();
+        drop(held);
+        futures::executor::block_on(prefetching);
+    };
+
+    // The first fork's guest reads both units, which the host fetches into its part cache; its
+    // cell, closed, records them. Opened again, it prefetches them, in memory already.
+    let first = dir.path().join("first");
+    let one = CellClient::connect_forked(&socket, &first, version, 0).unwrap();
+    prefetched(&first);
+    assert_eq!(read(&one, extent, 0, 512), Ok(data[..512].to_vec()));
+    assert_eq!(read(&one, extent, UNIT, 512), Ok(data[UNIT as usize..][..512].to_vec()));
+    drop(one);
+    let again = CellClient::connect(&socket, &first, 1 << 24).unwrap();
+    prefetched(&first);
+    drop(again);
+
+    // Its pages evicted, as memory pressure evicts them, the next fork's prefetch reads them into
+    // memory from the part cache, fetching nothing; its guest's reads page nothing in.
+    crate::cache::evict_least_used(None, |_| false);
+    let before = crate::stats::stats();
+    let second = dir.path().join("second");
+    let two = CellClient::connect_forked(&socket, &second, version, 0).unwrap();
+    prefetched(&second);
+    let counted = crate::stats::stats().since(&before);
+    assert_eq!((counted.prefetches, counted.prefetch_page_ins), (0, 2));
+    assert_eq!(
+        read(&two, extent, UNIT + 4096, 512),
+        Ok(data[UNIT as usize + 4096..][..512].to_vec())
+    );
+    assert_eq!(read(&two, extent, 8192, 512), Ok(data[8192..][..512].to_vec()));
+    assert_eq!(crate::stats::stats().since(&before).page_ins, 2);
+    drop((two, client));
 }
 
 /// TASK-79.17, TASK-702.3: a cell the daemon opens to work on, as no VM process has it open,

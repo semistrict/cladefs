@@ -114,6 +114,9 @@ pub struct Stats {
     pub predicted_unread: u64,
     /// The units they read that were not predicted.
     pub read_unpredicted: u64,
+    /// cladefs: the parts of extents forks read into memory ahead of their guests, of what their
+    /// versions' evidence predicted, from the host's cache once fetched into it (board 6225).
+    pub prefetch_page_ins: u64,
 }
 
 /// The counters, in the order of [`Stats`]' fields.
@@ -154,10 +157,11 @@ pub(crate) enum Counter {
     PredictedRead,
     PredictedUnread,
     ReadUnpredicted,
+    PrefetchPageIns,
 }
 
 /// The counters [`Counter`] names, which this module keeps.
-const COUNTED: usize = 35;
+const COUNTED: usize = 36;
 
 /// The counters a reading holds: those it keeps, and the extent store's.
 const COUNTERS: usize = COUNTED + 3;
@@ -222,6 +226,7 @@ pub fn stats() -> Stats {
         predicted_read: count(Counter::PredictedRead),
         predicted_unread: count(Counter::PredictedUnread),
         read_unpredicted: count(Counter::ReadUnpredicted),
+        prefetch_page_ins: count(Counter::PrefetchPageIns),
     }
 }
 
@@ -267,6 +272,7 @@ impl Stats {
             self.predicted_read,
             self.predicted_unread,
             self.read_unpredicted,
+            self.prefetch_page_ins,
         ]
     }
 
@@ -312,6 +318,7 @@ impl Stats {
             predicted_read: word(35),
             predicted_unread: word(36),
             read_unpredicted: word(37),
+            prefetch_page_ins: word(38),
         }
     }
 
@@ -364,6 +371,7 @@ impl Stats {
             "predicted-read",
             "predicted-unread",
             "read-unpredicted",
+            "prefetch-page-ins",
         ];
         std::array::from_fn(|at| (names[at], words[at]))
     }

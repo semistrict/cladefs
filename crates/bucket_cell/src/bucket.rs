@@ -158,6 +158,25 @@ pub enum Error {
     /// of a version (TASK-699): an answer, never retried, where [`Error::Unavailable`] is none.
     #[error("the store does not do what the request asks")]
     Unsupported,
+    /// cladefs: the store refused the request, as it will every time until an operator changes its
+    /// credentials, its permissions or the request (board 5736): `401`, `403`, a client error. A
+    /// probe, and so a bucket's opening and a tool's, fails on it at once; a request under way
+    /// waits on cheap ones until the store takes them again ([`readmitted`]), never sending its
+    /// payload again meanwhile.
+    #[error("the store refused the request: its credentials, its permissions or the request")]
+    Refused,
+    /// cladefs: the store's credentials expired (`ExpiredToken`, board 5736): refreshed by the
+    /// backend's credential provider as its next request goes, a cheap one first.
+    #[error("the store's credentials expired")]
+    Expired,
+}
+
+impl Error {
+    /// cladefs: whether the request failed, the store giving no answer of what it holds: out of
+    /// reach, refusing it, or its credentials expired.
+    pub fn failed(self) -> bool {
+        matches!(self, Self::Unavailable | Self::Refused | Self::Expired)
+    }
 }
 
 /// Which bytes of an object a ranged read reads: an object shorter than the range reads short.
@@ -284,15 +303,39 @@ pub async fn get(bucket: &impl Bucket, key: &str) -> Option<Object> {
         match bucket.get(key).await {
             Ok(object) => return Some(object),
             Err(Error::NotFound) => return None,
-            Err(_) => failed(bucket, &mut failures).await,
+            Err(error) => failed(bucket, &mut failures, error, key).await,
         }
     }
 }
 
-/// Counts a failure, and waits before the request goes again.
-async fn failed(bucket: &impl Bucket, failures: &mut u32) {
+/// Counts a failure, `error`, of a request of `key`, and waits before the request goes again: a
+/// refusal, or credentials expired, until the store takes a cheap request of `key` again
+/// ([`readmitted`]).
+async fn failed(bucket: &impl Bucket, failures: &mut u32, error: Error, key: &str) {
     *failures += 1;
-    bucket.pause(*failures).await;
+    match error {
+        Error::Refused | Error::Expired => readmitted(bucket, error, key).await,
+        _ => bucket.pause(*failures).await,
+    }
+}
+
+/// cladefs: waits, a request of `key` refused or its credentials expired (`error`), until the
+/// store answers a cheap one of `key` again, a HEAD: never sending the request's payload again
+/// meanwhile, a segment's 32 MiB each time (board 5736). Expired credentials are refreshed as that
+/// request goes; refused ones wait for an operator, which it says now and then.
+async fn readmitted(bucket: &impl Bucket, mut error: Error, key: &str) {
+    let mut checks = 0;
+    loop {
+        if error == Error::Refused && checks % 64 == 0 {
+            log::error!("object storage: {key}: {error}; waiting for them to change");
+        }
+        checks += 1;
+        bucket.pause(checks).await;
+        match bucket.head(key).await {
+            Ok(_) | Err(Error::NotFound) => return,
+            Err(again) => error = again,
+        }
+    }
 }
 
 /// A ranged read of an object that holds none of its range, which begins past the object's end
@@ -337,7 +380,7 @@ pub(crate) async fn get_range(
                 Ok(meta) if !range.begins_within(meta.size) => {
                     return Err(Past { key: key.to_owned(), range, size: meta.size });
                 }
-                _ => failed(bucket, &mut failures).await,
+                _ => failed(bucket, &mut failures, Error::Unavailable, key).await,
             },
         }
     }
@@ -359,7 +402,7 @@ pub(crate) async fn list(bucket: &impl Bucket, prefix: &str) -> Vec<Meta> {
     loop {
         match bucket.list(prefix).await {
             Ok(list) => return list,
-            Err(_) => failed(bucket, &mut failures).await,
+            Err(error) => failed(bucket, &mut failures, error, prefix).await,
         }
     }
 }
@@ -375,7 +418,7 @@ pub(crate) async fn list_delimited_page(
     loop {
         match bucket.list_delimited(prefix, page).await {
             Ok(listing) => return listing,
-            Err(_) => failed(bucket, &mut failures).await,
+            Err(error) => failed(bucket, &mut failures, error, prefix).await,
         }
     }
 }
@@ -438,8 +481,8 @@ pub(crate) async fn delete_all(bucket: &impl Bucket, keys: &[&str]) {
 /// [`delete_all`] is seen to be `Send` (TASK-395.15: a sweep spawning its passes).
 async fn delete_batch(bucket: &impl Bucket, keys: &[&str]) {
     let mut failures = 0;
-    while bucket.delete_batch(keys).await.is_err() {
-        failed(bucket, &mut failures).await;
+    while let Err(error) = bucket.delete_batch(keys).await {
+        failed(bucket, &mut failures, error, keys.first().copied().unwrap_or_default()).await;
     }
 }
 
@@ -448,8 +491,8 @@ async fn delete_batch(bucket: &impl Bucket, keys: &[&str]) {
 /// needs `Send`, may await it (TASK-395.10).
 pub(crate) async fn delete(bucket: &impl Bucket, key: &str) {
     let mut failures = 0;
-    while bucket.delete(key).await.is_err() {
-        failed(bucket, &mut failures).await;
+    while let Err(error) = bucket.delete(key).await {
+        failed(bucket, &mut failures, error, key).await;
     }
 }
 
@@ -470,18 +513,51 @@ pub(crate) async fn create(bucket: &impl Bucket, key: &str, bytes: Vec<u8>) -> C
     loop {
         match bucket.put(key, bytes.clone(), PutMode::Create).await {
             Ok(version) => return Created::Created(version),
+            // Perhaps this one's own write, which landed though its answer was lost; deleted
+            // since, tried again.
             Err(Error::AlreadyExists) => {
-                // Perhaps this one's own write, which landed though its answer was lost.
-                match get(bucket, key).await {
-                    Some(object) if bytes == object.bytes => {
-                        return Created::Created(object.meta.version);
-                    }
-                    Some(object) => return Created::Exists(object),
-                    // Deleted since: try again.
-                    None => {}
+                if let Some(found) = landed(bucket, key, &bytes).await {
+                    return found;
                 }
             }
-            Err(_) => failed(bucket, &mut failures).await,
+            Err(error) => failed(bucket, &mut failures, error, key).await,
+        }
+    }
+}
+
+/// cladefs: what is at `key`, where a create of `bytes` found an object (board 5738): this write,
+/// which landed though its answer was lost, or another's; none if it went since. A frame's is told
+/// by its size and its trailer, which holds a salt drawn at random for that framing and the MACs of
+/// its footer and table ([`extent_frame::trailer_of`]): a HEAD and a read of its last few hundred
+/// bytes, where a segment's whole read cost 32 MiB, and the memory for them. Anything else, and
+/// another's object, is read whole.
+async fn landed(bucket: &impl Bucket, key: &str, bytes: &Bytes) -> Option<Created> {
+    if let Some(trailer) = extent_frame::trailer_of(bytes) {
+        let meta = head(bucket, key).await?;
+        if meta.size == bytes.len() as u64 {
+            let suffix = ByteRange::Suffix(trailer.len() as u64);
+            match get_range(bucket, key, suffix).await {
+                Ok(Some(tail)) if tail == trailer => return Some(Created::Created(meta.version)),
+                Ok(None) => return None,
+                Ok(Some(_)) | Err(_) => {}
+            }
+        }
+    }
+    match get(bucket, key).await? {
+        object if *bytes == object.bytes => Some(Created::Created(object.meta.version)),
+        object => Some(Created::Exists(object)),
+    }
+}
+
+/// cladefs: what the backend says of the object at `key`, if any, its HEADs retried while they
+/// fail.
+pub(crate) async fn head(bucket: &impl Bucket, key: &str) -> Option<Meta> {
+    let mut failures = 0;
+    loop {
+        match bucket.head(key).await {
+            Ok(meta) => return Some(meta),
+            Err(Error::NotFound) => return None,
+            Err(error) => failed(bucket, &mut failures, error, key).await,
         }
     }
 }
@@ -513,7 +589,7 @@ pub(crate) async fn update(
                     _ => Updated::Changed,
                 };
             }
-            Err(_) => failed(bucket, &mut failures).await,
+            Err(error) => failed(bucket, &mut failures, error, key).await,
         }
     }
 }

@@ -1543,7 +1543,7 @@ impl World {
         let (started, start) = futures::channel::oneshot::channel();
         let (running, bucket) = (uploader.clone(), self.host_bucket(host));
         let running = self.spawn_uploader(async move {
-            running.run(recovering, cell_options(), bucket, holder, started).await;
+            running.run(recovering, cell_options(), bucket, holder, started, None).await;
         });
         let lineage = self.hosts[host].disks[&cell].lineage;
         trace!(

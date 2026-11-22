@@ -1,34 +1,71 @@
 # Open questions
 
-## Is herdtools7 (CeCILL-B) acceptable? (TASK-444.2, 2026-11-15)
-
-Needed: your call on herdtools7's licence, CeCILL-B (BSD-like, French law; GitHub reports
-NOASSERTION; not on OSI's list as far as I could find). Why: herd7 runs the Linux kernel memory
-model's litmus tests (tools/memory-model), the natural disposer for an audit of dax.c's barriers.
-Recommend: allow it as a dev-only checker (nothing linked or shipped). Until answered: TASK-444.2
-audits the host crates' Rust atomics with loom only; dax.c's barriers wait.
-
-## Which model resumes TASK-444.1 and .3? (2026-11-15)
-
-Needed: a model for three delegates that stopped when Claude Opus hit its rate limit (resets in
-about 75 h from 10:30 on 2026-11-15). Their work is uncommitted or unmerged in their worktrees:
-TASK-444.1 journal (`~/.t3/worktrees/fxdax/t3-863ac33f-…`, 6 commits and edits), TASK-444.1
-dax-cow (`t3-e87d4577-…`, 8 commits), and TASK-444.3 (`t3-29dc269c-…`, three dax.c fixes
-reproduced in guest/sim, not yet run on the test host). Why: T3 doesn't switch a delegate's provider
-unasked. Available: Claude Sonnet 5.5, a second Claude instance (claudeAgent_claude_echophase),
-and Codex. Recommend: the second Claude instance on Opus, else wait for the reset. Until answered:
-the worktrees stay as they are, nothing in them is lost, and TASK-444.4–.11 wait too.
-
-## Delete the dead crates `name` and `test_util`? (board 5762, 2026-11-21)
-
-Needed: your OK to delete two workspace members nothing depends on, with their tests:
-`crates/name` (the vfs library's names, 22 tests) and `crates/test_util` (18 tests), both copied
-from Fuchsia for code since removed (last touched by 7f8d6b69e). Why: your instructions reserve
-deleting tests to you; they build and run in every workspace run for nothing. Recommend: delete
-both. Until answered: they stay; their `[workspace.dependencies]` entries, which nothing took and
-Cargo warned of, are gone, as is `crates/fidl-fuchsia-fs`, dead with no tests.
+Open questions live in hotbed (`hotbed question ls -p cladefs` / `hotbed question add`). This file records `# Decisions` made without waiting on the user.
 
 # Decisions
+
+## doc-26: part slabs, quarantine scoped to what was staged, copy on write in the VM process (board 6124, 2026-11-21)
+
+Decided without you, designing Wave 2's track 2A:
+- **1 MiB slabs, with small slabs for short parts**, rather than size classes, or keeping
+  physmem's 4 KiB frames. A whole part takes a whole slab. A tail, or a small extent, takes a run
+  of a small slab's pages, which are punched as they are freed. The buddy allocator existed to
+  keep runs whole for the VM process's mappings, and a slab is one run by construction. *Undo:*
+  keep physmem and fix TASK-560 and TASK-602 in place.
+- **The daemon maps no arena**: `pwrite`/`pread`/`copy_file_range`/`fallocate` by offset. That
+  retires the physmap and the `vm.max_map_count` bound on physical memory (120 GiB at the default).
+  The alternative, mapping each arena whole, costs the daemon arenas × memory of address space,
+  past x86-64's 128 TiB at a few hundred tenants on a large host. macOS, development only, backs
+  an arena with an unlinked temporary file, the one place the host's page cache holds arena
+  pages. *Undo:* map arenas whole on Linux, with an address-space budget.
+- **Quarantine waits for the VM processes a slab was staged to**, rather than every VM process
+  holding its arena (the plan's "arena-scoped"). That is a subset, exact, and cheap at 1 MiB (a
+  SmallVec per slab). Tenant isolation follows, since a tenant's slabs are only staged to its own
+  VM processes. *Undo:* wait for the arena's holders. Spec mutation NoWaitsForStaged shows a
+  tenant-only scope is unsafe for public slabs.
+- **Copy on write, `private_max` and the snapshot's private-page check move into the VM process.**
+  None was a trust boundary: a VM process lying about them hurts only its own memory or its own
+  snapshot. The daemon no longer knows which pages are private, so a host change's unmap carries
+  `STAGE_KEEP_PRIVATE` (spec rule `evictionKeepsPrivate`). *Undo:* keep `FAULT_WRITE` and
+  `STAGE_PRIVATE`.
+- **A tenant's arena is handed to its VM processes read-only**, as the default one is. Nothing
+  writes it since TASK-501. *Undo:* hand it writable again.
+
+## doc-27: writers compact, a keyless collector, one head object (board 6127, 2026-11-21)
+
+Decided without you, designing Wave 2's track 2B:
+- **Writers relocate at checkpoint rounds.** That means segments of their own cell under half live
+  and pinned by no kept state; at most as many bytes copied as uploaded (write amplification ≤ 1);
+  at most `UPLOAD_BYTES / 4` in flight; and only with disk spare. Not before a version is made
+  (versions stay one local commit), and not on close (drain stays short). A cell nobody writes
+  keeps at most about 2x space. Versions and origins pin their segments whole, which the
+  collector's moves did not. If the soak shows that space, `cladefsctl compact` is the follow-up.
+  *Undo:* relocate on close too, or keep the collector's moves.
+- **The head is one object everywhere**, its swaps spaced (TASK-690) and coalesced, with the
+  checkpoint's swap folded into the next acknowledgement. A non-replicated GCS cell's
+  Uploaded-level sync loop gets about one sync a second, where ten slots gave about ten. fsync is
+  Ordered and unaffected. A GCS cell wanting fast durable syncs should be replicated (doc-21):
+  recommended. *Undo:* keep `head_slots` for GCS buckets alone (board 6020's state).
+- **The open cell keeps density, not `bucket_cell::Writer`** (board 6214, famous-pig). A segment's
+  live bytes are kept in `local_cell::Extents`, beside the extents themselves. The writer's state
+  is the acknowledged one, but whether an extent is live is the guest's view at the relocation
+  commit, and that view includes frees not yet uploaded. Keeping it there also leaves Wave 1's
+  writer and recovery code alone. Only the cell's own segments are counted, and an emptied
+  segment is forgotten. Data lengths come in at acknowledgement now, and from checkpoints and
+  tails later in 6214. *Undo:* keep a per-key map in `Writer`'s `Inner`, updated as `apply` runs.
+
+## A fork's prefetch reads its prediction into memory, its tenant's arena paying (board 6225, 2026-11-21)
+
+A fork whose version was only in the host's part cache took 5x as long to its first command
+(1.1 s against 0.22 s) since TASK-702.3 fetched predictions into the part cache alone: the guest's
+page-ins then read each part from disk as it asked. Now each predicted unit, once its parts are
+fetched into the part cache, is read into the extent cache, in the arena the guest's reads would
+have put it in (its tenant's, or the default one for a public base's), as TASK-38's replay did.
+That charges the tenant's arena for what the prediction names before the guest reads it, which
+TASK-702.3 avoided; boots read what was predicted (predicted-unread was 0 on ubu1), so it charges
+little the guest would not have. Not done: reading into memory on a host with no part cache, which
+would fetch at the guest's priority. Other options: page in only the first N ms of the prediction;
+a read-ahead priority for page-ins. Undoing: drop `evidence::ahead`'s second step.
 
 ## A cell's contents are one block device: `extent_files` became `block_device` (board 5790, 2026-11-21)
 

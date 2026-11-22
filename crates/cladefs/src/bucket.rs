@@ -610,6 +610,20 @@ pub struct HostFetcher {
     parts: Arc<fetch::Fetcher<RoutedBucket>>,
 }
 
+/// cladefs: polls `future` outside tokio's cooperative budget so awaiting a `bucket_runtime`
+/// `JoinHandle` inside `futures::executor::block_on` from a tokio task cannot livelock
+/// (board 6525). Under madsim there is no tokio coop budget.
+pub(crate) async fn unconstrained<F: std::future::Future>(future: F) -> F::Output {
+    #[cfg(not(madsim))]
+    {
+        tokio::task::unconstrained(future).await
+    }
+    #[cfg(madsim)]
+    {
+        future.await
+    }
+}
+
 impl HostFetcher {
     /// What reads extents' data from `bucket`, keeping the parts it fetches in `cache`, if given,
     /// the host's.
@@ -659,9 +673,13 @@ impl HostFetcher {
         // cladefs: `unconstrained` prevents tokio's thread-local coop budget from livelocking
         // when this future is polled inside `futures::executor::block_on` from a tokio task
         // (board 6525).
-        async move {
-            tokio::task::unconstrained(read).await.map_err(|err| Failure::local(err, "fetching"))?
-        }
+        async move { unconstrained(read).await.map_err(|err| Failure::local(err, "fetching"))? }
+    }
+
+    /// cladefs: whether it keeps the parts it fetches in the host's cache, which
+    /// [`HostFetcher::fetch_ahead`] fetches into (`Fetcher::keeps_parts`, board 6225).
+    pub(crate) fn keeps_parts(&self) -> bool {
+        self.parts.keeps_parts()
     }
 
     /// cladefs: fetches the parts holding the `len` bytes at `offset` in `extent`, whose data is

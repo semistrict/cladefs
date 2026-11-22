@@ -172,7 +172,7 @@ impl ImageDevice {
         let runtime = local_cell::upload::bucket_runtime()?;
         // cladefs: `unconstrained` prevents coop-budget livelock when polled from `block_on` inside
         // a tokio task (board 6525).
-        tokio::task::unconstrained(runtime.spawn(committing)).await.map_err(Error::new)?
+        crate::bucket::unconstrained(runtime.spawn(committing)).await.map_err(Error::new)?
     }
 }
 

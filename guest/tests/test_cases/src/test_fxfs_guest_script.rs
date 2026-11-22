@@ -101,9 +101,9 @@ mod host {
         let failed = |kind: &str, what: String| {
             Some(Failure { op: Some(kill), kind: kind.to_owned(), what })
         };
-        let fs: anyhow::Result<_> = block_on(async {
+        let fs = block_on(async {
             let storage = Storage::open(dir.join("cladefs.img")).await?;
-            Ok(Filesystem::mount(storage.check().await?).await?)
+            anyhow::Ok(Filesystem::mount(storage.check().await?).await?)
         });
         let fs = match fs {
             Ok(fs) => fs,

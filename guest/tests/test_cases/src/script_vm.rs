@@ -167,9 +167,9 @@ pub fn stored_as_modelled(path: &Path, files: &[(String, String)]) -> Option<Fai
         })
     };
     let failed = |kind: &str, what: String| Some(Failure { op: None, kind: kind.to_owned(), what });
-    let fs: anyhow::Result<_> = block_on(async {
+    let fs = block_on(async {
         let storage = Storage::open(path).await?;
-        Ok(Filesystem::mount(storage.check().await?).await?)
+        anyhow::Ok(Filesystem::mount(storage.check().await?).await?)
     });
     let fs = match fs {
         Ok(fs) => fs,

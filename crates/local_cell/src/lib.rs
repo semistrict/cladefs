@@ -169,7 +169,7 @@ mod dir;
 mod durability;
 mod extents;
 pub use durability::{LAG_BUCKETS, Lags, durability_lags};
-pub use extents::{OWN_ENTRY_BYTES, Own, own_held};
+pub use extents::{OWN_ENTRY_BYTES, Own, Sparse, own_held};
 mod framed;
 mod frames;
 mod framing;

@@ -1021,7 +1021,6 @@ mod tests {
             }
         });
     }
-
     /// board 6400: an unformatted home bucket serves bucket 1 (ROOT) with its own KMS while
     /// refusing other bucket numbers, and does not cache `None` so formatting it later (e.g. as
     /// bucket 2 via `identity::add`) takes effect on subsequent lookups.

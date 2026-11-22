@@ -129,6 +129,13 @@ async fn answer(
         Failing::Unavailable => {
             Some((StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailable", "Service unavailable"))
         }
+        Failing::Unauthenticated => {
+            Some((StatusCode::UNAUTHORIZED, "InvalidAccessKeyId", "Unauthorized"))
+        }
+        Failing::Forbidden => Some((StatusCode::FORBIDDEN, "AccessDenied", "Access Denied")),
+        Failing::ExpiredToken => {
+            Some((StatusCode::BAD_REQUEST, "ExpiredToken", "The provided token has expired"))
+        }
         Failing::Not | Failing::NoSpace => None,
     };
     if let Some((status, code, message)) = failure {

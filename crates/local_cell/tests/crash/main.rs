@@ -21,7 +21,7 @@ mod rounds;
 
 use kept::{CUT_ROUNDS, KEPT_ROUNDS, cut, kept};
 use local_cell::MemDir;
-use rounds::{ROUNDS, recovering, same, twice};
+use rounds::{First, ROUNDS, recovering, recovering_after, same, twice};
 
 /// cladefs: each round runs twice, at once, and its two runs' crashes leave the same directories,
 /// and they end with the same: a round is a function of its seed alone, so that a round that failed
@@ -41,6 +41,15 @@ async fn recovers_a_prefix_of_its_commits() {
     // commits (TASK-92.41): with segments that never filled, none did.
     let spanning = local_cell::commits_spanning_segments();
     assert!(spanning > ROUNDS, "{spanning} commits spanned segments in {ROUNDS} rounds");
+}
+
+/// Board 5744: a cell killed in a random workload, its host up, recovers what its writes left,
+/// durable or not, and keeps it through a power loss after it carried on and flushed.
+#[tokio::test(flavor = "multi_thread")]
+async fn keeps_what_it_recovered_after_a_kill_through_a_power_loss() {
+    for round in 0..ROUNDS {
+        recovering_after(round, MemDir::serial(), First::Kill).await;
+    }
 }
 
 /// cladefs: a cell keeping its cell in a bucket, crashing as its uploader uploads, recovers from

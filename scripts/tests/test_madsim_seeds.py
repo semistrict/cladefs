@@ -54,8 +54,11 @@ class ParseTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"madsim-known:2: not BOARD TEST PANIC"):
             seeds.known("# x\nephemeral_cells_survive_disk_faults host \\d+ never answered\n")
 
-    def test_the_repositorys_list_parses(self):
-        self.assertTrue(seeds.known(seeds.KNOWN.read_text()))
+    def test_the_repositorys_list_parses_and_names_the_simulations_tests(self):
+        """Empty once every bug it lists is fixed; each line it has, a test of tests/madsim.rs."""
+        simulation = (seeds.ROOT / "crates" / "cladefs" / "tests" / "madsim.rs").read_text()
+        for listed in seeds.known(seeds.KNOWN.read_text()):
+            self.assertIn(f"fn {listed.test}(", simulation)
 
     def test_a_panics_message_is_what_it_says_up_to_its_note(self):
         self.assertEqual(seeds.panic_of(" WARN x\n" + panic("the cell noted on hosts [0, 2]")),

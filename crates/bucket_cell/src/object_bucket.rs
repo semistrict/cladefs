@@ -554,7 +554,7 @@ impl Timed<'_> {
         let object = || self.path.map_or_else(String::new, |path| path.to_string());
         let answered = answered.map_err(|failure| {
             let answer = error(&failure);
-            if answer == Error::Unavailable {
+            if answer.failed() {
                 self.counts.failures[self.request as usize].fetch_add(1, Ordering::Relaxed);
                 if self.request.takes_turns() {
                     self.counts.turns[self.request as usize].failed();
@@ -567,7 +567,7 @@ impl Timed<'_> {
             }
             answer
         });
-        if !matches!(answered, Err(Error::Unavailable)) {
+        if !answered.as_ref().is_err_and(|answer| answer.failed()) {
             self.counts.failing[self.request as usize].answered(self.request);
             if self.request.takes_turns() {
                 self.counts.turns[self.request as usize].answered();
@@ -877,8 +877,7 @@ type Pages = Option<Arc<dyn PaginatedListStore>>;
 pub(crate) struct Reached {
     pub objects: Arc<dyn ObjectStore>,
     /// The same backend, which lists a level of keys a page a request, if it does: S3's, GCS's and
-    /// Azure's; not a degraded one's ([`crate::faults`]), whose pages would go around its faults,
-    /// which lists a level whole as files and memory do.
+    /// Azure's, degraded as its objects are if they are ([`crate::faults::FaultyPages`]).
     pub pages: Pages,
     /// The prefix the URL names in it.
     pub prefix: String,
@@ -1004,10 +1003,14 @@ pub(crate) fn reach(
         "gcs" => GCS_REWRITE_EVERY,
         _ => std::time::Duration::ZERO,
     };
+    // cladefs: degraded as the environment says, its pages too (board 5740).
     let (objects, pages): (Arc<dyn ObjectStore>, _) = match crate::faults::Faults::from_env()? {
         Some(faults) => {
             rewrite_every = rewrite_every.max(faults.now().rewrite_every);
-            (Arc::new(crate::faults::Faulty::new(backend, faults)), None)
+            let pages = pages.map(|pages| -> Arc<dyn PaginatedListStore> {
+                Arc::new(crate::faults::FaultyPages::new(pages, faults.clone()))
+            });
+            (Arc::new(crate::faults::Faulty::new(backend, faults)), pages)
         }
         None => (backend, pages),
     };
@@ -1069,6 +1072,35 @@ fn error(error: &object_store::Error) -> Error {
         object_store::Error::NotImplemented { .. } | object_store::Error::NotSupported { .. } => {
             Error::Unsupported
         }
+        // cladefs: refused, every time until an operator changes something (board 5736).
+        object_store::Error::Unauthenticated { .. }
+        | object_store::Error::PermissionDenied { .. } => Error::Refused,
+        object_store::Error::Generic { source, .. } => client_error(&**source),
+        _ => Error::Unavailable,
+    }
+}
+
+/// cladefs: what a generic failure of `object_store`'s says, by the status and body its request
+/// was answered with, which it says only in its text (board 5736): credentials expired; another
+/// client error but a timeout, too many requests or a range past the object's end, which
+/// [`crate::bucket::get_range`] tells by the object's size, refused; anything else, the backend out
+/// of reach or failing, unavailable.
+fn client_error(source: &(dyn std::error::Error + 'static)) -> Error {
+    let mut said = source.to_string();
+    let mut cause = source.source();
+    while let Some(next) = cause {
+        said.push_str(": ");
+        said.push_str(&next.to_string());
+        cause = next.source();
+    }
+    let expired = ["ExpiredToken", "TokenRefreshRequired", "RequestExpired"];
+    if expired.iter().any(|code| said.contains(code)) {
+        return Error::Expired;
+    }
+    let Some((_, status)) = said.split_once("status code: ") else { return Error::Unavailable };
+    match status.get(..3) {
+        Some("408" | "416" | "429") => Error::Unavailable,
+        Some(code) if code.starts_with('4') => Error::Refused,
         _ => Error::Unavailable,
     }
 }
@@ -1403,12 +1435,24 @@ fn backoff(failures: u32) -> std::time::Duration {
 /// of a version that is not the object's, and one of the object's version succeeds. cladefs: a step
 /// failing as a bucket out of reach does, `Unavailable`, says nothing of what the backend honours:
 /// the probe begins again, with an object of its own anew, as a conditional write that failed so
-/// may or may not have landed, backing off as the bucket's requests do (TASK-699).
+/// may or may not have landed, backing off as the bucket's requests do (TASK-699). A refusal fails it
+/// at once, so that a bucket's opening and a tool's do, rather than hanging; credentials expired,
+/// it goes again once a cheap request refreshed them, and fails if that one finds them expired
+/// still (board 5736).
 pub async fn probe(bucket: &impl Bucket, nonce: u64) -> Result<(), String> {
     let mut failures = 0;
     loop {
         match probe_once(bucket, nonce.wrapping_add(failures.into())).await {
             Probed::Answered(answer) => return answer,
+            Probed::Expired(key) => {
+                failures += 1;
+                match bucket.head(&key).await {
+                    Err(error @ (Error::Expired | Error::Refused)) => {
+                        return Err(format!("probing conditional writes at {key}: {error}"));
+                    }
+                    _ => log::info!("object storage: probing: credentials expired, again"),
+                }
+            }
             Probed::Unavailable(key) => {
                 failures += 1;
                 log::info!("object storage: probing conditional writes: out of reach, again");
@@ -1421,10 +1465,11 @@ pub async fn probe(bucket: &impl Bucket, nonce: u64) -> Result<(), String> {
 }
 
 /// What a probe of conditional writes found ([`probe`]): an answer, or the bucket out of reach at
-/// a step, its object's key.
+/// a step, or its credentials expired, its object's key.
 enum Probed {
     Answered(Result<(), String>),
     Unavailable(String),
+    Expired(String),
 }
 
 /// A probe of conditional writes, once, as [`probe`] makes it.
@@ -1435,18 +1480,27 @@ async fn probe_once(bucket: &impl Bucket, nonce: u64) -> Probed {
             "the store does not honour conditional writes: {what} gave {result:?}"
         )))
     };
-    let unavailable = |result: &Result<Version, Error>| result == &Err(Error::Unavailable);
+    // A step failing, as the store answered nothing of what it honours.
+    let failed = |result: &Result<Version, Error>| match result {
+        Err(Error::Unavailable) => Some(Probed::Unavailable(key.clone())),
+        Err(Error::Expired) => Some(Probed::Expired(key.clone())),
+        Err(Error::Refused) => {
+            let refused = format!("probing conditional writes at {key}: {}", Error::Refused);
+            Some(Probed::Answered(Err(refused)))
+        }
+        _ => None,
+    };
     let created = bucket.put(&key, bytes::Bytes::from_static(b"probe"), PutMode::Create).await;
-    if unavailable(&created) {
-        return Probed::Unavailable(key);
+    if let Some(failed) = failed(&created) {
+        return failed;
     }
     let version = match created {
         Ok(version) => version,
         Err(error) => return Probed::Answered(Err(format!("creating {key}: {error}"))),
     };
     let again = bucket.put(&key, bytes::Bytes::from_static(b"again"), PutMode::Create).await;
-    if unavailable(&again) {
-        return Probed::Unavailable(key);
+    if let Some(failed) = failed(&again) {
+        return failed;
     }
     if again != Err(Error::AlreadyExists) {
         return refused("a create where an object is", &again);
@@ -1455,22 +1509,22 @@ async fn probe_once(bucket: &impl Bucket, nonce: u64) -> Probed {
     let other =
         Version { e_tag: Some("\"cladefs-probe\"".to_owned()), version: Some("0".to_owned()) };
     let stale = bucket.put(&key, bytes::Bytes::from_static(b"stale"), PutMode::Update(other)).await;
-    if unavailable(&stale) {
-        return Probed::Unavailable(key);
+    if let Some(failed) = failed(&stale) {
+        return failed;
     }
     if stale != Err(Error::Precondition) {
         return refused("an update of another version", &stale);
     }
     let updated =
         bucket.put(&key, bytes::Bytes::from_static(b"updated"), PutMode::Update(version)).await;
-    if unavailable(&updated) {
-        return Probed::Unavailable(key);
+    if let Some(failed) = failed(&updated) {
+        return failed;
     }
     if updated.is_err() {
         return refused("an update of the object's version", &updated);
     }
     match bucket.delete(&key).await {
-        Err(Error::Unavailable) => Probed::Unavailable(key),
+        Err(Error::Unavailable | Error::Expired) => Probed::Unavailable(key),
         removed => Probed::Answered(removed.map_err(|error| format!("removing {key}: {error}"))),
     }
 }
@@ -2545,6 +2599,49 @@ pub(crate) mod tests {
         unspaced.put("head", vec![3].into(), PutMode::Update(head)).await.unwrap();
         assert_eq!(start.elapsed(), Duration::ZERO);
         assert_eq!(unspaced.stats().failures(Request::Update), 1);
+    }
+
+    /// Board 5736: a bucket whose store refuses its requests, `401` or `403`, fails its probe at
+    /// once, as its opening then does, rather than retrying for ever; one whose credentials
+    /// expired, and stay so after a cheap request, fails it too. A create under way, its
+    /// credentials expired, sends its object again only once a cheap request is answered: once
+    /// failed, once landed, the HEADs between failing.
+    #[tokio::test(start_paused = true)]
+    async fn refusals_fail_probes_and_wait_on_cheap_requests() {
+        use crate::faults::{Failing, Fault, Faults, Faulty};
+        let faults = Faults::new(std::time::Duration::ZERO, None);
+        let objects = Arc::new(object_store::memory::InMemory::new());
+        let bucket = ObjectBucket::new(Arc::new(Faulty::new(objects, faults.clone())), "");
+        let key = format!("probe/{}", base32_id::Padded(1));
+        let refused = format!("probing conditional writes at {key}: {}", Error::Refused);
+        let expired = format!("probing conditional writes at {key}: {}", Error::Expired);
+        for (failing, said) in [
+            (Failing::Unauthenticated, &refused),
+            (Failing::Forbidden, &refused),
+            (Failing::ExpiredToken, &expired),
+        ] {
+            faults.set(Fault { failing, ..Fault::default() });
+            assert_eq!(probe(&bucket, 1).await.as_ref(), Err(said), "{failing:?}");
+        }
+
+        faults.set(Fault { failing: Failing::ExpiredToken, ..Fault::default() });
+        let stats = |request| (bucket.stats().requests(request), bucket.stats().failures(request));
+        let (creates, heads) = (stats(Request::Create), stats(Request::Head));
+        let refreshed = async {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            faults.set(Fault::default());
+        };
+        let (created, ()) =
+            tokio::join!(crate::bucket::create(&bucket, "segment", vec![7; 1 << 20]), refreshed);
+        assert!(matches!(created, crate::bucket::Created::Created(_)));
+        let since = |(requests, failures): (u64, u64), (before, failed_before): (u64, u64)| {
+            (requests - before, failures - failed_before)
+        };
+        assert_eq!(since(stats(Request::Create), creates), (2, 1));
+        let (heads, failed) = since(stats(Request::Head), heads);
+        assert_eq!(failed, heads - 1, "every HEAD but the last failed, of {heads}");
+        // Backing off from 50 ms, doubling to 5 s: the twelfth at 31.35 s, after the refresh.
+        assert_eq!(heads, 12);
     }
 
     /// TASK-382: a host's uploads, as many as its upload memory holds, each sending its object

@@ -1219,6 +1219,13 @@ impl Queue {
 }
 
 impl Queued {
+    /// cladefs: the bytes of its data: what it holds but its footer's extents stored on their own
+    /// (doc-27: what its density is measured against once acknowledged).
+    pub fn data_len(&self) -> u64 {
+        let own: u64 = self.footer.contents.own.iter().map(|(_, len)| len).sum();
+        self.bytes - own
+    }
+
     pub fn new(number: u64, footer: Footer, restamped: bool, bytes: u64) -> Self {
         Self { number, footer, restamped, bytes, taken: false }
     }

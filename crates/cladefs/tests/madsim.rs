@@ -153,6 +153,12 @@ const ROOTS: &str = "/hosts";
 /// What every test's hosts share: their logger, their KMS's master key, and a bucket in memory,
 /// its requests delayed and failed as the seed says, and what heals it.
 fn world() -> (Arc<RoutedBucket>, Arc<bucket_cell::faults::Seeded>) {
+    world_with_slots(false)
+}
+
+/// Like [`world`], using GCS-style multi-slot heads (`GCS_HEAD_SLOTS`) when `gcs_slots` is set
+/// (board 6020).
+fn world_with_slots(gcs_slots: bool) -> (Arc<RoutedBucket>, Arc<bucket_cell::faults::Seeded>) {
     // Once a process: a determinism check runs the test twice in it.
     let _ = cladefs::cladefsd::logging::to_stderr();
     // SAFETY: the simulation's one thread, before any node reads the environment.
@@ -167,7 +173,11 @@ fn world() -> (Arc<RoutedBucket>, Arc<bucket_cell::faults::Seeded>) {
     let objects = Arc::new(object_store::memory::InMemory::new());
     let seeded = Arc::new(bucket_cell::faults::Seeded::new(objects, madsim::rand::random(), odds));
     let backend = bucket_cell::faults::SeededBackend(seeded.clone());
-    (Arc::new(ObjectBucket::new(Arc::new(backend), "").unrouted()), seeded)
+    let mut bucket = ObjectBucket::new(Arc::new(backend), "");
+    if gcs_slots {
+        bucket = bucket.rewriting_every(Duration::from_nanos(1));
+    }
+    (Arc::new(bucket.unrouted()), seeded)
 }
 
 /// Hosts 1 to `count`, booted, their cell directories under [`ROOTS`]' `hostN`, their cells in
@@ -420,6 +430,10 @@ struct Told {
     versioning: bool,
     /// Whether writers free blocks told uploaded, as the seed says, after a commit.
     freeing: bool,
+    /// Whether forced takes may run on a replicated cell: `Commit::Uploaded` returns once
+    /// replicated (doc-21, TASK-537.3.3), which a forced take may lose, so writers wait for
+    /// `SyncCell` before noting a commit uploaded to the bucket (board 6699).
+    syncing: bool,
     /// The versions made, each with the blocks told uploaded before it was begun: once a commit
     /// after it was told uploaded, which uploads it too, as a version is told made once committed
     /// at rest, and named in the head once uploaded (doc-20).
@@ -431,6 +445,18 @@ fn block_of(round: u64, sequence: u64) -> Vec<u8> {
     (0..4096u64).map(|at| ((round * 31 + sequence * 7 + at) % 251) as u8).collect()
 }
 
+/// Waits for `path`'s commits on `host` to be uploaded to the bucket when `told.syncing` holds
+/// (board 6699).
+async fn confirm_uploaded(host: u8, path: &Path, told: &Told) -> bool {
+    if !told.syncing {
+        return true;
+    }
+    let Ok(mut daemon) = cladefs::cladefsd::control::connect(control(host)).await else {
+        return false;
+    };
+    daemon.sync_cell(SyncCellRequest { path: path.display().to_string() }).await.is_ok()
+}
+
 /// A writer guest's round on its host: opens the cell directory at `path`, of `cell` if given
 /// (taken there already), and writes blocks from its cell's next sequence on, each committed
 /// uploaded and noted in `told` once the daemon says so, `writes` of them, or until a write or
@@ -438,7 +464,13 @@ fn block_of(round: u64, sequence: u64) -> Vec<u8> {
 /// commit, as the seed says, noted there with what was told uploaded before once a commit after it
 /// is told uploaded, and frees a block told uploaded ([`free_one`]). The cell's ID; or none, if its open was refused, as a later placement's
 /// taking, before it opened, has it refused (`ESTALE`).
-async fn write_round(path: PathBuf, round: u64, writes: u64, told: Arc<Told>) -> Option<u64> {
+async fn write_round(
+    host: u8,
+    path: PathBuf,
+    round: u64,
+    writes: u64,
+    told: Arc<Told>,
+) -> Option<u64> {
     use madsim::rand::Rng as _;
     let guest = guest().await;
     let cell = match guest.open(&path, 64 << 20).await {
@@ -460,6 +492,9 @@ async fn write_round(path: PathBuf, round: u64, writes: u64, told: Arc<Told>) ->
         if guest.commit(cladefs::Commit::Uploaded).await.is_err() {
             break;
         }
+        if !confirm_uploaded(host, &path, &told).await {
+            break;
+        }
         told.uploaded.lock().unwrap().insert(sequence, block);
         told.versions.lock().unwrap().append(&mut made);
         if told.versioning && madsim::rand::thread_rng().gen_bool(0.3) {
@@ -471,13 +506,16 @@ async fn write_round(path: PathBuf, round: u64, writes: u64, told: Arc<Told>) ->
         }
         if told.freeing
             && madsim::rand::thread_rng().gen_bool(0.3)
-            && !free_one(&guest, cell, &told).await
+            && !free_one(host, &path, &guest, cell, &told).await
         {
             break;
         }
     }
     // Its last versions uploaded, if its writes went on to the end.
-    if !made.is_empty() && guest.commit(cladefs::Commit::Uploaded).await.is_ok() {
+    if !made.is_empty()
+        && guest.commit(cladefs::Commit::Uploaded).await.is_ok()
+        && confirm_uploaded(host, &path, &told).await
+    {
         told.versions.lock().unwrap().append(&mut made);
     }
     guest.close();
@@ -488,7 +526,13 @@ async fn write_round(path: PathBuf, round: u64, writes: u64, told: Arc<Told>) ->
 /// commits uploaded: noted freed once that commit is told uploaded, and no longer noted uploaded
 /// from the start, as its free may have taken though the commit was not told. Whether both were
 /// told done.
-async fn free_one(guest: &cladefs::cladefsd::guest::Guest, cell: u64, told: &Told) -> bool {
+async fn free_one(
+    host: u8,
+    path: &Path,
+    guest: &cladefs::cladefsd::guest::Guest,
+    cell: u64,
+    told: &Told,
+) -> bool {
     use madsim::rand::Rng as _;
     let (sequence, block) = {
         let mut uploaded = told.uploaded.lock().unwrap();
@@ -500,7 +544,10 @@ async fn free_one(guest: &cladefs::cladefsd::guest::Guest, cell: u64, told: &Tol
         uploaded.remove_entry(&sequence).unwrap()
     };
     let extent = cladefs::ExtentId { cell, sequence };
-    if guest.free(extent).await.is_err() || guest.commit(cladefs::Commit::Uploaded).await.is_err() {
+    if guest.free(extent).await.is_err()
+        || guest.commit(cladefs::Commit::Uploaded).await.is_err()
+        || !confirm_uploaded(host, path, told).await
+    {
         return false;
     }
     told.freed.lock().unwrap().insert(sequence, block);
@@ -771,7 +818,13 @@ needs!(attrition_needs_head_swaps, head_swap, Profile::PLAIN);
 // The collector deletes, of a live cell, objects of the head's epoch it may yet name.
 needs!(collection_needs_epochs, collector_epochs, Profile::COLLECTED);
 // The collector lists objects after it read what cells need: what a writer made between, deleted.
-needs!(collection_needs_candidates_first, candidates_first, Profile::COLLECTED);
+// Uses GCS multi-slot heads (board 6020): with 1-slot heads `head/0` is atomic so a single-cell
+// pass never reads a partial head before `passed::list`.
+needs!(
+    collection_needs_candidates_first,
+    candidates_first,
+    Profile { gcs_slots: true, ..Profile::COLLECTED }
+);
 // A fork of a version, its base deleted, without a reference its base's passes keep it by.
 needs!(forking_needs_references, references, Profile::BASES);
 // A pass lists its cell's references with its candidates, missing a fork's made since.
@@ -850,6 +903,8 @@ struct Profile {
     /// Whether a host's memory and disk are limited a while at each round, as the seed says
     /// ([`press`]).
     pressure: bool,
+    /// Whether the bucket uses GCS-style 10-slot heads (board 6020).
+    gcs_slots: bool,
 }
 
 impl Profile {
@@ -868,6 +923,7 @@ impl Profile {
         bases: false,
         collector: false,
         pressure: false,
+        gcs_slots: false,
     };
 
     /// What the collector's rules need: frees leaving objects sparse, which it compacts, moving
@@ -907,6 +963,7 @@ impl Profile {
             bases: rng.gen_bool(0.3),
             collector: rng.gen_bool(0.5),
             pressure: rng.gen_bool(0.3),
+            gcs_slots: false,
         };
         eprintln!("swarm: {profile:?}");
         profile
@@ -1189,10 +1246,15 @@ async fn attrition(profile: Profile) -> Result<(), String> {
     const WRITES: u64 = 6;
     let Profile { kept, net, loss, versions, disk, forced, peers, drains, frees, bases, .. } =
         profile;
-    let (bucket, faults) = world();
+    let (bucket, faults) = world_with_slots(profile.gcs_slots);
     let (nodes, roots) = hosts_keeping(3, &bucket, kept);
     let handle = madsim::runtime::Handle::current();
-    let told = Arc::new(Told { versioning: versions, freeing: frees, ..Told::default() });
+    let told = Arc::new(Told {
+        versioning: versions,
+        freeing: frees,
+        syncing: forced && kept.replicas,
+        ..Told::default()
+    });
     let manager = manager();
     let path = |round: u64, host: usize| roots[host].join(format!("store{round}"));
     let mut cell = None;
@@ -1286,7 +1348,7 @@ async fn attrition(profile: Profile) -> Result<(), String> {
             let child = (target as u8 + 1, roots[target].join(format!("child{round}")));
             inherited.extend(base_round(round, node(source), &manager, base, child).await);
         }
-        let writing = write_round(at, round, WRITES, told.clone());
+        let writing = write_round(host as u8 + 1, at, round, WRITES, told.clone());
         let mut written = node(host).spawn(writing);
         // As the seed says: the writer done; or the next round taking the cell as it writes; or
         // its host killed as it writes, drained first now and then, started again a while after,
@@ -1541,7 +1603,7 @@ async fn ephemeral_attrition(disk: bool) -> Result<(), String> {
         host_fs::faults::set(DISK_FAULTS);
     }
     for round in 0..ROUNDS {
-        let writing = write_round(at.clone(), round, WRITES, told.clone());
+        let writing = write_round(host as u8 + 1, at.clone(), round, WRITES, told.clone());
         let mut written = node(host).spawn(writing);
         let wait = Duration::from_millis(madsim::rand::thread_rng().gen_range(0..2000));
         if madsim::time::timeout(wait, &mut written).await.is_err() {

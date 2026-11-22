@@ -11,7 +11,7 @@ use common::noise;
 use extent_frame::segment::{Chain, Contents, Location, NewVersion};
 use local_cell::{
     BucketData, Closed, Description, Dir, File as _, HostDir, LocalCell, Located, MemDir, MemFile,
-    NoSpace, Opening, Options, Place, SpentExtent, TooLong, TooSmall, Unsectored,
+    NoSpace, Opening, Options, Place, Sparse, SpentExtent, TooLong, TooSmall, Unsectored,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -291,6 +291,44 @@ async fn frees_remove_files() {
     cell.commit(None).await.unwrap();
     assert_eq!(segments().await, (0, 1));
     assert_eq!(dir.list(&of("extents", CELL.id)).unwrap(), Vec::<String>::new());
+}
+
+/// cladefs: doc-27 (board 6214): a segment the cell acknowledged in the bucket and then freed most
+/// of is sparse, at its data's length as framed, with what the cell holds there live, unless a
+/// kept state pins it. One freed to exactly half is not, nor is one freed whole, which the
+/// collector deletes: nothing in it to relocate. Its live bytes counted as first asked, then kept
+/// on as frees come after.
+#[tokio::test(flavor = "multi_thread")]
+async fn segments_freed_past_half_are_sparse() {
+    let dir = MemDir::new();
+    let cell = create(dir.clone(), 1 << 20);
+    for sequence in 0..8 {
+        cell.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).await.unwrap();
+    }
+    cell.commit(None).await.unwrap();
+    assert!(cell.close_now().await.unwrap());
+    let closed = closed_one(&cell).await;
+    let key = bucket_cell::layout::segment(CELL, closed.footer.segment, closed.footer.epoch);
+    cell.acknowledged(closed.number).await.unwrap();
+    let sparse = |pinned: bool| cell.sparse(|at| pinned && at == key).unwrap();
+    assert_eq!(sparse(false), []);
+
+    for sequence in 0..4 {
+        cell.free(extent(sequence)).unwrap();
+    }
+    cell.commit(None).await.unwrap();
+    assert_eq!(sparse(false), [], "half live");
+    cell.free(extent(4)).unwrap();
+    cell.commit(None).await.unwrap();
+    let len = 8 * BLOCK as u64;
+    let live = 3 * BLOCK as u64;
+    assert_eq!(sparse(false), [Sparse { key: key.clone(), live, len }]);
+    assert_eq!(sparse(true), [], "pinned");
+    for sequence in 5..8 {
+        cell.free(extent(sequence)).unwrap();
+    }
+    cell.commit(None).await.unwrap();
+    assert_eq!(sparse(false), [], "freed whole");
 }
 
 /// cladefs: a commit that fills the open segment closes it, and leaves its framing to a thread of

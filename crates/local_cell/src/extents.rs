@@ -20,9 +20,14 @@
 //! the extent daemon's budget of its anonymous memory counts, as it counts the decoded states the
 //! bucket's layers share once each, however many cells share them
 //! (`bucket_cell::recovery::Decoded::held`).
+//!
+//! cladefs: and how dense the cell's own segments in the bucket are ([`Density`], doc-27): the
+//! bytes of the extents it holds in each, and each one's data, which its writer relocates out of
+//! once they are sparse.
 
 use crate::layout::{Data, Extent};
 use bucket_cell::recovery::{ENTRY_BYTES, RUN_BYTES};
+use extent_frame::segment::CellId;
 use extent_frame::segment::Location;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -44,6 +49,122 @@ pub(crate) struct Extents {
     /// The runs those make in the bucket's layer's order, side by side, none it holds there
     /// between those of a run.
     hidden_runs: usize,
+    /// cladefs: the cell's, and how dense its own segments in the bucket are (doc-27).
+    cell: CellId,
+    density: Density,
+}
+
+/// cladefs: what a cell holds in each of its own segments in the bucket (doc-27, Choosing what to
+/// relocate): the bytes of the extents it holds there, of either layer, and the length of each
+/// one's data, once known. A segment of its own whose live bytes are under half its data is
+/// sparse: its writer relocates what it holds there into its open segment. Kept for its own
+/// segments alone: an inherited extent is in its parent's, which the parent's reference keeps
+/// whatever the cell does, and an extent stored on its own is wholly live or wholly freed.
+///
+/// Its live bytes are counted only once its writer first asks ([`Extents::sparse`]), then kept on
+/// as they change: counting them walks the bucket's layer whole, which a fork shares with its
+/// base's other forks so that opening one costs nothing of what it inherited (TASK-453), and most
+/// cells open never relocate, forks, versions and ephemeral cells among them. Lengths it keeps
+/// from the start, as segments are acknowledged, one entry a segment. A segment it holds nothing
+/// in any more, once counted, is forgotten: its key is written once, and no extent goes back
+/// into it.
+pub(crate) struct Density {
+    /// The prefix of the keys of the cell's own segments (`bucket_cell::layout::segments`).
+    prefix: String,
+    /// The length of each one's data, of those known.
+    lens: HashMap<String, u64>,
+    /// The bytes held in each one it holds anything in, once counted.
+    live: Option<HashMap<String, u64>>,
+}
+
+/// cladefs: a segment of a cell's own in the bucket whose live bytes are under half its data
+/// (doc-27's `COMPACT_BELOW`, 0.5, the collector's `compact_below` before it): one its writer
+/// relocates what it holds in ([`Extents::sparse`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sparse {
+    pub key: String,
+    /// The bytes of the extents the cell holds there.
+    pub live: u64,
+    /// The length of its data.
+    pub len: u64,
+}
+
+impl Sparse {
+    /// The bytes of its data the cell holds no extent in: what relocating out of it frees.
+    pub fn dead(&self) -> u64 {
+        self.len - self.live
+    }
+}
+
+impl Density {
+    fn new(cell: CellId) -> Self {
+        let prefix = bucket_cell::layout::segments(cell);
+        Self { prefix, lens: HashMap::new(), live: None }
+    }
+
+    /// Whether `key` is of one of the cell's own segments.
+    fn counts(&self, key: &str) -> bool {
+        key.starts_with(&self.prefix)
+    }
+
+    /// An extent held is at `at`.
+    fn gained(&mut self, at: &Location) {
+        let counts = self.counts(&at.key);
+        let Some(live) = self.live.as_mut().filter(|_| counts) else { return };
+        match live.get_mut(&at.key) {
+            Some(bytes) => *bytes += at.len,
+            None => drop(live.insert(at.key.clone(), at.len)),
+        }
+    }
+
+    /// An extent held at `at` is there no more.
+    fn lost(&mut self, at: &Location) {
+        let counts = self.counts(&at.key);
+        let Some(live) = self.live.as_mut().filter(|_| counts) else { return };
+        let bytes = live.get_mut(&at.key).expect("a segment it holds an extent in");
+        *bytes -= at.len;
+        if *bytes == 0 {
+            live.remove(&at.key);
+            self.lens.remove(&at.key);
+        }
+    }
+
+    /// The segment at `key` holds `len` bytes of data: kept, if it is the cell's own, and holds
+    /// anything the cell holds, or isn't counted yet.
+    fn sized(&mut self, key: &str, len: u64) {
+        let held = self.live.as_ref().is_none_or(|live| live.contains_key(key));
+        if self.counts(key) && held {
+            self.lens.insert(key.to_owned(), len);
+        }
+    }
+
+    /// Counts the live bytes, from `held`, the places of every extent held, unless counted: what
+    /// it keeps on from then on.
+    fn count<'a>(&mut self, held: impl Iterator<Item = &'a Location>) {
+        if self.live.is_some() {
+            return;
+        }
+        self.live = Some(HashMap::new());
+        for at in held {
+            self.gained(at);
+        }
+        let live = self.live.as_ref().expect("counted");
+        self.lens.retain(|key, _| live.contains_key(key));
+    }
+
+    /// Its segments sparse, but those `pinned` says a kept state reads ([`Extents::sparse`]).
+    fn sparse(&self, pinned: impl Fn(&str) -> bool) -> Vec<Sparse> {
+        let live = self.live.as_ref().expect("counted");
+        let mut sparse: Vec<Sparse> = (live.iter())
+            .filter_map(|(key, &live)| {
+                let len = *self.lens.get(key)?;
+                let sparse = live.saturating_mul(2) < len && !pinned(key);
+                sparse.then(|| Sparse { key: key.clone(), live, len })
+            })
+            .collect();
+        sparse.sort_unstable_by(|a, b| b.dead().cmp(&a.dead()).then_with(|| a.key.cmp(&b.key)));
+        sparse
+    }
 }
 
 /// What the cells of this process hold of their own ([`own_held`]).
@@ -86,12 +207,6 @@ impl Own {
 /// its writer keep of it, its location's key a string of its own in each map (TASK-472).
 pub const OWN_ENTRY_BYTES: u64 = 1024;
 
-impl Default for Extents {
-    fn default() -> Self {
-        Self::over(bucket_cell::recovery::Extents::new(), None)
-    }
-}
-
 impl Drop for Extents {
     fn drop(&mut self) {
         counted(self.weight(), Own::default());
@@ -114,13 +229,21 @@ fn counted(before: Own, after: Own) {
 
 impl Extents {
     /// The extents `bucket` places, the bucket's layer, sharing `layer`, the decoded state it
-    /// started from, if it did; none of the cell's own.
+    /// started from, if it did; none of the cell's own, `cell`'s.
     pub fn over(
         bucket: bucket_cell::recovery::Extents,
         layer: Option<Arc<bucket_cell::State>>,
+        cell: CellId,
     ) -> Self {
+        #[cfg_attr(not(any(test, feature = "audit")), expect(unused_mut))]
+        let mut density = Density::new(cell);
+        // cladefs: in the builds of the tests, counted from the start, so that the audit checks
+        // what every change does to it, not only what changes after a writer first asks.
+        #[cfg(any(test, feature = "audit"))]
+        density.count(bucket.values());
         let hidden = HashSet::new();
-        let extents = Self { bucket, layer, own: HashMap::new(), hidden, hidden_runs: 0 };
+        let own = HashMap::new();
+        let extents = Self { bucket, layer, own, hidden, hidden_runs: 0, cell, density };
         counted(Own::default(), extents.weight());
         extents
     }
@@ -179,10 +302,53 @@ impl Extents {
         }
     }
 
-    /// `extent`'s entry in its own layer, to change, if it is there: one the cell wrote, sealed,
-    /// acknowledged or followed, which the bucket's layer never is.
-    pub fn own_mut(&mut self, extent: &ExtentId) -> Option<&mut Extent> {
-        self.own.get_mut(extent)
+    /// cladefs: `extent`, held in its own layer, its data at `data` now, as a seal, or an
+    /// acknowledgement, places it: returns where it was. An extent of its own layer the cell
+    /// wrote, sealed, acknowledged or followed, which the bucket's layer never is.
+    pub fn place(&mut self, extent: &ExtentId, data: Data) -> Data {
+        self.unlive(extent);
+        let entry = self.own.get_mut(extent).expect("an extent placed is held in its own layer");
+        let was = std::mem::replace(&mut entry.data, data);
+        if let Data::Bucket(at) = &entry.data {
+            self.density.gained(at);
+        }
+        was
+    }
+
+    /// cladefs: `extent`, if held in the bucket, is held there no more, as its density counts it:
+    /// what a change of its entry begins with.
+    fn unlive(&mut self, extent: &ExtentId) {
+        let at = match self.own.get(extent) {
+            Some(Extent { data: Data::Bucket(at), .. }) => Some(at),
+            Some(_) => None,
+            None => self.bucket.get(extent).filter(|_| !self.hidden.contains(extent)),
+        };
+        if let Some(at) = at {
+            self.density.lost(at);
+        }
+    }
+
+    /// cladefs: the segment of its own at `key`, if it holds anything there, holds `len` bytes of
+    /// data ([`Density`]).
+    pub fn sized(&mut self, key: &str, len: u64) {
+        self.density.sized(key, len);
+    }
+
+    /// cladefs: its own segments in the bucket that are sparse ([`Sparse`]), but those `pinned`
+    /// says a kept state reads, which relocating out of would only copy what they keep anyway:
+    /// most dead bytes first, then by key, so that a round's budget goes where it frees most, in
+    /// an order no map's decides. Their live bytes counted the first time it is asked
+    /// ([`Density`]).
+    pub fn sparse(&mut self, pinned: impl Fn(&str) -> bool) -> Vec<Sparse> {
+        if self.density.live.is_none() {
+            let mut density = std::mem::replace(&mut self.density, Density::new(self.cell));
+            density.count(self.iter().filter_map(|(_, entry)| match entry {
+                Entry::Own(Extent { data: Data::Bucket(at), .. }) | Entry::Bucket(at) => Some(at),
+                Entry::Own(_) => None,
+            }));
+            self.density = density;
+        }
+        self.density.sparse(pinned)
     }
 
     /// `extent`'s entry, which a write to it changes: its own, or `make`'s, entered, if it holds
@@ -197,6 +363,10 @@ impl Extents {
 
     /// Holds `extent` at `entry`, in its own layer, over the bucket's.
     pub fn insert(&mut self, extent: ExtentId, entry: Extent) {
+        self.unlive(&extent);
+        if let Data::Bucket(at) = &entry.data {
+            self.density.gained(at);
+        }
         self.changing(|extents| {
             if extents.bucket.contains_key(&extent) {
                 extents.hide(extent);
@@ -207,6 +377,7 @@ impl Extents {
 
     /// Holds `extent` no more: returns its entry, if it held it.
     pub fn remove(&mut self, extent: &ExtentId) -> Option<Extent> {
+        self.unlive(extent);
         self.changing(|extents| {
             if let Some(entry) = extents.own.remove(extent) {
                 return Some(entry);
@@ -220,8 +391,12 @@ impl Extents {
     /// Names `extent`, if it holds it in the bucket, at `to`, where the collector moved it, if it
     /// names it on its way there ([`Data::follow`]): in its own layer, if the bucket's places it.
     pub fn follow(&mut self, extent: &ExtentId, to: &Location) {
-        if let Some(entry) = self.own.get_mut(extent) {
-            entry.data.follow(to);
+        if let Some(entry) = self.own.get(extent) {
+            if let Data::Bucket(at) = &entry.data
+                && bucket_cell::layout::further(&at.key, &to.key)
+            {
+                self.place(extent, Data::Bucket(to.clone()));
+            }
             return;
         }
         let Some(at) = self.in_bucket(extent) else { return };
@@ -253,6 +428,30 @@ impl Extents {
     /// is among them; the bucket's layer's is in the bucket.
     pub fn own(&self) -> impl Iterator<Item = (&ExtentId, &Extent)> {
         self.own.iter()
+    }
+
+    /// cladefs: panics unless what its density counts held in each of the cell's own segments, once
+    /// counted, is what it holds there, recounted from both layers; and it knows the lengths of
+    /// none it holds nothing in ([`Density`]).
+    #[cfg(any(test, feature = "audit"))]
+    pub fn audit(&self) {
+        let Some(counted) = &self.density.live else { return };
+        let mut live: HashMap<&str, u64> = HashMap::new();
+        for (_, entry) in self.iter() {
+            let at = match entry {
+                Entry::Own(Extent { data: Data::Bucket(at), .. }) | Entry::Bucket(at) => at,
+                Entry::Own(_) => continue,
+            };
+            if self.density.counts(&at.key) {
+                *live.entry(at.key.as_str()).or_default() += at.len;
+            }
+        }
+        let counted: HashMap<&str, u64> =
+            counted.iter().map(|(key, live)| (key.as_str(), *live)).collect();
+        assert_eq!(counted, live, "the bytes held in each of the cell's own segments");
+        for key in self.density.lens.keys() {
+            assert!(live.contains_key(key.as_str()), "{key}'s length kept, nothing held there");
+        }
     }
 
     /// cladefs: whether it shares its bucket's layer with `other`'s: one map, not two alike.
@@ -318,6 +517,11 @@ mod tests {
     use super::*;
     use crate::layout::{Piece, SegmentId};
 
+    /// The cell the tests' extents are of, whose segments the bucket holds them in.
+    fn cell() -> CellId {
+        bucket_cell::layout::test_cell(1)
+    }
+
     /// Where the bucket holds an extent: in a segment of the base's, at `offset`.
     fn at(offset: u64) -> Location {
         let key = bucket_cell::layout::segment(bucket_cell::layout::test_cell(1), 1, 1);
@@ -363,8 +567,10 @@ mod tests {
         let decoded = bucket_cell::State::of(bucket_cell::layout::test_cell(1), base.clone());
         let layer = Some(Arc::new(decoded));
         let counted = own_held();
-        let (mut one, other) =
-            (Extents::over(base.clone(), layer.clone()), Extents::over(base.clone(), layer));
+        let (mut one, other) = (
+            Extents::over(base.clone(), layer.clone(), cell()),
+            Extents::over(base.clone(), layer, cell()),
+        );
         assert_eq!(own_held(), counted);
         assert!(one.shares_bucket_with(&other));
         assert_eq!(one.len(), 10);
@@ -416,7 +622,7 @@ mod tests {
         assert_eq!(held(&other), whole);
         drop(one);
         assert_eq!(own_held(), counted);
-        let alone = Extents::over(base, None);
+        let alone = Extents::over(base, None, cell());
         assert_eq!(more_than(counted), Own { entries: 10, runs: 0 });
         drop(alone);
         assert_eq!(own_held(), counted);
@@ -431,7 +637,7 @@ mod tests {
             (0..1000).map(|sequence| (extent(sequence), at(sequence * 10))).collect();
         let layer = bucket_cell::State::of(bucket_cell::layout::test_cell(1), base.clone());
         let counted = own_held();
-        let mut extents = Extents::over(base, Some(Arc::new(layer)));
+        let mut extents = Extents::over(base, Some(Arc::new(layer)), cell());
         let runs = |extents: &Extents| extents.weight().runs;
         extents.remove(&extent(10));
         extents.remove(&extent(12));

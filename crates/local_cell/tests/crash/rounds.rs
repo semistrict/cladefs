@@ -264,7 +264,11 @@ fn contents(cell: &LocalCell<MemDir>) -> Model {
 /// system fails, from a random version on, as the host crashes, and the directory that crash
 /// leaves. Returns that, what each commit began with, the last made durable, and the round's RNG,
 /// to carry on.
-async fn crashed_round(round: u64, dir: MemDir) -> (MemDir, Vec<Model>, usize, StdRng) {
+async fn crashed_round(
+    round: u64,
+    dir: MemDir,
+    first: First,
+) -> (MemDir, Vec<Model>, usize, StdRng) {
     let mut rng = StdRng::seed_from_u64(round);
     let description = Description { block_size: BLOCK as u32, capacity: 4 << 20, cell: CELL };
     let cell = LocalCell::create(dir.clone(), description, OPTIONS).unwrap();
@@ -272,7 +276,22 @@ async fn crashed_round(round: u64, dir: MemDir) -> (MemDir, Vec<Model>, usize, S
     dir.fail_after(Some(rng.random_range(0..600)));
     let (durable, _) = workload(&mut rng, &cell, &mut epochs, Model::default(), 0).await;
     drop(cell);
-    (dir.crash(round), epochs, durable, rng)
+    let crashed = match first {
+        First::PowerLoss => dir.crash(round),
+        First::Kill => dir.killed(),
+    };
+    (crashed, epochs, durable, rng)
+}
+
+/// cladefs: how a round's cell first stops (board 5744).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum First {
+    /// Its host losing power: what its writes made durable kept, and any of the rest.
+    PowerLoss,
+    /// Its process killed, its host up: all it wrote kept, durable or not, its writes since their
+    /// syncs at the next power loss's mercy still.
+    #[allow(dead_code, reason = "the crash test's rounds kill; Shuttle's, sharing these, crash")]
+    Kill,
 }
 
 /// What a directory holds: each file's path, with its length and a hash of its contents; and each
@@ -336,7 +355,15 @@ pub fn same(round: u64, first: &Left, second: &Left) {
 /// recovers a prefix of its commits, carries on, and crashes again after a flush, keeping what it
 /// committed. Returns the directories it left, and whether its first crash was in a commit.
 pub async fn recovering(round: u64, dir: MemDir) -> (Left, bool) {
-    let (crashed, epochs, durable, mut rng) = crashed_round(round, dir).await;
+    recovering_after(round, dir, First::PowerLoss).await
+}
+
+/// Round `round` of the recovering rounds, its cell first stopping as `first` says, then as
+/// [`recovering`] says. cladefs: killed first, its host up, it recovers past what it made durable,
+/// to what its unsynced writes hold: a power loss after it carried on and flushed keeps what it
+/// committed since (board 5744).
+pub async fn recovering_after(round: u64, dir: MemDir, first: First) -> (Left, bool) {
+    let (crashed, epochs, durable, mut rng) = crashed_round(round, dir, first).await;
     let mut left = vec![("its first crash", digest(&crashed))];
     let mid_commit = durable + 1 < epochs.len();
 

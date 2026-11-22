@@ -320,7 +320,7 @@ impl<D: Dir> Recovering<D> {
         for (_, number) in &recovered.segments {
             by_key.insert(key(cell, *number), segment(*number));
         }
-        let lower = Extents::over(parent.extents.clone(), Some(parent.clone()));
+        let lower = Extents::over(parent.extents.clone(), Some(parent.clone()), cell);
         let mut replay = bucket_cell::State {
             root: checkpoint.root.clone(),
             next_sequence: checkpoint.next_sequence,

@@ -352,12 +352,6 @@ impl CellClient {
         self.client.request(&write(Data::Inline(&data))).await.map(drop)
     }
 
-    /// How many reads and writes moved their data through the transfer area.
-    #[cfg(test)]
-    pub(super) fn transfers(&self) -> u64 {
-        self.transfer.used.load(Ordering::Relaxed)
-    }
-
     /// The transfer area's slots, taken until dropped, which no read or write then has.
     #[cfg(test)]
     pub(super) fn take_transfer_slots(&self) -> Vec<impl Sized> {
@@ -573,13 +567,6 @@ impl CellClient {
     #[cfg(test)]
     pub(super) fn stage_counts(&self) -> StageCounts {
         self.client.stage_counts()
-    }
-
-    /// cladefs: the runs of private pages this process made of the cell's window so far, their
-    /// pages and nanoseconds, which it tells the daemon ([`STAGE_PRIVATE_COUNTS`]).
-    #[cfg(test)]
-    pub(super) fn private_counts(&self) -> PrivateCosts {
-        self.client.stage_counts.private()
     }
 
     /// cladefs: the runs of pages its window keeps installed at most, once it is created.
