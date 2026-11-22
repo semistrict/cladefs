@@ -410,8 +410,8 @@ pub struct ByBucket {
     own: HostKms<ObjectBucket>,
     registered: Registered,
     vars: Vec<(String, String)>,
-    /// The home bucket's number, once read: none if it has no identity.
-    own_number: Mutex<Option<Option<u16>>>,
+    /// The home bucket's number, cached once it has an identity (board 6400).
+    own_number: Mutex<Option<u16>>,
     chosen: Mutex<HashMap<u16, (KmsKey, kms::Shared)>>,
     named: Mutex<HashMap<String, kms::Shared>>,
     buckets: Mutex<BTreeMap<u16, Arc<BucketKms<ObjectBucket>>>>,
@@ -448,7 +448,7 @@ impl ByBucket {
         let mut all: Vec<_> =
             self.buckets.lock().unwrap().iter().map(|(n, kms)| (*n, kms.clone())).collect();
         if let HostKms::Bucket(kms) = &self.own {
-            let own = self.own_number.lock().unwrap().flatten().unwrap_or(NAMED);
+            let own = self.own_number.lock().unwrap().unwrap_or(NAMED);
             all.push((own, kms.clone()));
         }
         all
@@ -506,14 +506,17 @@ impl ByBucket {
         shredded
     }
 
-    /// The home bucket's number, read once: none if it has no identity.
+    /// The home bucket's number, cached once it has an identity (board 6400): `None` is never
+    /// cached, because an unformatted bucket acquires an identity on first cell creation.
     async fn own_number(&self) -> Result<Option<u16>, String> {
         if let Some(own) = *self.own_number.lock().unwrap() {
-            return Ok(own);
+            return Ok(Some(own));
         }
         let own = identity::get(&*self.home).await.map_err(|err| err.to_string())?;
         let own = own.map(|identity| identity.number);
-        *self.own_number.lock().unwrap() = Some(own);
+        if let Some(number) = own {
+            *self.own_number.lock().unwrap() = Some(number);
+        }
         Ok(own)
     }
 
@@ -591,7 +594,10 @@ pub struct Shredded {
 impl Kmses for ByBucket {
     fn of(&self, bucket: u16) -> BoxFuture<'_, Result<(KmsKey, kms::Shared), String>> {
         Box::pin(async move {
-            if bucket == NAMED || self.own_number().await? == Some(bucket) {
+            // An unformatted home bucket has no registry and takes bucket 1 (ROOT) once formatted,
+            // so bucket-1 cells (e.g. a standalone image `.bucket` opened before the daemon creates
+            // its first cell in an empty `CLADEFSD_BUCKET`) use the host's own KMS (board 6400).
+            if bucket == NAMED || self.own_number().await?.unwrap_or(identity::ROOT) == bucket {
                 return Ok(self.own());
             }
             if let Some(chosen) = self.chosen.lock().unwrap().get(&bucket) {
@@ -1013,6 +1019,77 @@ mod tests {
                 let object = KekObject::decode(7, &kek(bucket).await.unwrap()).unwrap();
                 assert!(matches!(object, KekObject::Tombstone { .. }), "a KEK left");
             }
+        });
+    }
+
+    /// board 6400: an unformatted home bucket serves bucket 1 (ROOT) with its own KMS while
+    /// refusing other bucket numbers, and does not cache `None` so formatting it later (e.g. as
+    /// bucket 2 via `identity::add`) takes effect on subsequent lookups.
+    #[test]
+    fn unformatted_home_serves_root_and_learns_number_once_formatted() {
+        use crate::identity::Details;
+        futures::executor::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let mk = |name: &str| {
+                std::fs::create_dir(dir.path().join(name)).unwrap();
+                format!("file://{}", dir.path().join(name).display())
+            };
+            let (root_url, home_url) = (mk("root"), mk("home"));
+            let root_kms_dir = dir.path().join("root-kms");
+            let home_kms_dir = dir.path().join("home-kms");
+            extent_keys::kms::LocalKms::open(&root_kms_dir).unwrap().create(1).unwrap();
+            extent_keys::kms::LocalKms::open(&home_kms_dir).unwrap().create(1).unwrap();
+            let root_kms_url = format!("local://{}", root_kms_dir.display());
+            let home_kms_url = format!("local://{}", home_kms_dir.display());
+            let home_kms: kms::Shared =
+                Arc::new(extent_keys::kms::LocalKms::open(&home_kms_dir).unwrap());
+            let home_routed = Arc::new(
+                ObjectBucket::from_url(&home_url)
+                    .unwrap()
+                    .routed(Arc::new(Registered::new(Vec::new()))),
+            );
+            let kmses = ByBucket::new(
+                home_routed,
+                HostKms::Named(home_kms_url.clone(), home_kms),
+                Vec::new(),
+            );
+            // Before `home` is formatted: bucket 1 resolves to `own`, bucket 2 is refused.
+            let (key, _) = kmses.of(identity::ROOT).await.unwrap();
+            assert_eq!(key.0.as_ref(), home_kms_url.as_str());
+            assert!(kmses.of(2).await.is_err());
+
+            // Now format `root` (bucket 1) and add `home` as bucket 2; `own_number` must NOT have
+            // cached `None`, so bucket 2 now resolves to `own` and bucket 1 to `root`'s KMS.
+            let root_bucket = ObjectBucket::from_url(&root_url).unwrap();
+            let home_bucket = ObjectBucket::from_url(&home_url).unwrap();
+            let root_details = Details {
+                url: Some(root_url.clone()),
+                kms: Some(root_kms_url.clone()),
+                ..Details::default()
+            };
+            let home_details = Details {
+                url: Some(home_url.clone()),
+                kms: Some(home_kms_url.clone()),
+                ..Details::default()
+            };
+            identity::format(&root_bucket, &root_details, identity::Asked::default())
+                .await
+                .unwrap();
+            let (_, registry) = identity::add(
+                &root_bucket,
+                &root_details,
+                &home_bucket,
+                home_details,
+                identity::Asked::default(),
+            )
+            .await
+            .unwrap();
+            identity::spread(&registry, &home_bucket).await.unwrap();
+
+            let (key2, _) = kmses.of(2).await.unwrap();
+            assert_eq!(key2.0.as_ref(), home_kms_url.as_str());
+            let (key1, _) = kmses.of(identity::ROOT).await.unwrap();
+            assert_eq!(key1.0.as_ref(), root_kms_url.as_str());
         });
     }
 }
