@@ -77,10 +77,13 @@ struct vext_queue {
  * (TASK-92.8). Made whole as the device was probed, a 2 GiB window's took a third of the guest's
  * boot, and 32 MiB of its memory (64 bytes a page), most of which a guest never maps: Fxfs hands
  * the window's space out first fit, from its start and from its middle (fs/cladefs/dax.c). A part is
- * a memory section of the window, or what of one it covers: hotplug maps a whole section's struct
- * pages on huge pages, and each making waits for an RCU grace period (mem_hotplug_begin).
- * Nothing reaches the window's memory but through dax_direct_access, so no page is used before it
- * has a struct page.
+ * 1 << vext_part_shift bytes of the window, or what of them it covers: a memory subsection, 2 MiB,
+ * whose struct pages are 32 KiB, by default. cladefs: parts of a memory section, 128 MiB, took
+ * 2 MiB of struct pages each, 4 MiB at least, as the window's start and middle are each in one: a
+ * sixtieth of a small VM (board 5649). A smaller part costs more makings for as much window, each
+ * waiting for an RCU grace period (mem_hotplug_begin), which the window's `made_ns` says. Nothing
+ * reaches the window's memory but through dax_direct_access, so no page is used before it has a
+ * struct page.
  */
 struct vext_window {
 	phys_addr_t phys;
@@ -88,9 +91,12 @@ struct vext_window {
 	/* Its memory, mapped in the kernel, where each part's making maps it (the direct map). */
 	void *kaddr;
 	struct dax_device *dax;
-	/* Its parts' pages, the first's section the window's first; their node's. */
-	struct dev_pagemap *parts;
-	unsigned int nr_parts;
+	/*
+	 * Its parts' pages, each allocated as it is made, the first's part the window's first; their
+	 * node's. Its parts are 1 << part_shift bytes.
+	 */
+	struct dev_pagemap **parts;
+	unsigned int nr_parts, part_shift;
 	int nid;
 	/* Which parts have struct pages, which `lock` serializes the making of. */
 	unsigned long *made_parts;
@@ -977,26 +983,51 @@ static void vext_read_config(struct virtio_extent *vext)
 }
 
 #if IS_ENABLED(CONFIG_FS_DAX)
+/*
+ * cladefs: the log2 of a window's parts' size (struct vext_window), a memory subsection's at least
+ * and a section's at most: what an A/B of the struct pages' memory against their makings' time
+ * sets (board 5649). Read as a window is set up.
+ */
+static unsigned int vext_part_shift = SUBSECTION_SHIFT;
+module_param_named(window_part_shift, vext_part_shift, uint, 0444);
+MODULE_PARM_DESC(window_part_shift, "The log2 of the bytes of a DAX window whose struct pages are made at once");
+
 /* The window's part holding its byte at `offset`. */
 static unsigned int vext_window_part(const struct vext_window *window, u64 offset)
 {
-	return ((window->phys + offset) >> PA_SECTION_SHIFT) - (window->phys >> PA_SECTION_SHIFT);
+	return ((window->phys + offset) >> window->part_shift) -
+	       (window->phys >> window->part_shift);
 }
 
 /* Makes the struct pages of the window's part `part`, with its lock held: 0, or a -errno. */
 static int vext_window_make_part(struct vext_window *window, unsigned int part)
 {
-	struct dev_pagemap *pgmap = &window->parts[part];
+	u64 first = ((window->phys >> window->part_shift) + part) << window->part_shift;
 	u64 start = ktime_get_ns();
+	struct dev_pagemap *pgmap;
 	unsigned int nofs;
 	void *kaddr;
 
 	/* Its allocations reclaim nothing of a filesystem, whose locks the caller may hold. */
 	nofs = memalloc_nofs_save();
+	pgmap = kzalloc(sizeof(*pgmap), GFP_KERNEL);
+	if (!pgmap) {
+		memalloc_nofs_restore(nofs);
+		return -ENOMEM;
+	}
+	pgmap->type = MEMORY_DEVICE_FS_DAX;
+	pgmap->range = (struct range) {
+		.start = max_t(u64, window->phys, first),
+		.end = min_t(u64, window->phys + window->len, first + BIT_ULL(window->part_shift)) - 1,
+	};
+	pgmap->nr_range = 1;
 	kaddr = memremap_pages(pgmap, window->nid);
 	memalloc_nofs_restore(nofs);
-	if (IS_ERR(kaddr))
+	if (IS_ERR(kaddr)) {
+		kfree(pgmap);
 		return PTR_ERR(kaddr);
+	}
+	window->parts[part] = pgmap;
 	WARN_ON_ONCE(kaddr != window->kaddr + (pgmap->range.start - window->phys));
 	atomic64_add(range_len(&pgmap->range), &window->made);
 	atomic64_add(ktime_get_ns() - start, &window->made_ns);
@@ -1083,8 +1114,11 @@ static void vext_window_unmake(void *data)
 	struct vext_window *window = data;
 	unsigned int part;
 
-	for_each_set_bit(part, window->made_parts, window->nr_parts)
-		memunmap_pages(&window->parts[part]);
+	for_each_set_bit(part, window->made_parts, window->nr_parts) {
+		memunmap_pages(window->parts[part]);
+		kfree(window->parts[part]);
+	}
+	kvfree(window->parts);
 }
 
 /*
@@ -1094,9 +1128,7 @@ static void vext_window_unmake(void *data)
 static int vext_map_window_dax(struct device *dev, struct vext_window *window,
 			       const struct virtio_shm_region *region)
 {
-	u64 end = region->addr + region->len;
 	struct dax_device *dax;
-	unsigned int part;
 	int err;
 
 	window->phys = region->addr;
@@ -1104,23 +1136,18 @@ static int vext_map_window_dax(struct device *dev, struct vext_window *window,
 	/* Where memremap_pages maps each part of a pgmap of FS_DAX's. */
 	window->kaddr = __va(region->addr);
 	window->nid = dev_to_node(dev);
+	window->part_shift = clamp_t(unsigned int, vext_part_shift, SUBSECTION_SHIFT, PA_SECTION_SHIFT);
+	/* Hotplug takes ranges of whole subsections, as the device's shared memory regions are. */
+	if (!IS_ALIGNED(region->addr | region->len, SUBSECTION_SIZE))
+		return -EINVAL;
 	window->nr_parts = vext_window_part(window, region->len - 1) + 1;
-	window->parts = devm_kcalloc(dev, window->nr_parts, sizeof(*window->parts), GFP_KERNEL);
 	window->made_parts = devm_bitmap_zalloc(dev, window->nr_parts, GFP_KERNEL);
-	if (!window->parts || !window->made_parts)
+	if (!window->made_parts)
+		return -ENOMEM;
+	window->parts = kvcalloc(window->nr_parts, sizeof(*window->parts), GFP_KERNEL);
+	if (!window->parts)
 		return -ENOMEM;
 	mutex_init(&window->lock);
-	for (part = 0; part < window->nr_parts; part++) {
-		u64 section = (region->addr >> PA_SECTION_SHIFT) + part;
-		struct dev_pagemap *pgmap = &window->parts[part];
-
-		pgmap->type = MEMORY_DEVICE_FS_DAX;
-		pgmap->range = (struct range) {
-			.start = max_t(u64, region->addr, section << PA_SECTION_SHIFT),
-			.end = min_t(u64, end, (section + 1) << PA_SECTION_SHIFT) - 1,
-		};
-		pgmap->nr_range = 1;
-	}
 	/* Released after the dax_device's put, below: no direct access is left then. */
 	err = devm_add_action_or_reset(dev, vext_window_unmake, window);
 	if (err)
