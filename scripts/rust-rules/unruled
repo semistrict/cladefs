@@ -70,3 +70,9 @@ latest-listening-loads: a read-modify-write replaced by a load, no ordering weak
 occurrence-told-by-a-store-and-a-load: a read-modify-write replaced by a store and a load, no ordering weaker: loom's (hearing::loom), which no syntactic rule can judge
 answers-clear-asks-relaxed: equivalent (its Fate): mixed-orderings would ask its Relaxed for a reason, which docs/memory-ordering.md gives
 asks-read-relaxed: equivalent (its Fate): mixed-orderings would ask its Relaxed for a reason, which docs/memory-ordering.md gives
+copies-kept-for-ever: a condition forced true (whether a copy of another bucket's cell is kept): which copies a collector keeps is the mirrors' protocol (specs/buckets)
+dead-childs-copy-references-kept: a retiring taken out whole (a dead child's references in a mirror's bucket)
+holds-kept-with-copies-gone: a deletion taken out whole (the mirrors' holds of a copy deleted)
+mirrors-keep-their-pins: a release replaced by a drop: which pins a done mirror lets go is the protocol's (mirrorPins)
+mirrors-mark-short-copies: an extent left out of the copy before its marker: an order of the protocol's (markerAfterCopy)
+mirrors-move-no-references: a step replaced by its result's value (no references moved): the protocol's (mirrorListsAfterMark)

@@ -1,5 +1,5 @@
 # cladefs's own: SQLite databases kept straight on an extent device, as pages in write-once
-# extents, each transaction one commit of the device (TASK-296).
+# extents, each transaction one commit of the device (TASK-296): one database a cell.
 [package]
 name = "sqlite_cladefs"
 version = "0.1.0"
@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
-extent_files.workspace = true
+block_device.workspace = true
 futures.workspace = true
 log.workspace = true
 rusqlite = { version = "0.41.1", features = ["bundled"] }
@@ -21,7 +21,7 @@ workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
-extent_files = { workspace = true, features = ["testing"] }
+block_device = { workspace = true, features = ["testing"] }
 extent_keys.workspace = true
 local_cell.workspace = true
 rand.workspace = true

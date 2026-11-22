@@ -8,33 +8,46 @@
 //! segments after the local checkpoint, their logs, its description and its write-ahead log's
 //! start. A migration moves them, its rules as the spec names them:
 //!
-//! 1. **Prepare** (`MigrateCell`): the target notes the cell in its journal and writes its own
-//!    reference to the cell's origin before it takes anything (`targetRefersFirst`), and answers
-//!    its incarnation. Taking an older migration of the cell, never accepted, it gives that one up
-//!    first (`supersedes`): the cell's writer, preparing this one, pursues it no more. A source
-//!    whose prepare went unanswered aborts that migration by its ID (`SourceLoses`).
-//! 2. **Rounds**, while the guest runs: the kept segments not sent yet, each whole, sparse.
+//! 1. **Prepare** (`MigrateCell`): the source notes the cell's next epoch, durably, then asks the
+//!    target, again with the same migration while its answer is lost (board 5734). The target
+//!    notes the cell in its journal and writes its own reference to the cell's origin before it
+//!    takes anything (`targetRefersFirst`), and answers its incarnation and a token new to this
+//!    take of the migration. Taking an older migration of the cell, by its epoch, never accepted,
+//!    it gives that one up first (`supersedes`): the cell's writer, preparing this one, pursues it
+//!    no more; a prepare older than the migration it takes, arriving late, it refuses (board
+//!    5732). A source whose prepare went unanswered aborts that migration by its ID
+//!    (`SourceLoses`).
+//! 2. **Rounds**, while the guest runs: the kept segments not sent yet, each whole, sparse; and
+//!    word that the migration goes on, as a target gives up one it hears nothing of for
+//!    `CLADEFSD_MIGRATION_IDLE` (board 5734; `TargetAbort`).
 //! 3. **Hand-over** (`HandOverCell`), once nothing has the cell open here, its VM process gone: the
 //!    source gives the cell up first, durably, a marker in its cell refusing every opening from
 //!    then on (`sourceGivesUpFirst`); then it sends the rest, the holes its kept segments gave back
-//!    since they were sent among it; then it asks the target to take the cell over, naming every
-//!    file and its length, and the CRC of each but the kept segments'. The target takes it only
-//!    holding them all so (`openAtNamed`), remembering the migration accepted for good
-//!    (`remembersAccepted`); refusing, it drops what it took and its reference, and never takes
-//!    that migration after (`refuseFinal`).
-//! 4. Accepted, the source removes its cell, then retires its own reference (`sourceRetiresLast`),
-//!    a note beside the cell directory saying it handed the cell over until both are done, so that
-//!    asking again after either failed finishes them (board 5665); refused, it removes its marker,
-//!    durably, and serves the cell again. Not answered, the marker
-//!    stays, the cell unopened here, and asking again, after a restart too, sends again what the
-//!    target lacks and asks it again, naming every file as before; the target answers as it did.
+//!    since they were sent among it; then it asks the target to take the cell over, naming the
+//!    incarnation and token its prepare's answer gave (`boundToPrepare`), and every file and its
+//!    length, and the CRC of each but the kept segments'. The target takes it only holding them
+//!    all so (`openAtNamed`), remembering the migration accepted (`remembersAccepted`); refusing,
+//!    it drops what it took and its reference, and never takes that migration after
+//!    (`refuseFinal`). Another incarnation of the target's, which knows nothing of it, answers
+//!    neither.
+//! 4. Accepted, the source notes so in the cell's journal entry, durably, then removes its cell,
+//!    tells the target it may forget it accepted the migration, and retires its own reference
+//!    and the entry (`sourceRetiresLast`), so that asking again, or the daemon starting again,
+//!    finishes them (board 5730); refused, it removes its marker, durably, and serves the cell
+//!    again. Not answered, the marker stays, the cell unopened here, and asking again, after a
+//!    restart too, sends again what the target lacks and asks it again, naming every file as
+//!    before; the target answers as it did.
+//!
+//! The target serves one request of a cell's migrations at a time, each run to its end however
+//! its asker goes, its bucket calls bounded (board 5732).
 
 use super::peers::proto::peer_client::PeerClient;
 use super::peers::proto::{
     FileDigest, MigrateAbortRequest, MigrateFileRequest, MigrateHandOverRequest,
-    MigratePrepareRequest, Range,
+    MigratePrepareRequest, MigratePrepareResponse, MigrateReleaseRequest, MigrateRenewRequest,
+    Range,
 };
-use crate::ephemeral_host::{self, Entry, staging};
+use crate::ephemeral_host::{self, Entry, Migrating, staging};
 use crate::{CellId, Errno};
 use bucket_cell::layout::Origin;
 use host_fs::FileExt as _;
@@ -59,6 +72,24 @@ const PIECE: usize = 4 << 20;
 /// How long a round of the source waits for the next.
 const ROUND: Duration = Duration::from_millis(500);
 
+/// How often a source's rounds tell its target the migration goes on: well within any
+/// `CLADEFSD_MIGRATION_IDLE` (board 5734).
+const RENEW: Duration = Duration::from_secs(1);
+
+/// How long a target keeps a migration it hears nothing of, unless `CLADEFSD_MIGRATION_IDLE` says
+/// otherwise (board 5734): a source down this long finds its hand-over refused, and serves again.
+const IDLE: Duration = Duration::from_secs(300);
+
+/// How long a target's call to the bucket, serving a migration's request, waits at most: past it,
+/// the request fails, what it noted undone (board 5732).
+const BUCKET_BOUND: Duration = Duration::from_secs(30);
+
+/// How long a source waits for each try of its prepare, the target's bucket calls within.
+const PREPARE_BOUND: Duration = Duration::from_secs(45);
+
+/// How often a source tries its prepare, its answer lost, before it gives the migration up.
+const PREPARE_TRIES: u32 = 3;
+
 /// What a cell given up to a migration says of it, in its marker: what asking the target again
 /// takes, after a restart too.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -66,29 +97,16 @@ struct Marker {
     migration: u64,
     peer: String,
     incarnation: u64,
+    token: u64,
 }
 
-/// What a source notes beside a cell directory it handed over until the directory and its reference
-/// are gone ([`handed_over`]): the cell's journal entry, if it has one, whose reference goes.
-#[derive(Debug, Serialize, Deserialize)]
-struct HandedOver {
-    migration: u64,
-    entry: Option<Entry>,
-}
-
-/// Where a source notes it handed the cell at `path` over ([`HandedOver`]): beside it, as a
-/// target stages a migration's files ([`staging`]).
-fn handed_over(path: &Path) -> PathBuf {
-    let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-    path.with_file_name(format!(".{name}.handed-over"))
-}
-
-/// A migration from this host under way: its target, and what of each kept segment it sent, its
-/// length and the bytes it took of the disk then.
+/// A migration from this host under way: its target, its prepare's answer, and what of each kept
+/// segment it sent, its length and the bytes it took of the disk then.
 struct Outgoing {
     migration: u64,
     peer: String,
     incarnation: u64,
+    token: u64,
     client: PeerClient<tonic::transport::Channel>,
     sent: tokio::sync::Mutex<HashMap<String, (u64, u64)>>,
     stopped: std::sync::atomic::AtomicBool,
@@ -96,42 +114,69 @@ struct Outgoing {
 
 impl Outgoing {
     fn new(
-        migration: u64,
-        peer: String,
-        incarnation: u64,
+        Marker { migration, peer, incarnation, token }: Marker,
         client: PeerClient<tonic::transport::Channel>,
     ) -> Self {
         let sent = tokio::sync::Mutex::default();
         let stopped = std::sync::atomic::AtomicBool::new(false);
-        Outgoing { migration, peer, incarnation, client, sent, stopped }
+        Outgoing { migration, peer, incarnation, token, client, sent, stopped }
     }
 
     /// The migration a cell's marker names, asked again with nothing known sent, as after a
     /// restart.
     fn resumed(marker: Marker) -> Result<Self, Errno> {
         let client = client(&marker.peer)?;
-        let resumed = Self::new(marker.migration, marker.peer, marker.incarnation, client);
+        let resumed = Self::new(marker, client);
         resumed.stopped.store(true, std::sync::atomic::Ordering::Release);
         Ok(resumed)
     }
 
     fn marker(&self) -> Marker {
-        Marker { migration: self.migration, peer: self.peer.clone(), incarnation: self.incarnation }
+        let (migration, peer) = (self.migration, self.peer.clone());
+        Marker { migration, peer, incarnation: self.incarnation, token: self.token }
     }
 }
 
-node_local::node_local! {
-    /// cladefs: the migrations this daemon, since it started, prepared to take, the only ones it
-    /// takes on with (board 5721): what a migration staged before is written but not synced, which
-    /// its host's restart may have lost part of, so that a migration being taken does not outlive
-    /// its daemon (specs/ephemeral: `Crash` makes a cell being received none), whether or not its
-    /// start, giving it up, could retire its entry.
-    static PREPARED: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
+/// A migration from this host of a cell: being prepared, or under way.
+enum Underway {
+    Preparing,
+    Moving(Arc<Outgoing>),
 }
 
 node_local::node_local! {
-    /// The migrations from this host under way, by their cells' paths.
-    static OUTGOING: Mutex<BTreeMap<PathBuf, Arc<Outgoing>>> = Mutex::new(BTreeMap::new());
+    /// The migrations from this host, by their cells' paths.
+    static OUTGOING: Mutex<BTreeMap<PathBuf, Underway>> = Mutex::new(BTreeMap::new());
+}
+
+/// The path of a cell whose migration is being prepared, held in [`OUTGOING`] from before the
+/// prepare is asked, so that two migrations of one cell at once never both prepare (board 5732):
+/// let go unless the migration begins.
+struct Reserved(PathBuf);
+
+impl Reserved {
+    /// The path of the cell at `path` reserved: `EBUSY` if a migration of it is under way.
+    fn new(path: &Path) -> Result<Self, Errno> {
+        let mut outgoing = OUTGOING.get().lock().unwrap();
+        if outgoing.contains_key(path) {
+            return Err(Errno::EBUSY);
+        }
+        outgoing.insert(path.to_owned(), Underway::Preparing);
+        Ok(Reserved(path.to_owned()))
+    }
+
+    /// The migration under way, `outgoing`: the cell's from now on.
+    fn begin(self, outgoing: Arc<Outgoing>) {
+        OUTGOING.get().lock().unwrap().insert(self.0.clone(), Underway::Moving(outgoing));
+    }
+}
+
+impl Drop for Reserved {
+    fn drop(&mut self) {
+        let mut outgoing = OUTGOING.get().lock().unwrap();
+        if let Some(Underway::Preparing) = outgoing.get(&self.0) {
+            outgoing.remove(&self.0);
+        }
+    }
 }
 
 /// The status of `errno`, for a peer.
@@ -148,11 +193,24 @@ fn client(address: &str) -> Result<PeerClient<tonic::transport::Channel>, Errno>
     })
 }
 
+/// How long this host, a target, keeps a migration it hears nothing of: `CLADEFSD_MIGRATION_IDLE`
+/// seconds, five minutes by default (board 5734).
+pub(super) fn idle() -> Result<Duration, String> {
+    let Some(set) = node_local::env::var_os("CLADEFSD_MIGRATION_IDLE") else { return Ok(IDLE) };
+    match set.to_str().and_then(|seconds| seconds.parse::<u64>().ok()) {
+        Some(0) | None => {
+            Err(format!("CLADEFSD_MIGRATION_IDLE must be a positive number of seconds: {set:?}"))
+        }
+        Some(seconds) => Ok(Duration::from_secs(seconds)),
+    }
+}
+
 /// Begins the migration of the ephemeral cell at `path` to the daemon whose peer
 /// address is `peer`, its cell going at `to` there (`MigrateCell`): prepared there, then rounds
 /// sending its kept segments as they come, until its hand-over. Returns the migration's ID.
 pub(super) async fn migrate(path: PathBuf, peer: String, to: String) -> Result<u64, Errno> {
     let host = ephemeral_host::host()?;
+    let reserved = Reserved::new(&path)?;
     let read = path.clone();
     let (checkpoint, cell) = super::cells::blocking(move || {
         // Given up to a migration already: that one's to hand over first.
@@ -164,10 +222,18 @@ pub(super) async fn migrate(path: PathBuf, peer: String, to: String) -> Result<u
         Ok((checkpoint.ok_or(Errno::EINVAL)?, cell))
     })
     .await?;
-    if OUTGOING.get().lock().unwrap().contains_key(&path) {
+    let entry = host.entry(cell).ok_or(Errno::ENOENT)?;
+    // Taken here by a migration not yet accepted, or handed over and being let go of.
+    if entry.migrating.is_some() {
         return Err(Errno::EBUSY);
     }
-    let entry = host.entry(cell).ok_or(Errno::ENOENT)?;
+    // The cell's next epoch, noted before any target hears of it: newer than every migration of
+    // the cell before, this host's restarted too.
+    let entry = Entry { epoch: entry.epoch + 1, ..entry };
+    host.note(&entry).map_err(|err| {
+        log::warn!("cladefsd: noting {}'s epoch: {err:#}", entry.child);
+        Errno::EIO
+    })?;
     let parent = checkpoint.parent();
     let migration = rand::random::<u64>() | 1;
     let mut client = client(&peer)?;
@@ -181,33 +247,76 @@ pub(super) async fn migrate(path: PathBuf, peer: String, to: String) -> Result<u
         parent_epoch: parent.epoch,
         bucket: entry.bucket.clone(),
         to,
+        epoch: entry.epoch,
     };
-    let prepared = match client.migrate_prepare(prepare).await {
-        Ok(prepared) => prepared.into_inner(),
-        Err(refused) => {
-            log::warn!("cladefsd: preparing migration {migration:x} at {peer}: {refused}");
-            // Prepared there or not, its answer lost: aborted by ID, as this host pursues it no
-            // more. Not delivered, the target gives it up as it starts, or at the cell's next
-            // prepare there (specs/ephemeral, `SourceLoses`, `supersedes`).
-            let abort = MigrateAbortRequest { migration };
-            if let Err(err) = client.migrate_abort(abort).await {
-                log::info!("cladefsd: aborting migration {migration:x} at {peer}: {err}");
+    let MigratePrepareResponse { incarnation, token } =
+        match prepare_retrying(&mut client, prepare).await {
+            Ok(prepared) => prepared,
+            Err(refused) => {
+                log::warn!("cladefsd: preparing migration {migration:x} at {peer}: {refused}");
+                // Prepared there or not, its answer lost: aborted by ID, as this host pursues it
+                // no more. Not delivered, the target gives it up as it starts, idle, or at the
+                // cell's next prepare there (specs/ephemeral, `SourceLoses`, `TargetAbort`,
+                // `supersedes`).
+                let abort = MigrateAbortRequest { migration };
+                if let Err(err) = client.migrate_abort(abort).await {
+                    log::info!("cladefsd: aborting migration {migration:x} at {peer}: {err}");
+                }
+                return Err(Errno::ENOTCONN);
             }
-            return Err(Errno::ENOTCONN);
-        }
-    };
-    let outgoing = Arc::new(Outgoing::new(migration, peer, prepared.incarnation, client));
-    OUTGOING.get().lock().unwrap().insert(path.clone(), outgoing.clone());
+        };
+    let marker = Marker { migration, peer, incarnation, token };
+    let outgoing = Arc::new(Outgoing::new(marker, client));
+    reserved.begin(outgoing.clone());
     let runtime = crate::bucket::bucket_runtime().map_err(|_| Errno::EIO)?;
     runtime.spawn(async move {
+        let mut renewed = tokio::time::Instant::now();
         while !outgoing.stopped.load(std::sync::atomic::Ordering::Acquire) {
             if let Err(err) = round(&outgoing, &path).await {
                 log::warn!("cladefsd: migration {:x}'s round: {err}", outgoing.migration);
+            }
+            if renewed.elapsed() >= RENEW {
+                renew(&outgoing).await;
+                renewed = tokio::time::Instant::now();
             }
             tokio::time::sleep(ROUND).await;
         }
     });
     Ok(migration)
+}
+
+/// Asks a target to prepare a migration, `prepare`, again with the same migration while its answer
+/// is lost, [`PREPARE_TRIES`] times at most (board 5734): the target's answer, or the last
+/// failure.
+async fn prepare_retrying(
+    client: &mut PeerClient<tonic::transport::Channel>,
+    prepare: MigratePrepareRequest,
+) -> Result<MigratePrepareResponse, Status> {
+    let mut tries = 0;
+    loop {
+        tries += 1;
+        let asked = tokio::time::timeout(PREPARE_BOUND, client.migrate_prepare(prepare.clone()));
+        let answered = asked.await.unwrap_or_else(|_| {
+            Err(Status::deadline_exceeded(format!("no answer within {PREPARE_BOUND:?}")))
+        });
+        match answered {
+            Ok(prepared) => return Ok(prepared.into_inner()),
+            Err(lost) if tries < PREPARE_TRIES && unanswered(&lost) => {
+                log::info!("cladefsd: migration {:x}'s prepare, again: {lost}", prepare.migration);
+                tokio::time::sleep(ROUND * tries).await;
+            }
+            Err(failed) => return Err(failed),
+        }
+    }
+}
+
+/// Whether `status` says a request went unanswered, rather than refused: worth asking again.
+fn unanswered(status: &Status) -> bool {
+    use tonic::Code;
+    matches!(
+        status.code(),
+        Code::Unavailable | Code::DeadlineExceeded | Code::Cancelled | Code::Unknown
+    )
 }
 
 /// A round of `outgoing`: the kept segments of the cell at `path` not sent yet, each whole.
@@ -224,6 +333,20 @@ async fn round(outgoing: &Outgoing, path: &Path) -> Result<(), Status> {
         sent.insert(relative, (len, allocated));
     }
     Ok(())
+}
+
+/// Tells `outgoing`'s target the migration goes on (board 5734). Given up there, its rounds stop:
+/// its hand-over will be refused, the cell served here again.
+async fn renew(outgoing: &Outgoing) {
+    let renewal = MigrateRenewRequest { migration: outgoing.migration };
+    match outgoing.client.clone().migrate_renew(renewal).await {
+        Ok(_) => {}
+        Err(gone) if gone.code() == tonic::Code::NotFound => {
+            log::warn!("cladefsd: migration {:x} given up by its target", outgoing.migration);
+            outgoing.stopped.store(true, std::sync::atomic::Ordering::Release);
+        }
+        Err(err) => log::info!("cladefsd: renewing migration {:x}: {err}", outgoing.migration),
+    }
 }
 
 /// The directories of the cell at `path`, by their paths in it: those its files are in, and those
@@ -348,24 +471,27 @@ fn crc_of(path: &Path) -> std::io::Result<u32> {
 pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
     let host = ephemeral_host::host()?;
     let _held = super::cells::hold_cell_alone(&path).await?;
-    // Handed over before, and asked again: what is left of letting it go.
-    let handed = handed_over(&path);
-    let noted =
-        host_fs::read(&handed).ok().map(|bytes| serde_json::from_slice::<HandedOver>(&bytes));
-    match noted {
-        Some(Ok(noted)) => {
-            log::info!("cladefsd: migration {:x} handed over: letting it go", noted.migration);
-            return let_go(&host, &path, &handed, &noted).await;
+    // Handed over before, and asked again: what is left of letting it go (board 5730).
+    let handed = host.handed_over(&path).map_err(|err| {
+        log::error!("cladefsd: the journal: {err:#}");
+        Errno::EIO
+    })?;
+    if !handed.is_empty() {
+        for entry in &handed {
+            log::info!("cladefsd: {} handed over: letting it go", entry.child);
+            let_go(&host, entry).await?;
         }
-        // Not whole, its writing failed: no note, the marker there still, which asks the target
-        // again, which answers yes again (`remembersAccepted`), noting it anew (board 5721).
-        Some(Err(err)) => log::warn!("cladefsd: {} is no whole note: {err}", handed.display()),
-        None => {}
+        return Ok(());
     }
     let marker_path = path.join(MARKER);
     let marked: Option<Marker> =
         host_fs::read(&marker_path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok());
-    let under_way = OUTGOING.get().lock().unwrap().get(&path).cloned();
+    let under_way = match OUTGOING.get().lock().unwrap().get(&path) {
+        // Its prepare not answered yet: nothing to hand over.
+        Some(Underway::Preparing) => return Err(Errno::EBUSY),
+        Some(Underway::Moving(outgoing)) => Some(outgoing.clone()),
+        None => None,
+    };
     // Held alone, the cell changes no more: rounds are over.
     if let Some(under_way) = &under_way {
         under_way.stopped.store(true, std::sync::atomic::Ordering::Release);
@@ -384,7 +510,8 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
         // Under way again, after a restart too, until its marker goes durably (board 5721).
         (Some(marker), _) => {
             let resumed = Arc::new(Outgoing::resumed(marker)?);
-            OUTGOING.get().lock().unwrap().insert(path.clone(), resumed.clone());
+            let under_way = Underway::Moving(resumed.clone());
+            OUTGOING.get().lock().unwrap().insert(path.clone(), under_way);
             resumed
         }
         (None, None) => return Err(Errno::ENOENT),
@@ -403,12 +530,13 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
         }
     }
     // The hand-over names every file of the cell, so that the target takes it only whole
-    // (`openAtNamed`).
+    // (`openAtNamed`), and the take its prepare answered (`boundToPrepare`).
     let files = named(&path).map_err(|err| {
         log::warn!("cladefsd: naming {}'s files: {err}", path.display());
         Errno::EIO
     })?;
-    let request = MigrateHandOverRequest { migration, incarnation: outgoing.incarnation, files };
+    let (incarnation, token) = (outgoing.incarnation, outgoing.token);
+    let request = MigrateHandOverRequest { migration, incarnation, files, token };
     let accepted = match outgoing.client.clone().migrate_hand_over(request).await {
         Ok(answer) => answer.into_inner().accepted,
         Err(unanswered) => {
@@ -430,51 +558,89 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
         return Err(Errno::EAGAIN);
     }
     OUTGOING.get().lock().unwrap().remove(&path);
-    // Accepted: noted so, durably, then let go of, as asking again finds it noted (board 5665).
+    // Accepted: noted so in the cell's entry, durably, then let go of, as asking again, or the
+    // daemon starting again, finds it noted (board 5730).
     let cell = local_cell::host_cell(&path).map_err(|_| Errno::EIO)?;
-    let noted = HandedOver { migration, entry: host.entry(cell) };
-    let bytes = serde_json::to_vec(&noted).map_err(|_| Errno::EIO)?;
-    write_durably(&handed, &bytes).map_err(|err| {
-        log::warn!("cladefsd: noting {} handed over: {err}", path.display());
+    let entry = host.entry(cell).ok_or(Errno::EIO)?;
+    let peer = outgoing.peer.clone();
+    let handed = Entry { migrating: Some(Migrating::HandedOver { id: migration, peer }), ..entry };
+    host.note(&handed).map_err(|err| {
+        log::warn!("cladefsd: noting {} handed over: {err:#}", path.display());
         Errno::EIO
     })?;
-    let_go(&host, &path, &handed, &noted).await
+    let_go(&host, &handed).await
 }
 
-/// Lets go of the cell at `path`, handed over as `noted` says, noted at `handed`: its cell
-/// directory goes, then this host's reference (`sourceRetiresLast`), then the note. `EIO` if the
-/// directory, the reference or the note does not go, the note left, from which asking again goes
-/// on. The note gone, its directory's sync failing answers `Ok` all the same (board 5721): the cell
-/// is handed over and let go of, and asking again would find nothing to go on from (`ENOENT`); a
-/// crash may bring the note back, of a cell directory gone and a reference retired.
-async fn let_go(
-    host: &ephemeral_host::Host,
-    path: &Path,
-    handed: &Path,
-    noted: &HandedOver,
-) -> Result<(), Errno> {
-    local_cell::remove_cell_dir(path).map_err(|err| {
-        log::warn!("cladefsd: removing {}, handed over: {err:#}", path.display());
-        Errno::EIO
-    })?;
-    // Only the entry noted, as it is still (board 5721): the cell back here since, at another
-    // path, its entry and reference are its own now, which letting go of the one before retired.
-    let current = noted.entry.as_ref().and_then(|entry| host.entry(entry.child));
-    if let Some(entry) = noted.entry.as_ref().filter(|&entry| current.as_ref() == Some(entry))
-        && let Err(err) = host.retire(entry).await
-    {
-        // The note kept, from which asking again retires it (board 5721).
-        log::warn!("cladefsd: retiring {}'s reference, handed over: {err:#}", entry.child);
-        return Err(Errno::EIO);
+/// Lets go of the cell `entry` notes handed over: its cell directory goes, if it is the cell's
+/// still, then its target is told it may forget it accepted the migration, then this host's
+/// reference and the entry go (`sourceRetiresLast`). `EIO` if the directory does not go, the entry
+/// kept, from which asking again goes on.
+async fn let_go(host: &ephemeral_host::Host, entry: &Entry) -> Result<(), Errno> {
+    let Some(Migrating::HandedOver { id: migration, peer }) = &entry.migrating else {
+        return Err(Errno::EINVAL);
+    };
+    let (path, child) = (entry.path.clone(), entry.child);
+    super::cells::blocking(move || {
+        // The cell, or its removal stopped part way: gone. Another cell put there since, its own.
+        let its = match local_cell::host_cell(&path) {
+            Ok(cell) => cell == child,
+            Err(_) => local_cell::deleting_host(&path),
+        };
+        if !its {
+            return Ok(());
+        }
+        local_cell::remove_cell_dir(&path).map_err(|err| {
+            log::warn!("cladefsd: removing {}, handed over: {err:#}", path.display());
+            Errno::EIO
+        })
+    })
+    .await?;
+    crate::faults::crashpoint!("migration::let_go");
+    release(peer, *migration).await;
+    match host.retire(entry).await {
+        Ok(()) => Ok(()),
+        // The entry gone, its directory's sync failing: let go of all the same (board 5721), as
+        // asking again would find nothing to go on from (`ENOENT`). A crash may bring the entry
+        // back, which the daemon starting lets go of again, each step again as before.
+        Err(err) if host.entry(child).is_none() => {
+            log::warn!("cladefsd: {child} let go of, its entry's removal not durable: {err:#}");
+            Ok(())
+        }
+        Err(err) => {
+            log::warn!("cladefsd: retiring {child}'s reference, handed over: {err:#}");
+            Err(Errno::EIO)
+        }
     }
-    host_fs::remove_file(handed).map_err(|err| {
-        log::warn!("cladefsd: {}, let go of: {err}", handed.display());
-        Errno::EIO
-    })?;
-    if let Err(err) = host_fs::sync_dir(handed.parent().unwrap_or(Path::new("."))) {
-        log::warn!("cladefsd: {} let go of, not durably: {err}", handed.display());
+}
+
+/// Tells the target at `peer` it may forget it accepted `migration`, its cell let go of here
+/// (board 5734). Unheard, the target keeps remembering it: one empty file.
+async fn release(peer: &str, migration: u64) {
+    let Ok(mut client) = client(peer) else { return };
+    let released = MigrateReleaseRequest { migration };
+    let asked = tokio::time::timeout(BUCKET_BOUND, client.migrate_release(released));
+    match asked.await {
+        Ok(Ok(_)) => {}
+        Ok(Err(err)) => log::info!("cladefsd: releasing migration {migration:x} at {peer}: {err}"),
+        Err(_) => log::info!("cladefsd: releasing migration {migration:x} at {peer}: no answer"),
     }
-    Ok(())
+}
+
+/// Lets go of every cell this host's journal notes handed over, as the daemon starts, before it
+/// serves (board 5730): a crash part way through letting one go. Those it fails to it leaves to
+/// asking again.
+pub(super) async fn let_go_handed_over(host: &ephemeral_host::Host) -> anyhow::Result<usize> {
+    let mut let_go_of = 0;
+    for entry in host.entries()? {
+        if !matches!(entry.migrating, Some(Migrating::HandedOver { .. })) {
+            continue;
+        }
+        match let_go(host, &entry).await {
+            Ok(()) => let_go_of += 1,
+            Err(err) => log::warn!("cladefsd: letting {} go, handed over: {err}", entry.child),
+        }
+    }
+    Ok(let_go_of)
 }
 
 /// Sends what `outgoing` has not sent of the cell at `path`, given up: its directories; the kept
@@ -548,9 +714,8 @@ fn remove_durably(path: &Path) -> std::io::Result<()> {
 
 /// Writes `bytes` to a file at `path`, whole, durably: staged beside it ([`staged`]), synced, then
 /// renamed over it, so that `path` holds them whole or as it was, whatever fails or crashes on the
-/// way (board 5721: a hand-over note created and its write failing was left empty, unreadable,
-/// every asking again failing on it; and a marker so, read as none, still refusing the cell's
-/// openings). The staged file goes if a step fails.
+/// way (board 5721: a marker created and its write failing was left empty, read as none, still
+/// refusing the cell's openings). The staged file goes if a step fails.
 fn write_durably(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let staged = staged(path);
     let written = (|| {
@@ -576,6 +741,28 @@ fn staged(path: &Path) -> PathBuf {
 /// The target's side: what its peer server does of a migration to it.
 pub(super) mod target {
     use super::*;
+    use tokio::time::Instant;
+
+    node_local::node_local! {
+        /// The cells migrations are taking here, each held by the request of its migrations
+        /// being served ([`Taking`]).
+        static TAKING: Mutex<HashMap<CellId, Arc<tokio::sync::Mutex<()>>>> =
+            Mutex::new(HashMap::new());
+    }
+
+    node_local::node_local! {
+        /// When each migration being taken here was last heard of, by its ID (board 5734).
+        static HEARD: Mutex<HashMap<u64, Instant>> = Mutex::new(HashMap::new());
+    }
+
+    node_local::node_local! {
+        /// The migrations this daemon, since it started, prepared to take, the only ones it
+        /// takes on with (board 5721): what a migration staged before is written but not synced,
+        /// which its host's restart may have lost part of, so that a migration being taken does
+        /// not outlive its daemon (specs/ephemeral: `Crash` makes a cell being received none),
+        /// whether or not its start, giving it up, could retire its entry.
+        static PREPARED: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
+    }
 
     /// The host's ephemeral cells' directory, for a peer: `FAILED_PRECONDITION` if it keeps none.
     fn host() -> Result<Arc<ephemeral_host::Host>, Status> {
@@ -584,12 +771,103 @@ pub(super) mod target {
         })
     }
 
+    /// The journal's failure, for a peer.
+    fn journal(err: anyhow::Error) -> Status {
+        status("the journal", err)
+    }
+
+    /// A cell a migration is taking here, held while one request of its migrations is served, so
+    /// that each sees the journal entry and staging directory as the one before left them (board
+    /// 5732).
+    struct Taking {
+        child: CellId,
+        held: Option<tokio::sync::OwnedMutexGuard<()>>,
+    }
+
+    /// Holds `child` ([`Taking`]), once no other request of its migrations is served.
+    async fn taking(child: CellId) -> Taking {
+        let lock = TAKING.get().lock().unwrap().entry(child).or_default().clone();
+        Taking { child, held: Some(lock.lock_owned().await) }
+    }
+
+    impl Drop for Taking {
+        fn drop(&mut self) {
+            self.held = None;
+            // Its lock gone unless another request holds it, or waits for it.
+            let mut taking = TAKING.get().lock().unwrap();
+            if taking.get(&self.child).is_some_and(|lock| Arc::strong_count(lock) == 1) {
+                taking.remove(&self.child);
+            }
+        }
+    }
+
+    /// The entry of the cell migration `migration` is taking here, held ([`Taking`]), if one is.
+    /// One a daemon before this one prepared it gives up ([`PREPARED`]), its start having failed
+    /// to, its disk failing.
+    async fn held(
+        host: &ephemeral_host::Host,
+        migration: u64,
+    ) -> Result<Option<(Taking, Entry)>, Status> {
+        let Some(entry) = host.receiving(migration).map_err(journal)? else { return Ok(None) };
+        let taking = taking(entry.child).await;
+        // As the request served before this one left it.
+        let Some(entry) = host.receiving(migration).map_err(journal)? else { return Ok(None) };
+        if !PREPARED.get().lock().unwrap().contains(&migration) {
+            log::warn!("cladefsd: migration {migration:x} prepared by a daemon before: given up");
+            refuse(host, &entry).await?;
+            return Ok(None);
+        }
+        Ok(Some((taking, entry)))
+    }
+
+    /// Notes, durably, the cell migration `migration`, accepted, took as taken: its entry written
+    /// again, unless the cell went on since. A noting that failed, or whose sync did, is made good
+    /// so before the acceptance is answered again or forgotten (boards 5721, 5734): forgotten
+    /// first, a crash bringing back an entry being taken had this host's start take it for a
+    /// migration never accepted, removing the cell, the one copy its source let go of.
+    async fn noted_taken(host: &ephemeral_host::Host, migration: u64) -> Result<(), Status> {
+        let Some(child) = host.accepted_cell(migration) else { return Ok(()) };
+        let _taking = taking(child).await;
+        let Some(entry) = host.entry(child) else { return Ok(()) };
+        let its = match entry.migrating {
+            None => true,
+            Some(Migrating::Receiving { id, .. }) => id == migration,
+            Some(Migrating::HandedOver { .. }) => false,
+        };
+        if its {
+            let taken = Entry { migrating: None, ..entry };
+            host.note(&taken).map_err(|err| status("noting the cell", err))?;
+        }
+        Ok(())
+    }
+
+    /// Notes migration `migration` heard of now (board 5734).
+    fn heard(migration: u64) {
+        HEARD.get().lock().unwrap().insert(migration, Instant::now());
+    }
+
+    /// Runs `work`, a request's, to its end however its asker goes: a request cancelled leaves
+    /// none of its steps half taken, each its bucket calls bounded.
+    async fn to_the_end<T: Send + 'static>(
+        work: impl std::future::Future<Output = Result<T, Status>> + Send + 'static,
+    ) -> Result<T, Status> {
+        let runtime = crate::bucket::bucket_runtime().map_err(|err| status("its runtime", err))?;
+        let done = runtime.spawn(work).await;
+        done.unwrap_or_else(|err| Err(status("serving it", err)))
+    }
+
     /// Prepares the migration `request` names: the cell noted, then its reference written here
-    /// before anything is taken, then its staging directory made. Asked again, it prepares again,
-    /// each step as it did. An older migration of the cell it is taking, never accepted, it gives
+    /// before anything is taken, then its staging directory made. Returns this host's incarnation
+    /// and the token of its take of it. Asked again, it prepares again, each step as it did,
+    /// answering the same. An older migration of the cell it is taking, never accepted, it gives
     /// up first: its source, the cell's writer, preparing this one, pursues that one no more, its
-    /// answer lost or its daemon restarted since (specs/ephemeral, `supersedes`).
-    pub(crate) async fn prepare(request: MigratePrepareRequest) -> Result<u64, Status> {
+    /// answer lost or its daemon restarted since (specs/ephemeral, `supersedes`); a migration older
+    /// than the one it takes, by the cell's epoch, it refuses (`ABORTED`, board 5732).
+    pub(crate) async fn prepare(request: MigratePrepareRequest) -> Result<(u64, u64), Status> {
+        to_the_end(take(request)).await
+    }
+
+    async fn take(request: MigratePrepareRequest) -> Result<(u64, u64), Status> {
         let host = host()?;
         let MigratePrepareRequest {
             migration,
@@ -601,6 +879,7 @@ pub(super) mod target {
             parent_epoch,
             bucket,
             to,
+            epoch,
         } = request;
         let child = CellId { tenant, id: cell };
         let origin = Origin {
@@ -608,126 +887,152 @@ pub(super) mod target {
             at,
             epoch: parent_epoch,
         };
+        let _taking = taking(child).await;
+        // Its source has its answer: asked again, late.
         if host.accepted(migration) {
-            return Ok(host.incarnation());
+            return Err(Status::already_exists(format!("migration {migration:x} accepted")));
         }
         let path = PathBuf::from(to);
-        let entry = Entry { child, origin, path: path.clone(), bucket, migration: Some(migration) };
+        let found = host.entry(child);
+        let prepared = |id: &u64| PREPARED.get().lock().unwrap().contains(id);
         let mut superseded = None;
-        match host.entry(child) {
-            None => {}
-            Some(found) if found == entry => {}
-            Some(found) if found.migration.is_some_and(|older| !host.accepted(older)) => {
-                supersede(&host, &found, &entry).await?;
-                superseded = Some(found);
+        let token = match found.as_ref().map(|found| (found, &found.migrating)) {
+            None => None,
+            Some((_, Some(Migrating::Receiving { id, token })))
+                if *id == migration && prepared(id) =>
+            {
+                Some(*token)
+            }
+            // Prepared by a daemon before this one, whose staging it trusts not: taken afresh.
+            Some((found, Some(Migrating::Receiving { id, .. }))) if *id == migration => {
+                host.drop_moved(found).map_err(journal)?;
+                None
+            }
+            Some((found, Some(Migrating::Receiving { id: older, .. }))) if found.epoch < epoch => {
+                log::info!("cladefsd: migration {older:x} of {child} superseded by {migration:x}");
+                supersede(&host, found, origin, &bucket).await?;
+                superseded = Some(staging(&found.path, *older));
+                None
+            }
+            Some((found, Some(Migrating::Receiving { id: newer, .. }))) => {
+                return Err(Status::aborted(format!(
+                    "migration {migration:x} of {child}, of epoch {epoch}, is older than \
+                     {newer:x}, of epoch {}",
+                    found.epoch
+                )));
+            }
+            // Handed over from here, coming back before its letting go finished: finished first.
+            Some((found, Some(Migrating::HandedOver { .. }))) => {
+                super::let_go(&host, found).await.map_err(|err| {
+                    Status::unavailable(format!("cell {child} is being let go here: {err}"))
+                })?;
+                None
             }
             // Noted, but held here no more: its letting go stopped part way, its disk failing
             // (board 5721). This host holds none of it, as the spec's `Prepare` asks.
-            Some(found) if found.migration.is_none() && matches!(host.holds(&found), Ok(false)) => {
+            Some((found, None)) if matches!(host.holds(found), Ok(false)) => {
                 log::info!("cladefsd: {child} noted here, held not: its entry retired");
-                host.retire(&found).await.map_err(|err| status("retiring its entry", err))?;
+                retire(&host, found).await?;
+                None
             }
-            Some(_) => return Err(Status::already_exists(format!("cell {child} is here"))),
-        }
-        if host_fs::exists(&path) {
+            Some((_, None)) => return Err(Status::already_exists(format!("cell {child} is here"))),
+        };
+        if token.is_none() && host_fs::exists(&path) {
             return Err(Status::already_exists(format!("{} is there", path.display())));
         }
+        let token = token.unwrap_or_else(|| rand::random::<u64>() | 1);
+        let migrating = Some(Migrating::Receiving { id: migration, token });
+        let entry = Entry { child, origin, path, bucket, epoch, migrating };
         host.note(&entry).map_err(|err| status("noting the cell", err))?;
+        heard(migration);
         // The older migration's files dropped once no entry names it: dropped part way, a staging
         // an entry names is one a retry of its migration may take for whole (board 5721).
-        if let Some(found) = superseded {
-            let older = staging(&found.path, found.migration.expect("an entry being taken"));
-            if let Err(err) = drop_staged(&older) {
-                log::warn!("cladefsd: dropping {}, superseded: {err}", older.display());
-            }
+        if let Some(older) = superseded
+            && let Err(err) = drop_staged(&older)
+        {
+            log::warn!("cladefsd: dropping {}, superseded: {err}", older.display());
         }
         let bucket =
             crate::host_cell::bucket(&entry.bucket).map_err(|err| status("its bucket", err))?;
-        bucket_cell::lifecycle::refer_ephemeral(&*bucket, origin, host.incarnation(), child).await;
+        let incarnation = host.incarnation();
+        let referring =
+            bucket_cell::lifecycle::refer_ephemeral(&*bucket, origin, incarnation, child);
+        if tokio::time::timeout(BUCKET_BOUND, referring).await.is_err() {
+            // Referred or not: given up, its reference retired, or, that timing out too, left to
+            // the reaping of migrations idle too long.
+            refuse(&host, &entry).await?;
+            return Err(Status::unavailable(format!("referring to {origin:?} timed out")));
+        }
         // Staged afresh but by this daemon: what a daemon before it staged, it may have lost part
         // of, unsynced, at its host's restart (board 5721).
-        let staged = staging(&path, migration);
-        if !PREPARED.get().lock().unwrap().contains(&migration) {
+        let staged = staging(&entry.path, migration);
+        if !prepared(&migration) {
             drop_staged(&staged).map_err(|err| status("dropping a staging of before", err))?;
         }
         host_fs::create_dir_all(&staged).map_err(|err| status("staging", err))?;
         PREPARED.get().lock().unwrap().insert(migration);
-        log::info!("cladefsd: migration {migration:x} of {child} prepared, to {}", path.display());
-        Ok(host.incarnation())
+        log::info!(
+            "cladefsd: migration {migration:x} of {child} prepared, to {}",
+            entry.path.display()
+        );
+        Ok((incarnation, token))
     }
 
-    /// Gives up the older migration of `found`, never accepted, for `entry`'s: its reference,
-    /// unless `entry`'s is the same; what it staged goes once `entry` is noted in its place.
+    /// Gives up the older migration of `found`, never accepted, for one of `origin` in `bucket`:
+    /// its cell, if taken into place, and its reference, unless the newer one's is the same; what
+    /// it staged goes once the newer one is noted in its place.
     async fn supersede(
         host: &ephemeral_host::Host,
         found: &Entry,
-        entry: &Entry,
+        origin: Origin,
+        bucket: &str,
     ) -> Result<(), Status> {
-        let older = found.migration.expect("an entry being taken");
-        log::info!("cladefsd: migration {older:x} of {} superseded", found.child);
-        if (found.origin, &found.bucket) != (entry.origin, &entry.bucket) {
-            host.retire(found).await.map_err(|err| status("retiring its reference", err))?;
+        host.drop_moved(found).map_err(journal)?;
+        if (found.origin, found.bucket.as_str()) != (origin, bucket) {
+            retire(host, found).await?;
         }
         Ok(())
     }
 
-    /// Removes the directory `staged`, if there, durably: no crash brings it back.
-    fn drop_staged(staged: &Path) -> std::io::Result<()> {
-        if !host_fs::exists(staged) {
-            return Ok(());
+    /// Retires `entry`'s reference, then the entry, in [`BUCKET_BOUND`]: `UNAVAILABLE` past it,
+    /// the entry kept, to be given up again.
+    async fn retire(host: &ephemeral_host::Host, entry: &Entry) -> Result<(), Status> {
+        match tokio::time::timeout(BUCKET_BOUND, host.retire(entry)).await {
+            Ok(retired) => retired.map_err(|err| status("retiring its reference", err)),
+            Err(_) => {
+                Err(Status::unavailable(format!("retiring {}'s reference timed out", entry.child)))
+            }
         }
-        host_fs::remove_dir_all(staged)?;
-        host_fs::sync_dir(staged.parent().unwrap_or(Path::new(".")))
-    }
-
-    /// The staging directory of the migration `migration`, being taken here.
-    fn staged(
-        host: &Arc<ephemeral_host::Host>,
-        migration: u64,
-    ) -> Result<(Entry, PathBuf), Status> {
-        if !PREPARED.get().lock().unwrap().contains(&migration) {
-            given_up(host, migration);
-            return Err(Status::not_found(format!("no migration {migration:x} begun here")));
-        }
-        let entry = host.receiving(migration).map_err(|err| status("the journal", err))?;
-        let entry =
-            entry.ok_or_else(|| Status::not_found(format!("no migration {migration:x}")))?;
-        let staged = staging(&entry.path, migration);
-        Ok((entry, staged))
-    }
-
-    /// Gives up the migration `migration`, prepared by a daemon before this one, if its entry is
-    /// here still: its start, giving it up, failed to retire it, its disk failing. Its entry and
-    /// reference retired, its files dropped, failures said.
-    fn given_up(host: &Arc<ephemeral_host::Host>, migration: u64) {
-        let Ok(Some(entry)) = host.receiving(migration) else { return };
-        let staged = staging(&entry.path, migration);
-        let host = host.clone();
-        drop(crate::bucket::bucket_runtime().map(|runtime| {
-            runtime.spawn(async move {
-                if let Err(err) = refuse(&host, &entry, &staged).await {
-                    log::warn!("cladefsd: giving migration {migration:x} up: {}", err.message());
-                }
-            })
-        }));
     }
 
     /// Writes the piece of a file `request` carries into its migration's staging directory.
-    pub(crate) fn file(request: MigrateFileRequest) -> Result<(), Status> {
+    pub(crate) async fn file(request: MigrateFileRequest) -> Result<(), Status> {
         let host = host()?;
+        let migration = request.migration;
+        let Some((_taking, entry)) = held(&host, migration).await? else {
+            return Err(Status::not_found(format!("no migration {migration:x}")));
+        };
+        heard(migration);
+        let staged = staging(&entry.path, migration);
+        let written = super::super::run::off_the_runtime(move || write(&staged, request));
+        written.await.map_err(|err| status("writing", err))?
+    }
+
+    /// Writes the piece of a file `request` carries into `staged`, its migration's staging
+    /// directory.
+    fn write(staged: &Path, request: MigrateFileRequest) -> Result<(), Status> {
         let MigrateFileRequest { migration, path, offset, bytes, len, holes } = request;
-        let (_, staged) = staged(&host, migration)?;
         // Dropped, as the migration was given up as this request came: not made again.
-        if !host_fs::is_dir(&staged) {
+        if !host_fs::is_dir(staged) {
             return Err(Status::not_found(format!("migration {migration:x} given up")));
         }
         // A directory, empty or not, its path ending with `/`.
         let left = || Status::invalid_argument(format!("{path:?} leaves the cell"));
         if let Some(dir) = path.strip_suffix('/') {
-            let dir = within(&staged, dir).ok_or_else(left)?;
+            let dir = within(staged, dir).ok_or_else(left)?;
             return host_fs::create_dir_all(dir).map_err(|err| status(&path, err));
         }
-        let file_path = within(&staged, &path).ok_or_else(left)?;
+        let file_path = within(staged, &path).ok_or_else(left)?;
         if let Some(dir) = file_path.parent() {
             host_fs::create_dir_all(dir).map_err(|err| status(&path, err))?;
         }
@@ -750,46 +1055,54 @@ pub(super) mod target {
 
     /// Takes the migration `request` names over, or refuses it, as the module's docs say.
     pub(crate) async fn hand_over(request: MigrateHandOverRequest) -> Result<bool, Status> {
+        to_the_end(take_over(request)).await
+    }
+
+    async fn take_over(request: MigrateHandOverRequest) -> Result<bool, Status> {
         let host = host()?;
-        let MigrateHandOverRequest { migration, incarnation, files } = request;
+        let MigrateHandOverRequest { migration, incarnation, files, token } = request;
+        // Asked of another incarnation of this host's, which alone knows the migration: this one,
+        // its disk lost since, can say neither yes nor no (specs/ephemeral).
+        if incarnation != host.incarnation() {
+            return Err(Status::failed_precondition(format!(
+                "migration {migration:x} asked of incarnation {incarnation:x}, this host's {:x}",
+                host.incarnation()
+            )));
+        }
         if host.accepted(migration) {
             // Accepted before: what is left of noting it so, as asking again finishes it (board
-            // 5721): its acceptance made durable again, and the cell noted taken if its entry says
-            // it is being taken still. A failure past the acceptance's writing left it there but
-            // not for good; answered yes at once, a crash then lost it, and its entry, its cell's
-            // source having let the cell go.
-            host.accept(migration).map_err(|err| status("remembering it accepted", err))?;
-            let receiving = host.receiving(migration).map_err(|err| status("the journal", err))?;
-            if let Some(entry) = receiving {
-                let taken = Entry { migration: None, ..entry };
-                host.note(&taken).map_err(|err| status("noting the cell", err))?;
+            // 5721): its acceptance made durable again, and the cell noted taken. A failure past
+            // the acceptance's writing left it there but not for good; answered yes at once, a
+            // crash then lost it, and its entry, its cell's source having let the cell go.
+            if let Some(child) = host.accepted_cell(migration) {
+                host.accept(migration, child)
+                    .map_err(|err| status("remembering it accepted", err))?;
             }
+            noted_taken(&host, migration).await?;
             return Ok(true);
         }
-        let (entry, staged) = match staged(&host, migration) {
-            Ok(staged) => staged,
-            Err(gone) => {
-                log::warn!("cladefsd: refusing migration {migration:x}: {}", gone.message());
-                return Ok(false);
-            }
+        let Some((_taking, entry)) = held(&host, migration).await? else {
+            log::warn!("cladefsd: refusing migration {migration:x}: not taking it");
+            return Ok(false);
         };
-        let taken = Entry { migration: None, ..entry.clone() };
+        heard(migration);
+        let staged = staging(&entry.path, migration);
         // Taken into place before, what followed failing: what is left of taking it, as asking
-        // again finishes it (board 5721). Refused then, its staging gone, the cell was left in its
-        // directory with no entry and no reference, its source serving it again.
-        // A failure reading it says neither: answered so, asked again later (board 5721).
+        // again finishes it (board 5721). A failure reading it says neither: answered so, asked
+        // again later.
         let moved_before = !host_fs::exists(&staged)
-            && host.holds(&taken).map_err(|err| status("reading the cell taken", err))?;
-        if !moved_before {
-            let lacking = match incarnation == host.incarnation() {
-                true => lacking(&staged, &files),
-                false => Some(format!("asked of incarnation {incarnation:x}")),
-            };
-            if let Some(lacking) = lacking {
-                log::warn!("cladefsd: refusing migration {migration:x}: {lacking}");
-                refuse(&host, &entry, &staged).await?;
-                return Ok(false);
+            && host.holds(&entry).map_err(|err| status("reading the cell taken", err))?;
+        let lacking = match entry.receiving() {
+            Some((_, taken)) if taken != token => {
+                Some(format!("it names token {token:x}, of another take of it"))
             }
+            _ if moved_before => None,
+            _ => lacking(&staged, &files),
+        };
+        if let Some(lacking) = lacking {
+            log::warn!("cladefsd: refusing migration {migration:x}: {lacking}");
+            refuse(&host, &entry).await?;
+            return Ok(false);
         }
         let moved = || -> std::io::Result<()> {
             if !moved_before {
@@ -799,39 +1112,123 @@ pub(super) mod target {
             host_fs::File::open(entry.path.parent().unwrap_or(Path::new(".")))?.sync_all()
         };
         moved().map_err(|err| status("taking the cell", err))?;
+        crate::faults::crashpoint!("migration::renamed");
         // Its reference written again before it is accepted (`targetRefersFirst`): a restart since
         // its prepare may have retired it, its entry's removal failing after (board 5721).
+        let taken = Entry { migrating: None, ..entry };
         let bucket =
             crate::host_cell::bucket(&taken.bucket).map_err(|err| status("its bucket", err))?;
         let (origin, child) = (taken.origin, taken.child);
-        bucket_cell::lifecycle::refer_ephemeral(&*bucket, origin, host.incarnation(), child).await;
-        host.accept(migration).map_err(|err| status("remembering it accepted", err))?;
+        let referring =
+            bucket_cell::lifecycle::refer_ephemeral(&*bucket, origin, host.incarnation(), child);
+        if tokio::time::timeout(BUCKET_BOUND, referring).await.is_err() {
+            return Err(Status::unavailable(format!("referring to {origin:?} timed out")));
+        }
+        host.accept(migration, taken.child)
+            .map_err(|err| status("remembering it accepted", err))?;
         host.note(&taken).map_err(|err| status("noting the cell", err))?;
+        HEARD.get().lock().unwrap().remove(&migration);
         Ok(true)
     }
 
     /// Gives the migration `request` names up, if this host holds it not yet.
     pub(crate) async fn abort(request: MigrateAbortRequest) -> Result<(), Status> {
-        let host = host()?;
-        if host.accepted(request.migration) {
-            return Ok(());
-        }
-        let Ok((entry, staged)) = staged(&host, request.migration) else { return Ok(()) };
-        refuse(&host, &entry, &staged).await
+        to_the_end(give_up(request.migration)).await
     }
 
-    /// Drops what the migration of `entry` took, staged at `staged`, then its reference.
-    async fn refuse(
-        host: &ephemeral_host::Host,
-        entry: &Entry,
-        staged: &Path,
-    ) -> Result<(), Status> {
-        // Its entry and reference first, then its files: dropped part way, a staging an entry
-        // names is one a retry of its migration may take for whole, a kept segment's file made
-        // again of holes alone (board 5721).
-        host.retire(entry).await.map_err(|err| status("retiring its reference", err))?;
-        if let Err(err) = drop_staged(staged) {
-            log::warn!("cladefsd: dropping {}, refused: {err}", staged.display());
+    async fn give_up(migration: u64) -> Result<(), Status> {
+        let host = host()?;
+        if host.accepted(migration) {
+            return Ok(());
+        }
+        let Some((_taking, entry)) = held(&host, migration).await? else { return Ok(()) };
+        refuse(&host, &entry).await
+    }
+
+    /// Gives up the migration taking `entry`'s cell: its cell, if taken into place, then its
+    /// entry and reference, then its files. Dropped part way, a staging an entry names is one a
+    /// retry of its migration may take for whole, a kept segment's file made again of holes alone
+    /// (board 5721).
+    async fn refuse(host: &ephemeral_host::Host, entry: &Entry) -> Result<(), Status> {
+        host.drop_moved(entry).map_err(journal)?;
+        retire(host, entry).await?;
+        if let Some((migration, _)) = entry.receiving() {
+            let staged = staging(&entry.path, migration);
+            if let Err(err) = drop_staged(&staged) {
+                log::warn!("cladefsd: dropping {}, refused: {err}", staged.display());
+            }
+            HEARD.get().lock().unwrap().remove(&migration);
+        }
+        Ok(())
+    }
+
+    /// Removes the directory `staged`, if there, durably: no crash brings it back.
+    fn drop_staged(staged: &Path) -> std::io::Result<()> {
+        if !host_fs::exists(staged) {
+            return Ok(());
+        }
+        host_fs::remove_dir_all(staged)?;
+        host_fs::sync_dir(staged.parent().unwrap_or(Path::new(".")))
+    }
+
+    /// Notes migration `migration` goes on, its source there still: `NOT_FOUND` if this host
+    /// takes it no more (board 5734).
+    pub(crate) fn renew(migration: u64) -> Result<(), Status> {
+        if host()?.receiving(migration).map_err(journal)?.is_none() {
+            return Err(Status::not_found(format!("no migration {migration:x}")));
+        }
+        heard(migration);
+        Ok(())
+    }
+
+    /// Forgets this host accepted migration `migration`: its source let the cell go, and asks no
+    /// more (board 5734). The cell noted taken first, durably ([`noted_taken`]).
+    pub(crate) async fn release(migration: u64) -> Result<(), Status> {
+        let host = host()?;
+        noted_taken(&host, migration).await?;
+        host.release(migration).map_err(|err| status("forgetting it accepted", err))
+    }
+
+    /// Gives up, every so often, each migration being taken here that it heard nothing of for
+    /// `idle` (board 5734; specs/ephemeral, `TargetAbort`): its source crashed, or the source's
+    /// abort lost. Heard of for the first time, a migration's wait begins.
+    pub(crate) async fn reap(idle: Duration) {
+        loop {
+            tokio::time::sleep((idle / 4).max(Duration::from_millis(250))).await;
+            if let Err(err) = reap_idle(idle).await {
+                log::warn!("cladefsd: giving up migrations idle too long: {err}");
+            }
+        }
+    }
+
+    async fn reap_idle(idle: Duration) -> Result<(), Status> {
+        let host = host()?;
+        let taken: Vec<u64> = host
+            .entries()
+            .map_err(journal)?
+            .iter()
+            .filter_map(Entry::receiving)
+            .map(|(id, _)| id)
+            .collect();
+        let idle_ones: Vec<u64> = {
+            let mut heard = HEARD.get().lock().unwrap();
+            heard.retain(|migration, _| taken.contains(migration));
+            let now = Instant::now();
+            let quiet = |migration: &u64| now - *heard.entry(*migration).or_insert(now) >= idle;
+            taken.into_iter().filter(quiet).collect()
+        };
+        for migration in idle_ones {
+            let Some((_taking, entry)) = held(&host, migration).await? else { continue };
+            // Heard of while this waited its turn.
+            let last = HEARD.get().lock().unwrap().get(&migration).copied();
+            if last.is_some_and(|last| last.elapsed() < idle) {
+                continue;
+            }
+            log::warn!(
+                "cladefsd: migration {migration:x} of {} idle {idle:?}: given up",
+                entry.child
+            );
+            refuse(&host, &entry).await?;
         }
         Ok(())
     }

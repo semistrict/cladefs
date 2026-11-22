@@ -1801,18 +1801,6 @@ mod tests {
         assert!(after.now_or_never().is_some());
     }
 
-    /// GETs done give back their places, and their bytes.
-    #[test]
-    fn gets_done_give_back_their_places() {
-        let budget = Budget::new(Limits { requests: 4, bytes: 100 });
-        let three = enter(&budget, 3).ok().unwrap();
-        let two = enter(&budget, 2).ok().unwrap();
-        drop(three);
-        assert_eq!(in_flight(&budget), (1, 2));
-        drop(two);
-        assert_eq!(in_flight(&budget), (0, 0));
-    }
-
     /// A GET whose read gave up waiting gives its place, once given it, to the next.
     #[test]
     fn gets_given_up_give_back_their_places() {

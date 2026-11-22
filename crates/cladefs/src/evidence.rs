@@ -166,12 +166,6 @@ impl Evidence {
         self.boot.recorded.is_some()
     }
 
-    /// Its prefetch, done: all it predicted fetched ahead, or stopped.
-    #[cfg(test)]
-    pub(crate) fn prefetched(&self) -> Shared<BoxFuture<'static, ()>> {
-        self.prefetching.0.clone()
-    }
-
     /// Whether it takes what the guest reads now into its boot: within its window.
     pub(crate) fn records(&self) -> bool {
         self.boot.within(Instant::now())

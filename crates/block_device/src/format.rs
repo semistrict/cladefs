@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! What a file set keeps on its device: the root, and the nodes of each file's tree.
+//! What a block device keeps on its extent device: the root, and the nodes of its tree.
 //!
 //! **Refs.** A block of an extent is named by a ref of 24 bytes: the extent's cell and sequence
 //! number, the block's index in it, and how many blocks the extent holds, which no ref to an
@@ -18,15 +18,13 @@
 //! of the extents it leaves blocks of, to know which live on (TASK-440).
 //!
 //! **The root.** [`ROOT_MAGIC`], a version, the sequence number minting goes on from, the extents
-//! to free once the root is durable, and the extent listing more of them, if any, and each file
-//! ([`encode_files`]): its name, size, its tree's height, the ref to its top node, and the extents
-//! its last commit left less than half live, to be compacted by its next, at most
-//! [`SPARSE_KEPT`]. A device's root is small ([`storage_device::MAX_ROOT`], the extent daemon's
-//! 4 KiB): files that don't fit are listed in an extent of their own, which the root names
-//! (TASK-551), as the dying extents are.
+//! to free once the root is durable, and the extent listing more of them, if any, and the tree
+//! ([`TreeRoot`]): the contents' size, the tree's height, the ref to its top node, and the extents
+//! the last commit left less than half live, to be compacted by the next, at most
+//! [`SPARSE_KEPT`]. An extent device's root is small ([`storage_device::MAX_ROOT`], the extent
+//! daemon's 4 KiB), and the root at its largest fits it ([`MAX_ROOT_BYTES`]).
 
 use anyhow::{Error, ensure};
-use std::collections::BTreeMap;
 use storage_device::ExtentId;
 
 /// The bytes of a ref.
@@ -38,16 +36,27 @@ const TRAILER_BYTES: usize = 16;
 /// What a node's trailer starts with.
 const NODE_MAGIC: u32 = u32::from_le_bytes(*b"FXSN");
 
-/// What a file set's root starts with.
-const ROOT_MAGIC: &[u8; 8] = b"FXSQLVOL";
+/// What a block device's root starts with.
+const ROOT_MAGIC: &[u8; 8] = b"CLADEBLK";
 
-/// The version of the root's format: 3 since extents end with their blocks' owners, and files
-/// name the extents to compact (TASK-440).
-const ROOT_VERSION: u32 = 4;
+/// The version of the root's format: 1, one tree (board 5790).
+const ROOT_VERSION: u32 = 1;
 
-/// The most extents a file names to compact at its next commit: more are left as they are until a
-/// later commit leaves blocks of them again.
+/// The most extents the tree names to compact at the next commit: more are left as they are until
+/// a later commit leaves blocks of them again.
 pub(crate) const SPARSE_KEPT: usize = 16;
+
+/// The most dying extents a root names itself: more are listed in an extent of their own.
+pub(crate) const DYING_KEPT: usize = 64;
+
+/// The bytes of the largest root: [`DYING_KEPT`] dying extents and [`SPARSE_KEPT`] to compact.
+pub(crate) const MAX_ROOT_BYTES: usize = ROOT_MAGIC.len()
+    + 4
+    + 8
+    + 8
+    + DYING_KEPT * 16
+    + 24
+    + (8 + 4 + REF_BYTES + 8 + SPARSE_KEPT * 20);
 
 /// The bytes of a block's owner in an extent's list of them.
 const OWNER_BYTES: usize = 8;
@@ -174,63 +183,29 @@ fn decode_ref(slot: &[u8; REF_BYTES]) -> Result<Option<Ref>, Error> {
     Ok(Some(Ref { extent, block, blocks }))
 }
 
-/// A file as the root keeps it.
+/// The tree as the root keeps it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct FileRoot {
+pub(crate) struct TreeRoot {
+    /// The contents' bytes.
     pub size: u64,
     pub height: u32,
     pub top: Option<Ref>,
-    /// The extents its last commit left less than half live, and the blocks each holds: its next
+    /// The extents the last commit left less than half live, and the blocks each holds: the next
     /// commit writes their live blocks again, so that they die. At most [`SPARSE_KEPT`].
     pub sparse: Vec<(ExtentId, u32)>,
 }
 
-/// A file set's root.
+/// A block device's root.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Root {
-    /// Where minting goes on from: every extent the file set wrote is below it.
+    /// Where minting goes on from: every extent the block device wrote is below it.
     pub minted: u64,
     /// The extents to free once the root is durable: what its commit left unreferenced, and what
-    /// earlier frees didn't free.
+    /// earlier frees didn't free. At most [`DYING_KEPT`].
     pub dying: Vec<ExtentId>,
     /// An extent listing more of them, and how many ([`encode_list`]).
     pub dying_list: Option<(ExtentId, u64)>,
-    /// The files, here or listed in an extent of their own ([`Root::files_list`]).
-    pub files: BTreeMap<String, FileRoot>,
-    /// An extent listing the files, if they would make the root too long, and the bytes of the
-    /// list ([`encode_files`]): `files` is empty then.
-    pub files_list: Option<(ExtentId, u64)>,
-}
-
-/// The bytes of `files`, as a root or an extent listing them holds them.
-pub(crate) fn encode_files(files: &BTreeMap<String, FileRoot>) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(&(files.len() as u64).to_le_bytes());
-    for (name, file) in files {
-        out.extend_from_slice(&(name.len() as u64).to_le_bytes());
-        out.extend_from_slice(name.as_bytes());
-        out.extend_from_slice(&file.size.to_le_bytes());
-        out.extend_from_slice(&file.height.to_le_bytes());
-        let mut top = [0; REF_BYTES];
-        encode_ref(&mut top, file.top);
-        out.extend_from_slice(&top);
-        assert!(file.sparse.len() <= SPARSE_KEPT, "{} extents to compact", file.sparse.len());
-        out.extend_from_slice(&(file.sparse.len() as u64).to_le_bytes());
-        for (extent, blocks) in &file.sparse {
-            out.extend_from_slice(&extent.cell.to_le_bytes());
-            out.extend_from_slice(&extent.sequence.to_le_bytes());
-            out.extend_from_slice(&blocks.to_le_bytes());
-        }
-    }
-    out
-}
-
-/// The files `bytes`, as [`encode_files`] made them, hold: past them, `bytes` holds zeros alone.
-pub(crate) fn decode_files(bytes: &[u8]) -> Result<BTreeMap<String, FileRoot>, Error> {
-    let mut reader = Reader(bytes);
-    let files = reader.files()?;
-    ensure!(reader.0.iter().all(|byte| *byte == 0), "bytes past the files listed");
-    Ok(files)
+    pub tree: TreeRoot,
 }
 
 /// The bytes of an extent listing `count` extents, in blocks of `block_size`.
@@ -251,11 +226,14 @@ pub(crate) fn encode_list(extents: &[ExtentId], block_size: usize) -> Vec<u8> {
 /// The `count` extents `bytes`, an extent listing them, lists.
 pub(crate) fn decode_list(bytes: &[u8], count: u64) -> Result<Vec<ExtentId>, Error> {
     let mut reader = Reader(bytes);
-    (0..count).map(|_| Ok(ExtentId::new(reader.u64()?, reader.u64()?))).collect()
+    (0..count).map(|_| reader.extent()).collect()
 }
 
 impl Root {
     pub fn encode(&self) -> Vec<u8> {
+        assert!(self.dying.len() <= DYING_KEPT, "{} dying extents in a root", self.dying.len());
+        let tree = &self.tree;
+        assert!(tree.sparse.len() <= SPARSE_KEPT, "{} extents to compact", tree.sparse.len());
         let mut out = Vec::new();
         out.extend_from_slice(ROOT_MAGIC);
         out.extend_from_slice(&ROOT_VERSION.to_le_bytes());
@@ -265,62 +243,61 @@ impl Root {
             out.extend_from_slice(&extent.cell.to_le_bytes());
             out.extend_from_slice(&extent.sequence.to_le_bytes());
         }
-        for listed in [self.dying_list, self.files_list] {
-            let (list, count) = listed.unwrap_or((ExtentId::new(0, 0), 0));
-            for word in [list.cell, list.sequence, count] {
-                out.extend_from_slice(&word.to_le_bytes());
-            }
+        let (list, count) = self.dying_list.unwrap_or((ExtentId::new(0, 0), 0));
+        for word in [list.cell, list.sequence, count] {
+            out.extend_from_slice(&word.to_le_bytes());
         }
-        assert!(self.files_list.is_none() || self.files.is_empty(), "files here and listed");
-        out.extend(encode_files(&self.files));
+        out.extend_from_slice(&tree.size.to_le_bytes());
+        out.extend_from_slice(&tree.height.to_le_bytes());
+        let mut top = [0; REF_BYTES];
+        encode_ref(&mut top, tree.top);
+        out.extend_from_slice(&top);
+        out.extend_from_slice(&(tree.sparse.len() as u64).to_le_bytes());
+        for (extent, blocks) in &tree.sparse {
+            out.extend_from_slice(&extent.cell.to_le_bytes());
+            out.extend_from_slice(&extent.sequence.to_le_bytes());
+            out.extend_from_slice(&blocks.to_le_bytes());
+        }
         out
     }
 
-    /// The root `bytes` hold: none if empty, as a device's root is until set.
+    /// The root `bytes` hold: none if empty, as an extent device's root is until set.
     pub fn decode(bytes: &[u8]) -> Result<Option<Self>, Error> {
         if bytes.is_empty() {
             return Ok(None);
         }
         let mut reader = Reader(bytes);
-        ensure!(reader.take(ROOT_MAGIC.len())? == ROOT_MAGIC, "the device holds no file set");
+        ensure!(
+            reader.take(ROOT_MAGIC.len()).is_ok_and(|magic| magic == ROOT_MAGIC),
+            "the device holds no block device"
+        );
         let version = reader.u32()?;
-        ensure!(version == ROOT_VERSION, "a file set of version {version}");
+        ensure!(version == ROOT_VERSION, "a block device of version {version}");
         let minted = reader.u64()?;
-        let dying = (0..reader.u64()?)
-            .map(|_| Ok(ExtentId::new(reader.u64()?, reader.u64()?)))
+        let count = reader.u64()?;
+        ensure!(count as usize <= DYING_KEPT, "a root naming {count} dying extents");
+        let dying = (0..count).map(|_| reader.extent()).collect::<Result<_, Error>>()?;
+        let (list, count) = (reader.extent()?, reader.u64()?);
+        let dying_list = (count > 0).then_some((list, count));
+        let size = reader.u64()?;
+        let height = reader.u32()?;
+        let top = decode_ref(reader.take(REF_BYTES)?.try_into().unwrap())?;
+        let count = reader.u64()?;
+        ensure!(count as usize <= SPARSE_KEPT, "a root naming {count} extents to compact");
+        let sparse = (0..count)
+            .map(|_| Ok((reader.extent()?, reader.u32()?)))
             .collect::<Result<_, Error>>()?;
-        let mut listed = || -> Result<_, Error> {
-            let (list, count) = (ExtentId::new(reader.u64()?, reader.u64()?), reader.u64()?);
-            Ok((count > 0).then_some((list, count)))
-        };
-        let (dying_list, files_list) = (listed()?, listed()?);
-        let files = reader.files()?;
         ensure!(reader.0.is_empty(), "{} bytes past the root", reader.0.len());
-        ensure!(files_list.is_none() || files.is_empty(), "files in the root and listed");
-        Ok(Some(Self { minted, dying, dying_list, files, files_list }))
+        let tree = TreeRoot { size, height, top, sparse };
+        Ok(Some(Self { minted, dying, dying_list, tree }))
     }
 }
 
 struct Reader<'a>(&'a [u8]);
 
 impl<'a> Reader<'a> {
-    /// Files, as [`encode_files`] wrote them.
-    fn files(&mut self) -> Result<BTreeMap<String, FileRoot>, Error> {
-        let mut files = BTreeMap::new();
-        for _ in 0..self.u64()? {
-            let len = self.u64()? as usize;
-            let name = String::from_utf8(self.take(len)?.to_vec())?;
-            let size = self.u64()?;
-            let height = self.u32()?;
-            let top = decode_ref(self.take(REF_BYTES)?.try_into().unwrap())?;
-            let count = self.u64()?;
-            ensure!(count as usize <= SPARSE_KEPT, "{name} names {count} extents to compact");
-            let sparse = (0..count)
-                .map(|_| Ok((ExtentId::new(self.u64()?, self.u64()?), self.u32()?)))
-                .collect::<Result<_, Error>>()?;
-            files.insert(name, FileRoot { size, height, top, sparse });
-        }
-        Ok(files)
+    fn extent(&mut self) -> Result<ExtentId, Error> {
+        Ok(ExtentId::new(self.u64()?, self.u64()?))
     }
 
     fn take(&mut self, len: usize) -> Result<&'a [u8], Error> {
@@ -386,36 +363,44 @@ mod tests {
             minted: 1 << 33,
             dying: vec![ExtentId::new(1, 2), ExtentId::new(4, 5)],
             dying_list: Some((ExtentId::new(1, 9), 300)),
-            files: BTreeMap::from([
-                (
-                    "a.db".into(),
-                    FileRoot {
-                        size: 8192,
-                        height: 1,
-                        top: Some(at(7, 2)),
-                        sparse: vec![(ExtentId::new(3, 4), 12), (ExtentId::new(5, 6), 1)],
-                    },
-                ),
-                ("b.db".into(), FileRoot::default()),
-            ]),
-            files_list: None,
+            tree: TreeRoot {
+                size: 8192,
+                height: 1,
+                top: Some(at(7, 2)),
+                sparse: vec![(ExtentId::new(3, 4), 12), (ExtentId::new(5, 6), 1)],
+            },
         };
-        assert_eq!(Root::decode(&root.encode()).unwrap(), Some(root.clone()));
-        let mut files = encode_files(&root.files);
-        files.resize(4096, 0);
-        assert_eq!(decode_files(&files).unwrap(), root.files);
-        let listed = Root {
-            files: BTreeMap::new(),
-            files_list: Some((ExtentId::new(1, 10), files.len() as u64)),
-            ..root
-        };
-        assert_eq!(Root::decode(&listed.encode()).unwrap(), Some(listed));
+        assert_eq!(Root::decode(&root.encode()).unwrap(), Some(root));
+        assert_eq!(Root::decode(&Root::default().encode()).unwrap(), Some(Root::default()));
         assert_eq!(Root::decode(&[]).unwrap(), None);
         let listed: Vec<_> = (0..300).map(|n| ExtentId::new(1, n)).collect();
         let list = encode_list(&listed, 4096);
         assert_eq!(list.len(), 8192);
         assert_eq!(decode_list(&list, 300).unwrap(), listed);
         let error = Root::decode(b"something else").unwrap_err();
-        assert_eq!(error.to_string(), "the device holds no file set");
+        assert_eq!(error.to_string(), "the device holds no block device");
+        let error = Root::decode(b"FXSQLVOL\x04\0\0\0").unwrap_err();
+        assert_eq!(error.to_string(), "the device holds no block device");
+    }
+
+    /// The root at its largest, as many dying extents and extents to compact as it names, fits
+    /// an extent device's root, the extent daemon's 4 KiB: TASK-551's root, which named every
+    /// file, did not.
+    #[test]
+    fn the_largest_root_fits_a_devices_root() {
+        let extents = |count: u64| (0..count).map(|n| ExtentId::new(u64::MAX, u64::MAX - n));
+        let root = Root {
+            minted: u64::MAX,
+            dying: extents(DYING_KEPT as u64).collect(),
+            dying_list: Some((ExtentId::new(u64::MAX, 1), u64::MAX)),
+            tree: TreeRoot {
+                size: u64::MAX,
+                height: u32::MAX,
+                top: Some(Ref { extent: ExtentId::new(u64::MAX, 1), block: 1, blocks: u32::MAX }),
+                sparse: extents(SPARSE_KEPT as u64).map(|extent| (extent, u32::MAX)).collect(),
+            },
+        };
+        // Which fits an extent device's root: block_device asserts it as it compiles.
+        assert_eq!(root.encode().len(), MAX_ROOT_BYTES);
     }
 }

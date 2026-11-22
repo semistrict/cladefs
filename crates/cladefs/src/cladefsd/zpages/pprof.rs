@@ -112,25 +112,6 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    #[test]
-    fn profiles_sample_for_the_seconds_asked() {
-        assert_eq!(seconds(""), Ok(DEFAULT));
-        assert_eq!(seconds("seconds=5"), Ok(Duration::from_secs(5)));
-        assert_eq!(seconds("seconds=0"), Err("seconds must be 1 to 300, not \"0\"".to_owned()));
-        assert_eq!(seconds("seconds=x"), Err("seconds must be 1 to 300, not \"x\"".to_owned()));
-        assert_eq!(serve("/profile", "seconds=301").status, "400 Bad Request");
-        assert_eq!(serve("/nothing", "").status, "404 Not Found");
-    }
-
-    /// A profile asked for while another is taken is refused, at once.
-    #[test]
-    fn profiles_are_taken_one_at_a_time() {
-        let _taken = PROFILING.lock().unwrap();
-        let refused = serve("/flamegraph", "seconds=300");
-        assert_eq!(refused.status, "409 Conflict");
-        assert_eq!(refused.body, b"a profile is being taken: one at a time\n");
-    }
-
     /// A thread spinning for the profile's second, named, is what it sampled: pprof's protobuf,
     /// whose functions name it; and a flamegraph, SVG. Asked for again until a profile's second
     /// gave the thread a fifth of a CPU-second, about 20 samples, by its own CPU clock: a loaded

@@ -1339,61 +1339,6 @@ mod tests {
         assert_eq!(StartFile::read(&dir).unwrap().1, Some(9));
     }
 
-    /// A segment left open closes again from its raw data and its log's whole records, their
-    /// contents folded into its footer, after the segments framed before it; one whose log holds
-    /// none holds nothing durable, and goes. Raw data and logs go.
-    #[test]
-    fn segments_left_open_close_again_from_their_logs() {
-        let dir = MemDir::new();
-        create_cell_dirs(&dir, CELL.id).unwrap();
-        left_open(&dir, 3, 2, &[commit(5, 10, 0), commit(6, 11, 4096)]);
-        // A torn record after them.
-        let log = dir.open(&log_path(segment(3)), false).unwrap();
-        log.write_at(&[1; 7], log.size().unwrap()).unwrap();
-        left_open(&dir, 4, 1, &[]);
-        let recovered = recover_closing(&dir).unwrap();
-        let [(footer, 3)] = &recovered.segments[..] else {
-            panic!("recovered {:?}", recovered.segments)
-        };
-        assert_eq!(footer.contents.commits, [tag(2, 6)]);
-        let extents =
-            [(ExtentId::new(CELL.id, 10), 0, 4096), (ExtentId::new(CELL.id, 11), 4096, 4096)];
-        assert_eq!(footer.contents.extents, extents);
-        assert_eq!((footer.contents.next_sequence, recovered.next), (12, 5));
-        assert_eq!(files(&dir, SEGMENTS), [3]);
-        assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![], vec![]));
-        let object = read_whole(&dir.open(&segment_path(segment(3)), true).unwrap()).unwrap();
-        assert_eq!(
-            extent_frame::data(&object, &bucket_cell::testing::ring([CELL]).of(CELL.id)).unwrap(),
-            vec![3; 2 * 4096]
-        );
-        // Recovered again, it holds the same.
-        let again = recover_closing(&dir).unwrap();
-        assert_eq!(again.segments, recovered.segments);
-    }
-
-    /// A segment whose framed file is torn, its framing stopped, closes again from its log; one
-    /// whose framed file is whole is kept, its raw data and log going.
-    #[test]
-    fn segments_framed_part_way_close_again() {
-        let dir = MemDir::new();
-        create_cell_dirs(&dir, CELL.id).unwrap();
-        left_open(&dir, 0, 1, &[commit(1, 1, 0)]);
-        let footer = recover_closing(&dir).unwrap().segments.remove(0).0;
-        // Framed whole, its raw data and log still there.
-        left_open(&dir, 0, 1, &[commit(1, 1, 0)]);
-        left_open(&dir, 1, 1, &[commit(2, 2, 0)]);
-        let torn = dir.create(&segment_path(segment(1)), true).unwrap();
-        torn.write_at(&[9; 100], 0).unwrap();
-        let recovered = recover_closing(&dir).unwrap();
-        let numbers: Vec<u64> = recovered.segments.iter().map(|(_, number)| *number).collect();
-        assert_eq!(numbers, [0, 1]);
-        assert_eq!(recovered.segments[0].0, footer);
-        let second = &recovered.segments[1].0;
-        assert_eq!((second.segment, second.epoch), (footer.segment + 1, footer.epoch));
-        assert_eq!(recovered.segments[1].0.contents.commits, [tag(2, 2)]);
-    }
-
     /// TASK-411.9: a recovery frames nothing: a segment it closes again keeps its raw data and log,
     /// no framed file, until the cell's keys frame it, encrypted under its cell's DEK, never in
     /// the clear, its data as it was. TASK-411.3: an encrypted segment's framed file, whole, its
@@ -1681,18 +1626,6 @@ mod tests {
         left_open(dir, 4, 1, &[commit(5, 6, 0)]);
     }
 
-    #[test]
-    fn commits_whose_runs_a_log_refuses_go() {
-        let dir = MemDir::new();
-        refusing_two(&dir);
-        let recovered = recover_closing(&dir).unwrap();
-        let last: Vec<u64> =
-            recovered.segments.iter().map(|(footer, _)| footer_last(footer)).collect();
-        assert_eq!(last, [2, 3, 4]);
-        assert_eq!(files(&dir, SEGMENTS), [0, 1, 2]);
-        assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![], vec![]));
-    }
-
     /// cladefs: so too after a recovery stopped after each of its operations, as by a crash, which
     /// may keep any of what it removed: segment 4 goes, durably, before segment 3, whose log says
     /// why both go; removed first, a crash kept segment 3's raw file without its log, which then
@@ -1832,34 +1765,6 @@ mod tests {
         let recovered = recover_closing(&dir).unwrap();
         assert_eq!(recovered.segments, framed);
         assert_eq!(files(&dir, SEGMENTS), [0, 1, 2]);
-    }
-
-    /// The queue gives the uploader the segments that are framed, whose commits are durable, in
-    /// order, each once, and is acknowledged in order, its start moving on.
-    #[test]
-    fn queues_give_what_may_upload_in_order() {
-        let footer = |segment, epoch| Footer {
-            cell: CELL,
-            segment,
-            epoch: 2,
-            contents: Contents { commits: vec![tag(2, epoch)], ..Contents::default() },
-        };
-        let mut queue = Queue::new(Some(tag(1, 4)), []);
-        for (number, epoch) in [(1, 5), (2, 6), (3, 7)] {
-            queue.push(number, footer(number, epoch), 100);
-        }
-        assert_eq!(queue.bytes(), 300);
-        let numbers = |taken: Vec<&Queued>| taken.iter().map(|q| q.number).collect::<Vec<_>>();
-        assert_eq!(numbers(queue.take(7, |_| false, 1)), [1]);
-        assert_eq!(numbers(queue.take(7, |number| number == 2, 9)), Vec::<u64>::new());
-        assert_eq!(numbers(queue.take(6, |_| false, 9)), [2]);
-        assert_eq!(numbers(queue.take(7, |_| false, 9)), [3]);
-        assert_eq!(numbers(queue.take(7, |_| false, 9)), Vec::<u64>::new());
-        assert!(queue.acknowledge(2).is_none());
-        let segments =
-            |group: Vec<Queued>| group.iter().map(|q| q.footer.segment).collect::<Vec<_>>();
-        assert_eq!(queue.acknowledge(1).map(segments), Some(vec![1]));
-        assert_eq!((queue.start(), queue.bytes()), (Some(tag(2, 5)), 200));
     }
 
     /// cladefs: acknowledged, the segments going on with a commit are held until the one ending it

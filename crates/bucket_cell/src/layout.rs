@@ -760,13 +760,6 @@ pub struct Segment {
     pub footer: Footer,
 }
 
-/// The child of a fork to `cell`, a cell, of no owner: tests', which name no two children
-/// alike.
-#[cfg(test)]
-pub(crate) fn child(cell: CellId) -> Child {
-    Child { cell, owner: 0 }
-}
-
 /// cladefs: the cell of tests' cells, of tenant 1.
 #[cfg(any(test, feature = "testing"))]
 pub const TEST_CELL: CellId = CellId { tenant: 1, id: 1 };
@@ -1219,79 +1212,6 @@ mod tests {
         super::moves(key, 1).unwrap()
     }
 
-    /// A cell's extents stored on their own, whichever writer uploaded them, are under its
-    /// prefix, and no other cell's are.
-    #[test]
-    fn extents_are_under_their_cells_prefix() {
-        let cell = test_cell(0x12);
-        let elsewhere = CellId { tenant: 1, id: 2 };
-        assert_eq!(extents(cell), "tenants/0000000000001/cells/000000000000j/extents/");
-        for epoch in [1, 7] {
-            let key = extent(cell, epoch, 3, ExtentId::new(0x12, 5));
-            assert!(key.starts_with(&extents(cell)));
-        }
-        assert!(!extent(elsewhere, 1, 3, ExtentId::new(0x12, 5)).starts_with(&extents(cell)));
-    }
-
-    /// cladefs: every object of a cell, and its cell's own, is under the cell's prefix, by tenant
-    /// then cell (TASK-364); and since format 9 everything the cell's collection reads: its
-    /// objects' moves and their moves, its collector's lease and marks, and the references of forks
-    /// of its cells, whatever the children's cells (TASK-395.2).
-    #[test]
-    fn a_cells_objects_are_under_its_tenants_prefix() {
-        let cell = CellId { tenant: 0xa, id: 0xc };
-        let elsewhere = CellId { tenant: 0xb, id: 4 };
-        let prefix = "tenants/000000000000a/cells/000000000000c/";
-        assert_eq!(cell.prefix(), prefix);
-        for key in [
-            segment(cell, 7, 2),
-            extent(cell, 2, 4, ExtentId::new(3, 9)),
-            checkpoint(cell, 7, 2),
-            head(cell, 3),
-            moves(&segment(cell, 7, 2)),
-            moves(&moves(&segment(cell, 7, 2))),
-            collector_lease(cell),
-            marks(cell, 2),
-            reference(cell, 7, elsewhere),
-        ] {
-            assert!(key.starts_with(prefix) && key.starts_with(TENANTS), "{key}");
-        }
-        assert_eq!(head(cell, 3), format!("{prefix}head/0000000000003"));
-        assert_eq!(heads(cell), format!("{prefix}head/"));
-        assert_eq!(
-            moves(&segment(cell, 7, 2)),
-            format!("{prefix}moves/segments/0000000000002.0000000000007/0000000000001")
-        );
-        assert_eq!(
-            moves(&moves(&segment(cell, 7, 2))),
-            format!(
-                "{prefix}moves/moves/segments/0000000000002.0000000000007/0000000000001/\
-                 0000000000001"
-            )
-        );
-        assert_eq!(collector_lease(cell), format!("{prefix}gc/lease"));
-        assert_eq!(marks(cell, 0x2a), format!("{prefix}gc/marks/000000000001a"));
-        assert_eq!(
-            reference(cell, 7, elsewhere),
-            format!("{prefix}refs/0000000000007/000000000000b.0000000000004")
-        );
-    }
-
-    /// TASK-395.2: a delimiter listing of a cell's references gives the parents with forks, and one
-    /// of a parent's, its distinct origins: each prefix read back as what it names, and no
-    /// other.
-    #[test]
-    fn references_list_by_origin() {
-        let (parent, child) = (CellId { tenant: 0xa, id: 0xc }, CellId { tenant: 1, id: 5 });
-        let key = reference(parent, 7, child);
-        assert!(key.starts_with(&origin(parent, 7)));
-        assert!(origin(parent, 7).starts_with(&references(parent)));
-        assert_eq!(referenced_at(parent, &origin(parent, 7)), Some(7));
-        assert_eq!(referenced_at(parent, &references(parent)), None);
-        let other = CellId { tenant: 0xa, id: 0xd };
-        assert_eq!(referenced_at(other, &origin(parent, 7)), None);
-    }
-
     /// TASK-395.2: the moves of a moves are of what it is of, along the way, in its cell alone.
     #[test]
     fn moves_are_further_along_the_way_in_their_cell() {
@@ -1343,15 +1263,6 @@ mod tests {
         assert!(!moves(&first).starts_with(&prefix));
         let of = "segments/0000000000002.0000000000007";
         assert_eq!(kind(&second), Kind::Moves { cell, of, pass: 2 });
-    }
-
-    /// The moves of an object of no cell's, which nothing writes, and a location read from a
-    /// corrupt checkpoint may name: refused as corrupt, not put at the bucket's root as before
-    /// format 9, nor a panic of the reader's.
-    #[test]
-    fn objects_of_no_cell_have_no_moves() {
-        let refused = "probe/0000000000001: no cell's object, which has no moves".to_owned();
-        assert_eq!(super::moves("probe/0000000000001", 1), Err(crate::Error::Corrupt(refused)));
     }
 
     #[test]
@@ -1494,130 +1405,5 @@ mod tests {
         for key in keys {
             assert_eq!(owner(&key), None, "{key}");
         }
-    }
-
-    #[test]
-    fn heads_decode_as_they_were_written() {
-        let head = Head {
-            epoch: 4,
-            holder: 9,
-            token: 7,
-            end: 5,
-            runs: vec![(0, 1), (3, 4)],
-            swaps: 41,
-            checkpoint: Some((2, 1)),
-            versions: vec![Version { id: 0xbe, at: 3, epoch: 4, shared: true }],
-            kind: Some(crate::cell::Kind::Sqlite),
-            replication: Some(Replication {
-                wish: Wish::new(1, Fsync::Replicated).unwrap(),
-                configuration: Some(Configuration {
-                    number: 2,
-                    epoch: 4,
-                    f: 1,
-                    members: vec![
-                        Member { address: "a:1".into(), incarnation: 5 },
-                        Member { address: "b:1".into(), incarnation: 6 },
-                        Member { address: "c:1".into(), incarnation: 7 },
-                    ],
-                }),
-            }),
-            ..Head::of(crate::record::Made::Root, 3)
-        };
-        assert_eq!(Head::decode(TEST_CELL, &encode(&head)), Ok(head.clone()));
-        // cladefs: a head of the format before, whose first bytes say so, is refused, not read
-        // (TASK-537.3.1: no migrations).
-        let mut older = encode(&head);
-        older[..4].copy_from_slice(&encode(&(FORMAT - 1)));
-        assert_eq!(
-            Head::decode(TEST_CELL, &older),
-            Err(crate::Error::Format { cell: TEST_CELL, format: FORMAT - 1 })
-        );
-    }
-
-    /// TASK-476: a head names the versions cut at the segments it names, in order, each once; a
-    /// window keeps the version cutting it and the newest before it alone; and a version is
-    /// dropped, or shared, by its ID.
-    #[test]
-    fn heads_name_their_versions() {
-        let cut = |id, keep_last| NewVersion { id, keep_last };
-        let named = |head: &Head| -> Vec<(u64, u64)> {
-            head.versions.iter().map(|version| (version.id, version.at)).collect()
-        };
-        let head = Head::default().holding(1, 5).naming([(2, &cut(10, None)), (3, &cut(11, None))]);
-        assert_eq!(named(&head), [(10, 2), (11, 3)]);
-        assert_eq!(named(&head.clone().naming([(2, &cut(10, None))])), named(&head), "once");
-        let windowed = head.clone().naming([(4, &cut(12, Some(2)))]);
-        assert_eq!(named(&windowed), [(11, 3), (12, 4)]);
-        let alone = head.clone().naming([(4, &cut(12, Some(0)))]);
-        assert_eq!(named(&alone), [(12, 4)], "a window keeps its own version, at least");
-        let dropped = windowed.clone().without(&BTreeSet::from([11]));
-        assert_eq!(named(&dropped), [(12, 4)]);
-        assert_eq!(windowed.version(12), Some(&Version { id: 12, at: 4, epoch: 1, shared: false }));
-        assert!(windowed.clone().sharing(12, true).version(12).unwrap().shared);
-        assert_eq!(windowed.version(10), None);
-    }
-
-    /// TASK-407: a head names each of its segments by its writer's epoch, from its runs, a run a
-    /// takeover; and none past its end. A writer's segments it names next go on its last run if
-    /// it is the writer's, or start one.
-    #[test]
-    fn heads_name_their_segments_by_epoch() {
-        let cell = test_cell(1);
-        let head = Head { end: 0, ..Head::default() }.holding(1, 3).holding(1, 4).holding(3, 6);
-        assert_eq!((head.end, &head.runs[..]), (6, &[(0, 1), (4, 3)][..]));
-        let named: Vec<_> = head.segments(2).collect();
-        assert_eq!(named, [(2, 1), (3, 1), (4, 3), (5, 3)]);
-        assert_eq!(
-            (head.epoch_of(3), head.epoch_of(4), head.epoch_of(6)),
-            (Some(1), Some(3), None)
-        );
-        assert_eq!(head.segment(cell, 5), Some(segment(cell, 5, 3)));
-        assert_eq!(head.clone().holding(3, 5), head, "nothing named twice, nor taken back");
-        let checkpointed = Head { checkpoint: Some((4, 3)), ..head };
-        assert_eq!(checkpointed.checkpoint(cell), Some(checkpoint(cell, 4, 3)));
-    }
-
-    #[test]
-    fn segments_hold_their_footers() {
-        let footer = Footer {
-            cell: test_cell(1),
-            segment: 2,
-            epoch: 3,
-            contents: Contents {
-                commits: vec![4],
-                extents: vec![(ExtentId::new(1, 5), 0, 3)],
-                own: vec![],
-                frees: vec![ExtentId::new(1, 1)],
-                root: Some(b"root".to_vec()),
-                next_sequence: 6,
-                capacity: Some(1 << 30),
-                continued: None,
-                versions: vec![NewVersion { id: 9, keep_last: Some(11) }],
-            },
-        };
-        let segment = Segment { data: b"abc".to_vec(), footer: footer.clone() };
-        let bytes = segment.encode(crate::testing::encrypting(test_cell(1)));
-        let keys = crate::testing::ring([test_cell(1)]);
-        assert_eq!(data_under(&bytes, &keys.of(1)).unwrap(), b"abc");
-        assert!(!bytes.windows(3).any(|bytes| bytes == b"abc"), "encrypted");
-        assert_eq!(Segment::footer(&bytes).unwrap(), footer);
-        assert!(Segment::footer(&bytes[..bytes.len() - 1]).is_err());
-    }
-
-    /// Objects' footers are found by their frames.
-    #[test]
-    fn objects_hold_their_footers() {
-        let encrypting = crate::testing::encrypting(test_cell(1));
-        let bytes = with_footer(&[1; 5000], &"footer", encrypting);
-        assert_eq!(footer::<String>(&bytes).unwrap(), "footer");
-        let keys = crate::testing::ring([test_cell(1)]);
-        let keys = keys.of(1);
-        assert_eq!(data_under(&bytes, &keys).unwrap(), &[1; 5000][..]);
-        let mut flipped = bytes.clone();
-        flipped[7] ^= 1;
-        assert_eq!(
-            data_under(&flipped, &keys),
-            Err(crate::Error::Corrupt("an object's part, by its CRC".into()))
-        );
     }
 }

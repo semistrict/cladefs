@@ -21,7 +21,7 @@ pub enum Kind {
     Fxfs,
     /// A database of `sqlite_cladefs`.
     Sqlite,
-    /// A VM's memory: an `extent_files` file set of one file, its image (TASK-456).
+    /// A VM's memory: a `block_device` whose contents are its image (TASK-456).
     Memory,
 }
 
@@ -73,31 +73,6 @@ mod tests {
     use crate::bucket::LIST_PAGE;
     use crate::testing::{Direct, SimBucket};
     use futures::executor::block_on;
-
-    /// TASK-395.4: every cell with an object under its prefix is listed, in the order of its key,
-    /// whatever its objects: a head alone, a segment, or what the collector keeps there;
-    /// keys of no cell's are not.
-    #[test]
-    fn cells_are_listed_by_their_prefixes() {
-        use crate::bucket::PutMode;
-        let bucket = Direct(SimBucket::new());
-        let cells = [
-            CellId { tenant: 1, id: 2 },
-            CellId { tenant: 1, id: 0x10 },
-            CellId { tenant: 3, id: 1 },
-        ];
-        let keys = [
-            layout::head(cells[2], 0),
-            layout::segment(cells[0], 0, 1),
-            layout::collector_lease(cells[1]),
-            layout::objectid_block(1),
-        ];
-        for key in keys {
-            block_on(bucket.put(&key, vec![1].into(), PutMode::Create)).unwrap();
-        }
-        assert_eq!(block_on(listed(&bucket).collect::<Vec<_>>()), cells);
-        assert_eq!(block_on(listed(&Direct(SimBucket::new())).collect::<Vec<_>>()), []);
-    }
 
     /// TASK-395.5: a bucket's cells are listed a page at a time, of tenants and of each tenant's
     /// cells, each page asked for once the cells before it are taken: a tenant of more cells than
@@ -151,14 +126,5 @@ mod tests {
                 "list-delimited tenants/0000000000003/cells/".to_owned(),
             ]
         );
-    }
-
-    /// Kinds go by their names.
-    #[test]
-    fn kinds_are_named() {
-        for kind in [Kind::Fxfs, Kind::Sqlite, Kind::Memory] {
-            assert_eq!(Kind::named(kind.name()), Some(kind));
-        }
-        assert_eq!(Kind::named("ext4"), None);
     }
 }

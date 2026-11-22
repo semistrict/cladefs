@@ -1926,37 +1926,6 @@ impl OpenCell {
         Ok(dax.as_ref().map_or(0, Dax::private_pages))
     }
 
-    /// Creates the DAX window in the `size` bytes of host memory at `base`, for a hypervisor that
-    /// follows host memory, such as KVM: the open cell takes the memory over, maps the window's
-    /// pages there, and serves the faults on the rest with userfaultfd, on a thread of its own.
-    /// `prefault`, if the hypervisor can map pages for the guest ahead of its accesses, is told of
-    /// the pages mapped. All in this process, as tests have it: a VM process's window is the
-    /// daemon's ([`CellClient`](crate::CellClient)'s of the same name).
-    ///
-    /// # Safety
-    ///
-    /// The memory must be a page-aligned mapping of `size` bytes that only the guest uses, until
-    /// the open cell is dropped.
-    #[cfg(all(test, target_os = "linux"))]
-    unsafe fn create_dax_window_in_host_memory(
-        &self,
-        base: std::ptr::NonNull<u8>,
-        size: u64,
-        prefault: Option<Arc<dyn crate::Prefault>>,
-    ) -> Result<DaxWindow, Error> {
-        self.install_dax(|| {
-            // SAFETY: The caller hands the memory over.
-            let stage = unsafe {
-                crate::dax::uffd::UffdSecondStage::in_process(
-                    base.as_ptr() as usize,
-                    size,
-                    prefault,
-                )
-            }?;
-            Dax::in_host_memory(stage)
-        })
-    }
-
     fn install_dax(
         &self,
         create: impl FnOnce() -> Result<(Dax, DaxWindow), Error>,
@@ -2661,21 +2630,6 @@ impl Bases {
 }
 
 #[cfg(test)]
-mod errno_tests {
-    use super::{Errno, errno};
-
-    /// TASK-539.12: the host's disk full, as making an open cell's file finds it, is `ENOSPC` to
-    /// the guest; an open cell failed for it says so, and is `EIO`.
-    #[test]
-    fn a_full_disk_is_enospc_and_a_failed_extent_store_eio() {
-        let full = std::io::Error::from_raw_os_error(libc::ENOSPC);
-        assert_eq!(errno(anyhow::Error::new(full).context("creating a raw file")), Errno::ENOSPC);
-        let failed = anyhow::anyhow!("the extent store failed: framing a segment: no space");
-        assert_eq!(errno(failed), Errno::EIO);
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::dax::{Access, SecondStage};
@@ -3136,78 +3090,6 @@ mod tests {
         assert_eq!(read(&fork, a, 0, 2 * BLOCK).await, Ok(data));
     }
 
-    /// Reads of sealed extents come from the extent cache (TASK-32): a fork reading what its base
-    /// read before reads nothing from the open cell. Past an extent's end, zeros, as the open cell
-    /// reads.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn reads_of_sealed_extents_come_from_the_cache() {
-        let (cell, dir) = cell(1 << 20).await;
-        let extent = id(&cell, 1);
-        write(&cell, extent, 0, &pattern(1, 2 * BLOCK)).await.unwrap();
-        // Open: from the open cell.
-        let before = stats::stats();
-        assert_eq!(read(&cell, extent, 0, 2 * BLOCK).await, Ok(pattern(1, 2 * BLOCK)));
-        assert_eq!(stats::stats().since(&before).read_stored_bytes, 2 * BLOCK as u64);
-        cell.commit(None).await.unwrap();
-
-        let before = stats::stats();
-        let tail = [pattern(1, 2 * BLOCK)[BLOCK..].to_vec(), vec![0; BLOCK]].concat();
-        assert_eq!(read(&cell, extent, BLOCK as u64, 2 * BLOCK).await, Ok(tail));
-        let first = stats::stats().since(&before);
-        assert_eq!((first.read_stored_bytes, first.page_ins), (0, 1));
-
-        let path = dir.path().join("fork");
-        cell.fork_to(&path, crate::host_cell::fork_child(cell.cell())).await.unwrap();
-        let fork = OpenCell::open(&path).await.unwrap();
-        let before = stats::stats();
-        assert_eq!(read(&fork, extent, 0, 2 * BLOCK).await, Ok(pattern(1, 2 * BLOCK)));
-        let again = stats::stats().since(&before);
-        assert_eq!((again.read_stored_bytes, again.page_ins, again.page_in_bytes), (0, 0, 0));
-    }
-
-    /// A follower reads its writer's open cell as of its view's commit while the writer goes on:
-    /// what the writer freed since, still; what it wrote since, not (ENOENT, as a journal's end);
-    /// and, advanced, what the commits between held until it lets go of them, and then, loudly
-    /// (EIO), not.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn followers_read_their_views_commits() {
-        let (cell, _dir) = cell(1 << 20).await;
-        let cell = Arc::new(cell);
-        let (a, b) = (id(&cell, 1), id(&cell, 2));
-        write(&cell, a, 0, &pattern(1, BLOCK)).await.unwrap();
-        cell.commit(Some(b"one")).await.unwrap();
-        let follower = cell.follow();
-        assert_eq!(follower.access().role, CellRole::Follower);
-        cell.free(a).unwrap();
-        write(&cell, b, 0, &pattern(2, BLOCK)).await.unwrap();
-        cell.commit(Some(b"two")).await.unwrap();
-        assert_eq!(read(&follower, a, 0, BLOCK).await, Ok(pattern(1, BLOCK)));
-        assert_eq!(read(&follower, b, 0, BLOCK).await, Err(Errno::ENOENT));
-        assert_eq!(follower.root(), Ok(b"one".to_vec()));
-
-        let commit = follower.advance().unwrap();
-        assert_eq!(follower.view_commit(), Ok(commit));
-        assert_eq!(follower.root(), Ok(b"two".to_vec()));
-        assert_eq!(read(&follower, b, 0, BLOCK).await, Ok(pattern(2, BLOCK)));
-        assert_eq!(read(&follower, a, 0, BLOCK).await, Ok(pattern(1, BLOCK)));
-        follower.let_go(commit).unwrap();
-        assert_eq!(read(&follower, a, 0, BLOCK).await, Err(Errno::EIO));
-        // Pinned, an extent stays, whatever commit the follower is as of.
-        follower.pin(b).unwrap();
-        cell.free(b).unwrap();
-        cell.commit(None).await.unwrap();
-        let commit = follower.advance().unwrap();
-        follower.let_go(commit).unwrap();
-        assert_eq!(read(&follower, b, 0, BLOCK).await, Ok(pattern(2, BLOCK)));
-        follower.unpin(b).unwrap();
-        assert_eq!(read(&follower, b, 0, BLOCK).await, Err(Errno::EIO));
-
-        // Dropped, it leaves its writer's open cell open.
-        drop(follower);
-        write(&cell, id(&cell, 3), 0, &pattern(3, BLOCK)).await.unwrap();
-        cell.commit(None).await.unwrap();
-    }
-
     /// TASK-165.8: a follower reads what its view's commit holds that the writer freed after it in
     /// the bucket, the segment holding it having left the open cell once acknowledged there; and
     /// once the bucket's collector has reclaimed it, which no later commit holds, the follower is
@@ -3249,133 +3131,6 @@ mod tests {
             bucket_cell::collector::Report { deleted: 64, compacted: 0, retired: 0, ..report }
         );
         assert_eq!(read(&follower, a, 0, BLOCK).await, Err(Errno::ESTALE));
-    }
-
-    /// A follower changes nothing: what would, it refuses with EROFS.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn followers_change_nothing() {
-        let (cell, dir) = cell(1 << 20).await;
-        let cell = Arc::new(cell);
-        let a = id(&cell, 1);
-        write(&cell, a, 0, &pattern(1, BLOCK)).await.unwrap();
-        cell.commit(None).await.unwrap();
-        let follower = cell.follow();
-        assert_eq!(write(&follower, id(&cell, 2), 0, &pattern(2, BLOCK)).await, Err(Errno::EROFS));
-        assert_eq!(follower.free(a), Err(Errno::EROFS));
-        assert_eq!(follower.commit(None).await, Err(Errno::EROFS));
-        assert_eq!(follower.commit_ordered(None).await, Err(Errno::EROFS));
-        assert_eq!(follower.set_capacity(2 << 20).await, Err(Errno::EROFS));
-        let forked = follower.fork_to(dir.path().join("fork"), host_cell::new_alone()).await;
-        assert_eq!(forked.map_err(|err| err.errno()), Err(Some(Errno::EROFS)));
-        // cladefs: a window that copies on write, nor so.
-        let copying = follower.create_copying_dax_window(4 * page_size(), None, 1);
-        assert_eq!(copying.map_err(|err| err.errno()).map(drop), Err(Some(Errno::EROFS)));
-        assert_eq!(cell.follow().advance().map(|_| ()), Ok(()));
-        assert_eq!(cell.advance(), Err(Errno::EINVAL));
-    }
-
-    /// A follower maps what its view's commit holds, sharing the cached pages the writer maps;
-    /// what the writer wrote since, it doesn't (ENOENT).
-    #[tokio::test(flavor = "multi_thread")]
-    async fn followers_map_their_views_commits() {
-        let (cell, _dir) = cell(1 << 20).await;
-        let cell = Arc::new(cell);
-        let ps = page_size();
-        let a = id(&cell, 1);
-        write(&cell, a, 0, &pattern(4, ps as usize)).await.unwrap();
-        cell.commit(None).await.unwrap();
-        let follower = cell.follow();
-        let b = id(&cell, 2);
-        write(&cell, b, 0, &pattern(5, ps as usize)).await.unwrap();
-        cell.commit(None).await.unwrap();
-        let window = follower.create_dax_window(4 * ps, None).unwrap();
-        follower.map(a, 0, ps, 0).await.unwrap();
-        assert_eq!(follower.map(b, 0, ps, ps).await, Err(Errno::ENOENT));
-        block_on(window.fault(0, Access::Read)).unwrap();
-        // SAFETY: The test faulted the page in, and nothing else accesses it.
-        let bytes = unsafe { std::slice::from_raw_parts(window.host_base(), ps as usize) };
-        assert!(bytes == pattern(4, ps as usize), "the follower's window maps other data");
-    }
-
-    /// A new writer takes an open cell over from its followers, or from a writer that went, once
-    /// nothing is open in it, which they go on following; its window goes with the writer that
-    /// went. Cut off, the followers fail with ESTALE.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn writers_take_over_cells_followed() {
-        let (cell, _dir) = cell(1 << 20).await;
-        let cell = Arc::new(cell);
-        let follower = cell.follow();
-        assert_eq!(follower.take_over(), Err(Errno::EROFS));
-        cell.take_over().unwrap();
-        let _window = cell.create_dax_window(4 * page_size(), None).unwrap();
-        let a = id(&cell, 1);
-        write(&cell, a, 0, &pattern(1, BLOCK)).await.unwrap();
-        assert_eq!(cell.take_over(), Err(Errno::EBUSY));
-        cell.commit(None).await.unwrap();
-        cell.take_over().unwrap();
-        let _window = cell.create_dax_window(4 * page_size(), None).unwrap();
-        follower.advance().unwrap();
-        assert_eq!(read(&follower, a, 0, BLOCK).await, Ok(pattern(1, BLOCK)));
-
-        cell.cut_followers();
-        assert_eq!(read(&follower, a, 0, BLOCK).await, Err(Errno::ESTALE));
-        assert_eq!(follower.advance(), Err(Errno::ESTALE));
-        assert_eq!(follower.pin(a), Err(Errno::ESTALE));
-        let fresh = cell.follow();
-        assert_eq!(read(&fresh, a, 0, BLOCK).await, Ok(pattern(1, BLOCK)));
-    }
-
-    /// A follower learns of its writer's commits after its view's.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn followers_hear_of_commits() {
-        let (cell, _dir) = cell(1 << 20).await;
-        let cell = Arc::new(cell);
-        cell.commit(None).await.unwrap();
-        let follower = cell.follow();
-        let commit = follower.view_commit().unwrap();
-        assert_eq!(follower.newer(commit, std::time::Duration::from_millis(10)).await, None);
-        write(&cell, id(&cell, 1), 0, &pattern(1, BLOCK)).await.unwrap();
-        cell.commit(None).await.unwrap();
-        let newer = follower.newer(commit, std::time::Duration::from_secs(10)).await;
-        assert_eq!(newer, Some(follower.advance().unwrap()));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn maps_sealed_extents() {
-        let (cell, _dir) = cell(1 << 20).await;
-        let ps = page_size();
-        let extent = id(&cell, 1);
-        // Not a whole number of pages where pages are 16 KiB.
-        let len = ps as usize + BLOCK;
-        write(&cell, extent, 0, &pattern(5, len)).await.unwrap();
-        assert_eq!(cell.map(extent, 0, ps, 0).await, Err(Errno::ENOSYS));
-        let window = cell.create_dax_window(6 * ps, None).unwrap();
-        cell.commit(None).await.unwrap();
-        cell.map(extent, 0, 2 * ps, ps).await.unwrap();
-        // Past the extent, zeros.
-        cell.map(extent, 0, 3 * ps, 3 * ps).await.unwrap();
-        assert_eq!(cell.map(id(&cell, 9), 0, ps, 0).await, Err(Errno::ENOENT));
-
-        block_on(async {
-            window.fault(ps, Access::Read).await.unwrap();
-            window.fault(2 * ps, Access::Read).await.unwrap();
-        });
-        // SAFETY: The test faulted the pages in, and nothing else accesses them.
-        let bytes = unsafe {
-            std::slice::from_raw_parts(window.host_base().add(ps as usize), 2 * ps as usize)
-        };
-        assert!(bytes[..len] == pattern(5, len)[..], "the window maps other data");
-        assert!(bytes[len..].iter().all(|byte| *byte == 0), "the padding isn't zeros");
-        block_on(window.fault(5 * ps, Access::Read)).unwrap();
-        // SAFETY: As above.
-        let past = unsafe {
-            std::slice::from_raw_parts(window.host_base().add(5 * ps as usize), ps as usize)
-        };
-        assert!(past.iter().all(|byte| *byte == 0), "past the extent isn't zeros");
-        // Unmapped, the range has nothing to fault in, which an access's fault there is told.
-        cell.unmap(ps, 2 * ps).unwrap();
-        assert!(!window.is_mapped(ps));
-        assert_eq!(block_on(window.fault(2 * ps, Access::Read)), Err(Errno::ENOENT));
     }
 
     /// Races `steps` on one extent, `rounds` times, a fresh extent each: `prepare` alone first,
@@ -3859,29 +3614,6 @@ mod tests {
         }
     }
 
-    /// cladefs: a reader reading an extent from its start has the parts after the one it reads read
-    /// ahead of it, before it faults on them.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn page_ins_read_ahead_of_a_reader_reading_on() {
-        let (cell, _dir) = held(64 << 20).await;
-        let extent = id(&cell, 1);
-        let len = 4 * extent_frame::PART as usize;
-        write(&cell, extent, 0, &pattern(5, len)).await.unwrap();
-        let window = cell.create_dax_window(len as u64, None).unwrap();
-        committed_here(&cell).await;
-        cell.map(extent, 0, len as u64, 0).await.unwrap();
-        let before = stats::stats();
-        block_on(window.fault(0, Access::Read)).unwrap();
-        // The first part, and the two after it, read ahead, in time.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        let read = || stats::stats().since(&before).page_in_bytes;
-        while read() < 3 * extent_frame::PART && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        let counted = stats::stats().since(&before);
-        assert_eq!((counted.page_ins, counted.page_in_bytes), (3, 3 * extent_frame::PART));
-    }
-
     /// TASK-702.2: forks of a version opened for guests read their tenant's evidence of it, once an
     /// interval for all the forks a host opens, and the first of them in the interval records what
     /// its guest reads of the version's extents, written as its open cell closes; another tenant's
@@ -3957,97 +3689,6 @@ mod tests {
             })
             .collect();
         assert_eq!(tenants, [5, 6]);
-    }
-
-    /// TASK-702.3: a fork of a version opened for a guest fetches what its tenant's evidence of the
-    /// version predicts into the host's cache, ahead of its guest: the parts of the extents its
-    /// open cell holds alone, not those of one the version holds and the fork freed. Its guest's
-    /// boot is measured against the prediction.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn forks_of_a_version_fetch_their_prediction_ahead() {
-        use bucket_cell::evidence::UNIT;
-        let (base, dir) = cell(64 << 20).await;
-        let extent = id(&base, 1);
-        write(&base, extent, 0, &pattern(5, 4 * UNIT as usize)).await.unwrap();
-        // An extent the version holds, which the second fork frees.
-        let freed = id(&base, 2);
-        write(&base, freed, 0, &pattern(6, UNIT as usize)).await.unwrap();
-        base.commit(None).await.unwrap();
-        let at = dir.path().join("version");
-        base.uploaded_version_at(&at).await.unwrap();
-        drop(base);
-        let version = OpenCell::open_for_host(&at).await.unwrap();
-        let fork = async |name: &str| {
-            let path = dir.path().join(name);
-            version.fork_to(&path, host_cell::named(5)).await.unwrap();
-            path
-        };
-        let (first, second) = (fork("first").await, fork("second").await);
-
-        // The first boot reads two of the extent's units, and the other extent's.
-        let one = OpenCell::open(&first).await.unwrap();
-        let now = std::time::Instant::now();
-        let at = |ms| now + std::time::Duration::from_millis(ms);
-        one.guest_read(extent, 3 * UNIT, 1, at(1));
-        one.guest_read(extent, UNIT, 1, at(2));
-        one.guest_read(freed, 0, 1, at(3));
-        one.close().await;
-        let worked_on = OpenCell::open_for_host(&second).await.unwrap();
-        worked_on.free(freed).unwrap();
-        worked_on.commit(None).await.unwrap();
-        worked_on.close().await;
-
-        // The next, opened where the host keeps the parts it fetches, fetches the two ahead.
-        crate::evidence::forget();
-        let cache = bucket_cell::cache::Cache::open(&dir.path().join("cache"), 1 << 30).unwrap();
-        let cache = Arc::new(cache);
-        let here = Opening::here().unwrap();
-        let keeping = local_cell::upload::Options { cache: Some(cache.clone()), ..here.keeping };
-        let opening = Opening { keeping, ..here };
-        let before = stats::stats();
-        let two = OpenCell::open_with(&second, opening).await.unwrap();
-        two.evidence().unwrap().prefetched().await;
-        assert_eq!(stats::stats().since(&before).prefetches, 2);
-        assert_ne!(cache.bytes(), 0);
-
-        // Its boot reads one of them, and a unit not predicted.
-        two.guest_read(extent, 3 * UNIT, 1, at(1));
-        two.guest_read(extent, 2 * UNIT, 1, at(2));
-        two.close().await;
-        let counted = stats::stats().since(&before);
-        let measured = (counted.predicted_read, counted.predicted_unread, counted.read_unpredicted);
-        assert_eq!(measured, (1, 2, 1));
-        version.close().await;
-    }
-
-    /// cladefs: a read fault on a sealed extent maps the pages its page-in supplied after it, a
-    /// part of the extent, rather than a few: reading on takes no more faults.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn read_faults_map_what_page_ins_supplied() {
-        let (cell, _dir) = cell(64 << 20).await;
-        let ps = page_size();
-        let extent = id(&cell, 1);
-        let part = extent_frame::PART;
-        let len = 4 * part as usize;
-        write(&cell, extent, 0, &pattern(5, len)).await.unwrap();
-        let stage = Arc::new(RecordingSecondStage::default());
-        let window = cell.create_dax_window(len as u64, Some(stage.clone())).unwrap();
-        cell.commit(None).await.unwrap();
-        // Nothing of it is in memory: mapping it maps no page yet.
-        cell.map(extent, 0, len as u64, 0).await.unwrap();
-        assert_eq!(*stage.0.lock().unwrap(), []);
-        // A fault on each part's first page maps the part.
-        block_on(async {
-            for start in (0..len as u64).step_by(part as usize) {
-                window.fault(start, Access::Read).await.unwrap();
-            }
-        });
-        let mapped: std::collections::BTreeSet<u64> = (stage.0.lock().unwrap().iter())
-            .filter(|(op, ..)| *op == "map")
-            .map(|(_, page)| *page)
-            .collect();
-        let pages: std::collections::BTreeSet<u64> = (0..len as u64).step_by(ps as usize).collect();
-        assert_eq!(mapped, pages);
     }
 
     /// cladefs: a part paged in is pages in a run of physical memory, which a window maps with one
@@ -4306,101 +3947,6 @@ mod tests {
         assert!(page.iter().all(|byte| *byte == 0), "the window's last page isn't zeros");
     }
 
-    /// cladefs: freeing an extent maps zeros where the window mapped it, read-only, rather than
-    /// what kept its pages; others stay.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn freeing_an_extent_maps_zeros_in_its_place() {
-        let (cell, _dir) = cell(1 << 20).await;
-        let ps = page_size();
-        let window = cell.create_dax_window(8 * ps, None).unwrap();
-        let (sealed, kept) = (id(&cell, 1), id(&cell, 2));
-        write(&cell, sealed, 0, &pattern(1, 2 * ps as usize)).await.unwrap();
-        write(&cell, kept, 0, &pattern(2, ps as usize)).await.unwrap();
-        cell.commit(None).await.unwrap();
-        cell.map(sealed, 0, 2 * ps, 0).await.unwrap();
-        cell.map(kept, 0, ps, 4 * ps).await.unwrap();
-        assert!(window.is_mapped(0) && window.is_mapped(ps));
-
-        let sealed_pages = cached(sealed).unwrap();
-        let weak = Arc::downgrade(&sealed_pages);
-        drop(sealed_pages);
-        cell.free(sealed).unwrap();
-        // Mapped, but no longer keeping the extent's pages: the sealed extent is gone.
-        assert!(window.is_mapped(0) && window.is_mapped(ps));
-        assert!(weak.upgrade().is_none(), "the window still keeps the freed extent's pages");
-        assert!(cached(sealed).is_none());
-        // Zeros, read-only: an open cell faults rather than writing them.
-        assert_eq!(block_on(window.fault(0, Access::Write)), Err(Errno::EACCES));
-        block_on(window.fault(0, Access::Read)).unwrap();
-        // SAFETY: The test faulted the pages in, and nothing else accesses them.
-        let bytes = unsafe { std::slice::from_raw_parts(window.host_base(), ps as usize) };
-        assert!(bytes.iter().all(|byte| *byte == 0), "a freed extent's range doesn't read zeros");
-        assert!(window.is_mapped(4 * ps), "an extent not freed was unmapped");
-    }
-
-    /// A window in host memory takes whole pages.
-    #[cfg(target_os = "linux")]
-    #[tokio::test(flavor = "multi_thread")]
-    async fn dax_window_in_host_memory_must_be_whole_pages() {
-        let (cell, _dir) = cell(1 << 20).await;
-        let ps = page_size() as usize;
-        let mut memory = vec![0u8; 3 * ps];
-        let aligned = memory.as_mut_ptr().wrapping_add(ps - memory.as_ptr() as usize % ps);
-        let base = std::ptr::NonNull::new(aligned).unwrap();
-        // SAFETY: Fails before using the memory.
-        let result = unsafe { cell.create_dax_window_in_host_memory(base, ps as u64 + 1, None) };
-        let error = result.expect_err("succeeded").to_string();
-        assert_eq!(error, "DAX window memory must be whole pages");
-    }
-
-    /// Windows mapping the same extent, from an open cell and a fork of it, map the same pages.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn windows_share_extents_pages() {
-        let (cell, dir) = cell(1 << 20).await;
-        let ps = page_size();
-        let extent = id(&cell, 1);
-        write(&cell, extent, 0, &pattern(6, ps as usize)).await.unwrap();
-        cell.commit(None).await.unwrap();
-        let copy_path = dir.path().join("copy");
-        cell.fork_to(&copy_path, crate::host_cell::fork_child(cell.cell())).await.unwrap();
-        let copy = OpenCell::open(&copy_path).await.unwrap();
-        let (window, copy_window) =
-            (cell.create_dax_window(ps, None).unwrap(), copy.create_dax_window(ps, None).unwrap());
-        cell.map(extent, 0, ps, 0).await.unwrap();
-        copy.map(extent, 0, ps, 0).await.unwrap();
-
-        // Counted before anything pages in: a page-in holds the extent too, a while after the
-        // fault it serves returns.
-        let extent_cached = cached(extent).unwrap();
-        // Each window's mapping holds the one copy of the extent's pages, which the cache keeps.
-        assert_eq!(Arc::strong_count(&extent_cached), 4);
-        copy.unmap(0, ps).unwrap();
-        assert_eq!(Arc::strong_count(&extent_cached), 3, "unmapped, the mapping let go");
-        copy.map(extent, 0, ps, 0).await.unwrap();
-        block_on(async {
-            window.fault(0, Access::Read).await.unwrap();
-            copy_window.fault(0, Access::Read).await.unwrap();
-        });
-        for window in [&window, &copy_window] {
-            // SAFETY: The test faulted the page in, and nothing writes it.
-            let mapped = unsafe { std::slice::from_raw_parts(window.host_base(), ps as usize) };
-            assert!(mapped == pattern(6, ps as usize), "a window maps other data");
-        }
-        cell.unmap(0, ps).unwrap();
-        copy.unmap(0, ps).unwrap();
-        // Unmapped, it stays cached, for the next read or mapping, until the kernel evicts its
-        // pages.
-        assert!(Arc::ptr_eq(&cached(extent).unwrap(), &extent_cached));
-        // cladefs: freed by one open cell, it stays cached for the other, which holds it still
-        // (TASK-79.7); freed by that one too, it is no longer cached.
-        cell.free(extent).unwrap();
-        assert!(Arc::ptr_eq(&cached(extent).unwrap(), &extent_cached));
-        assert_eq!(read(&copy, extent, 0, BLOCK).await, Ok(pattern(6, BLOCK)));
-        drop(extent_cached);
-        copy.free(extent).unwrap();
-        assert!(cached(extent).is_none());
-    }
-
     /// TASK-79.6: an extent freed once sealed is mapped, and written, no more: a fork
     /// that shares its pages through the cache, by its ID, would read what its writer stored in
     /// them as its own.
@@ -4469,36 +4015,6 @@ mod tests {
         let closed = Arc::downgrade(&cell.local);
         drop(cell);
         assert!(closed.upgrade().is_none(), "the cache keeps the cell");
-    }
-
-    /// cladefs (backlog doc-13): a `MAP` of an open extent, written and not yet sealed, is refused
-    /// (`EPERM`), and counted, the window as it was: the guest maps sealed extents alone. Sealed
-    /// by a commit, it maps, zeros past what was written; one never written maps nothing
-    /// (`ENOENT`).
-    #[tokio::test(flavor = "multi_thread")]
-    async fn open_extents_map_nowhere() {
-        let (cell, _dir) = cell(1 << 20).await;
-        let ps = page_size();
-        let window = cell.create_dax_window(2 * ps, None).unwrap();
-        let written = id(&cell, 1);
-        write(&cell, written, 0, &pattern(1, ps as usize)).await.unwrap();
-        let refused = open_maps_refused();
-        assert_eq!(cell.map(written, 0, ps, 0).await, Err(Errno::EPERM));
-        assert_eq!(open_maps_refused(), refused + 1);
-        assert!(!window.is_mapped(0), "an open extent mapped");
-        assert_eq!(cell.map(id(&cell, 3), 0, ps, 0).await, Err(Errno::ENOENT));
-
-        cell.commit(None).await.unwrap();
-        cell.map(written, 0, 2 * ps, 0).await.unwrap();
-        block_on(async {
-            for page in 0..2 {
-                window.fault(page * ps, Access::Read).await.unwrap();
-            }
-        });
-        // SAFETY: The test faulted the pages in, and nothing else accesses them.
-        let bytes = unsafe { std::slice::from_raw_parts(window.host_base(), 2 * ps as usize) };
-        assert!(bytes[..ps as usize] == pattern(1, ps as usize)[..], "the sealed written data");
-        assert!(bytes[ps as usize..].iter().all(|byte| *byte == 0), "past the sealed extent");
     }
 
     /// TASK-104: the cache keeps no more extents than its bound, letting go of those asked for

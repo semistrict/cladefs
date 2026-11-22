@@ -1,8 +1,8 @@
-# cladefs's own: named files kept straight on an extent device, as pages in write-once extents,
-# each file's commit one commit of the device: SQLite's databases' (sqlite_cladefs) and VMs'
-# memory (TASK-456).
+# cladefs's own: a block device kept straight on an extent device, as blocks in write-once
+# extents, each flush one commit of the extent device: a SQLite cell's database (sqlite_cladefs)
+# and a memory cell's VM memory (TASK-456).
 [package]
-name = "extent_files"
+name = "block_device"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -23,5 +23,5 @@ testing = []
 workspace = true
 
 [dev-dependencies]
-extent_files = { path = ".", features = ["testing"] }
+block_device = { path = ".", features = ["testing"] }
 rand.workspace = true

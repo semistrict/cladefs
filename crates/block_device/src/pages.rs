@@ -2,24 +2,25 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! A file's pages: its bytes, in chunks of a block each, kept in write-once extents.
+//! A block device's contents: its bytes, in chunks of a block each, kept in write-once extents.
 //!
-//! **The tree.** Chunk `k` is a block of some extent, or a hole, which reads as zeros. The file
+//! **The tree.** Chunk `k` is a block of some extent, or a hole, which reads as zeros. The device
 //! keeps where each chunk is in a radix tree of nodes (`format`): node `j` of level 1 names chunks
 //! `j * fanout..`, node `j` of level `l` names nodes `j * fanout..` of level `l - 1`, and the top
 //! node, the one node of the highest level, is what the root names. A node whose children are all
 //! holes is a hole too.
 //!
-//! **Reading it lazily** (TASK-440). Opening a file reads nothing: it knows its root alone. A
-//! node is read as a lookup first passes through it, from the top down, and kept: so what a file
-//! holds in memory grows with what was read and written of it, not with its size. A commit writes
-//! the nodes it changes from what it read of them.
+//! **Reading it lazily** (TASK-440). Opening the device reads nothing: it knows its root alone. A
+//! node is read as a lookup first passes through it, from the top down, and kept: so what the
+//! device holds in memory grows with what was read and written of it, not with its size. A commit
+//! writes the nodes it changes from what it read of them.
 //!
 //! **Changes.** Writes go to chunks in memory, read in first unless written whole, until a commit
 //! ([`Pages::plan`], [`Plan::write`], [`Pages::apply`]) writes them to new extents, with the nodes
-//! above them, which name them, and the nodes above those, to the top: copy on write. A truncation
-//! cuts the chunks past it, which read as holes from then on. A punch makes whole chunks holes,
-//! which a commit stores as nothing: a VM's memory keeps its zero pages so (TASK-456.2).
+//! above them, which name them, and the nodes above those, to the top: copy on write. A resize to
+//! fewer bytes cuts the chunks past it, which read as holes from then on. A discard makes whole
+//! chunks holes, which a commit stores as nothing: a VM's memory keeps its zero pages so
+//! (TASK-456.2).
 //!
 //! **Space.** Each extent ends with its blocks' owners (`format`): which chunk or node each holds.
 //! A block a commit replaces is dead. The commit reads the owners of the extents it leaves blocks
@@ -27,8 +28,8 @@
 //! freed; one less than half live is named in the root, and the next commit writes its live blocks
 //! again, with its own changes, so that it dies.
 
-use crate::format::{self, FileRoot, Owner, Ref, SPARSE_KEPT};
-use crate::window::Contents;
+use crate::format::{self, Owner, Ref, SPARSE_KEPT, TreeRoot};
+use crate::window::{Contents, Extents};
 use anyhow::{Context as _, Error, ensure};
 use futures::StreamExt as _;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -43,7 +44,7 @@ const TRANSFER_PIECE: usize = 1 << 20;
 
 /// How many chunks commits change before the window maps them again, one request for them all
 /// rather than one a commit, each chunk once however often changed; and the most of what they
-/// wrote a file keeps meanwhile, to read from memory: 4 MiB a file at most (TASK-552).
+/// wrote the device keeps meanwhile, to read from memory: 4 MiB at most (TASK-552).
 pub(crate) const REMAP_BATCH: u64 = 1024;
 
 /// A node's children: a ref, or a hole, for each of `fanout`, holes past the tree's end.
@@ -52,7 +53,7 @@ type Node = Box<[Option<Ref>]>;
 /// A tree node's place: its level, and its index at that level.
 type Place = (u32, u64);
 
-/// The chunks of a file of `size` bytes, in blocks of `block_size`.
+/// The chunks of contents of `size` bytes, in blocks of `block_size`.
 fn chunks(size: u64, block_size: usize) -> u64 {
     size.div_ceil(block_size as u64)
 }
@@ -265,10 +266,10 @@ impl Tree {
     }
 }
 
-/// A file's pages. See the module docs.
+/// A block device's contents. See the module docs.
 pub(crate) struct Pages {
-    /// The file as of its last commit, but its tree.
-    committed: FileRoot,
+    /// The contents as of the last commit, but the tree.
+    committed: TreeRoot,
     tree: Tree,
     /// The size as written since.
     size: u64,
@@ -276,12 +277,12 @@ pub(crate) struct Pages {
     cut: u64,
     /// The chunks written since, whole.
     dirty: BTreeMap<u64, Box<[u8]>>,
-    /// The chunks punched since that the last commit holds data in, none of them in `dirty`:
-    /// ranges, sorted, apart, as a VM's memory punches its zero pages by the million
-    /// (TASK-584). What the last commit holds as holes already is left out: punched, it changes
+    /// The chunks discarded since that the last commit holds data in, none of them in `dirty`:
+    /// ranges, sorted, apart, as a VM's memory discards its zero pages by the million
+    /// (TASK-584). What the last commit holds as holes already is left out: discarded, it changes
     /// nothing.
     holes: Vec<Range<u64>>,
-    /// The window's region the file has, if one (`window`): its first byte's address, its length,
+    /// The window's region, if the device has one (`window`): its first byte's address, its length,
     /// and which of its chunks it maps, as the last commit has them or as before commits since
     /// ([`Pages::mark_stale`]).
     region: Option<Region>,
@@ -296,7 +297,7 @@ pub(crate) struct Pages {
     recent: BTreeMap<u64, Box<[u8]>>,
 }
 
-/// A file's region of the window.
+/// The region of the window the contents are mapped into.
 struct Region {
     base: usize,
     len: u64,
@@ -337,18 +338,23 @@ fn merged(mut ranges: Vec<Range<u64>>) -> Vec<Range<u64>> {
 }
 
 impl Pages {
-    /// A file of no bytes, never committed.
+    /// Contents of no bytes, never committed.
     pub fn new(block_size: usize) -> Self {
-        Self::open(block_size, &FileRoot::default()).expect("an empty file's root")
+        Self::open(block_size, &TreeRoot::default()).expect("an empty tree's root")
     }
 
-    /// The file `root` names, on a device of blocks of `block_size`: nothing read yet.
-    pub fn open(block_size: usize, root: &FileRoot) -> Result<Self, Error> {
+    /// The contents `root` names, on a device of blocks of `block_size`: nothing read yet.
+    pub fn open(block_size: usize, root: &TreeRoot) -> Result<Self, Error> {
         let fanout = format::fanout(block_size) as u64;
         let counts = level_counts(chunks(root.size, block_size), fanout);
         let height = counts.len() as u32 - 1;
-        ensure!(root.height == height, "a file of {} bytes, of height {}", root.size, root.height);
-        ensure!(root.top.is_none() || height > 0, "a file of no chunks with a top node");
+        ensure!(
+            root.height == height,
+            "contents of {} bytes, of height {}",
+            root.size,
+            root.height
+        );
+        ensure!(root.top.is_none() || height > 0, "contents of no chunks with a top node");
         let cut = counts[0];
         let tree = Tree { block_size, fanout, top: root.top, counts, nodes: HashMap::new() };
         Ok(Self {
@@ -382,14 +388,14 @@ impl Pages {
             || self.cut < self.tree.counts[0]
     }
 
-    /// Whether chunk `index` was punched since the last commit, which held data there.
-    fn punched(&self, index: u64) -> bool {
+    /// Whether chunk `index` was discarded since the last commit, which held data there.
+    fn discarded(&self, index: u64) -> bool {
         let at = self.holes.partition_point(|range| range.end <= index);
         self.holes.get(at).is_some_and(|range| range.start <= index)
     }
 
-    /// Takes chunk `index` out of what was punched since, to be written.
-    fn unpunch(&mut self, index: u64) {
+    /// Takes chunk `index` out of what was discarded since, to be written.
+    fn undiscard(&mut self, index: u64) {
         let at = self.holes.partition_point(|range| range.end <= index);
         let Some(range) = self.holes.get(at).cloned() else { return };
         if range.start > index {
@@ -405,8 +411,9 @@ impl Pages {
         self.stale.get(at).is_some_and(|range| range.start <= index)
     }
 
-    /// The file as the last commit left it.
-    pub fn root(&self) -> FileRoot {
+    /// The contents as the last commit left them.
+    #[cfg(test)]
+    pub fn root(&self) -> TreeRoot {
         self.committed.clone()
     }
 
@@ -416,7 +423,7 @@ impl Pages {
         self.tree.nodes.len()
     }
 
-    /// The extents the file holds as of its last commit: every one its tree names, read whole,
+    /// The extents the contents hold as of the last commit: every one its tree names, read whole,
     /// none of it kept.
     pub async fn extents(&self, device: &dyn Device) -> Result<BTreeSet<ExtentId>, Error> {
         let mut tree = Tree {
@@ -434,13 +441,13 @@ impl Pages {
         Ok(extents)
     }
 
-    /// Where chunk `index` is as of the last commit, as the file reads now, its node read: a
+    /// Where chunk `index` is as of the last commit, as the contents read now, its node read: a
     /// hole once cut.
     fn committed_chunk(&self, index: u64) -> Option<Ref> {
         (index < self.cut).then(|| self.tree.at((0, index))).flatten()
     }
 
-    /// Reads the nodes naming `chunks`, those of the last commit's the file still has.
+    /// Reads the nodes naming `chunks`, those of the last commit's the contents still have.
     async fn load_chunks(&mut self, device: &dyn Device, chunks: Range<u64>) -> Result<(), Error> {
         let chunks = chunks.start..chunks.end.min(self.cut);
         let fanout = self.tree.fanout;
@@ -451,7 +458,7 @@ impl Pages {
         self.tree.load(device, nodes.map(|index| (1, index))).await
     }
 
-    /// Reads chunk `index` as of the last commit, as the file reads now, its node read, into
+    /// Reads chunk `index` as of the last commit, as the contents read now, its node read, into
     /// `out`: from the window's memory if it maps it.
     async fn read_committed(
         &self,
@@ -467,7 +474,7 @@ impl Pages {
             None => out.fill(0),
             Some(at) => match self.mapped(index * self.block_size() as u64, out.len() as u64) {
                 Some(at) => {
-                    // SAFETY: the window maps the chunk, read-only, until the file's next commit
+                    // SAFETY: the window maps the chunk, read-only, until the next commit
                     // marks it stale, which takes `&mut self` (mark_stale), not while this read
                     // borrows it.
                     out.copy_from_slice(unsafe { std::slice::from_raw_parts(at, out.len()) })
@@ -478,7 +485,7 @@ impl Pages {
         Ok(())
     }
 
-    /// Gives the file the window's region `region`, its memory's first byte and length, mapping
+    /// Gives the contents the window's region `region`, its memory's first byte and length, mapping
     /// nothing yet; or none, its region taken away.
     pub fn set_region(&mut self, region: Option<(std::ptr::NonNull<u8>, u64)>) {
         let block_size = self.block_size() as u64;
@@ -493,7 +500,7 @@ impl Pages {
     }
 
     /// Notes what the region maps of `chunks` now, as the last commit has them: the runs of it
-    /// mapped, `true`, or unmapped, past the file's end.
+    /// mapped, `true`, or unmapped, past the end.
     pub fn mark_mapped(&mut self, runs: impl IntoIterator<Item = (Range<u64>, bool)>) {
         let Some(region) = &mut self.region else { return };
         for (chunks, mapped) in runs {
@@ -504,7 +511,7 @@ impl Pages {
     }
 
     /// The ranges of `chunks` within the region that it doesn't map: to map before a read, unless
-    /// past the file's end as of its last commit.
+    /// past the end as of its last commit.
     pub fn unmapped(&self, chunks: Range<u64>) -> Vec<Range<u64>> {
         let Some(region) = &self.region else { return Vec::new() };
         let end = chunks.end.min(region.chunks(self.block_size())).min(self.tree.counts[0]);
@@ -585,7 +592,7 @@ impl Pages {
         self.load_chunks(device, chunks.clone()).await?;
         let clean = |index: u64| {
             !self.dirty.contains_key(&index)
-                && !self.punched(index)
+                && !self.discarded(index)
                 && self.committed_chunk(index).is_some()
         };
         if !chunks.into_iter().all(clean) {
@@ -595,12 +602,12 @@ impl Pages {
     }
 
     /// What the window is to map of `chunks` as of the last commit, in runs of chunks alike: a run
-    /// of blocks of one extent, holes (zeros), or nothing, past the file's end.
+    /// of blocks of one extent, holes (zeros), or nothing, past the end.
     pub async fn runs(
         &mut self,
         device: &dyn Device,
         chunks: Range<u64>,
-    ) -> Result<Vec<(Range<u64>, Option<Contents>)>, Error> {
+    ) -> Result<Extents, Error> {
         let committed = self.tree.counts[0];
         let known = chunks.start.min(committed)..chunks.end.min(committed);
         let fanout = self.tree.fanout;
@@ -616,7 +623,7 @@ impl Pages {
                 Some(Contents::Extent { extent: at.extent, offset: at.block as u64 * block_size })
             }
         };
-        let mut runs: Vec<(Range<u64>, Option<Contents>)> = Vec::new();
+        let mut runs: Extents = Vec::new();
         for index in chunks {
             let next = contents(index);
             if let Some((run, last)) = runs.last_mut() {
@@ -641,7 +648,7 @@ impl Pages {
         Ok(runs)
     }
 
-    /// Reads into `buf` from `offset`, as far as the file goes: how many bytes it read.
+    /// Reads into `buf` from `offset`, as far as the contents go: how many bytes it read.
     pub async fn read(
         &mut self,
         device: &dyn Device,
@@ -657,7 +664,7 @@ impl Pages {
             let (index, within) = (at / block_size, (at % block_size) as usize);
             let on_device = |index| {
                 if self.dirty.contains_key(&index)
-                    || self.punched(index)
+                    || self.discarded(index)
                     || self.recent.contains_key(&index)
                     || self.mapped(index * block_size, block_size).is_some()
                 {
@@ -692,7 +699,7 @@ impl Pages {
             let out = &mut buf[(at - offset) as usize..][..len];
             match self.dirty.get(&index) {
                 Some(chunk) => out.copy_from_slice(&chunk[within..within + len]),
-                None if self.punched(index) => out.fill(0),
+                None if self.discarded(index) => out.fill(0),
                 None if len == block_size as usize => {
                     self.read_committed(device, index, out).await?
                 }
@@ -716,8 +723,8 @@ impl Pages {
     ) -> Result<&mut [u8], Error> {
         if !self.dirty.contains_key(&index) {
             let mut chunk = vec![0; self.block_size()].into_boxed_slice();
-            if self.punched(index) {
-                self.unpunch(index);
+            if self.discarded(index) {
+                self.undiscard(index);
             } else if !whole {
                 self.load_chunks(device, index..index + 1).await?;
                 self.read_committed(device, index, &mut chunk).await?;
@@ -727,30 +734,30 @@ impl Pages {
         Ok(self.dirty.get_mut(&index).unwrap())
     }
 
-    /// Makes `chunks` holes, which read as zeros, those within the file: a commit stores them as
-    /// nothing, leaving what they held. What it notes is what the last commit holds data in, as
+    /// Makes `chunks` holes, which read as zeros, those within the contents: a commit stores them
+    /// as nothing, leaving what they held. What it notes is what the last commit holds data in, as
     /// ranges: chunks holes already cost nothing (TASK-584). It reads the nodes naming data
     /// among them.
-    pub async fn punch(&mut self, device: &dyn Device, chunks: Range<u64>) -> Result<(), Error> {
+    pub async fn discard(&mut self, device: &dyn Device, chunks: Range<u64>) -> Result<(), Error> {
         let end = chunks.end.min(self::chunks(self.size, self.block_size()));
         let chunks = chunks.start..end.max(chunks.start);
         let mut after = self.dirty.split_off(&chunks.start);
         self.dirty.append(&mut after.split_off(&chunks.end));
-        let mut punched: Vec<Range<u64>> = Vec::new();
+        let mut discarded: Vec<Range<u64>> = Vec::new();
         let held = chunks.start..chunks.end.min(self.cut);
         self.tree
             .visit(device, held, |(level, index), _| {
                 if level > 0 {
                     return;
                 }
-                match punched.last_mut() {
+                match discarded.last_mut() {
                     Some(range) if range.end == index => range.end += 1,
-                    _ => punched.push(index..index + 1),
+                    _ => discarded.push(index..index + 1),
                 }
             })
             .await?;
-        punched.append(&mut self.holes);
-        self.holes = merged(punched);
+        discarded.append(&mut self.holes);
+        self.holes = merged(discarded);
         Ok(())
     }
 
@@ -775,9 +782,9 @@ impl Pages {
         Ok(())
     }
 
-    /// Makes the file `size` bytes: what was past it, if it was longer, is gone, and reads as zeros
-    /// if it grows again.
-    pub async fn truncate(&mut self, device: &dyn Device, size: u64) -> Result<(), Error> {
+    /// Makes the contents `size` bytes: what was past it, if they were longer, is gone, and reads
+    /// as zeros if they grow again.
+    pub async fn resize(&mut self, device: &dyn Device, size: u64) -> Result<(), Error> {
         if size < self.size {
             let kept = chunks(size, self.block_size());
             let within = (size % self.block_size() as u64) as usize;
@@ -817,7 +824,7 @@ impl Pages {
         };
 
         // The chunks to write: those written, and the live ones of the extents left sparse, whose
-        // live nodes are written again too; and those punched, holes. The written ones borrowed,
+        // live nodes are written again too; and those discarded, holes. The written ones borrowed,
         // not copied: a commit's data is copied once, into the plan (TASK-583).
         let mut rewritten: BTreeMap<u64, Box<[u8]>> = BTreeMap::new();
         let mut forced = BTreeSet::new();
@@ -841,7 +848,7 @@ impl Pages {
             if level == 0 {
                 if index < self.cut
                     && !self.dirty.contains_key(&index)
-                    && !self.punched(index)
+                    && !self.discarded(index)
                     && !rewritten.contains_key(&index)
                 {
                     let mut chunk = vec![0; block_size].into_boxed_slice();
@@ -858,7 +865,7 @@ impl Pages {
             .chain(holes)
             .collect();
 
-        // The nodes to write: above each chunk written, along the end's path if the file's shape
+        // The nodes to write: above each chunk written, along the end's path if the tree's shape
         // changed, above chunks the last commit had that are cut, and the live nodes of sparse
         // extents, with what is above them. Not above chunks past what the last commit had: holes
         // there and then, which only the nodes above them as written name.
@@ -1036,12 +1043,12 @@ impl Pages {
                 .collect(),
             nodes,
             counts,
-            root: FileRoot { size: self.size, height, top, sparse },
+            root: TreeRoot { size: self.size, height, top, sparse },
             dead,
         })
     }
 
-    /// Makes `plan`, written and committed, the file's last commit: what it changed of what the
+    /// Makes `plan`, written and committed, the last commit: what it changed of what the
     /// window's region maps is stale ([`Pages::mark_stale`]), to be mapped again.
     pub fn apply(&mut self, plan: Plan) {
         let Plan { changed: placed_chunks, nodes, counts, root, .. } = plan;
@@ -1083,9 +1090,9 @@ impl Pages {
         // chunks it holds a copy of already, and others while it holds fewer than REMAP_BATCH.
         self.recent.retain(|index, _| *index < cut.min(n));
         let zeros = || vec![0; self.tree.block_size].into_boxed_slice();
-        let punched = holes.into_iter().flatten().filter(|index| self.is_stale(*index));
-        let punched: Vec<_> = punched.map(|index| (index, zeros())).collect();
-        for (index, chunk) in dirty.into_iter().chain(punched) {
+        let discarded = holes.into_iter().flatten().filter(|index| self.is_stale(*index));
+        let discarded: Vec<_> = discarded.map(|index| (index, zeros())).collect();
+        for (index, chunk) in dirty.into_iter().chain(discarded) {
             let kept = self.recent.len() < REMAP_BATCH as usize || self.recent.contains_key(&index);
             if index < n && self.is_stale(index) && kept {
                 self.recent.insert(index, chunk);
@@ -1094,7 +1101,7 @@ impl Pages {
     }
 }
 
-/// A commit of a file, planned ([`Pages::plan`]).
+/// A commit of the contents, planned ([`Pages::plan`]).
 pub(crate) struct Plan {
     /// The blocks to write, in order, the extents' one after another.
     data: Vec<u8>,
@@ -1109,8 +1116,8 @@ pub(crate) struct Plan {
     nodes: Vec<(Place, Option<Node>)>,
     /// The counts of the tree's levels.
     counts: Vec<u64>,
-    /// The file, as the commit leaves it.
-    pub root: FileRoot,
+    /// The contents, as the commit leaves them.
+    pub root: TreeRoot,
     /// The extents the commit leaves unreferenced.
     pub dead: Vec<ExtentId>,
 }
@@ -1200,7 +1207,7 @@ mod tests {
 
     const BLOCK: usize = 512;
 
-    /// A file of pages on a device, committed as a file set would, and a model of its bytes.
+    /// Pages on a device, committed as a block device commits them, and a model of its bytes.
     struct Model {
         device: FakeDevice,
         pages: Pages,
@@ -1235,13 +1242,13 @@ mod tests {
             self.model[offset as usize..end].copy_from_slice(data);
         }
 
-        fn truncate(&mut self, size: u64) {
-            block_on(self.pages.truncate(&self.device, size)).unwrap();
+        fn resize(&mut self, size: u64) {
+            block_on(self.pages.resize(&self.device, size)).unwrap();
             self.model.resize(size as usize, 0);
         }
 
-        fn punch(&mut self, chunks: Range<u64>) {
-            block_on(self.pages.punch(&self.device, chunks.clone())).unwrap();
+        fn discard(&mut self, chunks: Range<u64>) {
+            block_on(self.pages.discard(&self.device, chunks.clone())).unwrap();
             let end = (chunks.end * BLOCK as u64).min(self.model.len() as u64) as usize;
             let start = ((chunks.start * BLOCK as u64) as usize).min(end);
             self.model[start..end].fill(0);
@@ -1263,8 +1270,8 @@ mod tests {
             assert!(!self.pages.changed());
         }
 
-        /// The file opened again from its last commit's root, as a file set's next opening opens
-        /// it: what it wrote since is lost.
+        /// The pages opened again from the last commit's root, as a block device's next opening
+        /// opens them: what it wrote since is lost.
         fn reopen(&mut self) {
             self.pages = Pages::open(BLOCK, &self.pages.root()).unwrap();
             let size = self.pages.size() as usize;
@@ -1325,7 +1332,7 @@ mod tests {
     }
 
     /// A tree grown two levels taller in one commit keeps what it held: the node between its old
-    /// top and its new one is written, not left a hole, which lost the file's first chunks on its
+    /// top and its new one is written, not left a hole, which lost the first chunks on its
     /// next opening. The eager tree wrote every node from the cut to the end, this one among them
     /// (TASK-440).
     #[test]
@@ -1333,7 +1340,7 @@ mod tests {
         let mut model = Model::new(64);
         model.write(0, &vec![1; BLOCK * 424]);
         model.commit();
-        model.truncate(BLOCK as u64 * 20);
+        model.resize(BLOCK as u64 * 20);
         model.commit();
         assert_eq!(model.pages.root().height, 1);
         model.write(BLOCK as u64 * 494, &[2; BLOCK]);
@@ -1342,45 +1349,45 @@ mod tests {
         model.check();
     }
 
-    /// Punched chunks read as zeros, before their commit and after an opening, and the commit
-    /// stores nothing for them: a file of nothing but holes holds no extent (TASK-456.2).
+    /// Discarded chunks read as zeros, before their commit and after an opening, and the commit
+    /// stores nothing for them: contents of nothing but holes hold no extent (TASK-456.2).
     #[test]
-    fn punched_chunks_are_holes_stored_as_nothing() {
+    fn discarded_chunks_are_holes_stored_as_nothing() {
         let mut model = Model::new(64);
         model.write(0, &vec![5; BLOCK * 40]);
         model.commit();
-        model.punch(2..30);
+        model.discard(2..30);
         model.check();
         model.commit();
         model.check();
         model.reopen();
         model.check();
-        model.punch(0..40);
+        model.discard(0..40);
         model.commit();
         model.check();
         assert_eq!((model.pages.size(), model.device.extents()), (BLOCK as u64 * 40, Vec::new()));
     }
 
     #[test]
-    fn truncations_cut_what_follows() {
+    fn shrinking_cuts_what_follows() {
         let mut model = Model::new(64);
         model.write(0, &vec![4; BLOCK * 30]);
         model.commit();
-        model.truncate(BLOCK as u64 * 2 + 10);
+        model.resize(BLOCK as u64 * 2 + 10);
         model.check();
-        model.truncate(BLOCK as u64 * 25);
+        model.resize(BLOCK as u64 * 25);
         model.check();
         model.write(BLOCK as u64 * 24, &[5; 3]);
         model.commit();
         model.check();
         model.reopen();
-        model.truncate(0);
+        model.resize(0);
         model.commit();
         model.check();
         assert_eq!(model.device.extents(), Vec::new());
     }
 
-    /// Opening a file reads nothing; a read of one chunk reads the nodes on its path and the
+    /// Opening the pages reads nothing; a read of one chunk reads the nodes on its path and the
     /// chunk, and holds those nodes alone (TASK-440).
     #[test]
     fn an_opening_reads_nothing_and_a_read_reads_one_path() {
@@ -1397,10 +1404,10 @@ mod tests {
         assert_eq!((model.reads() - before, opened.nodes_held()), (4, 3));
     }
 
-    /// A file of 64 GiB written in three places holds the nodes of their paths alone, written
+    /// Contents of 64 GiB written in three places holds the nodes of their paths alone, written
     /// and read back across an opening (TASK-440).
     #[test]
-    fn a_sparse_64_gib_file_holds_what_it_touched() {
+    fn a_sparse_64_gib_device_holds_what_it_touched() {
         let mut model = Model::new(64);
         let size = 64u64 << 30;
         let places = [0, size / 2 + 12345, size - 3];
@@ -1450,7 +1457,7 @@ mod tests {
         model.check();
     }
 
-    /// Random writes and truncations, committed and opened again at random, read back as a model
+    /// Random writes and resizes, committed and opened again at random, read back as a model
     /// of the bytes does, and the device holds the extents the tree names, once committed.
     #[test]
     fn random_changes_read_as_the_model() {
@@ -1459,10 +1466,10 @@ mod tests {
             let mut model = Model::new(rng.random_range(1..16));
             for _ in 0..200 {
                 match rng.random_range(0..13) {
-                    0 => model.truncate(rng.random_range(0..BLOCK as u64 * 500)),
+                    0 => model.resize(rng.random_range(0..BLOCK as u64 * 500)),
                     11 => {
                         let start = rng.random_range(0..500);
-                        model.punch(start..start + rng.random_range(1..40));
+                        model.discard(start..start + rng.random_range(1..40));
                     }
                     1..4 => model.commit(),
                     4 => {
@@ -1485,12 +1492,12 @@ mod tests {
         }
     }
 
-    /// TASK-552: a file whose region maps a chunk that each commit rewrites, as a database's first
-    /// page, and that grows a chunk a commit, never read back, keeps no more of what its commits
-    /// wrote than a remap batch, however many commits pass with nothing mapped again: it kept a
-    /// copy of every chunk written, past the region's end too.
+    /// TASK-552: a device whose window maps a chunk that each commit rewrites, as a database's
+    /// first page, and that grows a chunk a commit, never read back, keeps no more of what its
+    /// commits wrote than a remap batch, however many commits pass with nothing mapped again: it
+    /// kept a copy of every chunk written, past the region's end too.
     #[test]
-    fn what_a_mapped_file_keeps_of_its_commits_stays_within_a_remap_batch() {
+    fn what_a_mapped_device_keeps_of_its_commits_stays_within_a_remap_batch() {
         let mut model = Model::new(4);
         let chunks = 64;
         let mut memory = vec![0u8; chunks * BLOCK];
@@ -1512,21 +1519,21 @@ mod tests {
         model.check();
     }
 
-    /// TASK-584: punching what the last commit holds as holes already changes nothing, and a
-    /// punch of what it holds data in, or of what was written since, reads as zeros, written
+    /// TASK-584: discarding what the last commit holds as holes already changes nothing, and a
+    /// discard of what it holds data in, or of what was written since, reads as zeros, written
     /// again in part after.
     #[test]
-    fn punching_holes_already_holes_changes_nothing() {
+    fn discarding_holes_already_holes_changes_nothing() {
         let mut model = Model::new(4);
-        model.truncate(4096 * BLOCK as u64);
+        model.resize(4096 * BLOCK as u64);
         model.commit();
-        model.punch(0..4096);
-        assert!(!model.pages.changed(), "a punch of holes changed the file");
+        model.discard(0..4096);
+        assert!(!model.pages.changed(), "a discard of holes changed the contents");
         assert!(model.pages.holes.is_empty());
         model.write(10 * BLOCK as u64, &vec![7; 20 * BLOCK]);
         model.commit();
         model.write(25 * BLOCK as u64, &vec![8; 10 * BLOCK]);
-        model.punch(0..4096);
+        model.discard(0..4096);
         assert_eq!(model.pages.holes, [10..30]);
         assert!(model.pages.dirty.is_empty());
         model.write(12 * BLOCK as u64 + 3, &[9; 5]);

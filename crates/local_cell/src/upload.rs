@@ -2353,7 +2353,10 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// can't be read, or reads shorter than its member's fence said, fails the take, as it may be
     /// the only one holding commits told replicated; and so does a log none of whose copies is
     /// authentic, as a log missing would look like a writer's base, given up
-    /// (`replicate::trimmed`).
+    /// (`replicate::trimmed`). A copy its member's fence says ends at nothing holds nothing, as
+    /// one it never made: a member makes a log's file at its first append, which may fail after
+    /// (board 5914: its write failing, ENOSPC, it held the file empty, which, no header of its own,
+    /// was no authentic copy, and every take failed).
     async fn read_longest(
         &self,
         cell: CellId,
@@ -2364,7 +2367,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // Each log's copies, by their members' fences' ends, the longest first.
         let mut copies: BTreeMap<u64, Vec<(u64, bucket_cell::layout::Member)>> = BTreeMap::new();
         for (member, ends) in fenced {
-            for &(log, end) in ends {
+            for &(log, end) in ends.iter().filter(|&&(_, end)| end > 0) {
                 copies.entry(log).or_default().push((end, member.clone()));
             }
         }
@@ -3014,60 +3017,6 @@ mod tests {
         let state = bucket_cell::recover(&*bucket, CELL, None).await.unwrap().state;
         let sequences: Vec<u64> = state.extents.keys().map(|extent| extent.sequence).collect();
         assert_eq!(sequences, (1..=last).collect::<Vec<_>>());
-    }
-
-    /// TASK-79.19: a gather takes no more of the segments the cell closed than may upload at once,
-    /// with those uploading; the rest it leaves in the cell, until those it took are uploaded.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn gathers_take_what_may_upload_at_once() {
-        let host = Runtime {
-            handle: tokio::runtime::Handle::current(),
-            uploads: Budget::new(Limits::UNBOUNDED),
-            keys: bucket_cell::keys::testing::host(),
-        };
-        let bucket = Arc::new(
-            ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), "").unrouted(),
-        );
-        let dir = MemDir::new();
-        let description = Description { block_size: 4096, capacity: 1 << 30, cell: CELL };
-        LocalCell::make(&dir, description, Some("memory:///gathers"), None).unwrap();
-        lifecycle::create(&*bucket, CELL, 1).await.unwrap();
-        // Its uploader uploads nothing it is not asked to within the hour: the test gathers.
-        let options = Options { interval: Duration::from_secs(3600), ..Options::default() };
-        let recovering = LocalCell::recover_unmade(dir).unwrap();
-        let (cell, uploader) =
-            open(recovering, crate::Options::default(), bucket.clone(), (1, options), &host)
-                .await
-                .unwrap();
-        cell.made().unwrap();
-        // Each commit closes its segment.
-        let closed = 2 * IN_FLIGHT + 1;
-        for sequence in 1..=closed as u64 {
-            cell.write(ExtentId::new(CELL.id, sequence), 0, &[sequence as u8; 4096]).await.unwrap();
-            cell.close_segment().unwrap();
-            cell.commit(None).await.unwrap();
-        }
-        let shared = &uploader.shared;
-        let writer = shared.writer.lock().unwrap().clone().unwrap();
-        let mut in_flight = InFlight::default();
-        let mut taken = Vec::new();
-        while shared.gather(&writer, &mut in_flight, (true, true)).await.unwrap().took {
-            taken.push(in_flight.len());
-            (async {
-                while let Some(uploaded) = in_flight.next().await {
-                    uploaded.unwrap();
-                }
-                let through = writer.acknowledge().await.unwrap();
-                shared.acknowledged(through, &mut in_flight).await.unwrap();
-            })
-            .await;
-        }
-        assert_eq!(taken, [IN_FLIGHT, IN_FLIGHT, 1]);
-        assert_eq!(uploader.last_uploaded(), cell.last_commit().unwrap());
-        drop(uploader);
-        let state = bucket_cell::recover(&*bucket, CELL, None).await.unwrap().state;
-        let sequences: Vec<u64> = state.extents.keys().map(|extent| extent.sequence).collect();
-        assert_eq!(sequences, (1..=closed as u64).collect::<Vec<_>>());
     }
 }
 

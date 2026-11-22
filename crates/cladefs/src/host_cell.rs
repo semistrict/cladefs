@@ -671,7 +671,8 @@ pub(crate) async fn fork_ephemeral(
         origin,
         path: path.to_owned(),
         bucket: url,
-        migration: None,
+        epoch: 0,
+        migrating: None,
     };
     let made = match upload::blocking(|| host.note(&entry)) {
         Err(err) => Err(err),
@@ -813,7 +814,8 @@ pub(crate) async fn delete(
                 origin,
                 path: dir.to_owned(),
                 bucket: url,
-                migration: None,
+                epoch: 0,
+                migrating: None,
             };
             host.retire(&entry).await.map_err(|err| Failure::msg(format!("{err:#}")))
         })

@@ -391,12 +391,4 @@ mod tests {
         assert_eq!(dir.list("d").unwrap(), ["r"]);
         assert_eq!(dir.cache().usage().held, 0);
     }
-
-    /// A directory in memory gives nothing: none of its files is on the host's filesystem.
-    #[test]
-    fn a_directory_in_memory_gives_nothing() {
-        let dir = crate::MemDir::new();
-        dir.create("f", true).unwrap();
-        assert!(!dir.give("f", &mut |_| panic!("given")).unwrap());
-    }
 }

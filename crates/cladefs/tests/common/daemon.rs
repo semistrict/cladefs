@@ -78,6 +78,25 @@ impl Daemon {
         Ok(self.runtime.block_on(self.client.stat_cell(request))?.into_inner())
     }
 
+    /// StatCell of the cell at `path` once it says no VM process has it open: the daemon lets it go
+    /// once it finds its VM process's connection gone, on its own side, after that end is shut
+    /// down, not with it (board 5885). Fails if it is open still ten seconds on.
+    pub fn wait_closed(&mut self, path: &Path) -> StatCellResponse {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let stat = self.stat(path).unwrap();
+            if !stat.open {
+                return stat;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{} still open ten seconds after its VM process went",
+                path.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     /// Forks the cell at `from` to `to` (ForkCell).
     pub fn fork(&mut self, from: &Path, to: &Path) -> Result<cladefs::CellId, tonic::Status> {
         let request = ForkCellRequest { from: name(from), to: name(to), ..Default::default() };

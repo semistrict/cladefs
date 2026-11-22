@@ -29,5 +29,9 @@ loom = { workspace = true, optional = true }
 parking_lot = { package = "shuttle-parking_lot", version = "0.12.5" }
 shuttle = { workspace = true, optional = true }
 
+# cladefs: its tests under madsim (tests/madsim.rs, board 2890).
+[target.'cfg(madsim)'.dev-dependencies]
+madsim = "=0.2.34"
+
 [lints]
 workspace = true

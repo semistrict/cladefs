@@ -6,7 +6,7 @@
 # Killer: bucket::write_budgets::a_hosts_cell_writes_what_its_design_says
 --- a/crates/local_cell/src/cell.rs
 +++ b/crates/local_cell/src/cell.rs
-@@ -2348,10 +2348,6 @@
+@@ -2758,10 +2758,6 @@ impl<D: Dir> LocalCell<D> {
              }
              let end = packer.end();
              let packed = packer.push(buf);
@@ -16,4 +16,4 @@
 -            }
              let file = match &mut framed {
                  Some(file) => file,
-                 // Its raw parts before are no parts of a cell at a version's, encrypted with AES-GCM: framed anew,
+                 // Its raw parts before are no parts of a cell at a version's, encrypted with

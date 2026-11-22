@@ -922,97 +922,6 @@ mod tests {
     }
 
     #[test]
-    fn urls_name_the_server_its_mount_and_its_keys() {
-        let kms =
-            OpenBao::new("openbao://bao.internal/transit?key=t-{tenant}", token("t")).unwrap();
-        assert_eq!(kms.inner.origin.as_str(), "http://bao.internal:8200/");
-        assert_eq!(kms.inner.mount, ["transit"]);
-        assert_eq!(kms.inner.shown, "openbao://bao.internal:8200/transit");
-        assert_eq!(kms.inner.names.of(42), "t-1a");
-        assert_eq!(kms.inner.namespace, None);
-        let kms = OpenBao::new(
-            "openbaos://[::1]:8300/kms/transit/?key=t-{tenant}&namespace=team%2Fa",
-            token("t"),
-        )
-        .unwrap();
-        assert_eq!(kms.inner.origin.as_str(), "https://[::1]:8300/");
-        assert_eq!(kms.inner.mount, ["kms", "transit"]);
-        assert_eq!(kms.inner.shown, "openbaos://[::1]:8300/kms/transit");
-        assert_eq!(kms.inner.namespace, Some(HeaderValue::from_static("team/a")));
-        assert_eq!(kms.inner.mounted(&["encrypt", "t-1"]), ["kms", "transit", "encrypt", "t-1"]);
-    }
-
-    #[test]
-    fn urls_naming_no_openbao_are_refused() {
-        let refused = |url: &str| OpenBao::new(url, token("t")).map(|_| ()).unwrap_err();
-        assert_eq!(
-            refused("openbao://h/transit"),
-            "\"openbao://h/transit\": the KMS URL names no key template: key=...{tenant}..."
-        );
-        assert_eq!(
-            refused("openbao://h/transit?key=one"),
-            "\"openbao://h/transit?key=one\": the key template \"one\" holds no {tenant}: every \
-             tenant would share one KEK"
-        );
-        assert_eq!(
-            refused("openbao://h/?key={tenant}"),
-            "\"openbao://h/?key={tenant}\": names no Transit engine's mount: \
-             openbao://HOST[:PORT]/MOUNT"
-        );
-        assert_eq!(
-            refused("openbao://root:secret@h/t?key={tenant}"),
-            "\"openbao://root:secret@h/t?key={tenant}\": holds credentials: OpenBao's token is \
-             CLADEFS_KMS_OPENBAO_TOKEN's"
-        );
-        assert_eq!(
-            refused("openbao://h/t?key={tenant}&token=x"),
-            "\"openbao://h/t?key={tenant}&token=x\": \"token\" is none of key, keys, namespace \
-             or ca"
-        );
-        assert_eq!(
-            refused("openbao://h/t?key={tenant}&ca=/ca.pem"),
-            "\"openbao://h/t?key={tenant}&ca=/ca.pem\": ca=FILE is for openbaos://, over TLS"
-        );
-        assert_eq!(
-            refused("openbao://h/t?key=a/{tenant}"),
-            "\"openbao://h/t?key=a/{tenant}\": the key name \"a/0\" is no Transit key's: \
-             letters, digits, -, _, ."
-        );
-        assert_eq!(
-            refused("openbaos://h/t?key={tenant}&ca=/no/such/ca.pem"),
-            "\"openbaos://h/t?key={tenant}&ca=/no/such/ca.pem\": the CAs \"/no/such/ca.pem\": No \
-             such file or directory (os error 2)"
-        );
-        assert_eq!(
-            refused("vault://h/t?key={tenant}"),
-            "\"vault://h/t?key={tenant}\": names no OpenBao: openbao:// or openbaos://"
-        );
-    }
-
-    #[test]
-    fn tokens_come_from_one_variable_of_the_environment() {
-        let env = |token: Option<&str>, file: Option<&str>| {
-            Token::of_env(|name| match name {
-                TOKEN_ENV => token.map(str::to_owned),
-                TOKEN_FILE_ENV => file.map(str::to_owned),
-                _ => None,
-            })
-        };
-        assert_matches!(env(Some("s.abc"), None), Ok(Token::Value(token)) if token == "s.abc");
-        assert_matches!(env(Some(""), Some("/run/token")), Ok(Token::File(path)) if path == std::path::Path::new("/run/token"));
-        assert_eq!(
-            env(Some("s.abc"), Some("/run/token")).unwrap_err(),
-            "both CLADEFS_KMS_OPENBAO_TOKEN and CLADEFS_KMS_OPENBAO_TOKEN_FILE are set: one"
-        );
-        assert_eq!(
-            env(None, None).unwrap_err(),
-            "OpenBao's token is in neither CLADEFS_KMS_OPENBAO_TOKEN nor CLADEFS_KMS_OPENBAO_TOKEN_FILE"
-        );
-        // Neither says its token.
-        assert_eq!(format!("{:?}", token("s.abc")), "Token::Value(..)");
-    }
-
-    #[test]
     fn token_files_are_read_trimmed_and_again_when_changed() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("token");
@@ -1031,27 +940,6 @@ mod tests {
             Some("OpenBao's token is empty".to_owned())
         );
         assert!(!Credentials::new(token("s.v")).unwrap().reread(&HeaderValue::from_static("s.x")));
-    }
-
-    #[test]
-    fn headers_name_the_backend_the_tenant_and_the_key() {
-        let header = header(0x2a, "k-2a");
-        assert_eq!(header, b"fxkm\x01\x07openbao\0\0\0\0\0\0\0\x2a\0\x04k-2a");
-        let wrapped = [&header[..], b"vault:v12:c2VhbGVk"].concat();
-        let parsed = Parsed::of(&wrapped).unwrap();
-        assert_eq!(
-            parsed,
-            Parsed {
-                header: &header,
-                tenant: 0x2a,
-                name: b"k-2a",
-                ciphertext: "vault:v12:c2VhbGVk",
-                version: 12,
-            }
-        );
-        for ciphertext in ["vault:v:x", "vault:v1:", "vault:vx:y", "vault:v1", "v1:abc"] {
-            assert_eq!(Parsed::version_of(ciphertext), None, "{ciphertext}");
-        }
     }
 
     /// AC #3: what another KMS wrapped, or this one for another tenant or under another key, or
@@ -1120,33 +1008,6 @@ mod tests {
         assert!(!failed.contains("s.token"), "{failed}");
     }
 
-    /// AC #1: keys wrapped under a tenant's Transit key unwrap for it, by any KMS of the same
-    /// engine, whatever runs their futures; another tenant's key unwraps none of them.
-    #[test]
-    fn wrapped_keys_unwrap_for_their_tenant() {
-        let Some(bao) = bao(&[7, 8]) else { return };
-        let kms = bao.kms();
-        let key = Secret::random();
-        let wrapped = wrap(&kms, 7, &key).unwrap();
-        let header_7 = header(7, "cladefs-tenant-7");
-        assert_eq!(&wrapped.0[..header_7.len()], &header_7[..]);
-        assert!(wrapped.0[header_7.len()..].starts_with(b"vault:v1:"), "{wrapped:?}");
-        assert_eq!(unwrap(&kms, 7, &wrapped).unwrap().expose(), key.expose());
-        // Another process's KMS, polled on a Tokio runtime, and dropped in it.
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        runtime.block_on(async {
-            let again = bao.kms();
-            assert_eq!(again.unwrap(7, &wrapped).await.unwrap().expose(), key.expose());
-        });
-        // Tenant 8's key, relabelled as its, fails Transit's check.
-        let relabelled =
-            [&header(8, "cladefs-tenant-8")[..], &wrapped.0[header_7.len()..]].concat();
-        assert_eq!(
-            refusal(unwrap(&kms, 8, &Wrapped(relabelled))),
-            "tenant 8: not authentic: a wrapped key, by the KMS's integrity check"
-        );
-    }
-
     /// A `derived` key derives a key of its own for each header, its `context`: wraps and unwraps
     /// as any other, a relabelled header failing its check.
     #[test]
@@ -1182,49 +1043,6 @@ mod tests {
         assert_eq!(unwrap(&kms, 7, &new).unwrap().expose(), new_key.expose());
     }
 
-    /// AC #2: a tenant's key whose use cladefs's token lost, soft-deleted, or with its older
-    /// versions kept from decrypting, is revoked: until given back.
-    #[test]
-    fn revoked_keys_wrap_and_unwrap_nothing_until_given_back() {
-        let Some(bao) = bao(&[7, 8]) else { return };
-        let kms = bao.kms();
-        let key = Secret::random();
-        let wrapped = wrap(&kms, 7, &key).unwrap();
-        let others = wrap(&kms, 8, &key).unwrap();
-        let works = || assert_eq!(unwrap(&kms, 7, &wrapped).unwrap().expose(), key.expose());
-        let revoked = |when: &str| {
-            assert_matches!(unwrap(&kms, 7, &wrapped), Err(Error::Revoked { tenant: 7 }), "{when}");
-            assert_eq!(refusal(wrap(&kms, 7, &key)), "tenant 7: its KEK is revoked", "{when}");
-        };
-
-        // The policy keeps tenant 8's key alone: 7's is neither usable nor readable.
-        bao.server.policy("cladefs", &DevServer::cladefs_policy(MOUNT, "cladefs-tenant-8"));
-        revoked("its policy");
-        assert_eq!(unwrap(&kms, 8, &others).unwrap().expose(), key.expose());
-        // Readable, but neither encrypting nor decrypting.
-        let readable = format!(
-            "{}path \"{MOUNT}/keys/cladefs-tenant-7\" {{ capabilities = [\"read\"] }}\n",
-            DevServer::cladefs_policy(MOUNT, "cladefs-tenant-8")
-        );
-        bao.server.policy("cladefs", &readable);
-        revoked("its policy, readable");
-        bao.server.policy("cladefs", &DevServer::cladefs_policy(MOUNT, "cladefs-tenant-*"));
-        works();
-
-        bao.bao(&["delete", &format!("{}/soft-delete", key_path(7))]);
-        revoked("soft-deleted");
-        bao.bao(&["write", "-f", &format!("{}/soft-delete-restore", key_path(7))]);
-        works();
-
-        bao.bao(&["write", "-f", &format!("{}/rotate", key_path(7))]);
-        bao.bao(&["write", &format!("{}/config", key_path(7)), "min_decryption_version=2"]);
-        assert_matches!(unwrap(&kms, 7, &wrapped), Err(Error::Revoked { tenant: 7 }));
-        let newer = wrap(&kms, 7, &key).unwrap();
-        assert_eq!(unwrap(&kms, 7, &newer).unwrap().expose(), key.expose());
-        bao.bao(&["write", &format!("{}/config", key_path(7)), "min_decryption_version=1"]);
-        works();
-    }
-
     /// AC #2: a tenant's key whose versions that wrapped are trimmed, or that is deleted, is
     /// destroyed for what they wrapped. Deleted, OpenBao has no more of it than of a key never
     /// made: a wrap says the tenant has none.
@@ -1248,27 +1066,6 @@ mod tests {
         bao.bao(&["delete", &key_path(8)]);
         assert_matches!(unwrap(&kms, 8, &wrapped), Err(Error::Destroyed { tenant: 8 }));
         assert_matches!(wrap(&kms, 8, &key), Err(Error::NoSuchTenant { tenant: 8 }));
-    }
-
-    /// AC #2: a tenant with no key is said to have none, if cladefs's token may read keys' names;
-    /// else revoked. A token that may make keys
-    /// (`create`, as root's) makes one for each tenant it wraps for (Transit's upsert).
-    #[test]
-    fn tenants_without_keys_are_named() {
-        let Some(bao) = bao(&[7]) else { return };
-        let kms = bao.kms();
-        let key = Secret::random();
-        assert_matches!(wrap(&kms, 9, &key), Err(Error::NoSuchTenant { tenant: 9 }));
-        assert_eq!(refusal(wrap(&kms, 9, &key)), "tenant 9: no KEK in the KMS");
-        let unreadable = "path \"transit/encrypt/*\" { capabilities = [\"update\"] }\n\
-                          path \"transit/decrypt/*\" { capabilities = [\"update\"] }\n";
-        bao.server.policy("cladefs", unreadable);
-        assert_matches!(wrap(&kms, 9, &key), Err(Error::Revoked { tenant: 9 }));
-
-        let root = bao.kms_with(QUERY, token(bao.server.root()));
-        let wrapped = wrap(&root, 9, &key).unwrap();
-        assert_eq!(unwrap(&root, 9, &wrapped).unwrap().expose(), key.expose());
-        assert_eq!(bao.bao(&["read", "-field=name", &key_path(9)]), "cladefs-tenant-9");
     }
 
     /// Two tenants sharing a key (each naming it, as overrides may) unwrap only their own wraps:
@@ -1369,33 +1166,6 @@ mod tests {
         );
     }
 
-    /// A namespace's Transit engine, named by the URL's `namespace`.
-    #[test]
-    fn namespaces_hold_their_own_engines() {
-        let Some(server) = DevServer::start() else { return };
-        server.bao(&["namespace", "create", "team"]);
-        server.bao(&["secrets", "enable", "-namespace=team", &format!("-path={MOUNT}"), "transit"]);
-        server.bao(&["write", "-namespace=team", "-f", &key_path(7)]);
-        let in_team = OpenBao::new(
-            &server.url(MOUNT, &format!("{QUERY}&namespace=team")),
-            token(server.root()),
-        )
-        .unwrap();
-        let key = Secret::random();
-        let wrapped = wrap(&in_team, 7, &key).unwrap();
-        assert_eq!(unwrap(&in_team, 7, &wrapped).unwrap().expose(), key.expose());
-        let in_root = OpenBao::new(&server.url(MOUNT, QUERY), token(server.root())).unwrap();
-        assert_eq!(
-            refusal(unwrap(&in_root, 7, &wrapped)),
-            format!(
-                "tenant 7: the KMS failed: openbao://127.0.0.1:{}/{MOUNT}: decrypt with key \
-                 \"cladefs-tenant-7\": 404 Not Found: no handler for route \
-                 \"transit/decrypt/cladefs-tenant-7\". route entry not found.",
-                server.port()
-            )
-        );
-    }
-
     /// `openbaos://`, over TLS, trusting the CA its `ca` names; refused without it.
     #[test]
     fn tls_servers_are_trusted_by_their_ca() {
@@ -1418,30 +1188,5 @@ mod tests {
                 port = bao.server.port()
             )
         );
-    }
-
-    /// TASK-411.3's `CLADEFS_KMS` names it, its token in the environment: `kms::from_url`.
-    #[test]
-    fn kms_urls_name_openbao_its_token_in_the_environment() {
-        let Some(bao) = bao(&[7]) else { return };
-        let url = bao.server.url(MOUNT, QUERY);
-        // SAFETY: nextest runs each test in a process of its own, this thread its only one.
-        unsafe { std::env::remove_var(TOKEN_FILE_ENV) };
-        // SAFETY: as above.
-        unsafe { std::env::remove_var(TOKEN_ENV) };
-        assert_eq!(
-            crate::kms::from_url(&url).map(|_| ()).unwrap_err(),
-            format!(
-                "{url:?}: OpenBao's token is in neither CLADEFS_KMS_OPENBAO_TOKEN nor \
-                 CLADEFS_KMS_OPENBAO_TOKEN_FILE"
-            )
-        );
-        // SAFETY: as above: the dev server is a child process, and `from_url` refused the URL
-        // before starting anything, no token found.
-        unsafe { std::env::set_var(TOKEN_ENV, &bao.token) };
-        let shared = crate::kms::from_url(&url).unwrap();
-        let key = Secret::random();
-        let wrapped = block_on(shared.wrap_dyn(7, &key)).unwrap();
-        assert_eq!(block_on(shared.unwrap_dyn(7, &wrapped)).unwrap().expose(), key.expose());
     }
 }

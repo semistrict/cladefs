@@ -120,7 +120,13 @@ pub async fn start(
             std::process::exit(1);
         }
     });
-    serving.map_err(|err| failed(&err.to_string()))
+    serving.map_err(|err| failed(&err.to_string()))?;
+    // cladefs: the migrations to it their sources abandoned, given up (board 5734).
+    if crate::ephemeral_host::host().is_ok() {
+        let idle = super::migration::idle().map_err(|err| failed(&err))?;
+        runtime.spawn(super::migration::target::reap(idle));
+    }
+    Ok(())
 }
 
 /// cladefs: what the daemon serves its peers on: a TCP listener, bound; under madsim, its address
@@ -422,18 +428,16 @@ impl proto::peer_server::Peer for Server {
         &self,
         request: Request<proto::MigratePrepareRequest>,
     ) -> Result<Response<proto::MigratePrepareResponse>, Status> {
-        let incarnation = super::migration::target::prepare(request.into_inner()).await?;
-        Ok(Response::new(proto::MigratePrepareResponse { incarnation }))
+        let (incarnation, token) = super::migration::target::prepare(request.into_inner()).await?;
+        Ok(Response::new(proto::MigratePrepareResponse { incarnation, token }))
     }
 
     async fn migrate_file(
         &self,
         request: Request<proto::MigrateFileRequest>,
     ) -> Result<Response<proto::MigrateFileResponse>, Status> {
-        let request = request.into_inner();
-        let written = super::run::off_the_runtime(move || super::migration::target::file(request));
-        let written = written.await.map_err(|err| Status::internal(format!("writing: {err}")))?;
-        written.map(|()| Response::new(proto::MigrateFileResponse {}))
+        super::migration::target::file(request.into_inner()).await?;
+        Ok(Response::new(proto::MigrateFileResponse {}))
     }
 
     async fn migrate_hand_over(
@@ -450,6 +454,22 @@ impl proto::peer_server::Peer for Server {
     ) -> Result<Response<proto::MigrateAbortResponse>, Status> {
         super::migration::target::abort(request.into_inner()).await?;
         Ok(Response::new(proto::MigrateAbortResponse {}))
+    }
+
+    async fn migrate_renew(
+        &self,
+        request: Request<proto::MigrateRenewRequest>,
+    ) -> Result<Response<proto::MigrateRenewResponse>, Status> {
+        super::migration::target::renew(request.into_inner().migration)?;
+        Ok(Response::new(proto::MigrateRenewResponse {}))
+    }
+
+    async fn migrate_release(
+        &self,
+        request: Request<proto::MigrateReleaseRequest>,
+    ) -> Result<Response<proto::MigrateReleaseResponse>, Status> {
+        super::migration::target::release(request.into_inner().migration).await?;
+        Ok(Response::new(proto::MigrateReleaseResponse {}))
     }
 
     async fn read_log(

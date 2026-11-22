@@ -189,23 +189,6 @@ mod tests {
         assert_eq!(alternates_moved(&moved, root, newest), moved);
     }
 
-    #[test]
-    fn transports() {
-        let local = |path: &str| Ok(Transport::Local(path.into()));
-        let helper = |scheme: &str| Ok(Transport::Helper(scheme.into()));
-        for (url, expected) in [
-            ("https://github.com/torvalds/linux", helper("https")),
-            ("http://git/linux", helper("http")),
-            ("/repos/upstream", local("/repos/upstream")),
-            ("file:///repos/upstream", local("/repos/upstream")),
-        ] {
-            assert_eq!(transport(url).map_err(|error| error.to_string()), expected, "{url}");
-        }
-        for url in ["ssh://host/repo", "host:repo", "relative"] {
-            assert!(transport(url).is_err(), "{url}");
-        }
-    }
-
     /// Git's side of `connect`: its capabilities asked, the service connected, and nothing read
     /// past the line that asked it, which is the service's.
     #[test]

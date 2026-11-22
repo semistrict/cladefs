@@ -67,8 +67,7 @@ async fn hosts_take_a_cells_head_in_turn_and_one_killed_takes_it_back() {
         assert_eq!(sorted.len(), epochs.len(), "each taking its own epoch: {taken:?}");
     }
     // host3, of the highest token, killed and started again: it takes the cell back, a later epoch.
-    handle.kill(nodes[2].id());
-    handle.restart(nodes[2].id());
+    node_local::restart(nodes[2].id()).await;
     madsim::time::sleep(Duration::from_secs(2)).await;
     let taken = taken.lock().unwrap();
     assert_eq!(taken.len(), 4, "{taken:?}");

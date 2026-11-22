@@ -120,6 +120,21 @@ class OffHostFs(unittest.TestCase):
             }
             """), [])
 
+    def test_a_test_module_within_a_module_passes_to_its_end_alone(self):
+        """Board 6105: migration.rs's tests are a module within one of the file's."""
+        self.assertEqual(self.matches("""\
+            mod target {
+                fn f() {}
+                #[cfg(test)]
+                mod tests {
+                    fn t() {
+                        let _ = std::fs::read("x");
+                    }
+                }
+                fn g() { let _ = std::fs::read("y"); }
+            }
+            """), [(9, "off-host-fs")])
+
 
 class MixedOrderings(unittest.TestCase):
     def test_a_counter_all_relaxed_passes(self):

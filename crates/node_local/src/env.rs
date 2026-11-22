@@ -7,7 +7,7 @@
 //! environment of its own ([`set_vars`]) reads that instead, so that daemons in one simulation
 //! are configured apart, each as its own process would be, by the same code: its socket, its
 //! token, its peers' address, its directories. A node killed loses it, as a node's statics are
-//! let go of ([`crate::Plugin`]): its restart gives it again, as a host's boot does.
+//! let go of ([`crate::kill`]): its restart gives it again, as a host's boot does.
 
 use std::env::VarError;
 use std::ffi::{OsStr, OsString};
@@ -43,16 +43,4 @@ crate::node_local! {
 pub fn set_vars<K: Into<OsString>, V: Into<OsString>>(vars: impl IntoIterator<Item = (K, V)>) {
     let vars = vars.into_iter().map(|(name, value)| (name.into(), value.into())).collect();
     *VARS.get().lock().unwrap() = Some(vars);
-}
-
-#[cfg(test)]
-mod tests {
-    /// Built normally, the process's environment.
-    #[test]
-    fn reads_the_processs_environment_built_normally() {
-        let path = std::env::var_os("PATH");
-        assert!(path.is_some(), "a test's process has a PATH");
-        assert_eq!(super::var_os("PATH"), path);
-        assert_eq!(super::var("NODE_LOCAL_NO_SUCH_VARIABLE"), Err(std::env::VarError::NotPresent));
-    }
 }

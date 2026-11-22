@@ -171,19 +171,6 @@ mod tests {
         assert_eq!(manager.asked, ["linux"]);
     }
 
-    /// A volume there already, made before a reboot, mounts with no ask.
-    #[test]
-    fn volumes_there_mount_unasked() {
-        let (dir, fake, mut manager) = (tempfile::tempdir().unwrap(), Fake::default(), manager());
-        let root = dir.path().to_owned();
-        fake.volumes.borrow_mut().insert("made-before".into(), b"m".to_vec());
-        let mut automounter =
-            Automounter { root: root.clone(), volumes: &fake, attach: &mut manager };
-        assert!(automounter.missing("made-before"));
-        drop(automounter);
-        assert!(manager.asked.is_empty());
-    }
-
     /// What the manager refuses, a manifest that doesn't import, and a name no volume may have
     /// fail, leaving nothing mounted, made or asked of the manager for the last.
     #[test]

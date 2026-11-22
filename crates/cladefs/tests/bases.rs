@@ -163,6 +163,7 @@ fn generations_go_once_nothing_reads_them() {
     assert_eq!(failure(daemon.delete(&base)), (Code::FailedPrecondition, Errno::EBUSY));
 
     drop(vm);
+    daemon.wait_closed(&sandbox);
     daemon.sync(&sandbox).unwrap();
     daemon.delete(&base).unwrap();
     // The cell it was attached to says so as it reads, and opens all the same.

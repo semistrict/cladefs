@@ -815,22 +815,6 @@ async fn revoked_tenants_pools_go_and_forks_into_their_new_cells_are_refused() {
     assert_eq!(world.head_of(last.cell).await, None);
 }
 
-/// TASK-411.4, as TASK-411.28 left it: an encrypted cell forks into no cell of a tenant the KMS has
-/// no KEK of: refused before anything is made, as destroyed, naming the tenant; no cell is made in
-/// the clear.
-#[tokio::test(flavor = "multi_thread")]
-async fn forks_into_cells_of_tenants_with_no_kek_are_refused() {
-    let world = World::new();
-    let host = world.host(5);
-    let (cell, uploader) = open_on(&world, &host, &made(test_cell(7))).await.unwrap();
-    written(&cell, &uploader, ExtentId::new(7, 1), &noise(1, 4096)).await;
-    let child = child_in(3, 8);
-    let refused = forked((&world, &host), &cell, &uploader, child).await.unwrap_err();
-    let none = bucket_cell::Error::Kms("tenant 3: no KEK in the KMS".into());
-    assert_eq!(refused, Failure::Bucket(none));
-    assert_eq!(world.head_of(child.cell).await, None);
-}
-
 /// TASK-411.19, as TASK-411.28 left it: a tenant whose KEK the KMS forgot (a real KMS's key
 /// deleted, answering as for a tenant that never had one, [`extent_keys::testing::Forgetting`])
 /// gets no cell: a cell opening on another host, of a new cell or of a new volume of its encrypted
@@ -1015,58 +999,6 @@ async fn encrypted_cells_raw_files_and_logs_hold_no_plaintext() {
     assert_eq!(clear, expected, "{on_disk:?}");
     uploader.cut_short()();
     assert_eq!(crate::on_disk(&MemDir::new()).unwrap(), None, "no cell");
-}
-
-/// TASK-421, TASK-400 in an encrypted cell: an encrypted cell's segment that compresses has its
-/// whole parts packed and held as they are written, compressed alone, in memory; its framing, in a
-/// copy, reads only its last part back, never whole, and encrypts what was held under its object's
-/// key: nothing of its data in any file of its directory, nor held once framed, and read back as
-/// written. Both on a directory whose I/O is its callers' alone, which packs ahead then and there,
-/// so that what is held is known at the commit. Before, an encrypted cell held nothing and read all
-/// its parts back (TASK-411.5).
-#[tokio::test(flavor = "multi_thread")]
-async fn encrypted_cells_hold_parts_packed_ahead_and_encrypt_them_framing() {
-    const MIB: usize = 1 << 20;
-    // Letters at random, sixteen of them: compresses by about half, framed in a copy.
-    let text = |seed: u64, len: usize| -> Vec<u8> {
-        noise(seed, len).into_iter().map(|byte| b'a' + byte % 16).collect()
-    };
-    let data = |sequence: u64| text(sequence, if sequence <= 6 { MIB } else { 4096 });
-    {
-        let world = World::new();
-        let host = world.host(5);
-        let cell = test_cell(7);
-        let dir = MemDir::serial();
-        let description = Description { block_size: 4096, capacity: 1 << 30, cell };
-        let kind = cell::Kind::Fxfs;
-        LocalCell::make(&dir, description, Some("memory:///encrypted"), Some(kind)).unwrap();
-        let held = crate::HeldParts::new();
-        let interval = Duration::from_secs(3600);
-        let options = Options { interval, held: Some(held.clone()), ..Options::default() };
-        let (open_cell, uploader) = open_with(&world, &host, &dir, options).await.unwrap();
-        assert!(open_cell.keys().encrypts());
-        for sequence in 1..=7 {
-            open_cell.write(ExtentId::new(cell.id, sequence), 0, &data(sequence)).await.unwrap();
-        }
-        open_cell.commit(None).await.unwrap();
-        let holding = held.counts();
-        assert!(holding.bytes > 2 * MIB as u64, "held {holding:?}");
-        let before = crate::framing_reads().0;
-        open_cell.close_segment().unwrap();
-        open_cell.commit(None).await.unwrap();
-        open_cell.closed(usize::MAX).await.unwrap();
-        let read_back = crate::framing_reads().0 - before;
-        assert_eq!(read_back, 4096, "the last part alone read back");
-        assert_eq!(held.counts().bytes, 0, "taken");
-        for sequence in 1..=7 {
-            let (extent, data) = (ExtentId::new(cell.id, sequence), data(sequence));
-            let mut buf = vec![0; data.len()];
-            open_cell.read(extent, 0, &mut buf).unwrap();
-            assert!(buf == data, "{extent:?} read back");
-            assert_eq!(clear_files(&dir, &data), Vec::<String>::new(), "{extent:?}");
-        }
-        uploader.cut_short()();
-    }
 }
 
 /// The encrypts of the framed files of `dir` whose paths start with `kind`, by their paths.

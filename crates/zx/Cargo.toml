@@ -6,8 +6,10 @@ edition.workspace = true
 license.workspace = true
 
 [lib]
-# The tests need Fuchsia's component framework.
+# The tests need Fuchsia's component framework: as a bench target (`--all-targets`) too, which
+# builds them.
 test = false
+bench = false
 doctest = false
 
 [dependencies]

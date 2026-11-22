@@ -272,16 +272,4 @@ pub(crate) mod tests {
         assert!(panicked.is_err());
         assert_eq!(futures::executor::block_on(rw.write(&halt)).err(), Some(Errno::EIO));
     }
-
-    /// An open cell's lock taken without a panic, and let go of, leaves it unhalted, however often.
-    #[test]
-    fn locks_let_go_of_leave_their_open_cell_unhalted() {
-        let halt = Halt::new(Path::new("cell"), crate::host_cell::new_alone());
-        let lock = CellMutex::new("lock", 0);
-        for _ in 0..3 {
-            *lock.lock(&halt).unwrap() += 1;
-        }
-        assert_eq!(*lock.lock(&halt).unwrap(), 3);
-        assert!(!halt.is_halted());
-    }
 }

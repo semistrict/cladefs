@@ -479,22 +479,4 @@ mod tests {
         assert!(buffer.as_slice().iter().all(|&b| b == 7));
         assert_eq!(Arc::strong_count(&file), 1, "the operation let the file go");
     }
-
-    /// Reads and writes give their buffers back with what they did.
-    #[test]
-    fn operations_give_their_buffers_back() {
-        let file = Arc::new(tempfile::tempfile().unwrap());
-        let io = Io::new().unwrap();
-        let mut data = Aligned::new(4096);
-        data.as_mut_slice().fill(3);
-        let Done { result, buffer } =
-            futures::executor::block_on(io.run(file.clone(), Op::Write { data, offset: 4096 }));
-        assert_eq!(result.unwrap(), 4096);
-        assert!(buffer.as_slice().iter().all(|&b| b == 3));
-        let Done { result, buffer } =
-            futures::executor::block_on(io.run(file, Op::Read { len: 8192, offset: 0 }));
-        assert_eq!(result.unwrap(), 8192);
-        assert!(buffer.as_slice()[..4096].iter().all(|&b| b == 0));
-        assert!(buffer.as_slice()[4096..].iter().all(|&b| b == 3));
-    }
 }

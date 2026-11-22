@@ -129,29 +129,49 @@ addresses (`CLADEFSD_PEER_ADDRESS`). Since everything an ephemeral cell holds pa
 files, and its kept segments never change once kept but for holes, a migration copies its cell directory's
 files rather than streaming its log (`cladefsd::migration`):
 
-1. **Prepare** (`MigrateCell` on S, naming T's peer address and the cell directory's path on T): T notes the
-   cell in its journal as being taken by the migration, writes its own reference before anything is
-   sent (`targetRefersFirst`), makes a staging directory beside the path, and answers its
-   incarnation.
+1. **Prepare** (`MigrateCell` on S, naming T's peer address and the cell directory's path on T): S
+   notes the cell's next epoch in its journal entry, durably, and reserves the cell's path, so a
+   second `MigrateCell` of it at once gets `EBUSY`. T notes the cell in its journal as being taken
+   by the migration, writes its own reference before anything is sent (`targetRefersFirst`),
+   makes a staging directory beside the path, and answers its incarnation and a token new to this
+   take of the migration. A prepare whose answer is lost S asks again, with the same migration,
+   three times at most, then aborts it by ID. T takes a migration older than the one it holds, by
+   the epoch, never (`ABORTED`); a newer one supersedes it (board 5732).
 2. **Rounds**, every 500 ms while the guest runs: S sends the kept segments it has not sent yet,
-   whole and sparse (`SEEK_DATA`/`SEEK_HOLE`).
+   whole and sparse (`SEEK_DATA`/`SEEK_HOLE`), and once a second tells T the migration goes on.
+   T gives up a migration it hears nothing of for `CLADEFSD_MIGRATION_IDLE` (five minutes by
+   default): its source crashed, or the source's abort was lost (board 5734).
 3. **Hand-over** (`HandOverCell` on S): refused while anything has the cell open (`EBUSY`), so the
    VM manager stops the VM process first. S then writes a `migrating` marker in the cell directory, durably,
    and from then on refuses to open it (`sourceGivesUpFirst`). It sends the rest: every directory
    (the empty ones too, which opening lists), the files the rounds did not send, whole, and the holes
-   the kept segments already sent have gained since. Then it asks T to take over, naming every file
-   with its length and the CRC32C of each one that is not a kept segment.
+   the kept segments already sent have gained since. Then it asks T to take over, naming T's
+   incarnation and token from the prepare's answer, and every file with its length and the CRC32C
+   of each one that is not a kept segment.
 4. **T's answer:** T accepts only if its staging directory holds every named file at that length and
-   CRC (`openAtNamed`). It then syncs the staging tree, renames it into place, records the migration
-   in `accepted/` for good (`remembersAccepted`), and notes the cell as its own. If the check fails,
-   T removes the staging directory and retires its reference, and any later ask gets no
-   (`refuseFinal`). A migration T never prepared, or one naming another incarnation of T's, also
-   gets no.
-5. **S's response:** accepted, S removes its cell directory, then retires its own reference
-   (`sourceRetiresLast`). Refused, it removes the marker and serves the cell again (`EAGAIN`). Not
-   answered (`ENOTCONN`), the marker stays and the cell stays unopened; `HandOverCell` asked
-   again, after a restart too, asks T again, which answers as it did. T restarted mid-migration
-   gives the migration up as it starts (its journal entry is a migration's), retiring its reference.
+   CRC (`openAtNamed`), and only for the token of its take (`boundToPrepare`): a prepare arriving
+   late, taken again after T answered no, makes a new token, so a late copy of the first
+   hand-over is refused. It then syncs the staging tree, renames it into place, records the
+   migration in `accepted/` (`remembersAccepted`), and notes the cell as its own. If the check
+   fails, T removes the staging directory and retires its reference, and any later ask gets no
+   (`refuseFinal`). A migration T never prepared also gets no. Asked of another incarnation of
+   T's, T answers neither yes nor no (`FAILED_PRECONDITION`): that incarnation, its disk lost, knows
+   nothing of the migration, and a no would have S serve again without what T's guest wrote.
+5. **S's response:** accepted, S notes the hand-over in the cell's journal entry, durably, then
+   removes its cell directory, tells T it may forget it accepted the migration
+   (`MigrateRelease`, so `accepted/` holds only migrations whose source may still ask), then
+   retires its own reference and the entry (`sourceRetiresLast`). Asking again, or the daemon
+   starting again, finishes what a crash left of these (board 5730). The note is the entry, kept
+   by the cell's ID, so a later cell at the same path is never taken for it. Refused, S removes the
+   marker and serves the cell again (`EAGAIN`). Not answered (`ENOTCONN`), the marker stays and the
+   cell stays unopened; `HandOverCell` asked again, after a restart too, asks T again, which
+   answers as it did. T restarted mid-migration gives the migration up as it starts (its journal
+   entry is a migration's), dropping what it staged, and the cell directory too if the hand-over
+   renamed it into place before T remembered it accepted (board 5728), and retiring its reference.
+
+**One request at a time:** T serves one request of a cell's migrations at a time, each run to its
+end even if its asker goes, and bounds its bucket calls (30 s): a prepare whose reference times out
+gives the migration up (board 5732).
 
 **One writer:** S gives the cell up before T can open it, and T opens only the cell directory S named in full.
 
@@ -165,13 +185,18 @@ extents with.
 
 `specs/ephemeral` (TLA+, every model under ten minutes): the parent's version, its dropping, the
 collector's passes, ephemeral forks crashing at each step, daemon restarts retiring references,
-decommissioning, and migration with S or T dying at each step.
+decommissioning, and migration with S or T dying at each step. Every migration message, prepares
+and their answers among them, may arrive late and again (board 5732).
 
-- **Invariants:** every live ephemeral cell's version is whole in its bucket (`NothingNeededGone`); at
-  most one host is a cell's writer (`OneWriter`); a writer on T holds every commit S told its guest
-  was Local (`HandOverLosesNothing`).
+- **Invariants:** every live ephemeral cell's version is whole in its bucket, a migration's on T
+  while S pursues it (`NothingNeededGone`: a prepare arriving after S's disk was lost and the
+  version collected is taken, reads nothing, and is given up); at most one host is a cell's writer
+  (`OneWriter`); a writer on T holds every commit S told its guest was Local
+  (`HandOverLosesNothing`); a migration S lost never keeps the cell from migrating to T again
+  (`MigratesAgain`).
 - **Rules, each with a mutation TLC finds:** `forksReferFirst`, `targetRefersFirst`,
-  `sourceGivesUpFirst`, `sourceRetiresLast`, `retireOnlyUnheld`.
+  `sourceGivesUpFirst`, `sourceRetiresLast`, `retireOnlyUnheld`, `refuseFinal`, `openAtNamed`,
+  `remembersAccepted`, `supersedes`, `boundToPrepare`.
 
 ## Order of work
 

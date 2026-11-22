@@ -602,7 +602,11 @@ pub(super) async fn attach(
         return Err(Errno::EACCES);
     }
     if let Some(open_cell) = open_by_connection(&path) {
-        return blocking(move || open_cell.attach_base(&base, &ancestry)).await;
+        // Let go of here, as its connection may let it go meanwhile (board 5764).
+        let attaching = open_cell.clone();
+        let attached = blocking(move || attaching.attach_base(&base, &ancestry)).await;
+        release(open_cell).await;
+        return attached;
     }
     let held = hold(&path).await?;
     blocking(move || {
@@ -1197,16 +1201,22 @@ pub(super) async fn share_version(path: PathBuf, id: u64, shared: bool) -> Resul
 /// Waits until every commit of the cell at `path` is in the daemon's bucket, holding no thread:
 /// through the connection's cell, if one has it open; or opened here, which uploads what it
 /// holds, if none has.
+/// cladefs: a cell its connection has open, synced through it, is let go of after (board 5764):
+/// its connection may let it go meanwhile, this the last reference then, closed here.
 pub(super) async fn sync(path: PathBuf) -> Result<(), Errno> {
     if let Some(open_cell) = open_by_connection(&path) {
-        return uploaded(&open_cell).await;
+        let synced = uploaded(&open_cell).await;
+        release(open_cell).await;
+        return synced;
     }
     let held = hold(&path).await?;
     // A cell its connection let go of may live on a while, its last reference dropped on a
     // blocking thread: synced as it is, under the hold, never opened a second time beside it,
     // which this process's claim on its directory refuses (TASK-648).
     if let Some((open_cell, _)) = held.instance() {
-        return uploaded(&open_cell).await;
+        let synced = uploaded(&open_cell).await;
+        release(open_cell).await;
+        return synced;
     }
     let here = Here::open(&path, held).await?;
     let synced = uploaded(here.held()).await;

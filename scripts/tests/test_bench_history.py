@@ -64,12 +64,12 @@ class History(unittest.TestCase):
             {
                 "fxfs-guest-dax-fork-warm": 300.0,
                 "fxfs-guest-dax-fork-cold": 100.0,
-                "fxfs-guest-dax-fork-profiled": 200.0,
+                "fxfs-guest-dax-fork-predicted": 200.0,
             },
             iterations={
                 "fxfs-guest-dax-fork-warm": 3,
                 "fxfs-guest-dax-fork-cold": 3,
-                "fxfs-guest-dax-fork-profiled": 5,
+                "fxfs-guest-dax-fork-predicted": 5,
             },
         )
         self.assertEqual(
@@ -85,7 +85,7 @@ source; its note says what it was for. Medians of the iterations.
 | Run | Revision | Filesystems | Iterations | Took | Note |
 |---|---|---|---|---|---|
 | [2026-10-10T1652Z](gce-fs-bench-2026-10-10T1652Z/) |  | ext4-virtio-blk, zz-future | 1 | – | – |
-| [fork-2026-10-17T1609Z](gce-fs-bench-fork-2026-10-17T1609Z/) |  | fxfs-guest-dax-fork-cold, fxfs-guest-dax-fork-profiled, fxfs-guest-dax-fork-warm | 3, 5 | – | – |
+| [fork-2026-10-17T1609Z](gce-fs-bench-fork-2026-10-17T1609Z/) |  | fxfs-guest-dax-fork-cold, fxfs-guest-dax-fork-predicted, fxfs-guest-dax-fork-warm | 3, 5 | – | – |
 | [followed-2026-10-19T0828Z](gce-fs-bench-followed-2026-10-19T0828Z/) | 584459ba0 + changes | fxfs-guest-dax, fxfs-guest-dax-followed, fxfs-guest-dax-followed-idle | 1 | 494 s | A writer with followers. Iterations: 1. |
 
 ## ext4-virtio-blk
@@ -118,7 +118,7 @@ source; its note says what it was for. Medians of the iterations.
 |---|---|---|
 | pgbench-tps | tps | 100 |
 
-## fxfs-guest-dax-fork-profiled
+## fxfs-guest-dax-fork-predicted
 
 | Workload | Unit | fork-2026-10-17T1609Z |
 |---|---|---|
@@ -148,7 +148,7 @@ source; its note says what it was for. Medians of the iterations.
 |---|---|---|
 | pgbench-tps | tps | 1.07× |
 
-## fxfs-guest-dax-fork-profiled: times slower than fxfs-guest-dax-fork-warm
+## fxfs-guest-dax-fork-predicted: times slower than fxfs-guest-dax-fork-warm
 
 | Workload | Unit | fork-2026-10-17T1609Z |
 |---|---|---|

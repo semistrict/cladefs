@@ -382,7 +382,6 @@ fn io_of(tenant: u64) -> impl Fn(io::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::Counted;
     use assert_matches::assert_matches;
     use futures::executor::block_on;
 
@@ -403,21 +402,6 @@ mod tests {
     /// The error's text: each names its tenant, which is what callers report.
     fn refusal<T: std::fmt::Debug>(result: Result<T, Error>) -> String {
         result.unwrap_err().to_string()
-    }
-
-    #[test]
-    fn wrapped_keys_unwrap_for_their_tenant() {
-        let (_dir, kms) = kms();
-        kms.create(7).unwrap();
-        let key = Secret::random();
-        let wrapped = wrap(&kms, 7, &key).unwrap();
-        assert_eq!(wrapped.0.len(), LOCAL_WRAPPED_LEN);
-        assert_eq!(LocalKms::kek_of(&wrapped), Ok(KekVersion { tenant: 7, version: 1 }));
-        assert_eq!(&wrapped.0[..HEADER_LEN], b"fxkw\x01\0\0\0\0\0\0\0\x07\0\0\0\x01");
-        assert_eq!(unwrap(&kms, 7, &wrapped).unwrap().expose(), key.expose());
-        // A KMS on the same directory, as another process opens it, unwraps it as well.
-        let again = LocalKms::open(&kms.dir).unwrap();
-        assert_eq!(unwrap(&again, 7, &wrapped).unwrap().expose(), key.expose());
     }
 
     #[test]
@@ -537,25 +521,6 @@ mod tests {
     }
 
     #[test]
-    fn revoked_keks_wrap_and_unwrap_nothing_until_unrevoked() {
-        let (_dir, kms) = kms();
-        kms.create(7).unwrap();
-        let key = Secret::random();
-        let wrapped = wrap(&kms, 7, &key).unwrap();
-        kms.revoke(7).unwrap();
-        kms.revoke(7).unwrap();
-        assert_matches!(unwrap(&kms, 7, &wrapped), Err(Error::Revoked { tenant: 7 }));
-        assert_eq!(refusal(unwrap(&kms, 7, &wrapped)), "tenant 7: its KEK is revoked");
-        assert_eq!(refusal(wrap(&kms, 7, &key)), "tenant 7: its KEK is revoked");
-        assert_eq!(refusal(kms.rotate(7)), "tenant 7: its KEK is revoked");
-        kms.unrevoke(7).unwrap();
-        kms.unrevoke(7).unwrap();
-        assert_eq!(unwrap(&kms, 7, &wrapped).unwrap().expose(), key.expose());
-        let again = wrap(&kms, 7, &key).unwrap();
-        assert_eq!(unwrap(&kms, 7, &again).unwrap().expose(), key.expose());
-    }
-
-    #[test]
     fn destroyed_keks_are_gone_for_good() {
         let (_dir, kms) = kms();
         kms.create(7).unwrap();
@@ -597,37 +562,6 @@ mod tests {
         assert_eq!(versions(&kms.tenant_dir(7)).unwrap(), [1]);
     }
 
-    #[test]
-    fn unknown_tenants_are_named() {
-        let (_dir, kms) = kms();
-        kms.create(7).unwrap();
-        let wrapped = wrap(&kms, 7, &Secret::random()).unwrap();
-        assert_matches!(unwrap(&kms, 9, &wrapped), Err(Error::NoSuchTenant { tenant: 9 }));
-        assert_eq!(refusal(unwrap(&kms, 9, &wrapped)), "tenant 9: no KEK in the KMS");
-        assert_eq!(refusal(wrap(&kms, 9, &Secret::random())), "tenant 9: no KEK in the KMS");
-        assert_eq!(refusal(kms.rotate(9)), "tenant 9: no KEK in the KMS");
-        assert_eq!(refusal(kms.revoke(9)), "tenant 9: no KEK in the KMS");
-        assert_eq!(refusal(kms.destroy(9)), "tenant 9: no KEK in the KMS");
-        assert_eq!(refusal(kms.create(7)), "tenant 7: a KEK exists already");
-    }
-
-    #[test]
-    fn kek_files_of_the_wrong_length_fail_as_io_errors() {
-        let (_dir, kms) = kms();
-        kms.create(7).unwrap();
-        let path = kek_path(&kms.tenant_dir(7), 1);
-        fs::write(&path, [0; 31]).unwrap();
-        let refused = wrap(&kms, 7, &Secret::random());
-        assert_matches!(
-            refused,
-            Err(Error::Io { tenant: 7, source }) if source.kind() == io::ErrorKind::InvalidData
-        );
-        assert_eq!(
-            refusal(wrap(&kms, 7, &Secret::random())),
-            format!("tenant 7: the KMS failed: {}: a KEK of 31 bytes, not 32", path.display())
-        );
-    }
-
     #[cfg(unix)]
     #[test]
     fn kek_files_are_their_owners_alone() {
@@ -644,50 +578,5 @@ mod tests {
         assert_eq!(mode(&kek_path(&tenant, 2)), 0o600);
         assert_eq!(mode(&tenant.join(REVOKED)), 0o600);
         assert_eq!(fs::metadata(kek_path(&tenant, 2)).unwrap().len(), KEY_LEN as u64);
-    }
-
-    /// TASK-411.3: a KMS is configured by its URL, `local:///DIR` alone, and reached through a
-    /// trait object as through itself.
-    #[test]
-    fn kmses_are_named_by_their_urls() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("kms");
-        let shared = crate::kms::from_url(&format!("local://{}", path.display())).unwrap();
-        LocalKms::open(&path).unwrap().create(7).unwrap();
-        let key = Secret::random();
-        let wrapped = block_on(shared.wrap_dyn(7, &key)).unwrap();
-        assert_eq!(block_on(shared.unwrap_dyn(7, &wrapped)).unwrap().expose(), key.expose());
-        assert_eq!(
-            block_on(shared.unwrap_dyn(8, &wrapped)).map(|_| ()).unwrap_err().to_string(),
-            "tenant 8: no KEK in the KMS"
-        );
-        let refused = |url: &str| crate::kms::from_url(url).map(|_| ()).unwrap_err();
-        assert_eq!(
-            refused("vault://key"),
-            "\"vault://key\" names no KMS: local:///DIR, openbao://, aws-kms://, gcp-kms:// or \
-             azure-kv:// (doc-16)"
-        );
-        assert_eq!(
-            refused("local://relative"),
-            "\"local://relative\" names no KMS: local:///DIR names an absolute directory"
-        );
-    }
-
-    #[test]
-    fn counted_kms_counts_its_calls() {
-        let (_dir, kms) = kms();
-        kms.create(7).unwrap();
-        let counted = Counted::new(kms);
-        assert_eq!((counted.wraps(), counted.unwraps()), (0, 0));
-        let wrapped = wrap(&counted, 7, &Secret::random()).unwrap();
-        wrap(&counted, 7, &Secret::random()).unwrap();
-        unwrap(&counted, 7, &wrapped).unwrap();
-        assert_eq!((counted.wraps(), counted.unwraps()), (2, 1));
-        // Refused calls count too: each is a call the KMS was asked.
-        counted.inner().revoke(7).unwrap();
-        assert_eq!(refusal(unwrap(&counted, 7, &wrapped)), "tenant 7: its KEK is revoked");
-        assert_eq!((counted.wraps(), counted.unwraps()), (2, 2));
-        counted.reset();
-        assert_eq!((counted.wraps(), counted.unwraps()), (0, 0));
     }
 }

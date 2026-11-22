@@ -10,11 +10,11 @@
 //! Physical memory, relief and quarantine are the process's: nextest runs each test in a process
 //! of its own, which configures them as it needs.
 
+#[cfg(all(not(feature = "shuttle"), target_os = "linux"))]
+use crate::ArenaId;
 use crate::CHUNK_SIZE;
 #[cfg(not(feature = "shuttle"))]
-use crate::{ArenaId, Page, page_bytes};
-#[cfg(not(feature = "shuttle"))]
-use std::os::fd::AsRawFd;
+use crate::{Page, page_bytes};
 
 #[cfg(not(feature = "shuttle"))]
 mod arenas;
@@ -40,49 +40,26 @@ fn chunk_of(page: &Page) -> usize {
 }
 
 /// The arena that has chunk `chunk`, if any.
-#[cfg(not(feature = "shuttle"))]
+#[cfg(all(not(feature = "shuttle"), target_os = "linux"))]
 fn chunk_arena(chunk: usize) -> Option<ArenaId> {
     crate::pmm::node().phys_memory().chunk_arena(chunk)
 }
 
 /// Physical memory of `chunks` chunks, for a test whose process has not used it yet.
+#[cfg(feature = "shuttle")]
 fn configure_chunks(chunks: usize) {
     crate::configure((chunks * CHUNK_SIZE) as u64).expect("physical memory is not in use yet");
 }
 
-/// The page at `offset` in arena `arena`'s shared memory object, as another process mapping the
-/// object sees it.
-#[cfg(not(feature = "shuttle"))]
-fn read_arena(arena: ArenaId, offset: u64) -> Vec<u8> {
-    let fd = crate::arena_fd(arena).unwrap();
-    // SAFETY: Maps a page of the object, read-only, which is unmapped below.
-    let addr = unsafe {
-        libc::mmap(
-            std::ptr::null_mut(),
-            page_bytes(),
-            libc::PROT_READ,
-            libc::MAP_SHARED,
-            fd.as_raw_fd(),
-            offset as libc::off_t,
-        )
-    };
-    assert_ne!(addr, libc::MAP_FAILED, "mmap: {}", std::io::Error::last_os_error());
-    // SAFETY: The mapping is a page long.
-    let page = unsafe { std::slice::from_raw_parts(addr.cast::<u8>(), page_bytes()) }.to_vec();
-    // SAFETY: Unmaps the mapping made above.
-    unsafe { libc::munmap(addr, page_bytes()) };
-    page
-}
-
 /// Fills `page` with `byte`.
-#[cfg(not(feature = "shuttle"))]
+#[cfg(all(not(feature = "shuttle"), target_os = "linux"))]
 fn fill(page: &Page, byte: u8) {
     // SAFETY: The page is the test's, a page long.
     unsafe { std::ptr::write_bytes(page.as_ptr(), byte, page_bytes()) };
 }
 
 /// The first byte of `page`.
-#[cfg(not(feature = "shuttle"))]
+#[cfg(all(not(feature = "shuttle"), target_os = "linux"))]
 fn first_byte(page: &Page) -> u8 {
     // SAFETY: The page is the test's.
     unsafe { page.as_ptr().read() }

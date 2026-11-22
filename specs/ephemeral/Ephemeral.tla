@@ -26,13 +26,21 @@
 (*   receiving (a target taking the source's log), gave up (handed over,   *)
 (*   its reference not yet retired). Writers' commits are Local at once,   *)
 (*   so a guest is told each (`told`).                                     *)
-(* - Hand-over: requests and answers are messages kept for ever, so that   *)
-(*   any of them may arrive late and again. A request names its target's   *)
-(*   incarnation, which alone answers it. A target answers from what it    *)
-(*   holds and from the migrations it accepted (`accepted`, on its disk).  *)
-(*   A source may lose a migration it prepared before its hand-over (its   *)
-(*   prepare's answer lost, or its daemon crashed): it aborts it by ID, a  *)
-(*   message that may arrive late, or never.                               *)
+(* - Migration: every request and answer is a message kept for ever, so   *)
+(*   that any of them may arrive late and again (board 5732): prepares,    *)
+(*   their answers, hand-overs, theirs, aborts and releases. A target      *)
+(*   taking a prepare makes a token new to that take (`tok`), which its    *)
+(*   answer carries with its incarnation, and the hand-over names both: a  *)
+(*   request names its target's incarnation, which alone answers it, as    *)
+(*   one of another knows nothing of it. A target answers from what it     *)
+(*   holds and from the migrations it accepted (`accepted`, on its disk),  *)
+(*   until their sources release them, having let the cell go (board       *)
+(*   5734). A source may lose a migration it prepared before its           *)
+(*   hand-over (its prepare's answer lost, or its daemon crashed): it      *)
+(*   aborts it by ID, a message that may arrive late, or never; a target   *)
+(*   may give up a migration of its own accord (TargetAbort: one idle too  *)
+(*   long, or whose bucket calls time out). Migration IDs grow, as the     *)
+(*   cell's epoch, which the code's prepares carry, does.                  *)
 (*                                                                         *)
 (* The rules, each a member of Rules; specs/ephemeral/mutations removes    *)
 (* one each, and must find the violation it prevents:                      *)
@@ -52,11 +60,15 @@
 (* - openAtNamed: a target accepts only holding the log through the commit *)
 (*   the request names (NoOpenAtNamed).                                    *)
 (* - remembersAccepted: a target answers yes to every request of a         *)
-(*   migration it accepted, even once it no longer holds the cell          *)
-(*   (NoRemembersAccepted).                                                *)
+(*   migration it accepted, even once it no longer holds the cell, until   *)
+(*   its source released it (NoRemembersAccepted).                         *)
 (* - supersedes: a target taking a migration the source lost gives it up   *)
-(*   at the cell's next prepare, so that the cell migrates there again     *)
-(*   (NoSupersedes, MigratesAgain).                                        *)
+(*   at the cell's next, newer prepare, so that the cell migrates there    *)
+(*   again (NoSupersedes, MigratesAgain); an older one, late, it refuses.  *)
+(* - boundToPrepare: a target accepts a hand-over only naming the token of *)
+(*   its take of the migration: a late prepare taken again after the       *)
+(*   target answered no, a late request of the first take refused         *)
+(*   (NoBoundToPrepare).                                                   *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets, TLC
 
@@ -72,7 +84,8 @@ CONSTANTS
     Rules           \* the rules in force (all, but in a mutation)
 
 AllRules == {"forksReferFirst", "targetRefersFirst", "sourceGivesUpFirst", "sourceRetiresLast",
-             "retireOnlyUnheld", "refuseFinal", "openAtNamed", "remembersAccepted", "supersedes"}
+             "retireOnlyUnheld", "refuseFinal", "openAtNamed", "remembersAccepted", "supersedes",
+             "boundToPrepare"}
 
 ASSUME Rules \subseteq AllRules
 ASSUME NoHost \notin Hosts
@@ -90,7 +103,8 @@ VARIABLES
     log,        \* the commits each host holds of each cell
     mig,        \* the migration a source asked for or a target takes, 0 for none
     partner,    \* a source's target, or a target's source
-    pinc,       \* a source's target's incarnation number, as prepared
+    tok,        \* a target's token of its take of the migration it takes, 0 for none
+    took,       \* how often each host took each migration: its takes' tokens, a late one's 2
     accepted,   \* the migrations each host accepted, on its disk
     msgs,       \* requests and answers sent, kept for ever
     told,       \* the most commits of each cell a guest was told were Local
@@ -102,8 +116,9 @@ VARIABLES
     handovers,  \* hand-overs accepted, for the Reaches models
     retired     \* references a daemon starting retired, for the Reaches models
 
-vars == <<named, data, refs, inc, phase, rlist, st, log, mig, partner, pinc, accepted, msgs, told,
-          forked, gphase, gnamed, grefs, passes, crashes, losses, migrations, handovers, retired>>
+vars == <<named, data, refs, inc, phase, rlist, st, log, mig, partner, tok, took, accepted,
+          msgs, told, forked, gphase, gnamed, grefs, passes, crashes, losses, migrations, handovers,
+          retired>>
 
 On(r) == r \in Rules
 I(h) == <<h, inc[h]>>
@@ -126,7 +141,8 @@ Init ==
     /\ log = [h \in Hosts |-> [c \in Cells |-> 0]]
     /\ mig = [h \in Hosts |-> [c \in Cells |-> 0]]
     /\ partner = [h \in Hosts |-> [c \in Cells |-> NoHost]]
-    /\ pinc = [h \in Hosts |-> [c \in Cells |-> 0]]
+    /\ tok = [h \in Hosts |-> [c \in Cells |-> 0]]
+    /\ took = [h \in Hosts |-> [i \in 1..MaxMigrations |-> 0]]
     /\ accepted = [h \in Hosts |-> {}]
     /\ msgs = {}
     /\ told = [c \in Cells |-> 0]
@@ -139,12 +155,15 @@ SetSt(h, c, s) == st' = [st EXCEPT ![h][c] = s]
 
 \* ---- The version and the collector ----
 
-Drop == named /\ named' = FALSE /\ UNCHANGED <<data, refs, inc, phase, rlist, st, log, mig,
-    partner, pinc, accepted, msgs, told, forked, gphase, gnamed, grefs, passes, crashes, losses,
-    migrations, handovers, retired>>
+\* What a migration keeps of a cell, which only the migration's actions and the hosts' change.
+MigState == <<mig, partner, tok, took>>
 
-GcUnchanged == UNCHANGED <<named, refs, inc, phase, rlist, st, log, mig, partner, pinc, accepted,
-    msgs, told, forked, crashes, losses, migrations, handovers, retired>>
+Drop == named /\ named' = FALSE /\ UNCHANGED <<data, refs, inc, phase, rlist, st, log, MigState,
+    accepted, msgs, told, forked, gphase, gnamed, grefs, passes, crashes, losses, migrations,
+    handovers, retired>>
+
+GcUnchanged == UNCHANGED <<named, refs, inc, phase, rlist, st, log, MigState, accepted, msgs, told,
+    forked, crashes, losses, migrations, handovers, retired>>
 
 GcRead ==
     /\ gphase = "idle" /\ passes < MaxPasses /\ data
@@ -164,8 +183,8 @@ GcDelete ==
 
 \* ---- Forks ----
 
-ForkUnchanged == UNCHANGED <<named, data, inc, phase, rlist, log, mig, partner, pinc, accepted,
-    msgs, told, gphase, gnamed, grefs, passes, crashes, losses, migrations, handovers, retired>>
+ForkUnchanged == UNCHANGED <<named, data, inc, phase, rlist, log, MigState, accepted, msgs, told,
+    gphase, gnamed, grefs, passes, crashes, losses, migrations, handovers, retired>>
 
 \* forksReferFirst: the reference first, then the head; without it, the head first.
 ForkBegin(h, c) ==
@@ -197,32 +216,53 @@ Commit(h, c) ==
     /\ phase[h] = "serving" /\ Serving(h, c) /\ log[h][c] < MaxCommits
     /\ log' = [log EXCEPT ![h][c] = @ + 1]
     /\ told' = [told EXCEPT ![c] = Max(@, log[h][c] + 1)]
-    /\ UNCHANGED <<named, data, refs, inc, phase, rlist, st, mig, partner, pinc, accepted, msgs,
-        forked, gphase, gnamed, grefs, passes, crashes, losses, migrations, handovers, retired>>
+    /\ UNCHANGED <<named, data, refs, inc, phase, rlist, st, MigState, accepted, msgs, forked,
+        gphase, gnamed, grefs, passes, crashes, losses, migrations, handovers, retired>>
 
 \* ---- Migration ----
 
 MigUnchanged == UNCHANGED <<named, data, inc, phase, rlist, forked, gphase, gnamed, grefs, passes,
     crashes, losses>>
 
-\* The source asks the target to prepare: the target refers (targetRefersFirst), then takes.
-\* A target takes a cell only holding nothing of it, or taking an older migration of it, which it
-\* gives up (supersedes): its writer, preparing this one, pursues that one no more. Its reference
-\* stays, the cell's of its incarnation still.
-Prepare(s, t, c) ==
-    /\ s # t /\ phase[s] = "serving" /\ phase[t] = "serving"
+\* The source asks the target to prepare a migration, its ID new: a message that may arrive late,
+\* and again.
+SourcePrepares(s, t, c) ==
+    /\ s # t /\ phase[s] = "serving"
     /\ st[s][c] = "writer" /\ mig[s][c] = 0
-    /\ st[t][c] \in IF On("supersedes") THEN {"none", "receiving"} ELSE {"none"}
     /\ migrations < MaxMigrations
     /\ LET id == migrations + 1 IN
        /\ migrations' = id
-       /\ st' = [st EXCEPT ![t][c] = "receiving"]
-       /\ log' = [log EXCEPT ![t][c] = 0]
-       /\ mig' = [mig EXCEPT ![s][c] = id, ![t][c] = id]
-       /\ partner' = [partner EXCEPT ![s][c] = t, ![t][c] = s]
-       /\ pinc' = [pinc EXCEPT ![s][c] = inc[t]]
-       /\ refs' = IF On("targetRefersFirst") THEN refs \cup {Key(t, c)} ELSE refs
-    /\ UNCHANGED <<accepted, msgs, told, handovers, retired>> /\ MigUnchanged
+       /\ mig' = [mig EXCEPT ![s][c] = id]
+       /\ partner' = [partner EXCEPT ![s][c] = t]
+       /\ msgs' = msgs \cup {[kind |-> "prep", cell |-> c, id |-> id, from |-> s, to |-> t]}
+    /\ UNCHANGED <<refs, st, log, tok, took, accepted, told, handovers, retired>>
+    /\ MigUnchanged
+
+\* Whether a target takes a prepare of migration `id` of cell `c`: holding nothing of it, or taking
+\* an older migration of it, which it gives up (supersedes): its writer, preparing this one, pursues
+\* that one no more. An older one, late, it refuses, and one it takes already it takes not again.
+Takes(t, c, id) ==
+    \/ st[t][c] = "none"
+    \/ st[t][c] = "receiving" /\ On("supersedes") /\ id > mig[t][c]
+
+Prepared(c, id, k, n) == [kind |-> "prepared", cell |-> c, id |-> id, k |-> k, tok |-> n]
+
+\* The target takes a prepare: it refers (targetRefersFirst), then takes, its token new to this
+\* take of the migration, which its answer carries (the code's tokens are random; here a host's
+\* first take of a migration is 1, and one late prepare taken again 2). A migration it accepted it
+\* takes not again: its source has its answer.
+TargetPrepares(m) == LET t == m.to c == m.cell n == took[t][m.id] + 1 IN
+    /\ m.kind = "prep" /\ phase[t] = "serving"
+    /\ m.id \notin accepted[t] /\ Takes(t, c, m.id) /\ n <= 2
+    /\ took' = [took EXCEPT ![t][m.id] = n]
+    /\ st' = [st EXCEPT ![t][c] = "receiving"]
+    /\ log' = [log EXCEPT ![t][c] = 0]
+    /\ mig' = [mig EXCEPT ![t][c] = m.id]
+    /\ partner' = [partner EXCEPT ![t][c] = m.from]
+    /\ tok' = [tok EXCEPT ![t][c] = n]
+    /\ refs' = IF On("targetRefersFirst") THEN refs \cup {Key(t, c)} ELSE refs
+    /\ msgs' = msgs \cup {Prepared(c, m.id, inc[t], n)}
+    /\ UNCHANGED <<accepted, told, migrations, handovers, retired>> /\ MigUnchanged
 
 \* A round: the target takes the source's log as it is.
 Round(t, c) == LET s == partner[t][c] IN
@@ -230,17 +270,25 @@ Round(t, c) == LET s == partner[t][c] IN
     /\ s # NoHost /\ phase[s] = "serving" /\ st[s][c] \in {"writer", "handing"}
     /\ mig[s][c] = mig[t][c] /\ log[t][c] # log[s][c]
     /\ log' = [log EXCEPT ![t][c] = log[s][c]]
-    /\ UNCHANGED <<refs, st, mig, partner, pinc, accepted, msgs, told, migrations, handovers, retired>>
+    /\ UNCHANGED <<refs, st, MigState, accepted, msgs, told, migrations, handovers, retired>>
     /\ MigUnchanged
 
-\* The target gives the migration up of its own accord, before any request.
-TargetAbort(t, c) ==
-    /\ phase[t] = "serving" /\ st[t][c] = "receiving"
+\* What a target that gives up the migration of `c` it takes leaves: nothing of it, its reference
+\* retired.
+GivesUp(t, c) ==
     /\ SetSt(t, c, "none")
     /\ mig' = [mig EXCEPT ![t][c] = 0]
     /\ partner' = [partner EXCEPT ![t][c] = NoHost]
+    /\ tok' = [tok EXCEPT ![t][c] = 0]
     /\ refs' = refs \ {Key(t, c)}
-    /\ UNCHANGED <<log, pinc, accepted, msgs, told, migrations, handovers, retired>> /\ MigUnchanged
+
+\* The target gives the migration up of its own accord, before any request: idle too long, or its
+\* bucket calls timed out.
+TargetAbort(t, c) ==
+    /\ phase[t] = "serving" /\ st[t][c] = "receiving"
+    /\ GivesUp(t, c)
+    /\ UNCHANGED <<log, took, accepted, msgs, told, migrations, handovers, retired>>
+    /\ MigUnchanged
 
 \* The source loses a migration it prepared, before its hand-over: its prepare's answer lost. It
 \* aborts it by ID, a message that may arrive late, or never, and serves on.
@@ -249,28 +297,30 @@ SourceLoses(s, c) ==
     /\ mig' = [mig EXCEPT ![s][c] = 0]
     /\ partner' = [partner EXCEPT ![s][c] = NoHost]
     /\ msgs' = msgs \cup {[kind |-> "abort", cell |-> c, id |-> mig[s][c], to |-> partner[s][c]]}
-    /\ UNCHANGED <<refs, st, log, pinc, accepted, told, migrations, handovers, retired>>
+    /\ UNCHANGED <<refs, st, log, tok, took, accepted, told, migrations, handovers, retired>>
     /\ MigUnchanged
 
 \* The target hears an abort: taking that migration still, it gives it up, its reference too.
 TargetHearsAbort(m) == LET t == m.to c == m.cell IN
     /\ m.kind = "abort" /\ phase[t] = "serving"
     /\ st[t][c] = "receiving" /\ mig[t][c] = m.id
-    /\ SetSt(t, c, "none")
-    /\ mig' = [mig EXCEPT ![t][c] = 0]
-    /\ partner' = [partner EXCEPT ![t][c] = NoHost]
-    /\ refs' = refs \ {Key(t, c)}
-    /\ UNCHANGED <<log, pinc, accepted, msgs, told, migrations, handovers, retired>> /\ MigUnchanged
+    /\ GivesUp(t, c)
+    /\ UNCHANGED <<log, took, accepted, msgs, told, migrations, handovers, retired>>
+    /\ MigUnchanged
 
-\* The source, its guest paused, asks for the hand-over at its last commit (sourceGivesUpFirst:
-\* its commits stop here). Without sourceRetiresLast, it retires its reference now.
+\* The source, its guest paused and its prepare answered, asks for the hand-over at its last commit,
+\* naming the incarnation and token an answer to its prepare gave, the one it heard
+\* (sourceGivesUpFirst: its commits stop here). Without sourceRetiresLast, it retires its reference
+\* now.
 Hand(s, c) ==
     /\ phase[s] = "serving" /\ st[s][c] = "writer" /\ mig[s][c] # 0
+    /\ \E a \in msgs :
+        /\ a.kind = "prepared" /\ a.cell = c /\ a.id = mig[s][c]
+        /\ msgs' = msgs \cup {[kind |-> "req", cell |-> c, id |-> mig[s][c], n |-> log[s][c],
+                               to |-> partner[s][c], k |-> a.k, tok |-> a.tok]}
     /\ SetSt(s, c, "handing")
-    /\ msgs' = msgs \cup {[kind |-> "req", cell |-> c, id |-> mig[s][c], n |-> log[s][c],
-                           to |-> partner[s][c], k |-> pinc[s][c]]}
     /\ refs' = IF On("sourceRetiresLast") THEN refs ELSE refs \ {Key(s, c)}
-    /\ UNCHANGED <<log, mig, partner, pinc, accepted, told, migrations, handovers, retired>> /\ MigUnchanged
+    /\ UNCHANGED <<log, MigState, accepted, told, migrations, handovers, retired>> /\ MigUnchanged
 
 \* Whether a target knows it accepted a migration: from its disk (remembersAccepted), or, without
 \* the rule, only while it is still the cell's writer.
@@ -286,13 +336,16 @@ TargetAnswer(m) == LET t == m.to c == m.cell IN
     /\ \/ \* A migration it accepted: yes again.
           /\ Remembers(t, c, m.id)
           /\ msgs' = msgs \cup {Answer(c, m.id, TRUE)}
-          /\ UNCHANGED <<refs, st, log, mig, partner, accepted, handovers>>
-       \/ \* Taking it: accepts holding the log through the commit named (openAtNamed).
+          /\ UNCHANGED <<refs, st, log, mig, partner, tok, accepted, handovers>>
+       \/ \* Taking it: accepts holding the log through the commit named (openAtNamed), the
+          \* request naming its take (boundToPrepare).
           /\ st[t][c] = "receiving" /\ mig[t][c] = m.id
           /\ (On("openAtNamed") => log[t][c] = m.n)
+          /\ (On("boundToPrepare") => tok[t][c] = m.tok)
           /\ st' = [st EXCEPT ![t][c] = "writer"]
           /\ mig' = [mig EXCEPT ![t][c] = 0]
           /\ partner' = [partner EXCEPT ![t][c] = NoHost]
+          /\ tok' = [tok EXCEPT ![t][c] = 0]
           /\ accepted' = [accepted EXCEPT ![t] = @ \cup {m.id}]
           /\ refs' = IF On("targetRefersFirst") THEN refs ELSE refs \cup {Key(t, c)}
           /\ msgs' = msgs \cup {Answer(c, m.id, TRUE)}
@@ -301,62 +354,75 @@ TargetAnswer(m) == LET t == m.to c == m.cell IN
        \/ \* Taking it: refuses; refuseFinal drops what it took, its reference too.
           /\ st[t][c] = "receiving" /\ mig[t][c] = m.id
           /\ IF On("refuseFinal")
-             THEN /\ st' = [st EXCEPT ![t][c] = "none"]
-                  /\ mig' = [mig EXCEPT ![t][c] = 0]
-                  /\ partner' = [partner EXCEPT ![t][c] = NoHost]
-                  /\ refs' = refs \ {Key(t, c)}
-             ELSE UNCHANGED <<st, mig, partner, refs>>
+             THEN GivesUp(t, c)
+             ELSE UNCHANGED <<st, mig, partner, tok, refs>>
           /\ msgs' = msgs \cup {Answer(c, m.id, FALSE)}
           /\ UNCHANGED <<log, accepted, handovers>>
        \/ \* Neither accepted nor taking it: no.
           /\ ~Remembers(t, c, m.id)
           /\ ~(st[t][c] = "receiving" /\ mig[t][c] = m.id)
           /\ msgs' = msgs \cup {Answer(c, m.id, FALSE)}
-          /\ UNCHANGED <<refs, st, log, mig, partner, accepted, handovers>>
-    /\ UNCHANGED <<pinc, told, migrations, retired>> /\ MigUnchanged
+          /\ UNCHANGED <<refs, st, log, mig, partner, tok, accepted, handovers>>
+    /\ UNCHANGED <<took, told, migrations, retired>> /\ MigUnchanged
 
-\* The source reads an answer to its hand-over: yes, it gave the cell up; no, it serves again.
+\* The source reads an answer to its hand-over: yes, it gave the cell up, the migration kept until
+\* it lets the cell go; no, it serves again.
 SourceHears(s, c, a) ==
     /\ phase[s] = "serving" /\ st[s][c] = "handing"
     /\ a.kind = "ans" /\ a.cell = c /\ a.id = mig[s][c]
     /\ SetSt(s, c, IF a.yes THEN "gaveup" ELSE "writer")
-    /\ mig' = [mig EXCEPT ![s][c] = 0]
-    /\ partner' = [partner EXCEPT ![s][c] = NoHost]
-    /\ UNCHANGED <<refs, log, pinc, accepted, msgs, told, migrations, handovers, retired>> /\ MigUnchanged
+    /\ mig' = IF a.yes THEN mig ELSE [mig EXCEPT ![s][c] = 0]
+    /\ partner' = IF a.yes THEN partner ELSE [partner EXCEPT ![s][c] = NoHost]
+    /\ UNCHANGED <<refs, log, tok, took, accepted, msgs, told, migrations, handovers, retired>>
+    /\ MigUnchanged
 
-\* The source, having given the cell up, deletes it, then retires its reference.
+\* The source, having given the cell up, deletes it, retires its reference, and releases the
+\* migration: it asks no more.
 SourceGone(s, c) ==
     /\ phase[s] = "serving" /\ st[s][c] = "gaveup"
     /\ SetSt(s, c, "none")
     /\ log' = [log EXCEPT ![s][c] = 0]
     /\ refs' = refs \ {Key(s, c)}
-    /\ UNCHANGED <<mig, partner, pinc, accepted, msgs, told, migrations, handovers, retired>>
+    /\ mig' = [mig EXCEPT ![s][c] = 0]
+    /\ partner' = [partner EXCEPT ![s][c] = NoHost]
+    /\ msgs' = msgs \cup {[kind |-> "release", cell |-> c, id |-> mig[s][c], to |-> partner[s][c]]}
+    /\ UNCHANGED <<tok, took, accepted, told, migrations, handovers, retired>>
+    /\ MigUnchanged
+
+\* The target hears a release: it forgets it accepted that migration.
+TargetHearsRelease(m) == LET t == m.to IN
+    /\ m.kind = "release" /\ phase[t] = "serving" /\ m.id \in accepted[t]
+    /\ accepted' = [accepted EXCEPT ![t] = @ \ {m.id}]
+    /\ UNCHANGED <<refs, st, log, MigState, msgs, told, migrations, handovers, retired>>
     /\ MigUnchanged
 
 \* ---- Hosts ----
 
 HostUnchanged == UNCHANGED <<named, data, accepted, msgs, told, forked, gphase, gnamed, grefs,
-    passes, migrations, handovers>>
+    passes, migrations, took, handovers>>
 
-\* A crash keeps the disk: writers, hand-overs asked and cells given up stay; what was in memory
-\* goes (forks under way, migrations being taken or prepared).
+\* A crash keeps the disk: writers, hand-overs asked and cells given up stay, with their migrations
+\* (the marker of a cell handed, and the journal entry of one given up, name it and its target);
+\* what was in memory goes (forks under way, migrations being taken or prepared).
 Volatile(s) == s \in {"forking", "failing", "early", "receiving"}
+Kept(s) == s \in {"handing", "gaveup"}
 Crash(h) ==
     /\ phase[h] # "down" /\ crashes < MaxCrashes
     /\ crashes' = crashes + 1
     /\ phase' = [phase EXCEPT ![h] = "down"]
     /\ st' = [st EXCEPT ![h] = [c \in Cells |-> IF Volatile(@[c]) THEN "none" ELSE @[c]]]
-    /\ mig' = [mig EXCEPT ![h] = [c \in Cells |-> IF st[h][c] = "handing" THEN @[c] ELSE 0]]
-    /\ partner' = [partner EXCEPT ![h] =
-                     [c \in Cells |-> IF st[h][c] = "handing" THEN @[c] ELSE NoHost]]
+    /\ mig' = [mig EXCEPT ![h] = [c \in Cells |-> IF Kept(st[h][c]) THEN @[c] ELSE 0]]
+    /\ partner' = [partner EXCEPT ![h] = [c \in Cells |-> IF Kept(st[h][c]) THEN @[c] ELSE NoHost]]
+    /\ tok' = [tok EXCEPT ![h] = [c \in Cells |-> 0]]
     /\ log' = [log EXCEPT ![h] = [c \in Cells |-> IF Volatile(st[h][c]) THEN 0 ELSE @[c]]]
-    /\ UNCHANGED <<refs, inc, rlist, pinc, losses, retired>> /\ HostUnchanged
+    /\ UNCHANGED <<refs, inc, rlist, losses, retired>> /\ HostUnchanged
 
 Start(h) ==
     /\ phase[h] = "down"
     /\ phase' = [phase EXCEPT ![h] = "starting"]
     /\ rlist' = [rlist EXCEPT ![h] = {r \in refs : r[2] = I(h)}]
-    /\ UNCHANGED <<refs, inc, st, log, mig, partner, pinc, crashes, losses, retired>> /\ HostUnchanged
+    /\ UNCHANGED <<refs, inc, st, log, mig, partner, tok, crashes, losses, retired>>
+    /\ HostUnchanged
 
 Held(h, r) == st[h][r[1]] \in {"writer", "handing"}
 
@@ -367,7 +433,7 @@ Retire(h) ==
        /\ retired' = retired + Cardinality(gone \cap refs)
     /\ phase' = [phase EXCEPT ![h] = "serving"]
     /\ rlist' = [rlist EXCEPT ![h] = {}]
-    /\ UNCHANGED <<inc, st, log, mig, partner, pinc, crashes, losses>> /\ HostUnchanged
+    /\ UNCHANGED <<inc, st, log, mig, partner, tok, crashes, losses>> /\ HostUnchanged
 
 \* A disk lost: everything the host held goes, and it comes back in a new incarnation.
 Lose(h) ==
@@ -380,15 +446,16 @@ Lose(h) ==
     /\ log' = [log EXCEPT ![h] = [c \in Cells |-> 0]]
     /\ mig' = [mig EXCEPT ![h] = [c \in Cells |-> 0]]
     /\ partner' = [partner EXCEPT ![h] = [c \in Cells |-> NoHost]]
+    /\ tok' = [tok EXCEPT ![h] = [c \in Cells |-> 0]]
     /\ accepted' = [accepted EXCEPT ![h] = {}]
-    /\ UNCHANGED <<named, data, refs, pinc, msgs, told, forked, gphase, gnamed, grefs, passes,
-        crashes, migrations, handovers, retired>>
+    /\ UNCHANGED <<named, data, refs, msgs, told, forked, gphase, gnamed, grefs, passes,
+        crashes, migrations, took, handovers, retired>>
 
 \* The VM manager decommissions an incarnation no host has any more.
 Decommission(h, k) ==
     /\ k < inc[h] /\ \E x \in refs : x[2] = <<h, k>>
     /\ refs' = {r \in refs : r[2] # <<h, k>>}
-    /\ UNCHANGED <<inc, phase, rlist, st, log, mig, partner, pinc, crashes, losses, retired>>
+    /\ UNCHANGED <<inc, phase, rlist, st, log, mig, partner, tok, crashes, losses, retired>>
     /\ HostUnchanged
 
 Next ==
@@ -397,9 +464,10 @@ Next ==
         \/ ForkBegin(h, c) \/ ForkRead(h, c) \/ ForkLate(h, c) \/ ForkFail(h, c)
         \/ Commit(h, c) \/ Round(h, c) \/ TargetAbort(h, c) \/ Hand(h, c) \/ SourceGone(h, c)
         \/ SourceLoses(h, c)
-        \/ \E t \in Hosts : Prepare(h, t, c)
+        \/ \E t \in Hosts : SourcePrepares(h, t, c)
         \/ \E a \in msgs : SourceHears(h, c, a)
-    \/ \E m \in msgs : TargetAnswer(m) \/ TargetHearsAbort(m)
+    \/ \E m \in msgs :
+        TargetPrepares(m) \/ TargetAnswer(m) \/ TargetHearsAbort(m) \/ TargetHearsRelease(m)
     \/ \E h \in Hosts : Crash(h) \/ Start(h) \/ Retire(h) \/ Lose(h)
     \/ \E h \in Hosts, k \in 0..MaxLosses : Decommission(h, k)
 
@@ -407,11 +475,33 @@ Spec == Init /\ [][Next]_vars
 
 HostPerms == Permutations(Hosts)
 
+\* Whether message `a` may still act: an answer to a prepare only while a writer pursues its
+\* migration, and one to a hand-over only while a source hands it over, migration IDs never coming
+\* back once their sources move on. Every other may act however late.
+Live(a) ==
+    CASE a.kind = "prepared" -> \E s \in Hosts : st[s][a.cell] = "writer" /\ mig[s][a.cell] = a.id
+      [] a.kind = "ans" -> \E s \in Hosts : st[s][a.cell] = "handing" /\ mig[s][a.cell] = a.id
+      [] OTHER -> TRUE
+
+\* What tells states apart: every variable, but the messages that can no longer act, from which
+\* the states that differ only in them go on alike.
+View == <<named, data, refs, inc, phase, rlist, st, log, mig, partner, tok, took, accepted,
+          {a \in msgs : Live(a)}, told, forked, gphase, gnamed, grefs, passes, crashes, losses,
+          migrations, handovers, retired>>
+
 \* ---- Invariants ----
 
-\* Every cell a host writes, hands over or takes reads its version whole.
+\* Whether the source of the migration of `c` that `t` takes still pursues it. A prepare arriving
+\* late, its source's disk lost and the version collected since, is taken all the same; that take
+\* reads nothing, as no hand-over of it ever comes, and the target gives it up (TargetAbort).
+Pursued(t, c) == LET s == partner[t][c] IN
+    s # NoHost /\ st[s][c] \in {"writer", "handing"} /\ mig[s][c] = mig[t][c]
+
+\* Every cell a host writes, hands over, or takes from a source pursuing it reads its version whole.
 NothingNeededGone ==
-    \A h \in Hosts, c \in Cells : st[h][c] \in {"writer", "handing", "receiving"} => data
+    \A h \in Hosts, c \in Cells :
+        /\ st[h][c] \in {"writer", "handing"} => data
+        /\ st[h][c] = "receiving" /\ Pursued(h, c) => data
 
 \* At most one host serves a cell's guest.
 OneWriter == \A c \in Cells : Cardinality({h \in Hosts : Serving(h, c)}) <= 1
@@ -419,13 +509,12 @@ OneWriter == \A c \in Cells : Cardinality({h \in Hosts : Serving(h, c)}) <= 1
 \* A cell's writer holds every commit its guests were told.
 HandOverLosesNothing == \A h \in Hosts, c \in Cells : st[h][c] = "writer" => log[h][c] >= told[c]
 
-\* A writer migrating nowhere may always begin a migration to another serving host that holds the
-\* cell not: a migration it lost there never refuses it for good.
+\* A writer migrating nowhere may always migrate to another host that holds the cell not: the
+\* target takes its next prepare, a migration it lost there never refusing it for good.
 MigratesAgain == \A s, t \in Hosts, c \in Cells :
-    (/\ s # t /\ phase[s] = "serving" /\ phase[t] = "serving"
-     /\ st[s][c] = "writer" /\ mig[s][c] = 0 /\ st[t][c] \in {"none", "receiving"}
+    (/\ s # t /\ st[s][c] = "writer" /\ mig[s][c] = 0 /\ st[t][c] \in {"none", "receiving"}
      /\ migrations < MaxMigrations)
-    => ENABLED Prepare(s, t, c)
+    => Takes(t, c, migrations + 1)
 
 \* Reached, as models of specs/ephemeral/mutations show they are violated (Reaches*).
 NoHandOver == handovers = 0

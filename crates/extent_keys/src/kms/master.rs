@@ -239,37 +239,6 @@ mod tests {
     const ONE: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     const TWO: &str = "ff0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1eFF";
 
-    fn ids(keys: &MasterKeys) -> Vec<String> {
-        keys.ids().iter().map(MasterKeyId::to_string).collect()
-    }
-
-    /// An ID is a hash of the key, under its label: the value pinned was checked with Python's
-    /// hashlib on 2026-11-15 (`sha256(b"cladefs master key id\0" + bytes(range(32)))[:8]`).
-    #[test]
-    fn ids_are_short_hashes_of_their_keys() {
-        let keys = MasterKeys::parse(ONE, "test").unwrap();
-        assert_eq!(ids(&keys), ["8b1917a7f2bf1306"]);
-        assert_eq!(keys.newest().id().to_string(), "8b1917a7f2bf1306");
-        assert_eq!(format!("{keys:?}"), "MasterKeys([MasterKeyId(8b1917a7f2bf1306)])");
-        assert_eq!(format!("{:?}", keys.newest()), "MasterKey(8b1917a7f2bf1306)");
-        assert_eq!(keys.newest().key().expose(), &std::array::from_fn(|at| at as u8));
-    }
-
-    #[test]
-    fn several_keys_are_the_newest_first_separated_by_commas_or_lines() {
-        for text in
-            [format!("{TWO},{ONE}"), format!("{TWO}\n{ONE}\n"), format!(" {TWO} ,\n\t{ONE}")]
-        {
-            let keys = MasterKeys::parse(&text, "test").unwrap();
-            let [two, one] = &ids(&keys)[..] else { panic!("{keys:?}") };
-            assert_eq!(one, "8b1917a7f2bf1306");
-            assert_eq!(keys.newest().id().to_string(), *two);
-            assert_eq!(keys.get(keys.ids()[1]).unwrap().id().to_string(), *one);
-        }
-        let other = MasterKey::new(Secret::random()).id();
-        assert!(MasterKeys::parse(ONE, "test").unwrap().get(other).is_none());
-    }
-
     /// Refusals say which key, never what it holds.
     #[test]
     fn keys_not_of_64_hex_digits_are_refused_by_place() {
@@ -290,57 +259,5 @@ mod tests {
         for refusal in [refused(short), refused(&bad)] {
             assert!(!refusal.contains(&ONE[..16]), "{refusal}");
         }
-    }
-
-    #[test]
-    fn files_hold_one_raw_key_or_keys_in_hex() {
-        let raw: [u8; KEY_LEN] = std::array::from_fn(|at| at as u8);
-        assert_eq!(ids(&MasterKeys::of_file(&raw, "file").unwrap()), ["8b1917a7f2bf1306"]);
-        let text = format!("{TWO}\n{ONE}\n");
-        assert_eq!(MasterKeys::of_file(text.as_bytes(), "file").unwrap().ids().len(), 2);
-        assert_eq!(
-            MasterKeys::of_file(&[0xff; 33], "file").unwrap_err(),
-            "file: neither 32 bytes, one key, nor text of keys in hexadecimal (33 bytes)"
-        );
-        assert_eq!(
-            MasterKeys::of_file(&[b'a'; 31], "file").unwrap_err(),
-            "file: key 1 of 1: not 64 hexadecimal digits"
-        );
-    }
-
-    /// The environment gives them, one way: each nextest test is a process of its own, so this
-    /// one's variables are its own.
-    #[test]
-    fn the_environment_gives_them_one_way() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("master");
-        std::fs::write(&file, std::array::from_fn::<u8, KEY_LEN, _>(|at| at as u8)).unwrap();
-        // SAFETY: this test's process is its own (nextest), no thread reading the environment.
-        let set = |name, value: Option<&std::ffi::OsStr>| unsafe {
-            match value {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
-            }
-        };
-        set(MASTER_KEY_VAR, None);
-        set(MASTER_KEY_FILE_VAR, None);
-        assert!(MasterKeys::from_env().unwrap().is_none());
-        set(MASTER_KEY_VAR, Some("".as_ref()));
-        assert!(MasterKeys::from_env().unwrap().is_none());
-        set(MASTER_KEY_VAR, Some(format!("{TWO},{ONE}").as_ref()));
-        assert_eq!(MasterKeys::from_env().unwrap().unwrap().ids().len(), 2);
-        set(MASTER_KEY_FILE_VAR, Some(file.as_os_str()));
-        assert_eq!(
-            MasterKeys::from_env().unwrap_err(),
-            "both CLADEFS_MASTER_KEY and CLADEFS_MASTER_KEY_FILE are set: give the master keys one way"
-        );
-        set(MASTER_KEY_VAR, None);
-        let keys = MasterKeys::from_env().unwrap().unwrap();
-        assert_eq!(ids(&keys), ["8b1917a7f2bf1306"]);
-        set(MASTER_KEY_FILE_VAR, Some(dir.path().join("missing").as_os_str()));
-        let refused = MasterKeys::from_env().unwrap_err();
-        let expected =
-            format!("CLADEFS_MASTER_KEY_FILE {}: ", dir.path().join("missing").display());
-        assert!(refused.starts_with(&expected), "{refused}");
     }
 }

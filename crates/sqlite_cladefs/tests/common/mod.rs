@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! A database a fork of its file set and the file set change apart: what each test of forks does,
-//! on each kind of device.
+//! A database and one on a fork of its device change apart: what each test of forks does, on each
+//! kind of device.
 
 use rusqlite::{Connection, params};
 use std::collections::BTreeMap;

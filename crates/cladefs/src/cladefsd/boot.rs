@@ -40,10 +40,14 @@ pub async fn boot(socket: &Path, memory: Option<u64>) -> anyhow::Result<()> {
     // says (doc-22, TASK-539.9).
     let disks = super::disk::DiskConfig::from_env().map_err(anyhow::Error::msg)?;
     super::disk::start(disks).map_err(anyhow::Error::msg)?;
-    // cladefs: its ephemeral cells' directory, if it keeps any (doc-25, TASK-698.3): the references
-    // of those it holds no more retired before it serves.
+    // cladefs: its ephemeral cells' directory, if it keeps any (doc-25, TASK-698.3): those it
+    // handed over let go of (board 5730), and the references of those it holds no more retired,
+    // before it serves; and how long a migration to it is kept, heard nothing of (board 5734).
     if let Some(dir) = set_os("CLADEFSD_EPHEMERAL") {
         let ephemeral = crate::ephemeral_host::open(Path::new(&dir))?;
+        let let_go = super::migration::let_go_handed_over(&ephemeral).await?;
+        log::info!("cladefsd: let go of {let_go} ephemeral cells handed over");
+        super::migration::idle().map_err(anyhow::Error::msg)?;
         let retired = ephemeral.retire_stale().await?;
         log::info!("cladefsd: retired {retired} references of ephemeral cells held no more");
     }

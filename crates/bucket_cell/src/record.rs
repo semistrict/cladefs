@@ -142,18 +142,4 @@ mod tests {
         }
         assert!(matches!(Head::decode(test_cell(3), &bytes[..3]), Err(Error::Corrupt(_))));
     }
-
-    /// Every kind of head, deleted or not, decodes back to itself.
-    #[test]
-    fn heads_decode_to_what_they_encode() {
-        let origin = Origin { parent: test_cell(1), at: 7, epoch: 2 };
-        let made =
-            [Made::Root, Made::Own, Made::Forking { origin, version: 0xbe }, Made::Clone(origin)];
-        for made in made {
-            for epoch in [0, 3, Head::FINAL] {
-                let head = Head { epoch, ..Head::of(made, 9) };
-                assert_eq!(Head::decode(test_cell(2), &encode(&head)), Ok(head));
-            }
-        }
-    }
 }

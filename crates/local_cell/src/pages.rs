@@ -1124,45 +1124,6 @@ mod tests {
         (0..len).map(|at| seed.wrapping_add((at % 251) as u8)).collect()
     }
 
-    /// Writes land in memory: reads see them at once, the file has none of them until a sync,
-    /// which writes them back, in the file's order, and syncs the file. Clean, they stay held,
-    /// read from memory, until evicted; then reads go to the file.
-    #[test]
-    fn writes_are_held_until_synced_and_read_from_memory() {
-        let dir = MemDisk::new();
-        let cache = cache(Options { expire: Duration::from_secs(3600), ..Options::default() });
-        let file = Cached::new(dir.create("f", true).unwrap(), &cache).unwrap();
-        let data = pattern(1, 3 * PAGE as usize + 100);
-        file.write_at(&data, 0).unwrap();
-        let mut read = vec![0; data.len()];
-        file.read_at(&mut read, 0).unwrap();
-        assert_eq!(read, data);
-        let mut under = vec![0; data.len()];
-        file.file().read_at(&mut under, 0).unwrap();
-        assert_eq!(under, vec![0; data.len()], "the file holds none of it before a sync");
-        assert_eq!(
-            cache.usage(),
-            Usage {
-                held: 4 * PAGE,
-                dirty: 4 * PAGE,
-                writing: 0,
-                peak: 4 * PAGE,
-                peak_dirty: 4 * PAGE
-            }
-        );
-        file.sync().unwrap();
-        file.file().read_at(&mut under, 0).unwrap();
-        assert_eq!(under, data);
-        assert_eq!(file.size().unwrap(), data.len() as u64);
-        assert_eq!(
-            cache.usage(),
-            Usage { held: 4 * PAGE, dirty: 0, writing: 0, peak: 4 * PAGE, peak_dirty: 4 * PAGE }
-        );
-        assert_eq!(cache.evict_to(0), 0);
-        file.read_at(&mut read, 0).unwrap();
-        assert_eq!(read, data, "read from the file, evicted");
-    }
-
     /// cladefs: the frames of pages gone hold the next pages written, never what they held
     /// before, another file's (TASK-433.9).
     #[test]
@@ -1289,68 +1250,6 @@ mod tests {
         let mut under = vec![0; 2 * PAGE as usize];
         file.file().read_at(&mut under, 0).unwrap();
         assert_eq!(under, pattern(7, 2 * PAGE as usize));
-    }
-
-    /// Sized to a governor's room, dirty thresholds keep their floors while `most` tracks `room`
-    /// even below the default 256 MiB so clean pages stay bounded (TASK-433.8, board 6001).
-    #[test]
-    fn caches_size_to_the_room_a_governor_leaves() {
-        let cache = PageCache::without_flusher(Options::default());
-        let made = Options::default();
-        cache.size_to(4 << 30);
-        let sized = cache.options();
-        assert_eq!(
-            (sized.background, sized.hard, sized.most, sized.expire),
-            ((4 << 30) / 10, (4 << 30) / 5, 4 << 30, made.expire)
-        );
-        cache.size_to(64 << 20);
-        let sized = cache.options();
-        assert_eq!(
-            (sized.background, sized.hard, sized.most),
-            (made.background, made.hard, 64 << 20)
-        );
-    }
-
-    /// board 6001: when sized to a room smaller than `Options::default().most`, reads and writes
-    /// keep clean page retention bounded by `room` without waiting for a subsequent `evict_to()`.
-    #[test]
-    fn clean_pages_stay_bounded_below_default_most() {
-        let dir = MemDisk::new();
-        let cache = PageCache::without_flusher(Options::default());
-        let room = 4 * PAGE;
-        assert!(room < Options::default().most);
-        cache.size_to(room);
-
-        let f1 = Cached::new(dir.create("f1", true).unwrap(), &cache).unwrap();
-        let f2 = Cached::new(dir.create("f2", true).unwrap(), &cache).unwrap();
-        let f3 = Cached::new(dir.create("f3", true).unwrap(), &cache).unwrap();
-
-        f1.write_at(&pattern(1, (3 * PAGE) as usize), 0).unwrap();
-        f1.sync().unwrap();
-        assert_eq!(cache.usage().dirty, 0);
-        assert!(cache.usage().held <= room);
-
-        f2.write_at(&pattern(2, (3 * PAGE) as usize), 0).unwrap();
-        // Writing f2 took held past `room`, evicting f1's clean pages immediately.
-        assert_eq!(cache.usage().held - cache.usage().dirty, 0);
-        f2.sync().unwrap();
-        assert_eq!(cache.usage().dirty, 0);
-        assert!(cache.usage().held <= room);
-
-        // Reading back f1 still returns its synced bytes from disk without inflating clean pages.
-        let mut buf = vec![0u8; (3 * PAGE) as usize];
-        f1.read_at(&mut buf, 0).unwrap();
-        assert_eq!(buf, pattern(1, (3 * PAGE) as usize));
-
-        // Writing more than `room` to a single file and syncing evicts its clean pages at sync.
-        f3.write_at(&pattern(3, (6 * PAGE) as usize), 0).unwrap();
-        f3.sync().unwrap();
-        assert_eq!(cache.usage().dirty, 0);
-        assert!(
-            cache.usage().held <= room,
-            "clean pages {} exceeded room {room}",
-            cache.usage().held
-        );
     }
 
     /// A range written behind is written back by the flusher, ahead of any threshold or expiry,

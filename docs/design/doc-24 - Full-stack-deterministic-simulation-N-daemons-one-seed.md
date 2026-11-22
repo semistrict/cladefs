@@ -100,6 +100,14 @@ when the node is killed. A mechanical conversion of each static (`X.lock()` beco
 (the panic hook, the logger, constant tables) stay. Metrics and z-pages become per node too, so
 that a simulated host's `/z/` pages are its own.
 
+As built, a node's values are leaked, not dropped: a killed node's tasks may leave references to
+them anywhere. What a value holds outside the process's memory, a static made
+`NodeLocal::releasing` lets go of once its simulation ends, as the simulation's thread exits:
+physmem's memory, its mapping and its arenas' shared memory objects (board 2890), which a process
+running simulation after simulation (madsim's `MADSIM_TEST_NUM`) otherwise kept, about six
+descriptors a simulation, until it ran out. The leaked values' memory stays: a megabyte or so a
+simulation, which is why scripts/test.sh still runs each seed in a process of its own.
+
 ## The guest and the checker
 
 A simulated guest per open cell: writes extents, commits at each level (Ordered, Local, and its
@@ -357,6 +365,54 @@ Before the decision, the steps that served any of the three went on:
   message, a hang (nextest's profile madsim ends a test at five minutes) or a crash fails it. A
   line goes with its bug's fix.
 
+## Fault profiles and rule searches as built (board 2830, 2026-11-21)
+
+`crates/cladefs/tests/madsim.rs`'s attrition is one workload (a writer guest's rounds, each on the
+next of three hosts, takes at later placements, kills, zombie writers, the bucket failing and out
+of reach) over a `Profile` of fault families, each a test of its own, and all of them drawn at
+random per seed (`Profile::swarm`, FoundationDB's `addFailureInjection`):
+
+- **Network**: a host cut off both ways (`clog_node`), one way (`clog_node_in`/`_out`), or the
+  links between nodes cut one after another and mended in another order (FoundationDB's
+  swizzle); packets lost and delayed throughout, which TCP's streams ride out stalling.
+- **Replication**: a replicated cell's takes, a member killed with the writer's host and down
+  still as the next host takes the cell, forced (doc-21).
+- **Operations**: versions made and each forked at the end; writers freeing blocks told uploaded,
+  each freed reading no more; bases made, a version of each forked on another host, the base
+  deleted; the collector passing meanwhile and twice at the end, its grace gone between, from a
+  node of its own under the hosts' KMS; the hosts told other peers (SetPeers); a host drained, as
+  SIGTERM has it, before its kill.
+- **Pressure**: a host's memory and disk limited a while (SetMemoryLimit, ShrinkMemory,
+  SetDiskLimit), writes refused past them. The host's disk governor stays out of reach while a
+  simulated disk is a fixed terabyte (board 5899).
+- **Disks**: calls failing (board 5654), as before. BUGGIFY stays off in the full stack: turned on,
+  its sites switched by the madsim seed, it lost an ephemeral cell's Local commits (board 6034),
+  which it waits for.
+
+The checker: every block told uploaded and not freed reads as written on the last host, none freed
+does, each version's fork holds what was told uploaded before it, and each base's fork reads the
+block it inherited.
+
+**Rule searches** (`needs!`): a rule of `bucket_cell::Rules` off, seeds of its profile until one
+loses what a guest was told, each seed a process of its own (as scripts/test.sh runs them: a
+simulation's node-local values stay in its process, board 2890). Each rule was tried over 2,000
+seeds of the profile that reaches it. Five find theirs: `head_swap` (attrition),
+`collector_epochs` and `candidates_first` (frees and the collector), `references` and
+`references_relisted` (bases). `slots_at_birth` found its on Linux (seed 92 of the bases profile)
+but in none of 2,000 seeds on macOS, whose schedules differ; a search one platform misses would
+fail `scripts/test.sh` there, so it has none. The rest found none: `local_cell::sim`'s searches find each, their
+steps aimed at the protocol's races over 20,000 seeds, where a full-stack seed reaches them
+seldom; aiming the full stack's faults at those races is adoption 5 below. `local_cell::Rules`
+(the open cell's concurrency) found none either: its framings', flushes' and frees' rules over
+2,000 seeds of their profiles, and its views' and writes' rules guard a follower and a writer
+racing its own commits, which one simulated guest, its requests one at a time, never is; Shuttle's
+searches find them (`crates/local_cell/tests/shuttle`).
+
+**What it found**: cladefsd's drain counters were process statics, so each simulated host waited
+for every host's connections and calls, and simulations sharing a process woke each other's tasks
+(board 5806); with BUGGIFY on, an ephemeral cell's Local commits lost (board 6034); and, on main as
+it was, two live-migration endings of the ephemeral disk-faults profile (board 6032).
+
 ## What FoundationDB does that we don't (2026-11-20)
 
 Read in `~/src/foundationdb` at 7e7611f82 (2026-11-06). The user asked for this to be compared
@@ -552,6 +608,56 @@ B-tree and remapping (extents are written once), a cluster-wide Ratekeeper with 
 throttle themselves (guests are untrusted; pacing is the daemon's), killing the process at its
 memory limit (it would take every VM on the host), format migrations. FoundationDB has no TLA+
 specs; ours are worth keeping, their atomic steps split where the code's are not (board 5732).
+
+## Compared with FoundationDB's again, as built (board 2844, 2026-11-21)
+
+The full stack runs its fault profiles (board 2830) and both simulations their branch coverage
+(board 2842). Of the ten adoptions above, as ranked first:
+
+1. **`buggify!`, two levels**: made (`bucket_cell::buggify`, ef663c5ee), on in local_cell::sim's
+   runs (four seeds in five), but at four sites in the whole tree, not the thresholds, retries and
+   governors planned (reply 5760 on board 2830). Off in the full stack: turned on, its first 200
+   seeds lost an ephemeral cell's Local commits (board 6034), the first finding of its own.
+2. **A mixed profile per seed**: made, local_cell::sim's `swarm` (f3ce86ee1) and the full stack's
+   `Profile::swarm` (board 2830). Found in the full stack: harness gaps alone so far (a partition's
+   links left cut at the heal), as the named profiles found first what the families reach.
+3. **Knobs**: not made. The protocol's bounds run at production sizes in both simulations (lag
+   1 GiB, checkpoints, page cache, in-flight bytes), so their branches stay unreached (the
+   coverage's "bounds no seed gets near"). Next after board 6034, with BUGGIFY.
+4. **`probe!`**: not made; llvm-cov's branch coverage of the simulations stands in for it
+   (scripts/sim-coverage.sh, nightly). What it found: the two simulations reach different halves of
+   the protocol (local_cell::sim never runs the uploader's task; the full stack never writes
+   anything but whole blocks), each gap now a task (boards 6037, 6039, 6041). A probe names a
+   situation, which a branch doesn't: still worth making for the races the searches miss.
+5. **Faults aimed at the protocol's state**: barely made (a forced take with a member held down).
+   Its absence is why 26 of bucket_cell's 31 rules have no full-stack search: over 2,000 seeds
+   each, the profiles' blind faults hit 25 of their races never, and `slots_at_birth`'s on Linux
+   alone, where local_cell::sim's aimed steps hit each.
+6. **A heal phase**: made in part. Every profile heals (the bucket, the disks and the network
+   whole, limits lifted, the collector's last passes past their grace), then checks what guests
+   were told; but with no bound in time to reach Uploaded and replicas converged, nor a leak check
+   (reply 5760 on board 2830).
+7. **Every error not injected fails a seed**: not made.
+8. **A determinism digest**: not made as a digest; MADSIM_TEST_CHECK_DETERMINISM run by hand over
+   1,200 seeds found what reached the simulation from outside (a real temporary directory's name,
+   board 5471; two simulations' threads deadlocking on node_local's locks, board 5473).
+9. **Timers jittered, I/O short**: the network's latency and loss made (board 2830); timers and
+   short reads and writes not.
+10. **Reseeding from a step**: not made.
+
+**What the full-stack simulation found** (TASK-685 to now): live migration's lost messages,
+markers and notes (TASK-713 to 715, boards 2934, 5721, 5890's commit told durable lost, 6032), a
+CreateCell whose last sync failed (5668), a bucket probe taking a bucket out of reach (TASK-699),
+the daemon's process statics shared by simulated hosts (5806, and physmem's memory, TASK-685.14),
+BUGGIFY's lost Local commits (6034), and leaks of simulations into each other (5473, 2890). Most
+by the ephemeral profiles' crashes and the disk faults; none yet by a rule search alone.
+
+**What FoundationDB does still that we don't**, by its history's evidence: faults aimed at the
+protocol's state and knobs shrunk under BUGGIFY (the two that would reach the 26 rules and the
+bounds); every unexpected error failing a seed, and a bounded heal with a leak check (a fifth of
+its finds were hangs); sanitizers over the simulation's seeds (Miri or ASAN over local_cell::sim);
+restarts from the disks alone; a model of its own per workload; ensembles of 10^5 fresh seeds a
+night, where our soak runs 2,000 a profile; and code probes, situations rather than branches.
 
 ## Costs and risks
 
