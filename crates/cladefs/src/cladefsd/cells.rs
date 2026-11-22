@@ -831,9 +831,9 @@ pub(super) fn removed_if_unmade(path: &Path) -> Result<(), Errno> {
 
 /// cladefs: where the daemon keeps the version `version` of `cell`'s cell open for the forks of it
 /// made here ([`host_cell::version_dir`]), made from the bucket the first time the version is
-/// forked here ([`opened_version`]).
-fn version_dir(cell: CellId, version: u64) -> PathBuf {
-    crate::host_cell::version_dir(cell, version)
+/// forked here ([`opened_version`]): among its part cache's cells at versions, if it keeps one.
+fn version_dir(cell: CellId, version: u64) -> Result<PathBuf, Errno> {
+    Ok(crate::host_cell::version_dir(cell, version, part_cache()?.as_deref()))
 }
 
 /// cladefs: the directory the version `version` of `cell` is kept open in for forks here
@@ -843,7 +843,7 @@ fn version_dir(cell: CellId, version: u64) -> PathBuf {
 /// uploaded behind. `ENOENT` if the bucket has no such cell.
 async fn opened_version(cell: CellId, version: u64, capacity: u64) -> Result<PathBuf, Errno> {
     let capacity = capacity.max(OpenCell::BLOCK_SIZE as u64);
-    let dir = version_dir(cell, version);
+    let dir = version_dir(cell, version)?;
     let held = hold_within(&dir, VERSION_WAIT).await?;
     if host_fs::exists(&dir) && !crate::host_cell::unmade(&dir) {
         return Ok(dir);

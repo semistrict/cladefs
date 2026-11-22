@@ -8,7 +8,8 @@ host holds no more. On ubu1 (Ryzen 9 8945HS), each run a `hotbed run --bench` me
 `memory.low` 16G), every Firecracker in its jailer's jail, a release guest kernel. The drivers
 still call fxjob (board 6058), so each ran by hand: scripts/lib/test-linux-host.sh's `build`
 phase as hotbed work, then its `measure` phase as the measurement, its results on the scratch
-disk's ext4 (in the workspace's ZFS a fork fails, board 6589). 16 GiB, not the driver's 20: ubu1
+disk's ext4 (in the workspace's ZFS a fork failed: the cell at a version it went through was
+in the TMPDIR, on that ext4, not on the part cache's filesystem; since board 6589 it is). 16 GiB, not the driver's 20: ubu1
 had no more to guarantee beside others' work. The case logs are in
 [ubu1-cells-per-host-dax-2026-11-22/](ubu1-cells-per-host-dax-2026-11-22).
 

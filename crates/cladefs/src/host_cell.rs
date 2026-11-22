@@ -24,6 +24,7 @@
 use crate::error::{Errno, Error};
 use crate::faults::failpoint;
 use anyhow::Context as _;
+use bucket_cell::cache::Cache;
 use bucket_cell::cell;
 use bucket_cell::layout::{CellId, Child};
 use bucket_cell::object_bucket::{ObjectBucket, RoutedBucket};
@@ -601,14 +602,16 @@ pub(crate) fn version_made_of(cell: CellId, version: u64) -> Option<PathBuf> {
     VERSIONS_MADE.get().lock().unwrap().get(&(cell, version)).cloned()
 }
 
-/// cladefs: where a cell at the version `version` of `cell` is kept for forks of it: a directory of
-/// its own, in the process's temporary directory, gone with the process, as such a cell holds
-/// nothing of its own.
-pub(crate) fn version_dir(cell: CellId, version: u64) -> PathBuf {
-    static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    let root = ROOT.get_or_init(|| {
-        std::env::temp_dir().join(format!("cladefs-versions-{}", std::process::id()))
-    });
+/// cladefs: where a cell at the version `version` of `cell` is kept for forks of it, served by
+/// `cache`, the host's, if it has one: a directory of its own, among the cache's cells at versions,
+/// on its filesystem, as a cell elsewhere than the cache is refused (board 6589,
+/// [`Cache::versions`]); without, in the process's temporary directory. Such a cell holds nothing
+/// of its own.
+pub(crate) fn version_dir(cell: CellId, version: u64, cache: Option<&Cache>) -> PathBuf {
+    let root = match cache {
+        Some(cache) => cache.versions().to_owned(),
+        None => std::env::temp_dir().join(format!("cladefs-versions-{}", std::process::id())),
+    };
     root.join(format!("{:x}.{:x}.{:x}", cell.tenant, cell.id, version))
 }
 
@@ -624,7 +627,7 @@ pub(crate) async fn fork_through(
     child: Child,
     prepare: impl FnOnce(&Path) -> anyhow::Result<()> + Send,
 ) -> Result<(), Error> {
-    let at = version_dir(local.description().cell, version);
+    let at = version_dir(local.description().cell, version, uploader.options().cache.as_deref());
     let (kind, url) = (local.kind().ok_or(Errno::EINVAL)?, local.bucket().ok_or(Errno::EINVAL)?);
     let made = upload::blocking(|| -> Result<(), Error> {
         let made = at.parent().map_or(Ok(()), host_fs::create_dir_all);

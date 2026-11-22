@@ -1191,8 +1191,9 @@ impl OpenCell {
 
     /// cladefs: forks the open cell, as [`OpenCell::fork`] says, to `cell` at `path`: an open cell
     /// at a version forks itself; any other, a version of its last commit, made (of it quiescent,
-    /// if `quiescent`) and uploaded, an open cell at which, beside `path`, forks, then dropped, its
-    /// child keeping what it inherits by its reference. Forks are of versions alone (TASK-508.3).
+    /// if `quiescent`) and uploaded, an open cell at which, among the host cache's cells at
+    /// versions ([`host_cell::version_dir`]), forks, then dropped, its child keeping what it
+    /// inherits by its reference. Forks are of versions alone (TASK-508.3).
     async fn fork_at_version(
         &self,
         path: &Path,

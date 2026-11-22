@@ -2547,6 +2547,49 @@ fn forks_read_their_prediction_into_memory_from_the_part_cache() {
     drop((two, client));
 }
 
+/// Board 6589: a host whose temporary directory is on another filesystem than its part cache and
+/// its cells, as a hotbed workspace's results on ZFS beside its TMPDIR on ext4, forks a cell with
+/// a writer and restores a version: the cell at a version each goes through is on the cache's
+/// filesystem, which every cell the cache serves must be on (TASK-359), not in the temporary
+/// directory, which refused both (`EIO`).
+#[cfg(target_os = "linux")]
+#[test]
+fn forks_go_through_versions_on_the_part_caches_filesystem() {
+    use std::os::unix::fs::MetadataExt as _;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir_in("/dev/shm").unwrap();
+    let device = |path: &Path| std::fs::metadata(path).unwrap().dev();
+    assert_ne!(device(dir.path()), device(elsewhere.path()), "two filesystems");
+    // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
+    // environment yet.
+    unsafe {
+        std::env::set_var("CLADEFSD_PART_CACHE", dir.path().join("parts"));
+        std::env::set_var("TMPDIR", elsewhere.path());
+    }
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let (path, fork) = (dir.path().join("store"), dir.path().join("fork"));
+    let client = CellClient::connect(&socket, &path, 1 << 24).unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    let data = pattern(3, 2 * BLOCK);
+    write(&client, extent, 0, &data).unwrap();
+    client.commit(Some(b"base")).unwrap();
+    drop(client);
+
+    // Its writer's cell, no connection's, forked through a version of its last commit.
+    fork_cell(&path, &fork).unwrap();
+    let forked = CellClient::connect(&socket, &fork, 1 << 24).unwrap();
+    assert_eq!(read(&forked, extent, 0, 512), Ok(data[..512].to_vec()));
+    // A version of the fork restored, from the cell at the version kept open for its forks.
+    let version = forked.make_version().unwrap();
+    let restored =
+        CellClient::connect_forked(&socket, dir.path().join("restored"), version, 0).unwrap();
+    assert_eq!(read(&restored, extent, BLOCK as u64, 512), Ok(data[BLOCK..][..512].to_vec()));
+    drop((restored, forked));
+}
+
 /// TASK-79.17, TASK-702.3: a cell the daemon opens to work on, as no VM process has it open,
 /// boots no guest: its version's read evidence is not read, nor anything fetched ahead for it. Here
 /// a fork of a version is synced; a VM opening it reads the evidence.

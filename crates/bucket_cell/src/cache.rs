@@ -51,6 +51,9 @@ pub struct Cache {
     /// The most the disk governor leaves it ([`Cache::set_limit`]): `u64::MAX` until it says.
     governed: AtomicU64,
     kept: Mutex<Index>,
+    /// cladefs: beside its files, on their filesystem, the cells at versions its host opens of its
+    /// own ([`Cache::versions`], board 6589).
+    versions: PathBuf,
     /// The directory, locked, so that no other cache opens it while this one has it.
     _lock: host_fs::Flock,
 }
@@ -290,6 +293,10 @@ impl Index {
 /// Where the cache keeps its files under the directory it is given.
 const FILES: &str = "cladefs-parts";
 
+/// cladefs: where, under the directory it is given, the cells at versions its host opens of its
+/// own are ([`Cache::versions`]).
+const VERSIONS: &str = "cladefs-versions";
+
 /// The blocks of the filesystems the cache's files are on, as the parts in them are aligned to:
 /// what punching a hole frees whole.
 const BLOCK: u64 = extent_frame::ALIGN;
@@ -298,11 +305,19 @@ impl Cache {
     /// The cache in `dir`, keeping at most `budget` bytes of objects (`u64::MAX`, none), and what
     /// the disk governor leaves it, once it says ([`Cache::set_limit`]): what an earlier one kept,
     /// read from its files, those that fail their checks removed, then evicted, those read least
-    /// recently first, as far as `budget` needs. Fails while another cache has the directory.
+    /// recently first, as far as `budget` needs; and its directory of cells at versions emptied
+    /// ([`Cache::versions`]). Fails while another cache has the directory.
     pub fn open(dir: &Path, budget: u64) -> io::Result<Self> {
+        let versions = dir.join(VERSIONS);
         let dir = dir.join(FILES);
         host_fs::create_dir_all(&dir)?;
         let lock = lock(&dir)?;
+        // What an earlier cache's host left of its cells at versions, which it alone had: they
+        // hold nothing of their own.
+        match host_fs::remove_dir_all(&versions) {
+            Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(err),
+            _ => host_fs::create_dir(&versions)?,
+        }
         let files = Files::new(dir)?;
         let mut found = Vec::new();
         files.walk(Path::new(""), &mut found)?;
@@ -314,7 +329,8 @@ impl Cache {
             kept.insert(&key, found);
         }
         let governed = AtomicU64::new(u64::MAX);
-        let cache = Self { files, budget, governed, kept: Mutex::new(kept), _lock: lock };
+        let kept = Mutex::new(kept);
+        let cache = Self { files, budget, governed, kept, versions, _lock: lock };
         cache.set_limit(u64::MAX)?;
         Ok(cache)
     }
@@ -337,6 +353,15 @@ impl Cache {
     /// The directory the cache keeps its objects in.
     pub fn dir(&self) -> &Path {
         &self.files.dir
+    }
+
+    /// cladefs: the directory, on the filesystem of the cache's files, of the cells at versions
+    /// the cache's host opens of its own, to fork them (board 6589): as every cell the cache
+    /// serves, they must be on it, as a cell elsewhere is refused (TASK-359). They hold nothing of
+    /// their own, their every extent the bucket's: the cache empties it as it opens, as no other
+    /// cache has it.
+    pub fn versions(&self) -> &Path {
+        &self.versions
     }
 
     /// The tail of the object at `key`, if it is kept, checked against its CRCs: one that fails
