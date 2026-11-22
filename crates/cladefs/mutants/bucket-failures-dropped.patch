@@ -6,10 +6,10 @@
 # Killer: cladefsd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound
 --- a/crates/bucket_cell/src/object_bucket.rs
 +++ b/crates/bucket_cell/src/object_bucket.rs
-@@ -635,15 +635,9 @@
+@@ -592,15 +592,9 @@ impl Timed<'_> {
          let answered = answered.map_err(|failure| {
              let answer = error(&failure);
-             if answer == Error::Unavailable {
+             if answer.failed() {
 -                self.counts.failures[self.request as usize].fetch_add(1, Ordering::Relaxed);
                  if self.request.takes_turns() {
                      self.counts.turns[self.request as usize].failed();

@@ -6,16 +6,16 @@
 # Killer: cladefsd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound
 --- a/crates/bucket_cell/src/bucket.rs
 +++ b/crates/bucket_cell/src/bucket.rs
-@@ -439,7 +439,7 @@ pub(crate) async fn create(bucket: &impl Bucket, key: &str, bytes: Vec<u8>) -> C
+@@ -511,7 +511,7 @@ pub(crate) async fn create(bucket: &impl Bucket, key: &str, bytes: Vec<u8>) -> C
      let bytes = Bytes::from(bytes);
      let mut failures = 0;
      loop {
 -        match bucket.put(key, bytes.clone(), PutMode::Create).await {
 +        match bucket.put(key, Bytes::copy_from_slice(&bytes), PutMode::Create).await {
              Ok(version) => return Created::Created(version),
-             Err(Error::AlreadyExists) => {
-                 // Perhaps this one's own write, which landed though its answer was lost.
-@@ -476,7 +476,7 @@ pub(crate) async fn update(
+             // Perhaps this one's own write, which landed though its answer was lost; deleted
+             // since, tried again.
+@@ -581,7 +581,7 @@ pub(crate) async fn update(
      let bytes = Bytes::from(bytes);
      let mut failures = 0;
      loop {
