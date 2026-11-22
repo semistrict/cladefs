@@ -2667,6 +2667,44 @@ fn forks_read_their_prediction_into_memory_from_the_part_cache() {
     drop((two, client));
 }
 
+/// Board 7420: a restore's fork, made and opened syncing nothing, is unmade on the disk, as a host
+/// crashing then would leave it for deleting, and whole here, as any cell, until its first flush
+/// makes it durable; or, its VM committing nothing, its close does.
+#[test]
+fn restores_forks_are_made_durable_by_their_first_flush_or_their_close() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let client = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    write(&client, extent, 0, &pattern(3, BLOCK)).unwrap();
+    client.commit(None).unwrap();
+    let version = client.make_version().unwrap();
+    let unmade = |path: &Path| path.join("unmade").exists();
+
+    let restored = dir.path().join("restored");
+    let vm = CellClient::connect_forked(&socket, &restored, version, 0).unwrap();
+    assert!(unmade(&restored), "made durable as it was restored");
+    assert!(!crate::host_cell::unmade(&restored), "unmade here");
+    assert_eq!(read(&vm, extent, 0, 512), Ok(pattern(3, BLOCK)[..512].to_vec()));
+    let own = ExtentId { cell: vm.cell(), sequence: 1 };
+    write(&vm, own, 0, &pattern(4, BLOCK)).unwrap();
+    vm.commit(None).unwrap();
+    assert!(!unmade(&restored), "its first flush left it unmade");
+
+    let closed = dir.path().join("closed");
+    let idle = CellClient::connect_forked(&socket, &closed, version, 0).unwrap();
+    assert!(unmade(&closed), "made durable as it was restored");
+    drop(idle);
+    // Opened again once its close is done.
+    let again = CellClient::connect(&socket, &closed, 1 << 24).unwrap();
+    assert!(!unmade(&closed), "its close left it unmade");
+    assert_eq!(read(&again, extent, 0, 512), Ok(pattern(3, BLOCK)[..512].to_vec()));
+    drop((again, vm, client));
+}
+
 /// Board 6589: a host whose temporary directory is on another filesystem than its part cache and
 /// its cells, as a hotbed workspace's results on ZFS beside its TMPDIR on ext4, forks a cell with
 /// a writer and restores a version: the cell at a version each goes through is on the cache's

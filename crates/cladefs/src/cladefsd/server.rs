@@ -1933,6 +1933,10 @@ impl Connection {
             (None, &codec::Opening::ForkOf { tenant, cell, version, capacity }) => {
                 cells::removed_if_unmade(path)?;
                 let forked = (crate::CellId { tenant, id: cell }, version);
+                // cladefs: a restore's fork, made and opened syncing nothing: durable by its first
+                // flush or its close, before any commit of its VM is (board 7420, the user's
+                // call). A host crash before leaves it unmade, as if the restore never was.
+                let _deferring = local_cell::defer_durability(path);
                 cells::fork_version(forked, capacity, (path, self.tenant.granted())).await?;
                 Arc::new(open_cell_at(path, None, Some(arena)).await?)
             }

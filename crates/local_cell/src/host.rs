@@ -60,6 +60,10 @@ pub fn create_host_at_version(
 /// cladefs: the cell at `path` is whole, as its maker made it ([`LocalCell::made`], TASK-196): the
 /// file saying it is not goes, durably, its maker having let it go.
 pub fn made_host(path: &Path) -> Result<(), Error> {
+    // cladefs: its durability deferred, its `UNMADE` file goes as it settles (board 7420).
+    if crate::deferral::of(path).is_some_and(|deferral| deferral.mark_made()) {
+        return Ok(());
+    }
     let dir = HostDir::new(path)?;
     let made = match dir.remove(UNMADE) {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -72,6 +76,10 @@ pub fn made_host(path: &Path) -> Result<(), Error> {
 /// way: no cell, which deleting finishes (TASK-79.84, TASK-196). Its description, made last of
 /// its directory, is not there; or it says it was never made whole ([`LocalCell::made`]).
 pub fn unmade_host(path: &Path) -> bool {
+    // cladefs: whole here, its durability deferred (board 7420).
+    if crate::deferral::made_here(path) {
+        return false;
+    }
     host_fs::is_dir(path)
         && (!host_fs::exists(path.join(DESCRIPTION)) || host_fs::exists(path.join(UNMADE)))
 }
@@ -168,6 +176,8 @@ pub(crate) const DELETED: &str = "store.deleted";
 /// it held a cell or what a making left of one, so that what its files took of the host's disk
 /// goes with them (TASK-539.3); the cell opened nowhere.
 pub fn remove_cell_dir(cell_dir: &Path) -> Result<(), Error> {
+    // cladefs: its durability deferred no more: gone (board 7420).
+    crate::deferral::forget(cell_dir);
     crate::footprint::removing(cell_dir, || remove_cell(cell_dir))
 }
 

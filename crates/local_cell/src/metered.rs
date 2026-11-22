@@ -132,6 +132,18 @@ impl<D: Dir> Dir for Metered<D> {
         self.shared.dir.barrier()
     }
 
+    fn defers(&self) -> bool {
+        self.shared.dir.defers()
+    }
+
+    fn made_deferred(&self) -> bool {
+        self.shared.dir.made_deferred()
+    }
+
+    fn settle(&self) -> io::Result<()> {
+        self.shared.dir.settle()
+    }
+
     /// The first taking in this process lists it anew ([`Footprint::taken`]): other processes may
     /// have changed it while they had it.
     fn take(&self) -> io::Result<()> {

@@ -79,6 +79,10 @@ impl<'d, D: Dir> Making<'d, D> {
     /// if the directory's I/O is its callers' alone ([`Dir::concurrent`], TASK-79.79).
     pub(crate) fn sync(self) -> Result<(), Error> {
         let Self { dir, durable } = self;
+        // Its durability deferred, its settling makes it all durable, its parent's entry too.
+        if dir.defers() {
+            return Ok(());
+        }
         let most = if dir.concurrent() { AT_ONCE } else { 1 };
         at_once(&durable, most, |durable| match durable {
             Durable::File(name, file) => file.sync().with_context(|| format!("syncing {name}")),
