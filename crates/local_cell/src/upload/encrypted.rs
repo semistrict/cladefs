@@ -173,7 +173,9 @@ async fn open_on<K: Kms>(
     host: &Host,
     dir: &MemDir,
 ) -> Result<(Arc<LocalCell<MemDir>>, Uploader<MemDir>), Failure> {
-    open_with(world, host, dir, Options { checkpoint_every: 1, ..Options::default() }).await
+    // cladefs: no relocations where the collector compacts (doc-27 step 1).
+    let options = Options { checkpoint_every: 1, relocate: false, ..Options::default() };
+    open_with(world, host, dir, options).await
 }
 
 /// The cell in `dir`, opened by `host` as [`open_on`] opens it, its uploader's options `options`

@@ -13,7 +13,7 @@
 //! at each version the head names and at each fork's origin under the cell's references, which
 //! keep them whole, so that relocating out of them would copy what stays anyway.
 
-use crate::{Dir, LocalCell, Relocated, Relocating};
+use crate::{Dir, LocalCell, PartlyRelocated, Relocated, Relocating};
 use bucket_cell::fetch::{Budget, Fetcher, Limits, Memory, Priority};
 use bucket_cell::layout::CellId;
 use bucket_cell::{Bucket, Writer, lifecycle, recovery};
@@ -51,7 +51,7 @@ impl Credit {
         allowance
     }
 
-    /// A round given `allowance` relocated `relocated` of it: the rest goes back.
+    /// A round given `allowance` relocated `relocated` of it, failing or not: the rest goes back.
     pub(crate) fn spent(&mut self, allowance: u64, relocated: u64) {
         let relocated = relocated.min(allowance);
         self.credit = self.credit.saturating_add(allowance - relocated);
@@ -82,16 +82,34 @@ impl Pins {
             let known = self.at.lock().unwrap().get(&at).cloned();
             let keys = match known {
                 Some(keys) => keys,
-                None => {
-                    let read = recovery::recover_version(bucket, cell, at, writer.keys()).await?;
-                    let keys = Arc::new(own_segments(cell, &read.state));
-                    self.at.lock().unwrap().insert(at, keys.clone());
-                    keys
-                }
+                None => match recovery::recover_version(bucket, cell, at, writer.keys()).await {
+                    Ok(read) => {
+                        let keys = Arc::new(own_segments(cell, &read.state));
+                        self.at.lock().unwrap().insert(at, keys.clone());
+                        keys
+                    }
+                    // A pin spares copies alone: one unread, as a given-up fork's origin may be
+                    // whose reference stands yet, pins nothing this round, and fails none.
+                    Err(error) => {
+                        log::warn!("cladefs: cell {cell}'s state at {at:x}, kept: {error}");
+                        continue;
+                    }
+                },
             };
             pinned.extend(keys.iter().cloned());
         }
         Ok(pinned)
+    }
+}
+
+/// What a round that ended as `ended` relocated: what it says it did, or, if it failed, what its
+/// relocation committed before ([`PartlyRelocated`]); nothing else.
+pub(crate) fn relocated(ended: &anyhow::Result<Relocated>) -> Relocated {
+    match ended {
+        Ok(relocated) => *relocated,
+        Err(error) => error
+            .downcast_ref::<PartlyRelocated>()
+            .map_or_else(Relocated::default, |partly| partly.0),
     }
 }
 
@@ -106,14 +124,17 @@ fn own_segments(cell: CellId, state: &bucket_cell::State) -> HashSet<String> {
 /// and the commit that names it there,
 /// out of the segments sparsest first; none pinned ([`Pins`]). An extent read gone, freed or
 /// relocated since it was listed, is passed over; any other failure ends the round, failing
-/// nothing but it (a relocation is optional, doc-27).
+/// nothing but it (a relocation is optional, doc-27). What it reads it holds a place for in
+/// `uploads`, the budget of the host's uploads, which its uploads go before.
 pub(crate) async fn round<D: Dir, B: Bucket>(
     cell: &LocalCell<D>,
     writer: &Writer<B>,
-    bucket: &Arc<B>,
+    (bucket, uploads): (&Arc<B>, &Arc<Budget>),
     pins: &Pins,
     allowance: u64,
 ) -> anyhow::Result<Relocated> {
+    // No more than a relocation would take now: none while it would take nothing.
+    let allowance = allowance.min(cell.relocation_room()?);
     if allowance == 0 {
         return Ok(Relocated::default());
     }
@@ -138,8 +159,11 @@ pub(crate) async fn round<D: Dir, B: Bucket>(
             chosen.push((extent, at));
         }
     }
+    // What it reads it holds until relocated: in the budget of the host's uploads, behind them.
+    let bytes = chosen.iter().map(|(_, at)| at.len).sum();
+    let _held = uploads.hold(Priority::Ahead, bytes).await;
     let memory = Memory::new();
-    let _held = memory.keys().hold(writer.keys().clone());
+    let _keys = memory.keys().hold(writer.keys().clone());
     let fetcher = Fetcher::new(bucket.clone(), Budget::new(Limits::UNBOUNDED), memory, None);
     let read = futures::stream::iter(chosen)
         .map(|(extent, from)| {

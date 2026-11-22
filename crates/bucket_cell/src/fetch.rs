@@ -157,7 +157,7 @@ struct Waiter {
 }
 
 /// A request's place in its budget, given up when it is dropped.
-pub(crate) struct Slot {
+pub struct Slot {
     budget: Option<Arc<Budget>>,
     bytes: u64,
 }
@@ -205,6 +205,13 @@ impl Budget {
         self.admit(&mut queues);
         // Its sender goes only with a slot, and the budget, which holds it, outlives this.
         (ticket, async move { given.await.expect("a waiter is given its place") })
+    }
+
+    /// cladefs: a place for `bytes` held outside a request, as long as what it returns is: what a
+    /// writer's relocation round holds read (doc-27), in the budget of the host's uploads, behind
+    /// them.
+    pub async fn hold(self: &Arc<Self>, priority: Priority, bytes: u64) -> Slot {
+        self.enter(priority, bytes).1.await
     }
 
     /// Moves the request of `ticket`, if it waits behind demand, up to it.

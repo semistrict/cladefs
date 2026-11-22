@@ -688,6 +688,10 @@ pub(crate) struct Shared<D: Dir, B: bucket_cell::Bucket = RoutedBucket> {
     /// cladefs: said, as its sender goes, once its keeper is done, which holds it, and so its
     /// cell, meanwhile: what [`Shared::run`] waits for before it returns (TASK-701).
     kept: Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
+    /// cladefs: the relocation round under way, if one is ([`Shared::relocating`]): what aborts it,
+    /// and what says it went, the cell it held with it, which [`Shared::run`] waits for.
+    relocation:
+        Mutex<Option<(futures::future::AbortHandle, futures::channel::oneshot::Receiver<()>)>>,
     /// cladefs: the configuration whose members' logs its taking recovered the cell from, if it
     /// did, its own write-ahead log holding less (TASK-537.3.4): what the simulation follows the
     /// history of the commits of (TASK-680).
@@ -1328,6 +1332,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             held: Mutex::default(),
             keeping: Mutex::default(),
             kept: Mutex::default(),
+            relocation: Mutex::default(),
             #[cfg(test)]
             recovered_from: Mutex::default(),
         })
@@ -1492,6 +1497,12 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         initial_head: Option<head::Read>,
     ) {
         self.upload(recovering, options, bucket, holder, started, initial_head).await;
+        // cladefs: a relocation round under way ends with it, its cell let go (TASK-685.3).
+        self.abort_round();
+        let round = self.relocation.lock().unwrap().take();
+        if let Some((_, gone)) = round {
+            let _ = gone.await;
+        }
         let kept = self.kept.lock().unwrap().take();
         if let Some(kept) = kept {
             // Said as the keeper's task ends, or goes, its sender with it.
@@ -1562,7 +1573,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let mut ack_wanted = false;
         // cladefs: the relocation round under way, if one is, with what it was allowed; what the
         // next may copy; and the keys the states the cell keeps read (doc-27, board 6214).
-        let mut relocating: Option<(u64, BoxFuture<'static, anyhow::Result<u64>>)> = None;
+        let mut relocating: Option<(u64, Round)> = None;
         let mut credit = relocations::Credit::default();
         let pins = Arc::new(relocations::Pins::default());
         // Whether the next gather closes the cell's open segment: for a commit waiting for its
@@ -1588,6 +1599,11 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 close |= urgent;
                 (progress.stop, progress.cut)
             };
+            // cladefs: stopping relocates nothing more, which keeps a drain short (doc-27): what a
+            // round under way committed, the write-ahead log keeps.
+            if stop {
+                self.abort_round();
+            }
             // Cut short (TASK-216): what it has in flight, and what it would have taken, the
             // cell's log keeps, for the cell's next opening.
             if stop && cut {
@@ -1639,9 +1655,10 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                     return Poll::Ready(Happened::Uploaded(uploaded));
                 }
                 if let Some((allowance, round)) = relocating.as_mut()
-                    && let Poll::Ready(relocated) = round.poll_unpin(cx)
+                    && let Poll::Ready(ended) = round.poll_unpin(cx)
                 {
-                    return Poll::Ready(Happened::Relocated(*allowance, relocated));
+                    let ended = ended.unwrap_or_else(|_| Err(anyhow::anyhow!("its task dropped")));
+                    return Poll::Ready(Happened::Relocated(*allowance, ended));
                 }
                 woken.as_mut().poll(cx).map(Happened::Woken)
             })
@@ -1675,8 +1692,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                                 .is_some_and(|disk| disk.under_pressure());
                             if self.options.relocate && relocating.is_none() && !stop && !pressed {
                                 let allowance = credit.take();
-                                let round = Self::relocating(
-                                    (self.cell().clone(), writer.clone()),
+                                let round = self.relocating(
+                                    writer.clone(),
                                     (bucket.clone(), pins.clone()),
                                     allowance,
                                 );
@@ -1687,13 +1704,14 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                         Err(err) => Err(err.into()),
                     }
                 }
-                Happened::Relocated(allowance, relocated) => {
+                Happened::Relocated(allowance, ended) => {
                     relocating = None;
-                    let relocated = relocated.unwrap_or_else(|err| {
+                    self.relocation.lock().unwrap().take();
+                    if let Err(err) = &ended {
                         log::warn!("cladefs: relocating cell {}: {err:#}", writer.cell());
-                        0
-                    });
-                    credit.spent(allowance, relocated);
+                    }
+                    // What it committed counts, failing after or not.
+                    credit.spent(allowance, relocations::relocated(&ended).bytes);
                     Ok(())
                 }
             };
@@ -1720,19 +1738,45 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         .boxed()
     }
 
-    /// cladefs: a relocation round over `cell`, `writer`'s, of `allowance` bytes at most
-    /// ([`relocations::round`]): what it relocated. A failure fails nothing but the round.
+    /// cladefs: a relocation round over its cell, `writer`'s, of `allowance` bytes at most
+    /// ([`relocations::round`]), within the host's uploads' budget: how it ended. A task of its
+    /// own, as its spawn runs its keeper, not polled by the run: it waits for the cell's commits,
+    /// which may wait for what the run does meanwhile, a commit's upload for its gather (Codex's
+    /// review of d33a6c360). A failure fails nothing but the round.
     fn relocating(
-        (cell, writer): (Arc<LocalCell<D>>, Arc<Writer<B>>),
+        &self,
+        writer: Arc<Writer<B>>,
         (bucket, pins): (Arc<B>, Arc<relocations::Pins>),
         allowance: u64,
-    ) -> BoxFuture<'static, anyhow::Result<u64>> {
-        async move {
+    ) -> Round {
+        let (cell, uploads) = (self.cell().clone(), self.uploads.clone());
+        let (ended, round) = futures::channel::oneshot::channel();
+        let (abort, registration) = futures::future::AbortHandle::new_pair();
+        let (done, gone) = futures::channel::oneshot::channel::<()>();
+        *self.relocation.lock().unwrap() = Some((abort, gone));
+        let ending = async move {
             fail::fail_point!("upload::relocating", |_| Err(anyhow::anyhow!("failpoint")));
-            let relocated = relocations::round(&cell, &writer, &bucket, &pins, allowance).await;
-            relocated.map(|relocated| relocated.bytes)
+            let places = (&bucket, &uploads);
+            relocations::round(&cell, &writer, places, &pins, allowance).await
+        };
+        let ending = futures::future::Abortable::new(ending, registration);
+        (self.spawn)(
+            async move {
+                let stopped = |_| Err(anyhow::anyhow!("the uploader stopped"));
+                drop(ended.send(ending.await.unwrap_or_else(stopped)));
+                // Said once the round, and the cell it held, went.
+                drop(done);
+            }
+            .boxed(),
+        );
+        round
+    }
+
+    /// cladefs: aborts the relocation round under way, if one is.
+    fn abort_round(&self) {
+        if let Some((abort, _)) = &*self.relocation.lock().unwrap() {
+            abort.abort();
         }
-        .boxed()
     }
 
     /// Stops uploading, for `err`: commits waiting for uploads, and forks, fail with it.
@@ -2778,12 +2822,14 @@ enum HeadWork {
 }
 
 /// cladefs: what the uploader's run waits on that happened first.
+/// cladefs: a relocation round under way, its task's, as it ends ([`Shared::relocating`]).
+type Round = futures::channel::oneshot::Receiver<anyhow::Result<crate::Relocated>>;
+
 enum Happened {
     /// The next upload in order is done.
     Uploaded(Result<(), bucket_cell::Error>),
-    /// cladefs: the relocation round under way, given what it was allowed, is done: what it
-    /// relocated.
-    Relocated(u64, anyhow::Result<u64>),
+    /// cladefs: the relocation round under way, given what it was allowed, is done: how it ended.
+    Relocated(u64, anyhow::Result<crate::Relocated>),
     /// The work with the cell's head under way is done.
     Headed(Result<HeadWork, bucket_cell::Error>),
     /// It was woken, or its interval ran out: whether it was woken.
@@ -3132,10 +3178,8 @@ mod tests {
         let writer = cell.uploader.shared.writer().unwrap();
         let pins = relocations::Pins::default();
         let round = async |allowance| {
-            relocations::round(&cell.cell, &writer, &cell.bucket, &pins, allowance)
-                .await
-                .unwrap()
-                .bytes
+            let places = (&cell.bucket, &cell.host.uploads);
+            relocations::round(&cell.cell, &writer, places, &pins, allowance).await.unwrap().bytes
         };
         assert_eq!(round(u64::MAX).await, 0, "its version keeps the first segment whole");
         cell.uploader.drop_versions(&BTreeSet::from([1])).await.unwrap();
@@ -3175,6 +3219,36 @@ mod tests {
             assert_ne!(cell.in_bucket(sequence), Some(segment_key(0)), "{sequence}");
         }
         assert_eq!(cell.cell.sparse(|_| false).unwrap(), []);
+    }
+
+    /// cladefs: doc-27 (board 6214; the reviews of d33a6c360): a round whose relocation waits for
+    /// a guest's write in progress, holding the cell's commits back, holds back no upload: the
+    /// uploader, gathering what the guest commits after, waits for it in its own task, which goes
+    /// on once the write is done, the commit after it uploaded. Polled by the uploader's run, it
+    /// was never polled again once the run waited for the cell's commits in its gather.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rounds_waiting_for_writes_hold_no_upload_back() {
+        let scenario = fail::FailScenario::setup();
+        let interval = Duration::from_millis(20);
+        let cell =
+            Doc27::open(Options { interval, checkpoint_every: 1, ..Options::default() }).await;
+        cell.segment(0..8, &[]).await;
+        // The round after the next checkpoint waits until the write below is begun.
+        fail::cfg("upload::relocating", "pause").unwrap();
+        cell.segment(8..9, &[0, 1, 2, 3, 4, 5]).await;
+        let write = cell.cell.begin_write(Doc27::extent(9), 0, BLOCK as u64).await.unwrap();
+        write.write(&[9; BLOCK], 0).unwrap();
+        fail::remove("upload::relocating");
+        cell.until("the round waiting for the write", |cell| cell.cell.holding_writes()).await;
+        // The interval runs out: the uploader gathers, closing the cell's open segment.
+        tokio::time::sleep(10 * interval).await;
+        write.finish();
+        let committed = tokio::time::timeout(Duration::from_secs(10), cell.cell.commit(None));
+        committed.await.expect("a commit held back").unwrap();
+        let uploaded = cell.uploader.uploaded(cell.cell.last_commit().unwrap());
+        tokio::time::timeout(Duration::from_secs(10), uploaded).await.expect("held back").unwrap();
+        cell.until("relocated", |cell| [6, 7].iter().all(|&at| cell.in_bucket(at).is_none())).await;
+        scenario.teardown();
     }
 
     /// TASK-539.9: a cell's disk under pressure urges its uploader, which closes the open segment
@@ -3600,7 +3674,8 @@ mod shuttle_tests {
             // Its interval never runs out: the writer asks for what it commits.
             let never: Clock = Arc::new(|_| futures::future::pending().boxed());
             let spawn: Spawn = Arc::new(|task| drop(shuttle::future::spawn(task)));
-            let options = Options { token: holder, ..Options::default() };
+            // cladefs: no relocations where the collector compacts (doc-27 step 1).
+            let options = Options { token: holder, relocate: false, ..Options::default() };
             let uploader = Shared::new(
                 options,
                 Budget::new(Limits::UNBOUNDED),

@@ -2109,16 +2109,17 @@ impl World {
         let session = &self.hosts[host].sessions[&cell];
         let (open_cell, writer) =
             (session.cell.clone().unwrap(), session.uploader.writer().unwrap());
-        let bucket = self.host_bucket(host);
+        let (bucket, uploads) = (self.host_bucket(host), self.hosts[host].uploads.clone());
         let allowance = self.rng.random_range(1..=64) << 14;
         let (id, events) = (session.id, self.events.clone());
         let round = self.spawn(async move {
             let pins = crate::relocations::Pins::default();
             // A round failing fails nothing (doc-27): it says so in the trace alone.
-            let relocated =
-                crate::relocations::round(&open_cell, &writer, &bucket, &pins, allowance).await;
-            trace!("cell {cell} relocated {relocated:?}", cell = Short(cell));
-            if let Ok(crate::Relocated { commit: Some(epoch), .. }) = relocated {
+            let places = (&bucket, &uploads);
+            let ended =
+                crate::relocations::round(&open_cell, &writer, places, &pins, allowance).await;
+            trace!("cell {cell} relocated {ended:?}", cell = Short(cell));
+            if let Some(epoch) = crate::relocations::relocated(&ended).commit {
                 events.borrow_mut().push(Event::Relocated { host, cell, session: id, epoch });
             }
         });

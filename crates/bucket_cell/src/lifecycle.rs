@@ -352,9 +352,10 @@ pub async fn ephemeral_references(
         .collect())
 }
 
-/// cladefs: the segments of `cell` that forks of it were made at, as their references under its
-/// prefix say ([`layout::references`]): each the origin of a cell that may read the cell's state
-/// there, which its writer relocates nothing of (doc-27, Choosing what to relocate). One LIST.
+/// cladefs: the segments of `cell` that what refers to it under its prefix refers to
+/// ([`layout::references`]): forks', ephemeral cells', and mirrors' pins and holds, each a state
+/// of the cell another cell may read, which its writer relocates nothing of (doc-27, Choosing
+/// what to relocate). One LIST.
 /// cladefs: refused, [`bucket::Refused`] (board 5861).
 pub async fn referenced_at(
     bucket: &impl Bucket,
@@ -363,7 +364,14 @@ pub async fn referenced_at(
     let listed = bucket::list(bucket, &layout::references(cell)).await?;
     Ok((listed.iter())
         .filter_map(|meta| match layout::kind(&meta.key) {
-            layout::Kind::Reference { parent, at, .. } if parent == cell => Some(at),
+            layout::Kind::Reference { parent, at, .. }
+            | layout::Kind::Ephemeral { parent, at, .. }
+            | layout::Kind::Pin { parent, at }
+            | layout::Kind::Hold { parent, at, .. }
+                if parent == cell =>
+            {
+                Some(at)
+            }
             _ => None,
         })
         .collect())
@@ -518,12 +526,13 @@ async fn finish_fork(
             // dropped: nothing keeps what it would read, which the collector may have deleted
             // since, its cell's writer relocating out of it (doc-27). Failed as the fork given up
             // on is, not as the version's state lost.
+            // Only so: given up on, and its version no longer named, else what it reads is kept
+            // (the verifying review of d33a6c360).
             Err(lost @ Error::Lost(_)) => {
-                let head = head::get(bucket, child).await?;
-                return Err(match head.is_none_or(|head| head.deleted()) {
-                    true => Error::Deleted,
-                    false => lost,
-                });
+                let given_up = head::get(bucket, child).await?.is_none_or(|head| head.deleted());
+                let parent = head::get(bucket, cell).await?;
+                let named = parent.as_ref().and_then(|head| head.version(version)).is_some();
+                return Err(if given_up && !named { Error::Deleted } else { lost });
             }
             Err(error) => return Err(error),
         }

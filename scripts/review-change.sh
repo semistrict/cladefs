@@ -62,7 +62,8 @@ fi
 
 cd "$root"
 
-# A field of a hotbed command's JSON output: json_field data id.
+# A field of a hotbed command's JSON output (`--json`: hotbed prints plain text by default):
+# json_field data id.
 json_field() {
     python3 -c 'import json, sys
 d = json.load(sys.stdin)
@@ -74,11 +75,11 @@ print(d)' "$@"
 if ((use_hotbed)); then
     # The caller's session, else one started for this review and ended after it.
     session=${HOTBED_SESSION:-}
-    if [[ -z $session ]] && current=$(hotbed session current 2> /dev/null); then
+    if [[ -z $session ]] && current=$(hotbed session current --json 2> /dev/null); then
         session=$(json_field data id <<< "$current")
     fi
     if [[ -z $session ]]; then
-        session=$(hotbed session start | json_field data id)
+        session=$(hotbed session start --json | json_field data id)
         trap 'hotbed session end -s "$session" > /dev/null || true' EXIT
     fi
     if [[ -z $review_id ]]; then
@@ -89,7 +90,7 @@ if ((use_hotbed)); then
             base) request+=(--base "$name" --head HEAD) ;;
             uncommitted) ;;  # hotbed snapshots the uncommitted changes itself
         esac
-        review_id=$(hotbed "${request[@]}" | json_field data id)
+        review_id=$(hotbed "${request[@]}" --json | json_field data id)
     fi
     hotbed review start -s "$session" "$review_id" > /dev/null
     instructions+=$'\n\n'"This is hotbed review $review_id. Your sandbox can't reach hotbed: end your report with the \`\`\`json hotbed-findings block (\`{\"findings\": []}\` if none survive)."
@@ -117,5 +118,5 @@ if ((use_hotbed)); then
         hotbed review findings -s "$session" "$review_id" --file "$out.findings.json" > /dev/null
     fi
     hotbed review finish -s "$session" "$review_id" --summary "$summary" > /dev/null
-    echo "review-change.sh: hotbed review $review_id, $(hotbed review link "$review_id" | json_field data url)" >&2
+    echo "review-change.sh: hotbed review $review_id, $(hotbed review link "$review_id" --json | json_field data url)" >&2
 fi

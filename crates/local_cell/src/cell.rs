@@ -1531,6 +1531,17 @@ pub struct Relocated {
     pub commit: Option<u64>,
 }
 
+/// cladefs: a relocation that failed after it relocated what it says ([`LocalCell::relocate`]),
+/// committed: the context of its error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PartlyRelocated(pub Relocated);
+
+impl std::fmt::Display for PartlyRelocated {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "relocating, {} bytes relocated", self.0.bytes)
+    }
+}
+
 /// cladefs: an extent of a cell's own segments in the bucket, read by its writer to relocate it
 /// ([`LocalCell::relocate`], doc-27): where it was read, and its bytes, as the guest reads them.
 #[derive(Clone, Debug)]
@@ -2640,9 +2651,7 @@ impl<D: Dir> LocalCell<D> {
             self.flush().await?;
         }
         match failed {
-            Some(failed) => {
-                Err(failed.context(format!("relocating, {} bytes relocated", relocated.bytes)))
-            }
+            Some(failed) => Err(failed.context(PartlyRelocated(relocated))),
             None => Ok(relocated),
         }
     }
@@ -4135,6 +4144,19 @@ impl<D: Dir> LocalCell<D> {
     /// Their live bytes counted the first time it is asked, walking every extent the cell holds.
     pub fn sparse(&self, pinned: impl Fn(&str) -> bool) -> Result<Vec<Sparse>, Error> {
         Ok(self.state()?.extents.sparse(pinned))
+    }
+
+    /// cladefs: how many bytes a relocation now would take ([`LocalCell::relocate`]): what the open
+    /// segment has room for, none while the guest has filled a segment since its last commit or a
+    /// run of an extent it has open ends where a copy would go, as a relocation then relocates
+    /// nothing: what a round reads no more than (the verifying review of d33a6c360).
+    pub fn relocation_room(&self) -> Result<u64, Error> {
+        let state = self.state()?;
+        if state.segments.has_full() || self.run_goes_on(&state) {
+            return Ok(0);
+        }
+        let open = state.segments.len(state.segments.open_segment());
+        Ok(self.options.segment_limit().saturating_sub(open))
     }
 
     /// cladefs: the extents the cell holds in each of its segments in the bucket `keys` names,
