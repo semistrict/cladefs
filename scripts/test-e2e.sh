@@ -8,7 +8,8 @@
 # by suite, `--tag SUITE` (the guest tests' runner's `list`, whose --help names the suites;
 # default: --tag e2e), which boot cladefs's Firecracker (vendor/firecracker,
 # with its cladefs feature), which this builds, and the guest kernel
-# CLADEFS_GUEST_KERNEL names (scripts/build-guest-kernel.sh builds it). Each test's
+# CLADEFS_GUEST_KERNEL names, or, unset, this tree's, which scripts/build-guest-kernel.sh builds
+# where it built last, only what changed since (board 7427). Each test's
 # logs are kept under $CLADEFS_E2E_RESULTS (default: a new temporary directory).
 # CLADEFS_E2E_REPEATS runs each case that many times (default 1), as a soak, each a
 # repeat: it stops at a case's first failing repeat, whose logs it keeps, in repeat-K
@@ -108,6 +109,22 @@ if [[ -z ${LIBCLANG_PATH:-} ]] && command -v llvm-config > /dev/null; then
     LIBCLANG_PATH=$(llvm-config --libdir)
 fi
 if [[ -n ${LIBCLANG_PATH:-} ]]; then export LIBCLANG_PATH; fi
+
+# cladefs: the guest kernel, CLADEFS_GUEST_KERNEL's, or else this tree's, built where its last
+# build was (build-guest-kernel.sh's work directory, under HOME: in a hotbed workspace, the
+# workspace's, whose base built main's), only what changed since (board 7427). Its build's log is
+# the results' guest-kernel.log.
+if [[ -z $build_only && -z ${CLADEFS_GUEST_KERNEL:-} ]]; then
+    measurement_refuses "the guest kernel's build, CLADEFS_GUEST_KERNEL unset,"
+    # Its last line says where the kernel is.
+    if ! "$root/scripts/build-guest-kernel.sh" > "$results/guest-kernel.log" 2>&1 ||
+        [[ ! -s $(tail -1 "$results/guest-kernel.log") ]]; then
+        echo "building the guest kernel failed: see $results/guest-kernel.log" >&2
+        exit 1
+    fi
+    CLADEFS_GUEST_KERNEL=$(tail -1 "$results/guest-kernel.log")
+    export CLADEFS_GUEST_KERNEL
+fi
 
 # The directory cargo builds into, run in directory $1 as `$2` (default cargo): its workspace's
 # target directory, CARGO_TARGET_DIR's if set, as cargo metadata says, not a path guessed here, so
