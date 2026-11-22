@@ -656,7 +656,12 @@ impl HostFetcher {
             Ok(parts.read(extent, &location, offset, len, Priority::Demand).await?)
         });
         let read = self.runtime.spawn(crate::request::within(crate::request::current(), reading));
-        async move { read.await.map_err(|err| Failure::local(err, "fetching"))? }
+        // cladefs: `unconstrained` prevents tokio's thread-local coop budget from livelocking
+        // when this future is polled inside `futures::executor::block_on` from a tokio task
+        // (board 6525).
+        async move {
+            tokio::task::unconstrained(read).await.map_err(|err| Failure::local(err, "fetching"))?
+        }
     }
 
     /// cladefs: fetches the parts holding the `len` bytes at `offset` in `extent`, whose data is
@@ -1836,6 +1841,9 @@ mod tests {
             }
         });
         assert_eq!(asked, 0, "allocations of {EXTENTS} asks of the cell");
+        // Warm up `futures::executor::block_on`'s thread-local `CURRENT_THREAD_NOTIFY` Arc on
+        // whichever tokio worker thread we are running on before counting cache-read allocations.
+        futures::executor::block_on(async {});
         let (read, ()) = allocations_while(|| {
             futures::executor::block_on(async {
                 for sequence in 1..=EXTENTS {

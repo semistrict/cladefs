@@ -369,5 +369,12 @@ async fn on_bucket_runtime<T: Send + 'static>(
     work: impl Future<Output = Result<T, Error>> + Send + 'static,
 ) -> Result<T, Error> {
     let runtime = local_cell::upload::bucket_runtime().map_err(Error::new)?;
-    runtime.spawn(work).await.map_err(Error::new)?
+    #[cfg(test)]
+    let work = {
+        let pace = collect::quickened();
+        collect::with_quickened(pace, work)
+    };
+    // cladefs: `unconstrained` prevents coop-budget livelock when polled from `block_on` inside
+    // a tokio task (board 6525).
+    tokio::task::unconstrained(runtime.spawn(work)).await.map_err(Error::new)?
 }

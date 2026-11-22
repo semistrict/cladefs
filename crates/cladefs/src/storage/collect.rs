@@ -37,6 +37,12 @@ thread_local! {
     static QUICKENED: std::cell::Cell<Option<Pace>> = const { std::cell::Cell::new(None) };
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    /// The pace carried across `on_bucket_runtime` spawns (board 6543).
+    static TASK_QUICKENED: Pace;
+}
+
 /// Has the collectors this thread makes from now on go at `pace`: as tests have passes run often,
 /// and delete at once, among commits (TASK-291.3).
 #[cfg(test)]
@@ -44,10 +50,29 @@ pub(crate) fn quicken(pace: Pace) {
     QUICKENED.with(|quickened| quickened.set(Some(pace)));
 }
 
+/// The test pace active on this task or thread, if any, to carry into `on_bucket_runtime`
+/// (board 6543).
+#[cfg(test)]
+pub(crate) fn quickened() -> Option<Pace> {
+    TASK_QUICKENED.try_with(|pace| *pace).ok().or_else(|| QUICKENED.with(std::cell::Cell::get))
+}
+
+/// Runs `work` with `pace` as its collector pace, if given (board 6543).
+#[cfg(test)]
+pub(crate) async fn with_quickened<T>(
+    pace: Option<Pace>,
+    work: impl std::future::Future<Output = T>,
+) -> T {
+    match pace {
+        Some(pace) => TASK_QUICKENED.scope(pace, work).await,
+        None => work.await,
+    }
+}
+
 /// The pace of a collector made now.
 fn pace() -> Pace {
     #[cfg(test)]
-    if let Some(pace) = QUICKENED.with(std::cell::Cell::get) {
+    if let Some(pace) = quickened() {
         return pace;
     }
     PACE
