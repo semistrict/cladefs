@@ -1544,8 +1544,7 @@ impl World {
         let (started, start) = futures::channel::oneshot::channel();
         let (running, bucket) = (uploader.clone(), self.host_bucket(host));
         let running = self.spawn_uploader(async move {
-            let recovering = (recovering, None);
-            running.run(recovering, cell_options(), bucket, holder, started).await;
+            running.run(recovering, cell_options(), bucket, holder, started, None).await;
         });
         let lineage = self.hosts[host].disks[&cell].lineage;
         trace!(
@@ -2412,7 +2411,7 @@ impl World {
 
     /// cladefs: the versions the heads of the cells with versions name, each by its ID, of which
     /// cell, the segment it is at and the commit it is of: as a host restoring one read it.
-    fn named_versions(&self) -> Vec<(u64, u64, u64, u64)> {
+    fn named_versions(&self) -> Vec<(u64, u64, u64, u64, u64)> {
         let direct = Direct(self.bucket.clone());
         let cells: BTreeSet<u64> = self.versions.values().map(|cut| cut.cell).collect();
         let mut named = Vec::new();
@@ -2422,7 +2421,7 @@ impl World {
             };
             for version in &head.versions {
                 if let Some(cut) = self.versions.get(&version.id) {
-                    named.push((version.id, cell, version.at, cut.tag));
+                    named.push((version.id, cell, version.at, version.epoch, cut.tag));
                 }
             }
         }
@@ -2436,9 +2435,9 @@ impl World {
         if named.is_empty() {
             return None;
         }
-        let (version, cell, at, tag) = named[self.rng.random_range(0..named.len())];
+        let (version, cell, at, epoch, tag) = named[self.rng.random_range(0..named.len())];
         let (host, owner) = (self.rng.random_range(0..self.hosts.len()), self.id());
-        let origin = Origin { parent: sim_cell(cell), at };
+        let origin = Origin { parent: sim_cell(cell), at, epoch };
         Some(Restore { version, origin, base: Some(tag), host, owner, running: None })
     }
 

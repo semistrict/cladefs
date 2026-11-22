@@ -929,7 +929,7 @@ impl Cladefsd for Control {
         let ShredCellRequest { tenant, cell } = request.into_inner();
         let cell = crate::CellId { tenant, id: cell };
         let bucket = cells::daemon_bucket().map_err(status)?;
-        let shredded = crate::bucket::shred_cell(&bucket, cell).await.map_err(|err| {
+        let shredded = crate::bucket::shred_cell(&*bucket, cell).await.map_err(|err| {
             let failure = local_cell::upload::Failure::Bucket(err);
             let errno = crate::bucket::errno(&failure).unwrap_or(Errno::EIO);
             log::error!("cladefsd: shredding cell {cell}: {failure}");

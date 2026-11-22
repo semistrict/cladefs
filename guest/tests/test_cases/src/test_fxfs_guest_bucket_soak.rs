@@ -206,7 +206,8 @@ mod host {
             for (vm, cell_dir) in cell_dirs.iter().enumerate() {
                 let booted = Instant::now();
                 let vm = vm as u64;
-                running.push((boot(test_setup, &root, &socket, cell_dir, (vm, rate, secs))?, booted));
+                running
+                    .push((boot(test_setup, &root, &socket, cell_dir, (vm, rate, secs))?, booted));
             }
             let began = Instant::now();
             let mut ended = 0.0;

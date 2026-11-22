@@ -1168,7 +1168,9 @@ impl Model {
             Step::Write { ref data, .. } | Step::DirectWrite { ref data, .. } => {
                 Ok(data.len() as u64)
             }
-            Step::MappedWrite { ref data, .. } | Step::MapWrite { ref data, .. } => Ok(data.len() as u64),
+            Step::MappedWrite { ref data, .. } | Step::MapWrite { ref data, .. } => {
+                Ok(data.len() as u64)
+            }
             Step::Read { file, at, len } | Step::DirectRead { file, at, len } => {
                 Ok(read(file, at, len))
             }
@@ -2114,8 +2116,11 @@ mod tests {
     fn a_mapped_write_wraps_within_the_file() {
         let mut model = Model::new(1);
         model.truncate(0, 1000);
-        let op = Op::MappedWrite { file: 0, place: Place::At(1900), len: 500, data: 1, child: false };
-        let Step::MappedWrite { at, data, .. } = model.resolve(&op) else { panic!("a mapped write") };
+        let op =
+            Op::MappedWrite { file: 0, place: Place::At(1900), len: 500, data: 1, child: false };
+        let Step::MappedWrite { at, data, .. } = model.resolve(&op) else {
+            panic!("a mapped write")
+        };
         assert_eq!((at, data.len()), (900, 100));
     }
 

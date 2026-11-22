@@ -22,7 +22,7 @@ use bucket_cell::fetch::{self, Budget, Limits, Priority};
 use bucket_cell::identity::{Asked, Details, Identity, Registry};
 use bucket_cell::keys;
 use bucket_cell::layout::Location;
-use bucket_cell::object_bucket::ObjectBucket;
+use bucket_cell::object_bucket::{ObjectBucket, RoutedBucket};
 use local_cell::upload::{Failure, Runtime, UPLOAD_BYTES};
 use std::sync::Arc;
 use storage_device::ExtentId;
@@ -290,42 +290,45 @@ pub fn bucket_kms() -> Option<Arc<BucketKms<ObjectBucket>>> {
 
 /// cladefs: the host's KMS ([`kms`]), chosen once: or why it has none.
 fn host_keys() -> &'static Result<HostKeys, String> {
-    KMS.get().get_or_init(|| match bucket_cell::bucket_kms::from_env(host_bucket) {
-        Ok(chosen) => {
-            let bucket = chosen.bucket().cloned();
-            // cladefs: each other bucket's cells under that bucket's KMS (TASK-633.6), given the
-            // host's bucket to reach them by; the host's alone without one.
-            let (kmses, by_bucket): (Arc<dyn keys::Kmses>, _) = match host_bucket() {
-                Ok(home) => {
-                    let by_bucket = Arc::new(ByBucket::new(home, chosen, std::env::vars()));
-                    (by_bucket.clone(), Some(by_bucket))
-                }
-                Err(_) => (one(chosen.shared()), None),
-            };
-            Ok(HostKeys { kmses, bucket, by_bucket })
-        }
-        // cladefs: this crate's own unit tests, given no KMS, encrypt under the tests' KMS, each
-        // tenant's KEK made on its first use, which the tests' readers share
-        // (`bucket_cell::keys::testing`, TASK-411.28).
-        #[cfg(test)]
-        Err(why) if why == bucket_cell::bucket_kms::no_kms() => Ok(HostKeys {
-            kmses: one(bucket_cell::keys::testing::kms()),
-            bucket: None,
-            by_bucket: None,
-        }),
-        // cladefs: its integration tests, and the processes they start, given no KMS, encrypt under
-        // the tests' KMS, every tenant's KEK one known key (`testing::encrypted`, TASK-411.28).
-        #[cfg(all(feature = "tests-kms", not(test)))]
-        Err(why) if why == bucket_cell::bucket_kms::no_kms() => Ok(testing::host_keys()),
-        Err(why) => {
-            log::error!("cladefs: the host's KMS: {why}");
-            Err(why)
+    KMS.get().get_or_init(|| {
+        match bucket_cell::bucket_kms::from_env(|| host_bucket().map(|bucket| bucket.own().clone()))
+        {
+            Ok(chosen) => {
+                let bucket = chosen.bucket().cloned();
+                // cladefs: each other bucket's cells under that bucket's KMS (TASK-633.6), given the
+                // host's bucket to reach them by; the host's alone without one.
+                let (kmses, by_bucket): (Arc<dyn keys::Kmses>, _) = match host_bucket() {
+                    Ok(home) => {
+                        let by_bucket = Arc::new(ByBucket::new(home, chosen, std::env::vars()));
+                        (by_bucket.clone(), Some(by_bucket))
+                    }
+                    Err(_) => (one(chosen.shared()), None),
+                };
+                Ok(HostKeys { kmses, bucket, by_bucket })
+            }
+            // cladefs: this crate's own unit tests, given no KMS, encrypt under the tests' KMS, each
+            // tenant's KEK made on its first use, which the tests' readers share
+            // (`bucket_cell::keys::testing`, TASK-411.28).
+            #[cfg(test)]
+            Err(why) if why == bucket_cell::bucket_kms::no_kms() => Ok(HostKeys {
+                kmses: one(bucket_cell::keys::testing::kms()),
+                bucket: None,
+                by_bucket: None,
+            }),
+            // cladefs: its integration tests, and the processes they start, given no KMS, encrypt under
+            // the tests' KMS, every tenant's KEK one known key (`testing::encrypted`, TASK-411.28).
+            #[cfg(all(feature = "tests-kms", not(test)))]
+            Err(why) if why == bucket_cell::bucket_kms::no_kms() => Ok(testing::host_keys()),
+            Err(why) => {
+                log::error!("cladefs: the host's KMS: {why}");
+                Err(why)
+            }
         }
     })
 }
 
 /// cladefs: the host's bucket, which the bucket KMS keeps tenants' KEKs in (`CLADEFSD_BUCKET`).
-fn host_bucket() -> Result<Arc<ObjectBucket>, String> {
+fn host_bucket() -> Result<Arc<RoutedBucket>, String> {
     let url = crate::host_cell::host_bucket_url().ok_or("CLADEFSD_BUCKET names none")?;
     crate::host_cell::bucket(&url).map_err(|err| format!("{url}: {err:#}"))
 }
@@ -427,12 +430,14 @@ pub fn forget(scope: keys::Scope, why: &str) -> Forgotten {
     let halted = format!("as {scope}'s keys are forgotten: {why}");
     let stores = crate::halt::halt_cells(|cell| scope.covers(cell), Errno::EACCES, &halted);
     let (bytes, extents) = crate::cache::forget(|cell| scope.covers(cell));
+    // Forget keys before bumping `forget_kept`'s generation so no concurrent read can re-open or
+    // re-insert plaintext after `forget_kept` runs (board 6026).
+    let rings = MEMORY.get().keys().forget(scope);
     let kept = MEMORY.get().forget_kept(scope);
     // Its KMS, if it made it: one not made yet unwrapped nothing.
     if let Some(kms) = POOLED.get().get() {
         kms.forget(scope, why);
     }
-    let rings = MEMORY.get().keys().forget(scope);
     let forgotten = Forgotten { stores, rings, kept, extents, bytes };
     log::warn!("cladefs: {scope}'s keys forgotten, {why}: {forgotten:?}");
     forgotten
@@ -444,7 +449,7 @@ pub fn forget(scope: keys::Scope, why: &str) -> Forgotten {
 /// of the shredding does. Returns how many generations of its KEK it took out, and what the host
 /// forgot. Only as strong as `bucket` keeps no older version of the cell's head (doc-16).
 pub async fn shred_cell(
-    bucket: &ObjectBucket,
+    bucket: &impl bucket_cell::Bucket,
     cell: crate::CellId,
 ) -> Result<(usize, Forgotten), bucket_cell::Error> {
     let removed = bucket_cell::keys::shred(bucket, cell).await?;
@@ -553,11 +558,17 @@ node_local::node_local! {
 }
 
 node_local::node_local! {
-    /// What a host's open cells' reads keep in memory, objects' tails and the parts fetched last:
-    /// once for the host, however many of its open cells read them, as the forks of one base read
-    /// its parts, within bounds that hold for the host, not for each open cell (TASK-92.21,
-    /// TASK-92.22).
-    static MEMORY: Arc<fetch::Memory> = fetch::Memory::new();
+    /// What a host's open cells' reads keep in memory, objects' tails and the parts fetched/unpacked
+    /// last: unified with `local_cell::unpacked()` via `fetch::shared_parts()` and governed by
+    /// `cladefsd::memory` (TASK-92.21, TASK-92.22, board 6026).
+    static MEMORY: Arc<fetch::Memory> = fetch::Memory::with_parts(fetch::shared_parts().clone());
+}
+
+/// cladefs: the host's fetcher memory, whose tails and unified recent/unpacked parts the memory
+/// governor counts and evicts (board 6026).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn memory() -> &'static Arc<fetch::Memory> {
+    MEMORY.get()
 }
 
 node_local::node_local! {
@@ -633,14 +644,28 @@ const RELOCATED_MOST: usize = 8;
 /// first if it has any.
 pub struct HostFetcher {
     runtime: tokio::runtime::Handle,
-    parts: Arc<fetch::Fetcher<ObjectBucket>>,
+    parts: Arc<fetch::Fetcher<RoutedBucket>>,
+}
+
+/// cladefs: polls `future` outside tokio's cooperative budget so awaiting a `bucket_runtime`
+/// `JoinHandle` inside `futures::executor::block_on` from a tokio task cannot livelock
+/// (board 6525). Under madsim there is no tokio coop budget.
+pub(crate) async fn unconstrained<F: std::future::Future>(future: F) -> F::Output {
+    #[cfg(not(madsim))]
+    {
+        tokio::task::unconstrained(future).await
+    }
+    #[cfg(madsim)]
+    {
+        future.await
+    }
 }
 
 impl HostFetcher {
     /// What reads extents' data from `bucket`, keeping the parts it fetches in `cache`, if given,
     /// the host's.
     pub(crate) fn new(
-        bucket: Arc<ObjectBucket>,
+        bucket: Arc<RoutedBucket>,
         cache: Option<Arc<Cache>>,
     ) -> Result<Arc<Self>, Failure> {
         let runtime = bucket_runtime()?;
@@ -682,7 +707,10 @@ impl HostFetcher {
             Ok(parts.read(extent, &location, offset, len, Priority::Demand).await?)
         });
         let read = self.runtime.spawn(crate::request::within(crate::request::current(), reading));
-        async move { read.await.map_err(|err| Failure::local(err, "fetching"))? }
+        // cladefs: `unconstrained` prevents tokio's thread-local coop budget from livelocking
+        // when this future is polled inside `futures::executor::block_on` from a tokio task
+        // (board 6525).
+        async move { unconstrained(read).await.map_err(|err| Failure::local(err, "fetching"))? }
     }
 
     /// cladefs: `len` bytes at `offset` in `extent`, whose data was at `location` in the bucket,
@@ -746,13 +774,13 @@ impl HostFetcher {
 node_local::node_local! {
     /// cladefs: the hosts sharing the host's bucket, the one they share, which its open cells'
     /// fetchers of it ask for parts before it, if it has any ([`ask_peers`], TASK-406.2).
-    static PEERS: std::sync::OnceLock<(Arc<ObjectBucket>, Arc<peers::Peers>)> =
+    static PEERS: std::sync::OnceLock<(Arc<RoutedBucket>, Arc<peers::Peers>)> =
         std::sync::OnceLock::new();
 }
 
 /// cladefs: has the fetchers of `bucket`, the host's, made from now on ask `peers`, the hosts
 /// sharing it, for the parts they own before it (TASK-406.2): before any open cell opens. Once.
-pub fn ask_peers(bucket: Arc<ObjectBucket>, peers: Arc<peers::Peers>) -> Result<(), String> {
+pub fn ask_peers(bucket: Arc<RoutedBucket>, peers: Arc<peers::Peers>) -> Result<(), String> {
     PEERS.get().set((bucket, peers)).map_err(|_| "the host's peers are set already".to_owned())
 }
 
@@ -781,7 +809,7 @@ pub fn members() -> Option<Arc<dyn local_cell::upload::Members>> {
 /// cladefs: what serves the hosts sharing `bucket`, the host's, the parts they ask it for, as
 /// stored (TASK-406.2): a fetcher of it, keeping what it fetches in `cache`, the host's, as its
 /// open cells' fetchers do, with them, under the host's budget, and asking no peer.
-pub fn serving_peers(bucket: Arc<ObjectBucket>, cache: Arc<Cache>) -> Result<Serving, Failure> {
+pub fn serving_peers(bucket: Arc<RoutedBucket>, cache: Arc<Cache>) -> Result<Serving, Failure> {
     Ok(Serving {
         runtime: bucket_runtime()?,
         parts: Arc::new(fetch::Fetcher::new(
@@ -797,7 +825,7 @@ pub fn serving_peers(bucket: Arc<ObjectBucket>, cache: Arc<Cache>) -> Result<Ser
 #[derive(Clone)]
 pub struct Serving {
     runtime: tokio::runtime::Handle,
-    parts: Arc<fetch::Fetcher<ObjectBucket>>,
+    parts: Arc<fetch::Fetcher<RoutedBucket>>,
 }
 
 impl Serving {
@@ -833,7 +861,7 @@ mod tests {
     use crate::test_data::noise;
     use crate::{ExtentId, OpenCell, VolatileSlice};
     use bucket_cell::cache::Cache;
-    use bucket_cell::object_bucket::ObjectBucket;
+    use bucket_cell::object_bucket::{ObjectBucket, RoutedBucket};
     use bucket_cell::testing::read;
     use bucket_cell::{lifecycle, recover};
     use object_store::memory::InMemory;
@@ -844,7 +872,7 @@ mod tests {
 
     /// The URL `bucket` is this process's by, made so if it is none's yet: a memory bucket of its
     /// own, by its address, which the open cells the tests make in it name (TASK-165.9).
-    pub(super) fn url_of(bucket: &Arc<ObjectBucket>) -> String {
+    pub(super) fn url_of(bucket: &Arc<RoutedBucket>) -> String {
         let url = format!("memory:///bucket-tests-{:p}", Arc::as_ptr(bucket));
         crate::host_cell::use_bucket(&url, bucket.clone());
         url
@@ -855,7 +883,7 @@ mod tests {
     pub(super) async fn kept_in(
         path: impl AsRef<std::path::Path>,
         (capacity, cell): (u64, Option<crate::CellId>),
-        bucket: &Arc<ObjectBucket>,
+        bucket: &Arc<RoutedBucket>,
         keeping: local_cell::upload::Options,
     ) -> Result<OpenCell, crate::Error> {
         let cell = cell.unwrap_or_else(crate::host_cell::new_alone);
@@ -865,7 +893,7 @@ mod tests {
     /// Has the cell directory at `path` name `bucket` as the bucket its cell is kept in: a host
     /// restarted whose open cells reach the bucket otherwise than before, as the fault tests' do
     /// (TASK-165.9). An open cell whose host died before it described it names nothing.
-    pub(super) fn naming(path: &std::path::Path, bucket: &Arc<ObjectBucket>) {
+    pub(super) fn naming(path: &std::path::Path, bucket: &Arc<RoutedBucket>) {
         let description = path.join("store");
         let text = match std::fs::read_to_string(&description) {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
@@ -914,7 +942,7 @@ mod tests {
     pub(super) type Uploaded = (Vec<(u64, Vec<u8>)>, Option<Vec<u8>>);
 
     /// The cell's extents and root, read back from `bucket`.
-    pub(super) fn uploaded(bucket: &Arc<ObjectBucket>, cell: crate::CellId) -> Uploaded {
+    pub(super) fn uploaded(bucket: &Arc<RoutedBucket>, cell: crate::CellId) -> Uploaded {
         futures::executor::block_on(async {
             let state = recover(&**bucket, cell, None).await.unwrap().state;
             let mut extents = Vec::new();
@@ -930,7 +958,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn uploads_what_the_open_cell_makes_durable() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "cells"));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "cells").unrouted());
         let open_cell = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
             .await
             .unwrap();
@@ -1012,7 +1040,7 @@ mod tests {
     async fn takeovers_of_writers_still_uploading_keep_their_guests() {
         use bucket_cell::{Commit, SegmentBuilder, Writer};
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let (cell, token) = (crate::host_cell::new_alone(), crate::host_cell::token().unwrap());
         // The writer before, its two segments in flight.
         let before = futures::executor::block_on(async {
@@ -1077,8 +1105,8 @@ mod tests {
         let objects: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         // The dying host's way to the objects, and what reaches them after it.
         let gated = Arc::new(Gated::over(objects.clone()));
-        let reached = Arc::new(ObjectBucket::new(gated.clone(), ""));
-        let bucket = Arc::new(ObjectBucket::new(objects, ""));
+        let reached = Arc::new(ObjectBucket::new(gated.clone(), "").unrouted());
+        let bucket = Arc::new(ObjectBucket::new(objects, "").unrouted());
         let options = bucket_cell::collector::Options { compact_below: 0.5, grace: 0 };
         let collect = |holder| {
             let pass = bucket_cell::collector::collect(&*bucket, holder, &options);
@@ -1160,7 +1188,7 @@ mod tests {
     async fn inherited_compacted_twice() {
         const EXTENT: usize = 64 * BLOCK;
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let options = bucket_cell::collector::Options { compact_below: 0.5, grace: 0 };
         let collect = |holder| {
             let pass = bucket_cell::collector::collect(&*bucket, holder, &options);
@@ -1231,7 +1259,7 @@ mod tests {
         const EXTENT: usize = 64 * BLOCK;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let options = bucket_cell::collector::Options { compact_below: 0.5, grace: 0 };
         let collect = |holder| {
             let pass = bucket_cell::collector::collect(&*bucket, holder, &options);
@@ -1299,7 +1327,7 @@ mod tests {
     }
 
     /// The footers of `cell`'s segments in `bucket`, in order.
-    fn footers(bucket: &ObjectBucket, cell: crate::CellId) -> Vec<bucket_cell::layout::Footer> {
+    fn footers(bucket: &RoutedBucket, cell: crate::CellId) -> Vec<bucket_cell::layout::Footer> {
         use bucket_cell::layout;
         futures::executor::block_on(async {
             let listed = bucket_cell::Bucket::list(bucket, &layout::segments(cell)).await;
@@ -1320,7 +1348,7 @@ mod tests {
     async fn logs_caught_up_upload_in_order() {
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
-        let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(gated.clone(), "").unrouted());
         let open_cell =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket, idle()).await.unwrap();
         let cell = open_cell.cell();
@@ -1334,7 +1362,7 @@ mod tests {
         }
         open_cell.flush().await.unwrap();
         // Out of reach: the open cell holds what it committed, the bucket nothing of it.
-        let behind = Arc::new(ObjectBucket::new(gated.backend.clone(), ""));
+        let behind = Arc::new(ObjectBucket::new(gated.backend.clone(), "").unrouted());
         assert_eq!(uploaded(&behind, cell), (vec![], None));
         gated.shut.store(false, std::sync::atomic::Ordering::Relaxed);
         open_cell.wait_uploaded().await.unwrap();
@@ -1353,7 +1381,7 @@ mod tests {
     ) -> (tempfile::TempDir, crate::host_cell::Opened, u64) {
         const EXTENT: usize = 1 << 20;
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let path = dir.path().join("store");
         let opened = crate::host_cell::create_unmade(
             &path,
@@ -1452,7 +1480,7 @@ mod tests {
         let put = Duration::from_millis(350);
         let config = ThrottleConfig { wait_put_per_call: put, ..ThrottleConfig::default() };
         let objects = Arc::new(ThrottledStore::new(InMemory::new(), config));
-        let bucket = Arc::new(ObjectBucket::new(objects, ""));
+        let bucket = Arc::new(ObjectBucket::new(objects, "").unrouted());
         let dir = tempfile::tempdir().unwrap();
         let open_cell = kept_in(
             dir.path().join("store"),
@@ -1559,7 +1587,7 @@ mod tests {
         use crate::host_cell::fork_child;
         let held = || crate::heap::held() as u64;
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let capacity = 2 * extents * BLOCK as u64 + (1 << 30);
         let base =
             kept_in(dir.path().join("base"), (capacity, None), &bucket, idle()).await.unwrap();
@@ -1781,7 +1809,7 @@ mod tests {
         const FORKS: usize = 4;
         for version in [false, true] {
             let dir = tempfile::tempdir().unwrap();
-            let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+            let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
             let base =
                 kept_in(dir.path().join("base"), (1 << 30, None), &bucket, idle()).await.unwrap();
             for sequence in 1..=EXTENTS {
@@ -1875,7 +1903,7 @@ mod tests {
         use crate::host_cell::fork_child;
         const EXTENTS: u64 = 4160;
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let capacity = 2 * EXTENTS * BLOCK as u64 + (1 << 30);
         let base =
             kept_in(dir.path().join("base"), (capacity, None), &bucket, idle()).await.unwrap();
@@ -1909,6 +1937,9 @@ mod tests {
             }
         });
         assert_eq!(asked, 0, "allocations of {EXTENTS} asks of the cell");
+        // Warm up `futures::executor::block_on`'s thread-local `CURRENT_THREAD_NOTIFY` Arc on
+        // whichever tokio worker thread we are running on before counting cache-read allocations.
+        futures::executor::block_on(async {});
         let (read, ()) = allocations_while(|| {
             futures::executor::block_on(async {
                 for sequence in 1..=EXTENTS {
@@ -1938,7 +1969,7 @@ mod tests {
         let (extents, rounds) =
             (count("CLADEFS_BENCH_EXTENTS", 32768), count("CLADEFS_BENCH_ROUNDS", 20));
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let capacity = 2 * extents * BLOCK as u64 + (1 << 30);
         let base =
             kept_in(dir.path().join("base"), (capacity, None), &bucket, idle()).await.unwrap();
@@ -2010,7 +2041,7 @@ mod tests {
     async fn files_with_flipped_bytes_are_not_uploaded() {
         use bucket_cell::layout;
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let open_cell = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
             .await
             .unwrap();
@@ -2046,7 +2077,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn durable_commits_fail_once_another_takes_the_cell() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let open_cell = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
             .await
             .unwrap();
@@ -2069,7 +2100,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn later_placements_fence_earlier_ones() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let (first_path, second_path) = (dir.path().join("first"), dir.path().join("second"));
         let first = kept_in(&first_path, (1 << 30, None), &bucket.clone(), idle()).await.unwrap();
         let cell = first.cell();
@@ -2129,11 +2160,11 @@ mod tests {
     /// An open cell, placed, its cell then lost to it as `lose` loses it, in `dir`, changes nothing
     /// more once its uploader finds it lost.
     async fn changes_nothing_once_lost(
-        lose: impl AsyncFnOnce(&Arc<ObjectBucket>, &std::path::Path, crate::CellId),
+        lose: impl AsyncFnOnce(&Arc<RoutedBucket>, &std::path::Path, crate::CellId),
     ) {
         const EROFS: crate::Errno = crate::Errno::EROFS;
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let path = dir.path().join("first");
         let open_cell = kept_in(&path, (1 << 30, None), &bucket.clone(), idle()).await.unwrap();
         let cell = open_cell.cell();
@@ -2164,7 +2195,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn versions_made_here_are_forgotten_once_dropped() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let open_cell = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
             .await
             .unwrap();
@@ -2188,7 +2219,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn earlier_placements_delete_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let (first_path, second_path) = (dir.path().join("first"), dir.path().join("second"));
         let first = kept_in(&first_path, (1 << 30, None), &bucket.clone(), idle()).await.unwrap();
         let cell = first.cell();
@@ -2220,7 +2251,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn unplaced_copies_take_their_hosts_token() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let options = local_cell::upload::Options { token: 9, ..idle() };
         let open_cell =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options)
@@ -2237,13 +2268,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn open_cells_whose_bucket_lacks_their_cell_refuse() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let path = dir.path().join("store");
         let open_cell = kept_in(&path, (1 << 30, None), &bucket, idle()).await.unwrap();
         write(&open_cell, 1, &pattern(1, BLOCK)).await;
         open_cell.commit(Some(b"acknowledged")).await.unwrap();
         drop(open_cell);
-        let other = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let other = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         naming(&path, &other);
         let refused = reopened(&path, idle()).await.err().and_then(|err| err.errno());
         assert_eq!(refused, Some(crate::Errno::ENOENT));
@@ -2259,7 +2290,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn dropped_open_cells_upload_their_open_segments_commits() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let open_cell = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
             .await
             .unwrap();
@@ -2279,7 +2310,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn waits_for_uploads() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let open_cell = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
             .await
             .unwrap();
@@ -2626,7 +2657,7 @@ mod tests {
         use bucket_cell::object_bucket::Request;
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
-        let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(gated.clone(), "").unrouted());
         let open_cell = Arc::new(
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options)
                 .await
@@ -2678,7 +2709,7 @@ mod tests {
         super::set_upload_memory(BUDGET).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
-        let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(gated.clone(), "").unrouted());
         let options =
             local_cell::upload::Options { max_lag: u64::MAX, max_lag_bytes: u64::MAX, ..idle() };
         let open_cell = Arc::new(
@@ -2734,7 +2765,7 @@ mod tests {
     async fn segments_upload_at_once() {
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
-        let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(gated.clone(), "").unrouted());
         let open_cell = Arc::new(
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
                 .await
@@ -2770,7 +2801,7 @@ mod tests {
     async fn uploads_done_close_no_segment_for_commits_no_one_waits_for() {
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
-        let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(gated.clone(), "").unrouted());
         let open_cell = Arc::new(
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
                 .await
@@ -2832,7 +2863,7 @@ mod tests {
             kept_in(
                 dir.path().join("lost"),
                 (1 << 30, None),
-                &Arc::new(ObjectBucket::new(gated.clone(), prefix)),
+                &Arc::new(ObjectBucket::new(gated.clone(), prefix).unrouted()),
                 options,
             )
             .await
@@ -2884,7 +2915,7 @@ mod tests {
         drop(waiting);
         std::fs::rename(dir.path().join("lost"), dir.path().join("gone")).unwrap();
 
-        let bucket = Arc::new(ObjectBucket::new(objects, prefix));
+        let bucket = Arc::new(ObjectBucket::new(objects, prefix).unrouted());
         let taken =
             kept_in(dir.path().join("taken"), (1 << 30, Some(cell)), &bucket.clone(), idle())
                 .await
@@ -2919,7 +2950,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn extents_freed_and_written_anew_survive_recovery() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let lost = kept_in(dir.path().join("lost"), (1 << 30, None), &bucket.clone(), idle())
             .await
             .unwrap();
@@ -3040,7 +3071,7 @@ mod tests {
     async fn durable_commits_cost_a_create_and_a_head_swap() {
         use bucket_cell::object_bucket::Request;
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let open_cell = kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle())
             .await
             .unwrap();
@@ -3075,7 +3106,7 @@ mod tests {
         use bucket_cell::layout;
         use bucket_cell::object_bucket::Request;
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let lost = kept_in(dir.path().join("lost"), (1 << 30, None), &bucket.clone(), idle())
             .await
             .unwrap();
@@ -3240,7 +3271,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn opens_cells_elsewhere() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let first = kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle())
             .await
             .unwrap();
@@ -3291,7 +3322,7 @@ mod tests {
         use crate::request::{RequestId, within};
         let lines = crate::cladefsd::logging::capture();
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let first = kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle())
             .await
             .unwrap();
@@ -3349,7 +3380,7 @@ mod tests {
 
     /// The directory of an open cell of `cell` at `path`, its cell kept in `bucket`, made whole,
     /// and not opened: what opening takes the cell into, as the bucket holds it.
-    fn made_for(path: &std::path::Path, cell: crate::CellId, bucket: &Arc<ObjectBucket>) {
+    fn made_for(path: &std::path::Path, cell: crate::CellId, bucket: &Arc<RoutedBucket>) {
         std::fs::create_dir(path).unwrap();
         let description =
             local_cell::Description { block_size: BLOCK as u32, capacity: 1 << 30, cell };
@@ -3365,7 +3396,7 @@ mod tests {
     async fn takes_take_what_the_cell_holds_once_taken() {
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
-        let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(gated.clone(), "").unrouted());
         let first =
             kept_in(dir.path().join("first"), (1 << 30, None), &bucket, idle()).await.unwrap();
         let cell = first.cell();
@@ -3401,14 +3432,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let gated = Arc::new(Gated::over(memory.clone()));
-        let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(gated.clone(), "").unrouted());
         // The first host's, through a gate of its own.
         let dying = Arc::new(Gated::over(memory));
         let lost = dir.path().join("lost");
         let first = kept_in(
             &lost,
             (1 << 30, None),
-            &Arc::new(ObjectBucket::new(dying.clone(), "")),
+            &Arc::new(ObjectBucket::new(dying.clone(), "").unrouted()),
             idle(),
         )
         .await;
@@ -3465,7 +3496,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn versions_fork_into_other_tenants_cells_while_shared() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let of = |tenant| crate::host_cell::named(tenant);
         let source = dir.path().join("source");
         let source = kept_in(&source, (1 << 30, Some(of(1))), &bucket, idle()).await.unwrap();
@@ -3533,7 +3564,7 @@ mod tests {
         }
         crate::bucket::set_kms(kms.clone()).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let of = |tenant| crate::host_cell::named(tenant);
         let source = dir.path().join("source");
         let source = kept_in(&source, (1 << 30, Some(of(1))), &bucket, idle()).await.unwrap();
@@ -3596,7 +3627,7 @@ mod tests {
         local.destroy(1).unwrap();
         crate::bucket::set_kms(Arc::new(extent_keys::testing::Forgetting::new(local))).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let of = |tenant| crate::host_cell::named(tenant);
         for (name, tenant) in [("forgotten", 1), ("never", 2)] {
             let cell = of(tenant);
@@ -3623,7 +3654,7 @@ mod tests {
         }
         crate::bucket::set_kms(kms.clone()).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let of = |tenant| crate::host_cell::named(tenant);
         let names = ["ours", "sibling", "theirs"];
         let mut open_cells: Vec<(OpenCell, ExtentId, Vec<u8>)> = Vec::new();
@@ -3660,7 +3691,7 @@ mod tests {
         };
 
         let cell = open_cells[0].0.cell();
-        let shredded = futures::executor::block_on(crate::bucket::shred_cell(&bucket, cell));
+        let shredded = futures::executor::block_on(crate::bucket::shred_cell(&*bucket, cell));
         let (removed, forgotten) = shredded.unwrap();
         assert_eq!(removed, 1);
         assert_eq!(
@@ -3853,7 +3884,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn open_cells_with_writers_fork_into_other_tenants_cells_from_the_common_tenant_alone() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let of = |tenant| crate::host_cell::named(tenant);
         let listed = || {
             let listed = futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, ""));
@@ -3911,7 +3942,7 @@ mod tests {
     async fn forks_name_their_commit_though_later_ones_are_acknowledged_with_it() {
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
-        let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(gated.clone(), "").unrouted());
         let parent = Arc::new(
             kept_in(dir.path().join("parent"), (1 << 30, None), &bucket.clone(), idle())
                 .await
@@ -3960,7 +3991,7 @@ mod tests {
     async fn extents_freed_are_spent_on_the_host_that_takes_their_cell() {
         for checkpointed in [false, true] {
             let dir = tempfile::tempdir().unwrap();
-            let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+            let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
             let first = kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle())
                 .await
                 .unwrap();
@@ -3999,7 +4030,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn extents_sealed_and_freed_in_one_segment_are_spent_where_their_cell_is_taken() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let first = kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle())
             .await
             .unwrap();
@@ -4034,7 +4065,7 @@ mod tests {
         use bucket_cell::Bucket as _;
         use bucket_cell::bucket::PutMode;
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let first = kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle())
             .await
             .unwrap();
@@ -4071,7 +4102,7 @@ mod tests {
     /// holding an extent and a root: returns the child's record.
     async fn forked(
         parent: &OpenCell,
-        bucket: &Arc<ObjectBucket>,
+        bucket: &Arc<RoutedBucket>,
         path: &std::path::Path,
         child: crate::CellId,
     ) -> bucket_cell::layout::Head {
@@ -4088,7 +4119,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn forks_to_a_child_forked_before_make_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let parent = kept_in(dir.path().join("parent"), (1 << 30, None), &bucket.clone(), idle())
             .await
             .unwrap();
@@ -4157,7 +4188,7 @@ mod tests {
     /// and a root: what a guest may name as its fork's child.
     async fn others(
         path: &std::path::Path,
-        bucket: &Arc<ObjectBucket>,
+        bucket: &Arc<RoutedBucket>,
         cell: crate::CellId,
     ) -> OpenCell {
         let others = kept_in(path, (1 << 30, Some(cell)), &bucket.clone(), idle()).await.unwrap();
@@ -4171,7 +4202,7 @@ mod tests {
 
     /// Whether the cell of `others`, its open cell, is live still: it commits, and uploads its
     /// commits.
-    async fn live(others: &OpenCell, bucket: &Arc<ObjectBucket>) -> Committed {
+    async fn live(others: &OpenCell, bucket: &Arc<RoutedBucket>) -> Committed {
         write(others, 2, &pattern(4, BLOCK)).await;
         let committed = others.commit(Some(b"again")).await;
         (committed, others.wait_uploaded().await, uploaded(bucket, others.cell()))
@@ -4190,7 +4221,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn forks_to_a_cell_the_bucket_has_fail_with_eexist() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
         let parent = kept_in(dir.path().join("parent"), (1 << 30, None), &bucket.clone(), idle())
             .await
             .unwrap();
@@ -4222,7 +4253,7 @@ mod tests {
             kept_in(
                 dir.join("parent"),
                 (1 << 30, None),
-                &Arc::new(ObjectBucket::new(gated.clone(), "")),
+                &Arc::new(ObjectBucket::new(gated.clone(), "").unrouted()),
                 idle(),
             )
             .await
@@ -4258,7 +4289,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let gated = Arc::new(Gated::over(memory.clone()));
-        let bucket = Arc::new(ObjectBucket::new(memory, ""));
+        let bucket = Arc::new(ObjectBucket::new(memory, "").unrouted());
         let path = dir.path().join("child");
         let (_, child, fork) = forking_held(dir.path(), &gated, &path).await;
         let others = others(&dir.path().join("other"), &bucket, child).await;

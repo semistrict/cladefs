@@ -411,7 +411,7 @@ async fn write(
         writer.upload(segment).await.map_err(failed)?;
         writer.acknowledge().await.map_err(failed)?;
         if let Some(version) = version {
-            versioned = Some((version, Origin { parent: id, at: segment }));
+            versioned = Some((version, Origin { parent: id, at: segment, epoch: writer.epoch() }));
         }
     }
     writer.checkpoint().await.map_err(failed)?;

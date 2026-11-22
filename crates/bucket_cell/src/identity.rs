@@ -37,8 +37,21 @@ pub const NONE: u16 = u16::MAX;
 /// The root bucket's number: the first bucket's, which keeps the record of every bucket.
 pub const ROOT: u16 = 1;
 
-/// cladefs: how many slots a cell's head is kept in, by default ([`Settings::head_slots`]).
-pub const DEFAULT_HEAD_SLOTS: u64 = 10;
+/// cladefs: how many slots a cell's head is kept in by default on S3/Azure/file/memory buckets
+/// ([`Settings::head_slots`], board 6020).
+pub const DEFAULT_HEAD_SLOTS: u64 = 1;
+
+/// cladefs: how many slots a cell's head is kept in by default on GCS buckets, where a single
+/// object accepts at most ~1 write/s (TASK-690, TASK-691, board 6020).
+pub const GCS_HEAD_SLOTS: u64 = 10;
+
+/// cladefs: default `head_slots` for a bucket's provider (`10` for GCS, `1` elsewhere).
+pub fn default_head_slots(provider: Option<&str>) -> u64 {
+    match provider {
+        Some("gcs") => GCS_HEAD_SLOTS,
+        _ => DEFAULT_HEAD_SLOTS,
+    }
+}
 
 /// cladefs: what a bucket is formatted or added with, its settings, fixed for good in its identity
 /// (TASK-691): every host reads them as it opens the bucket, and goes by them for as long as the
@@ -74,17 +87,42 @@ pub struct Asked {
 }
 
 impl Settings {
-    /// What a formatting asked `asked` makes: each the default, but those asked; refused out of
-    /// range ([`Error::Settings`]).
+    /// Default settings for a bucket of `provider` (`Some("gcs")` gets 10 head slots, others 1).
+    pub fn for_provider(provider: Option<&str>) -> Self {
+        Self { head_slots: default_head_slots(provider) }
+    }
+
+    /// What a formatting asked `asked` makes: each the default for `provider`, but those asked;
+    /// refused out of range ([`Error::Settings`]).
     pub fn formatted(asked: Asked) -> Result<Self, Error> {
-        Self { head_slots: asked.head_slots.unwrap_or(DEFAULT_HEAD_SLOTS) }.checked()
+        Self::formatted_for(asked, None)
+    }
+
+    /// What a formatting of a bucket of `provider` asked `asked` makes.
+    pub fn formatted_for(asked: Asked, provider: Option<&str>) -> Result<Self, Error> {
+        Self::formatted_with_default(asked, default_head_slots(provider))
+    }
+
+    /// What a formatting with fallback `default_slots` asked `asked` makes.
+    fn formatted_with_default(asked: Asked, default_slots: u64) -> Result<Self, Error> {
+        Self { head_slots: asked.head_slots.unwrap_or(default_slots) }.checked()
     }
 
     /// What an addition to the buckets of a root of `root` asked `asked` makes: each per-bucket
-    /// setting the root's, but those asked; each clade-wide one the root's, an ask of another
-    /// refused ([`Error::Settings`]).
+    /// setting the root's (or `GCS_HEAD_SLOTS` when adding a GCS bucket without an explicit ask),
+    /// but those asked; each clade-wide one the root's, an ask of another refused
+    /// ([`Error::Settings`]).
     pub fn added(root: Settings, asked: Asked) -> Result<Self, Error> {
-        Self { head_slots: asked.head_slots.unwrap_or(root.head_slots) }.checked()
+        Self::added_for(root, asked, None)
+    }
+
+    /// What an addition of a bucket of `provider` to a root of `root` asked `asked` makes.
+    pub fn added_for(root: Settings, asked: Asked, provider: Option<&str>) -> Result<Self, Error> {
+        let fallback = match provider {
+            Some("gcs") => root.head_slots.max(GCS_HEAD_SLOTS),
+            _ => root.head_slots,
+        };
+        Self { head_slots: asked.head_slots.unwrap_or(fallback) }.checked()
     }
 
     /// These, if each is in its range.
@@ -281,7 +319,11 @@ pub async fn format(
     let identity = match get(bucket).await? {
         Some(found) => found,
         None => {
-            let settings = Settings::formatted(asked)?;
+            let default_slots = match details.provider.as_deref() {
+                Some(provider) => default_head_slots(Some(provider)),
+                None => bucket.default_head_slots(),
+            };
+            let settings = Settings::formatted_with_default(asked, default_slots)?;
             let made =
                 Identity { format: layout::FORMAT, number: ROOT, id: rand::random(), settings };
             match bucket::create(bucket, layout::IDENTITY, layout::encode(&made)).await? {
@@ -324,7 +366,13 @@ pub async fn add(
     if ours.number != ROOT {
         return Err(Error::NotRoot(ours.number));
     }
-    let settings = Settings::added(ours.settings, asked)?;
+    let settings = match details.provider.as_deref() {
+        Some(provider) => Settings::added_for(ours.settings, asked, Some(provider))?,
+        None => {
+            let fallback = ours.settings.head_slots.max(new.default_head_slots());
+            Settings { head_slots: asked.head_slots.unwrap_or(fallback) }.checked()?
+        }
+    };
     let found = get(new).await?;
     let (entry, registry) = loop {
         let (registry, version) = registry_versioned(root)

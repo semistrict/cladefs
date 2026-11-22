@@ -25,9 +25,8 @@ use crate::error::{Errno, Error};
 use crate::faults::failpoint;
 use anyhow::Context as _;
 use bucket_cell::cell;
-use bucket_cell::known::Learned;
 use bucket_cell::layout::{CellId, Child};
-use bucket_cell::object_bucket::ObjectBucket;
+use bucket_cell::object_bucket::{ObjectBucket, RoutedBucket};
 use local_cell::upload::{self, Failure, Uploader};
 use local_cell::{Description, HostDir, LocalCell, Options, Recovering};
 use std::collections::{BTreeMap, BTreeSet};
@@ -69,7 +68,7 @@ pub(crate) fn may_fork_into(
 /// other cell of the bucket has, nor will (`bucket_cell::objectid`), so that cells made apart,
 /// and the forks of one, mint extent IDs of their own (backlog doc-4), which a host's cache of
 /// extents keys them by (TASK-364). A cell's ID is its cell's: no caller names a new one.
-pub(crate) async fn new_cell(bucket: &ObjectBucket, tenant: u64) -> Result<CellId, Failure> {
+pub(crate) async fn new_cell(bucket: &RoutedBucket, tenant: u64) -> Result<CellId, Failure> {
     let id = bucket.new_objectid().await?;
     Ok(CellId { tenant, id })
 }
@@ -130,11 +129,11 @@ node_local::node_local! {
     /// The buckets this process keeps cells in, by their URLs: one each, which every cell
     /// naming it shares, so that a memory bucket (`memory:///NAME`) is one for the process, as a
     /// bucket elsewhere is one for every process.
-    static BUCKETS: Mutex<BTreeMap<String, Arc<ObjectBucket>>> = Mutex::new(BTreeMap::new());
+    static BUCKETS: Mutex<BTreeMap<String, Arc<RoutedBucket>>> = Mutex::new(BTreeMap::new());
 }
 
 /// The bucket at `url` ([`ObjectBucket::from_url`]): this process's, made if it has none yet.
-pub(crate) fn bucket(url: &str) -> anyhow::Result<Arc<ObjectBucket>> {
+pub(crate) fn bucket(url: &str) -> anyhow::Result<Arc<RoutedBucket>> {
     bucket_opened(url, ObjectBucket::from_url)
 }
 
@@ -142,7 +141,7 @@ pub(crate) fn bucket(url: &str) -> anyhow::Result<Arc<ObjectBucket>> {
 /// own options, its credentials (`CLADEFSD_BUCKET_<number>_*`,
 /// [`bucket_cell::object_bucket::numbered_options`]), unless this process opened it already
 /// (board 5550).
-pub(crate) fn bucket_of(url: &str, number: u16) -> anyhow::Result<Arc<ObjectBucket>> {
+pub(crate) fn bucket_of(url: &str, number: u16) -> anyhow::Result<Arc<RoutedBucket>> {
     bucket_opened(url, |url| ObjectBucket::from_url_numbered(url, number))
 }
 
@@ -150,7 +149,7 @@ pub(crate) fn bucket_of(url: &str, number: u16) -> anyhow::Result<Arc<ObjectBuck
 fn bucket_opened(
     url: &str,
     open: impl FnOnce(&str) -> Result<ObjectBucket, String>,
-) -> anyhow::Result<Arc<ObjectBucket>> {
+) -> anyhow::Result<Arc<RoutedBucket>> {
     let mut buckets = BUCKETS.get().lock().unwrap();
     if let Some(bucket) = buckets.get(url) {
         return Ok(bucket.clone());
@@ -165,14 +164,14 @@ fn bucket_opened(
 
 /// cladefs: the bucket numbered `number`, as the host whose bucket is at `home` reaches it
 /// (TASK-633.3, backlog doc-23): `home` itself, if of that number; else the bucket its requests of
-/// that number's cells go to ([`ObjectBucket::numbered`]): the registry in `home`'s root, or the
+/// that number's cells go to ([`RoutedBucket::numbered`]): the registry in `home`'s root, or the
 /// root bucket's, records it; opened with its own options, and refused unless its identity is the
 /// one recorded (`Error::Mismatched`). `NoBucket` if no registry records it.
 pub(crate) async fn bucket_numbered(home: &str, number: u16) -> Result<Arc<ObjectBucket>, Failure> {
     let ours = bucket(home)?;
     let identity = bucket_cell::identity::get(&*ours).await?;
     if identity.is_some_and(|identity| identity.number == number) {
-        return Ok(ours);
+        return Ok(ours.own().clone());
     }
     Ok(ours.numbered(number).await?)
 }
@@ -193,7 +192,7 @@ pub(crate) fn decoded_held() -> bucket_cell::recovery::Held {
 /// buckets they put themselves in front of, and the simulation the bucket its hosts share; unless
 /// it is already, the same.
 #[cfg(any(test, madsim))]
-pub(crate) fn use_bucket(url: &str, bucket: Arc<ObjectBucket>) {
+pub(crate) fn use_bucket(url: &str, bucket: Arc<RoutedBucket>) {
     let mut buckets = BUCKETS.get().lock().unwrap();
     let had = buckets.entry(url.to_owned()).or_insert_with(|| bucket.clone());
     assert!(Arc::ptr_eq(had, &bucket), "this process has another bucket at {url}");
@@ -272,7 +271,7 @@ pub(crate) fn keeping() -> Result<upload::Options, Failure> {
 /// kept in, and its uploader, which took the cell's head, or holds its version (TASK-165.9).
 pub(crate) struct Opened {
     pub local: Arc<LocalCell<HostDir>>,
-    pub bucket: Arc<ObjectBucket>,
+    pub bucket: Arc<RoutedBucket>,
     pub uploader: Uploader<HostDir>,
 }
 
@@ -294,7 +293,7 @@ impl Opened {
 /// The bucket the cell directory at `path` names, if its description is there: as deleting it, or
 /// what of it a deletion that stopped left, goes by. A cell of another format is refused
 /// (`local_cell::Format`).
-pub(crate) fn bucket_at(path: &Path) -> anyhow::Result<Option<Arc<ObjectBucket>>> {
+pub(crate) fn bucket_at(path: &Path) -> anyhow::Result<Option<Arc<RoutedBucket>>> {
     match local_cell::host_bucket(path) {
         Ok(Some(url)) => Ok(Some(bucket(&url)?)),
         Err(err) if err.is::<local_cell::Format>() => Err(err),
@@ -348,21 +347,22 @@ pub(crate) async fn create_unmade(
     let made = async {
         let url = bucket.map_or_else(|| bucket_for(path), |bucket| Ok(bucket.to_owned()))?;
         let bucket = self::bucket(&url)?;
-        let cell = match of {
+        let (cell, initial_head) = match of {
             CellOf::New(tenant) => {
                 let cell = new_cell(&bucket, tenant).await?;
                 make_keys(&bucket, cell).await?;
-                cell
+                (cell, None)
             }
-            CellOf::Named(cell) => {
-                if !learn_taken(&bucket, cell).await? {
+            CellOf::Named(cell) => match learn_taken(&bucket, cell).await? {
+                Some(read) => (cell, Some(read)),
+                None => {
                     make_keys(&bucket, cell).await?;
+                    (cell, None)
                 }
-                cell
-            }
+            },
             CellOf::Taken(cell) => match learn_taken(&bucket, cell).await? {
-                true => cell,
-                false => return Err(bucket_cell::Error::NoCell.into()),
+                Some(read) => (cell, Some(read)),
+                None => return Err(bucket_cell::Error::NoCell.into()),
             },
         };
         let recovering = upload::blocking(|| -> Result<_, Failure> {
@@ -374,7 +374,7 @@ pub(crate) async fn create_unmade(
             synced.map_err(|err| Failure::local(err, "syncing a cell directory's parent"))?;
             Ok(LocalCell::recover_unmade(host_dir(path)?)?)
         })?;
-        opened(recovering, keeping).await
+        opened_with_head(recovering, keeping, initial_head).await
     };
     // Leave nothing half made behind.
     let made = made.await;
@@ -387,23 +387,20 @@ pub(crate) async fn create_unmade(
 /// A new cell made here, a root, its KEK from the host's pool, before its cell first opens
 /// (TASK-515): a tenant the KMS refuses gets nothing made (TASK-411.28); its first taking gives it
 /// its DEK and kind.
-async fn make_keys(bucket: &ObjectBucket, cell: CellId) -> Result<(), Failure> {
+async fn make_keys(bucket: &RoutedBucket, cell: CellId) -> Result<(), Failure> {
     let kms = crate::bucket::kms()?;
     bucket_cell::keys::make(bucket, &kms, cell, rand::random()).await?;
     Ok(())
 }
 
-/// Whether the bucket has `cell`: its head, read to see, is what the cell's opening, next, would
-/// read first, learned for it, a read less (`bucket_cell::known`, TASK-449).
-async fn learn_taken(bucket: &ObjectBucket, cell: CellId) -> Result<bool, Failure> {
+/// Reads `cell`'s head to check whether the bucket holds it, returning the [`head::Read`] so the
+/// opening immediately after reuses it instead of issuing a second head GET (board 6017).
+async fn learn_taken(
+    bucket: &RoutedBucket,
+    cell: CellId,
+) -> Result<Option<bucket_cell::head::Read>, Failure> {
     let read = bucket_cell::head::read(bucket, cell).await?;
-    let found = read.head(cell)?.is_some();
-    if let Some(known) = bucket_cell::Bucket::known(bucket)
-        && found
-    {
-        known.learn(cell, Learned { head: read.slots() });
-    }
-    Ok(found)
+    Ok(read.head(cell)?.is_some().then_some(read))
 }
 
 /// Opens the cell directory at `path` as of its last commit, with the bucket it names: its
@@ -461,13 +458,29 @@ async fn opened(
     recovering: Recovering<HostDir>,
     keeping: upload::Options,
 ) -> Result<Opened, Failure> {
+    opened_with_head(recovering, keeping, None).await
+}
+
+/// Like [`opened`], passing an already-fetched [`bucket_cell::head::Read`] to the uploader.
+async fn opened_with_head(
+    recovering: Recovering<HostDir>,
+    keeping: upload::Options,
+    initial_head: Option<bucket_cell::head::Read>,
+) -> Result<Opened, Failure> {
     let url = recovering.bucket().map(str::to_owned);
     let path = || recovering_path(&recovering);
     let url = url.ok_or_else(|| Failure::msg(format!("{} names no bucket", path())))?;
     let bucket = bucket(&url).with_context(|| format!("opening the bucket {url}"))?;
     let runtime = crate::bucket::runtime()?;
     let holding = (rand::random(), keeping);
-    let opening = upload::open(recovering, options(), bucket.clone(), holding, &runtime);
+    let opening = upload::open_with_head(
+        recovering,
+        options(),
+        bucket.clone(),
+        holding,
+        &runtime,
+        initial_head,
+    );
     let (local, uploader) = opening.await?;
     Ok(Opened { local, bucket, uploader })
 }
@@ -747,7 +760,7 @@ pub(crate) async fn open_ephemeral(
     path: &Path,
     keeping: &upload::Options,
 ) -> Result<
-    (Arc<LocalCell<HostDir>>, Arc<ObjectBucket>, bucket_cell::keys::RingHold, upload::Forked),
+    (Arc<LocalCell<HostDir>>, Arc<RoutedBucket>, bucket_cell::keys::RingHold, upload::Forked),
     Failure,
 > {
     closed(path).await?;
@@ -810,7 +823,7 @@ fn make_child(
 /// cell directory holds its cell in `bucket`.
 pub(crate) async fn delete(
     path: &Path,
-    bucket: Option<&ObjectBucket>,
+    bucket: Option<&RoutedBucket>,
     token: impl Fn() -> Result<u64, Failure>,
 ) -> Result<(), Error> {
     // cladefs: an ephemeral cell's reference retired, its note forgotten (doc-25, TASK-698.3).
@@ -820,7 +833,11 @@ pub(crate) async fn delete(
             let checkpoint = checkpoint
                 .ok_or_else(|| Failure::msg(format!("{} has no checkpoint", dir.display())))?;
             let parent = checkpoint.parent();
-            let origin = bucket_cell::layout::Origin { parent: parent.cell, at: parent.at };
+            let origin = bucket_cell::layout::Origin {
+                parent: parent.cell,
+                at: parent.at,
+                epoch: parent.epoch,
+            };
             let host = crate::ephemeral_host::host().map_err(|errno| {
                 Failure::msg(format!(
                     "deleting ephemeral cell {cell}: no CLADEFSD_EPHEMERAL: {errno}"

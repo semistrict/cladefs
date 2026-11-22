@@ -11,8 +11,11 @@
 //! changed since, files' writes, and directories' entries made, removed or renamed, each in order,
 //! are kept beside. A crash ([`Disk::crashed`]) keeps what was
 //! durable and any of what changed since, as the seed says, each change kept or not in order, each
-//! block of each write whole, not at all, garbage, or torn, its garbage in the bytes it changes
-//! alone (powersafe overwrite: [`garbled`]); what no directory's entry names after goes. No symbolic links; paths are absolute, a relative one taken from the root.
+//! sector of each write whole, not at all, garbage, or torn, its garbage in the bytes it changes
+//! alone ([`crate::crash`]); what no directory's entry names after goes. A directory made is an
+//! entry of its parent's like a file's, durable at the next sync of anything, which commits a
+//! journaling file system's journal, as ext4 and XFS have it (board 5748). No symbolic links;
+//! paths are absolute, a relative one taken from the root.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -20,25 +23,6 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
-
-/// The granularity of a crash: a write survives it in blocks of this size, each whole or not.
-const BLOCK: usize = 512;
-
-/// `on`, the disk's bytes of a block a crash cut `written` short in, as garbage: those `written`
-/// changes, at random; those it writes as they were, as they were. A crash damages no byte a
-/// write leaves as it is, the sector's others included: powersafe overwrite, as SQLite assumes
-/// of Linux's disks by default (`SQLITE_IOCAP_POWERSAFE_OVERWRITE`), and cladefs too (board 5890,
-/// decision-3): a log's append, its page cache writing back whole pages, writes again the
-/// sector holding the end of the last record synced.
-fn garbled(on: &mut [u8], written: &[u8], rng: &mut Rng) {
-    let mut noise = vec![0; on.len()];
-    rng.fill(&mut noise);
-    for ((byte, &new), noise) in on.iter_mut().zip(written).zip(noise) {
-        if *byte != new {
-            *byte = noise;
-        }
-    }
-}
 
 /// The blocks a file gives back ([`punch_hole`](crate::punch_hole)), and counts allocated.
 const HOLE: u64 = 4096;
@@ -66,6 +50,9 @@ struct Fs {
     locks: BTreeMap<u64, u64>,
     /// The openings made, numbered.
     opened: u64,
+    /// cladefs: the directories made since the last sync of anything: their parents, names and
+    /// inodes (board 5748).
+    making: Vec<(u64, OsString, u64)>,
 }
 
 #[derive(Clone)]
@@ -171,7 +158,7 @@ impl Fs {
     fn new() -> Self {
         let mut inodes = BTreeMap::new();
         inodes.insert(ROOT, Inode::Dir(DirData::default()));
-        Self { inodes, next: ROOT + 1, locks: BTreeMap::new(), opened: 0 }
+        Self { inodes, next: ROOT + 1, locks: BTreeMap::new(), opened: 0, making: Vec::new() }
     }
 
     fn file(&mut self, inode: u64) -> io::Result<&mut FileData> {
@@ -243,12 +230,10 @@ impl Fs {
             return Err(errno(libc::EEXIST));
         }
         let made = self.make(Inode::Dir(DirData::default()));
-        // Durable at once, as the cells' own simulations have directories (`local_cell::MemDir`),
-        // and as a journaling file system's next sync of anything makes it.
-        let parent = self.dir(parent)?;
-        parent.entries.insert(name.clone(), made);
-        parent.durable.insert(name, made);
-        Ok(())
+        // cladefs: an entry of its parent's like a file's, durable at the next sync of anything
+        // (board 5748): a crash before loses the directory, or keeps it, with all under it.
+        self.making.push((parent, name.clone(), made));
+        self.change(parent, DirChange::Set(name, made))
     }
 
     fn remove(&mut self, path: &Path, dir: bool) -> io::Result<()> {
@@ -326,6 +311,18 @@ impl Fs {
         Ok(at == inode)
     }
 
+    /// cladefs: a sync's commit of the file system's journal: every directory made since durable
+    /// in its parent, if its parent holds it still (board 5748).
+    fn journaled(&mut self) {
+        for (parent, name, made) in std::mem::take(&mut self.making) {
+            if let Some(Inode::Dir(dir)) = self.inodes.get_mut(&parent)
+                && dir.entries.get(&name) == Some(&made)
+            {
+                dir.durable.insert(name, made);
+            }
+        }
+    }
+
     /// The disk as a crash leaves it, as `rng` draws it (the module's docs).
     fn crashed(&self, rng: &mut Rng) -> Fs {
         let mut inodes = BTreeMap::new();
@@ -368,25 +365,8 @@ impl Fs {
                                 }
                             }
                             FileChange::Write(at, bytes) => {
-                                for (index, block) in bytes.chunks(BLOCK).enumerate() {
-                                    let start = at + index * BLOCK;
-                                    let fate = rng.below(4);
-                                    if fate == 0 {
-                                        continue;
-                                    }
-                                    if data.len() < start + block.len() {
-                                        data.resize(start + block.len(), 0);
-                                    }
-                                    let into = &mut data[start..start + block.len()];
-                                    match fate {
-                                        1 => into.copy_from_slice(block),
-                                        2 => garbled(into, block, rng),
-                                        _ => {
-                                            let half = block.len() / 2;
-                                            into[..half].copy_from_slice(&block[..half]);
-                                        }
-                                    }
-                                }
+                                let draw = &mut |n| rng.below(n);
+                                crate::crash::write(&mut data, *at, bytes, true, draw);
                             }
                         }
                     }
@@ -404,7 +384,8 @@ impl Fs {
                 file.links = count;
             }
         }
-        Fs { inodes, next: self.next, locks: BTreeMap::new(), opened: self.opened }
+        let (locks, making) = (BTreeMap::new(), Vec::new());
+        Fs { inodes, next: self.next, locks, opened: self.opened, making }
     }
 }
 
@@ -439,12 +420,6 @@ impl Rng {
 
     fn below(&mut self, n: u64) -> u64 {
         self.next() % n
-    }
-
-    fn fill(&mut self, bytes: &mut [u8]) {
-        for byte in bytes {
-            *byte = self.next() as u8;
-        }
     }
 }
 
@@ -500,16 +475,18 @@ fn with<T>(work: impl FnOnce(&mut Fs) -> io::Result<T>) -> io::Result<T> {
 /// crashing.
 pub mod faults {
     /// How often a call that changes a host's disk fails: `fail` of them, as the seed draws it,
-    /// with `EIO`, or, as often, a call adding data with `ENOSPC`. A call that only reads, or
-    /// looks, never does.
+    /// with `EIO`, or, as often, a call adding data with `ENOSPC`; cladefs: and how often a read of
+    /// a file's data does, `reads` of them, with `EIO`, as a drive's unreadable sector fails it
+    /// (board 5748). A call that only looks never does.
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct Odds {
         pub fail: f64,
+        pub reads: f64,
     }
 
     impl Odds {
         /// None: every call as the disk has it.
-        pub const NONE: Self = Self { fail: 0.0 };
+        pub const NONE: Self = Self { fail: 0.0, reads: 0.0 };
     }
 
     /// Has the calls of every host's disk of this simulation fail from now on as `odds` says:
@@ -533,14 +510,9 @@ static ODDS: Mutex<Vec<(std::thread::ThreadId, faults::Odds)>> = Mutex::new(Vec:
 /// only on a host's node, the simulation's own calls never.
 fn faulted(what: std::fmt::Arguments<'_>, adds: bool) -> io::Result<()> {
     use madsim::rand::Rng as _;
-    let simulation = std::thread::current().id();
-    let odds = ODDS.lock().unwrap().iter().find(|(of, _)| *of == simulation).map(|(_, odds)| *odds);
-    let Some(odds) = odds.filter(|odds| odds.fail > 0.0) else { return Ok(()) };
-    if madsim::runtime::Handle::try_current().is_err() {
-        return Ok(());
-    }
+    let Some(fail) = drawn(|odds| odds.fail) else { return Ok(()) };
     let mut rng = madsim::rand::thread_rng();
-    if !rng.gen_bool(odds.fail.min(1.0)) {
+    if !rng.gen_bool(fail.min(1.0)) {
         return Ok(());
     }
     let code = match adds && rng.gen_bool(0.5) {
@@ -550,6 +522,28 @@ fn faulted(what: std::fmt::Arguments<'_>, adds: bool) -> io::Result<()> {
     let error = errno(code);
     log::warn!("host_fs: {what}, failed as the seed says: {error}");
     Err(error)
+}
+
+/// cladefs: fails `what`, a read of a file's data on a simulated host's disk, as the odds of reads
+/// failing say, with `EIO` (board 5748), drawn as [`faulted`] draws.
+fn read_faulted(what: std::fmt::Arguments<'_>) -> io::Result<()> {
+    use madsim::rand::Rng as _;
+    let Some(reads) = drawn(|odds| odds.reads) else { return Ok(()) };
+    if !madsim::rand::thread_rng().gen_bool(reads.min(1.0)) {
+        return Ok(());
+    }
+    let error = errno(libc::EIO);
+    log::warn!("host_fs: {what}, failed as the seed says: {error}");
+    Err(error)
+}
+
+/// The odds `of` the simulation's faults say, if above none and on a host's node: the
+/// simulation's own calls never fail.
+fn drawn(of: impl Fn(&faults::Odds) -> f64) -> Option<f64> {
+    let simulation = std::thread::current().id();
+    let odds = ODDS.lock().unwrap().iter().find(|(at, _)| *at == simulation).map(|(_, odds)| *odds);
+    let odds = odds.map(|odds| of(&odds)).filter(|odds| *odds > 0.0)?;
+    madsim::runtime::Handle::try_current().is_ok().then_some(odds)
 }
 
 /// What a file of a disk is: a file, or a directory.
@@ -813,6 +807,7 @@ impl File {
                 }
                 None => return Err(errno(libc::EBADF)),
             }
+            fs.journaled();
             Ok(())
         })
     }
@@ -1045,6 +1040,7 @@ pub fn hard_link(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()>
 
 pub fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
     with(|fs| {
+        read_faulted(format_args!("reading {}", path.as_ref().display()))?;
         let inode = fs.lookup(path.as_ref())?;
         Ok(fs.file(inode)?.data.clone())
     })
@@ -1102,6 +1098,8 @@ pub trait FileExt {
 impl FileExt for File {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
         self.with(|fs| {
+            let len = buf.len();
+            read_faulted(format_args!("reading {len} bytes of inode {} at {offset}", self.inode))?;
             let file = fs.file(self.inode)?;
             let at = (offset as usize).min(file.data.len());
             let read = buf.len().min(file.data.len() - at);

@@ -128,7 +128,8 @@ mod host {
             let listen = |role: &str| UnixListener::bind(format!("{}_{PORT}", uds(role).display()));
             let (writers, followers) = (listen("writer")?, listen("follower")?);
 
-            let mut writer = run(self, test_setup, &root, "writer", &cell_dir, false, &uds("writer"))?;
+            let mut writer =
+                run(self, test_setup, &root, "writer", &cell_dir, false, &uds("writer"))?;
             let mut w = Guest::accept(&mut writer, &writers)?;
             w.expect("ready")?;
             let mut follower =

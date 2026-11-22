@@ -48,10 +48,11 @@ use crate::{Dir, DirHold, File, HeldParts, LocalCell, Opening, Recovering, read_
 use bucket_cell::cache::Cache;
 use bucket_cell::fetch::Budget;
 use bucket_cell::keys::{self, CellKeys, Ring, RingHold};
-use bucket_cell::known::Learned;
 use bucket_cell::layout::{CellId, Chain, Child, Head, Origin, epoch_of};
 use bucket_cell::mirror::Mirrored;
+#[cfg(test)]
 use bucket_cell::object_bucket::ObjectBucket;
+use bucket_cell::object_bucket::RoutedBucket;
 use bucket_cell::wal::TakenCell;
 use bucket_cell::{Body, Objects, Recovered, Writer, head, lifecycle};
 use event_listener::Event;
@@ -81,8 +82,8 @@ pub const CHECKPOINT_EVERY: u64 = 64;
 /// starts its mirror there; TASK-633.8): nothing unless `child` is of `bucket` and the version of
 /// another's cell, nor for one mirrored there already ([`ObjectBucket::mirror_wanted`]), which
 /// takes its turn before this returns. What it came to is logged.
-fn mirror_wanted(bucket: &Arc<ObjectBucket>, child: CellId, origin: Origin) -> Result<(), Failure> {
-    let Origin { parent, at } = origin;
+fn mirror_wanted(bucket: &Arc<RoutedBucket>, child: CellId, origin: Origin) -> Result<(), Failure> {
+    let Origin { parent, at, .. } = origin;
     let mirroring = bucket.mirror_wanted(child, origin);
     bucket_runtime()?.spawn(async move { logged(mirroring.await, parent, at) });
     Ok(())
@@ -90,14 +91,16 @@ fn mirror_wanted(bucket: &Arc<ObjectBucket>, child: CellId, origin: Origin) -> R
 
 /// cladefs: the mirror in `bucket` of the version `cell` was forked from, if of another bucket's
 /// cell, begun in the background on `runtime`, the cell's uploader's, as `cell` opens
-/// ([`ObjectBucket::mirror_for`]): the host that forked it may have died before it began it. A
+/// ([`RoutedBucket::mirror_for`]): the host that forked it may have died before it began it. A
 /// process that opens cells on a runtime of its own, as a VM's does, makes no other.
-fn mirror_for(bucket: &Arc<ObjectBucket>, cell: CellId, runtime: &tokio::runtime::Handle) {
+fn mirror_for(bucket: &Arc<RoutedBucket>, cell: CellId, runtime: &tokio::runtime::Handle) {
     let mirroring = bucket.clone().mirror_for(cell);
     runtime.spawn(async move {
         match mirroring.await {
             Ok(None) => {}
-            Ok(Some((Origin { parent, at }, mirrored))) => logged(Ok(Some(mirrored)), parent, at),
+            Ok(Some((Origin { parent, at, .. }, mirrored))) => {
+                logged(Ok(Some(mirrored)), parent, at)
+            }
             Err(err) => log::warn!("cladefs: mirroring the version {cell} was forked from: {err}"),
         }
     });
@@ -243,7 +246,11 @@ impl<T> Retried<T> {
 /// (TASK-39.4). Deleting it again does nothing. A later placement's cell, whose token is higher,
 /// is not deleted (`bucket_cell::Error::Stale`, TASK-45.1).
 ///
-pub async fn delete_cell(bucket: &ObjectBucket, cell: CellId, token: u64) -> Result<(), Failure> {
+pub async fn delete_cell<B: bucket_cell::Bucket>(
+    bucket: &B,
+    cell: CellId,
+    token: u64,
+) -> Result<(), Failure> {
     Ok(lifecycle::delete(bucket, cell, rand::random(), token).await?)
 }
 
@@ -477,9 +484,22 @@ impl Default for Options {
 pub async fn open<D: Dir>(
     recovering: Recovering<D>,
     cell_options: crate::Options,
-    bucket: Arc<ObjectBucket>,
+    bucket: Arc<RoutedBucket>,
     (holder, options): (u64, Options),
     runtime: &Runtime,
+) -> Result<(Arc<LocalCell<D>>, Uploader<D>), Failure> {
+    open_with_head(recovering, cell_options, bucket, (holder, options), runtime, None).await
+}
+
+/// Like [`open`], reusing an already-fetched [`head::Read`] from the caller (e.g. a pre-open
+/// existence check) so taking a cell costs one head GET instead of two (board 6017).
+pub async fn open_with_head<D: Dir>(
+    recovering: Recovering<D>,
+    cell_options: crate::Options,
+    bucket: Arc<RoutedBucket>,
+    (holder, options): (u64, Options),
+    runtime: &Runtime,
+    initial_head: Option<head::Read>,
 ) -> Result<(Arc<LocalCell<D>>, Uploader<D>), Failure> {
     let sleep: Clock = Arc::new(|interval| tokio::time::sleep(interval).boxed());
     let handle = runtime.handle.clone();
@@ -490,8 +510,6 @@ pub async fn open<D: Dir>(
     let stopped = Arc::new(Stopped::default());
     let stop = stopped.clone();
     let (uploader, uploads) = (shared.clone(), bucket.clone());
-    // What the host learned for this opening, taken as it begins (TASK-449's review).
-    let learned = learned(&*bucket, &recovering);
     let cell = recovering.cell();
     UPLOADERS.get().send_modify(|running| *running += 1);
     // A task, not a thread of its own (TASK-34).
@@ -499,8 +517,7 @@ pub async fn open<D: Dir>(
         // Its conditional writes checked before any is relied on (doc-7, The head).
         match uploads.probed(holder).await {
             Ok(()) => {
-                let recovering = (recovering, learned);
-                uploader.run(recovering, cell_options, uploads, holder, started).await
+                uploader.run(recovering, cell_options, uploads, holder, started, initial_head).await
             }
             // Its opener gone or not, it says why it stopped to whoever listens.
             Err(err) => drop(started.send(Err(Failure::msg(err)))),
@@ -549,7 +566,7 @@ struct EphemeralKeys {
 pub async fn open_ephemeral<D: Dir>(
     recovering: Recovering<D>,
     cell_options: crate::Options,
-    bucket: Arc<ObjectBucket>,
+    bucket: Arc<RoutedBucket>,
     runtime: &Runtime,
     (cache, held): (Option<Arc<Cache>>, Option<Arc<HeldParts>>),
 ) -> Result<(Arc<LocalCell<D>>, RingHold, Forked), Failure> {
@@ -557,7 +574,7 @@ pub async fn open_ephemeral<D: Dir>(
     let (parent, cell) = (checkpoint.parent(), recovering.cell());
     let EphemeralKeys { owner, kek, deks, inherited } =
         bucket_cell::layout::decode(checkpoint.keys()).map_err(Failure::from)?;
-    let origin = Origin { parent: parent.cell, at: parent.at };
+    let origin = Origin { parent: parent.cell, at: parent.at, epoch: parent.epoch };
     let mut head = Head::of(bucket_cell::record::Made::Clone(origin), owner);
     head.keks.extend(kek);
     (head.deks, head.inherited) = (deks, inherited);
@@ -620,7 +637,7 @@ impl Stopped {
 pub struct Uploader<D: Dir> {
     shared: Arc<Shared<D>>,
     /// The bucket the cell is kept in.
-    bucket: Arc<ObjectBucket>,
+    bucket: Arc<RoutedBucket>,
     /// Says the uploader stopped, once it has: taken by [`Uploader::close`], or its drop, which
     /// wait for it.
     stopped: Option<Arc<Stopped>>,
@@ -629,7 +646,7 @@ pub struct Uploader<D: Dir> {
     _dir: DirHold<D>,
 }
 
-pub(crate) struct Shared<D: Dir, B: bucket_cell::Bucket = ObjectBucket> {
+pub(crate) struct Shared<D: Dir, B: bucket_cell::Bucket = RoutedBucket> {
     /// The cell, once opened.
     cell: std::sync::OnceLock<Arc<LocalCell<D>>>,
     /// The cell's writer, once it took the cell, and as it takes it again (TASK-204).
@@ -1037,17 +1054,12 @@ impl<D: Dir> Uploader<D> {
             given,
             keys,
         );
-        let made = match forking.await {
+        match forking.await {
             Err(bucket_cell::Error::Deleted) => return Err(Failure::VersionDropped),
             Err(err) => return Err(err.into()),
-            Ok(made) => made,
-        };
-        if let Some(head) = made {
-            inheriting.made();
-            if let Some(known) = bucket_cell::Bucket::known(&*self.bucket) {
-                known.learn(child.cell, Learned { head });
-            }
+            Ok(()) => {}
         }
+        inheriting.made();
         mirror_wanted(&self.bucket, child.cell, at.origin)?;
         Ok(())
     }
@@ -1081,8 +1093,12 @@ impl<D: Dir> Uploader<D> {
         let (deks, inherited) = given.deks.unwrap_or_default();
         let keys = EphemeralKeys { owner: child.owner, kek: given.kek, deks, inherited };
         inheriting.made();
-        let parent =
-            crate::Parent { cell: at.origin.parent, version: at.version, at: at.origin.at };
+        let parent = crate::Parent {
+            cell: at.origin.parent,
+            version: at.version,
+            at: at.origin.at,
+            epoch: at.origin.epoch,
+        };
         Ok(crate::LocalCheckpoint::fork(parent, &at.state, bucket_cell::layout::encode(&keys)))
     }
 
@@ -1174,7 +1190,7 @@ impl<D: Dir> Uploader<D> {
     }
 
     /// The bucket the cell is kept in.
-    pub fn bucket(&self) -> &ObjectBucket {
+    pub fn bucket(&self) -> &RoutedBucket {
         &self.bucket
     }
 
@@ -1448,18 +1464,19 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         }
     }
 
-    /// Runs the uploader of the cell `recovering` recovered, opening it first, with what the host
-    /// learned of its cell for this opening, if anything ([`learned`]): returns once it stopped,
-    /// its keeper too, if it has one, so that nothing of it holds the cell open (TASK-701).
+    /// Runs the uploader of the cell `recovering` recovered, opening it first: returns once it
+    /// stopped, its keeper too, if it has one, so that nothing of it holds the cell open
+    /// (TASK-701).
     pub(crate) async fn run(
         self: &Arc<Self>,
-        recovering: (Recovering<D>, Option<Learned>),
+        recovering: Recovering<D>,
         options: crate::Options,
         bucket: Arc<B>,
         holder: u64,
         started: futures::channel::oneshot::Sender<Result<Arc<LocalCell<D>>, Failure>>,
+        initial_head: Option<head::Read>,
     ) {
-        self.upload(recovering, options, bucket, holder, started).await;
+        self.upload(recovering, options, bucket, holder, started, initial_head).await;
         let kept = self.kept.lock().unwrap().take();
         if let Some(kept) = kept {
             // Said as the keeper's task ends, or goes, its sender with it.
@@ -1470,15 +1487,16 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// Runs the uploader, as [`Shared::run`] does, but for waiting for its keeper.
     async fn upload(
         self: &Arc<Self>,
-        recovering: (Recovering<D>, Option<Learned>),
+        recovering: Recovering<D>,
         options: crate::Options,
         bucket: Arc<B>,
         holder: u64,
         started: futures::channel::oneshot::Sender<Result<Arc<LocalCell<D>>, Failure>>,
+        initial_head: Option<head::Read>,
     ) {
         let interval = self.options.interval;
         self.holders.lock().unwrap().0 = holder;
-        let writer = match self.start(recovering, options, &bucket, holder).await {
+        let writer = match self.start(recovering, options, &bucket, holder, initial_head).await {
             Ok(writer) => {
                 // cladefs: urged by its disk as it comes under pressure (doc-22, TASK-539.9).
                 if let Some(disk) = crate::dir::Dir::disk(self.cell().dir()) {
@@ -1664,16 +1682,17 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// as the writer found its end, which another writer may have moved on meanwhile.
     async fn start(
         &self,
-        (recovering, learned): (Recovering<D>, Option<Learned>),
+        recovering: Recovering<D>,
         options: crate::Options,
         bucket: &Arc<B>,
         holder: u64,
+        initial_head: Option<head::Read>,
     ) -> Result<Option<Arc<Writer<B>>>, Failure> {
         let cell = recovering.cell();
         let (cache, parts) = (self.options.cache.clone(), self.options.held.clone());
         let placement = recovering.token().unwrap_or(self.options.token);
         let kms = &self.keys.kms;
-        let read = first_read(&**bucket, cell, learned, kms).await?;
+        let read = first_read(&**bucket, cell, initial_head).await?;
         // A cell with no head is none: its maker makes it before its cell first opens.
         let Some(found) = read.head(cell)? else {
             return Err(match recovering.version() {
@@ -2495,7 +2514,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let Some(version) = head.version(id).copied() else {
             return Err(Failure::VersionDropped);
         };
-        let origin = Origin { parent: cell, at: version.at };
+        let origin = Origin { parent: cell, at: version.at, epoch: version.epoch };
         let cell_keys = CellKeys::of(cell, &head, self.keys.kms.clone());
         let keys = keys::ring(&**bucket, &cell_keys, cell, &head, true).await?;
         let recovering = bucket_cell::recovery::recover_version(&**bucket, cell, version.at, &keys);
@@ -2621,47 +2640,23 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     }
 }
 
-/// What this host learned of the cell `recovering` recovered, which the opening of its cell
-/// takes from the bucket's [`Known`](bucket_cell::known::Known) as it begins, whatever comes of
-/// it after: so nothing learned for an opening outlives it, a failed one's no later one's
-/// (TASK-449's review). Only for a cell whose log goes on from nothing the bucket acknowledged:
-/// one that has, learned nothing of here, its learning dropped.
-fn learned<B: bucket_cell::Bucket, D: Dir>(
-    bucket: &B,
-    recovering: &Recovering<D>,
-) -> Option<Learned> {
-    let learned = bucket.known()?.take(recovering.cell());
-    learned.filter(|_| recovering.start().is_none())
-}
-
-/// What an opening of the cell of `cell` reads first (TASK-165.11, TASK-449): its head, which
-/// the taking goes on from and its recovery starts from; of a cell this host has just made,
-/// `learned` ([`learned`]) stands for that read: its head as its fork left it, as a read made then,
-/// the taking conditional on it. A fork of a version its host crashed in the middle of, its head
-/// saying so, is resumed first ([`lifecycle::resume_version_fork`]: its reference written, the
-/// fork made), which fails if the version was dropped: so the cell takes no state of a fork not
-/// made.
+/// What an opening of the cell of `cell` reads first (TASK-165.11, board 6020): its head, which
+/// the taking goes on from and its recovery starts from. A fork of a version whose restore never
+/// finished (still `Forking`, not deleted) is refused as unmade: its caller retries with a fresh
+/// child ID instead of resuming in place.
 async fn first_read<B: bucket_cell::Bucket>(
     bucket: &B,
     cell: CellId,
-    learned: Option<Learned>,
-    kms: &Arc<keys::CachingKms>,
+    initial_head: Option<head::Read>,
 ) -> Result<head::Read, Failure> {
-    let read = match learned {
-        Some(Learned { head }) => head::Read::found(head),
+    let read = match initial_head {
+        Some(read) => read,
         None => head::read(bucket, cell).await?,
     };
-    if !read.head(cell)?.is_some_and(|head| !head.deleted() && head.forking().is_some()) {
-        return Ok(read);
+    if read.head(cell)?.is_some_and(|head| !head.deleted() && head.forking().is_some()) {
+        return Err(bucket_cell::Error::Unmade(cell).into());
     }
-    // cladefs: a version's restore into another cell writes its checkpoint at the version under
-    // the version's cell's keys, unwrapped by the host's KMS (TASK-476).
-    let start = lifecycle::Start::Found(read.slots());
-    match lifecycle::resume_version_fork(bucket, cell, start, keys::Parents::Kms(kms, None)).await?
-    {
-        Some(left) => Ok(head::Read::found(left)),
-        None => Ok(head::read(bucket, cell).await?),
-    }
+    Ok(read)
 }
 
 /// The bytes of `file`, an extent's of its own a segment of the write-ahead log names, read only
@@ -2847,8 +2842,9 @@ mod tests {
             uploads: Budget::new(Limits::UNBOUNDED),
             keys: bucket_cell::keys::testing::host(),
         };
-        let bucket =
-            Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
+        let bucket = Arc::new(
+            ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), "").unrouted(),
+        );
         let dir = MemDir::new();
         let description = Description { block_size: 4096, capacity: 1 << 30, cell: CELL };
         let kind = bucket_cell::cell::Kind::Fxfs;
@@ -2889,8 +2885,9 @@ mod tests {
             uploads: Budget::new(Limits::UNBOUNDED),
             keys: bucket_cell::keys::testing::host(),
         };
-        let bucket =
-            Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
+        let bucket = Arc::new(
+            ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), "").unrouted(),
+        );
         let dir = MemDir::new();
         let disk = dir.disk().disk().clone();
         let description = Description { block_size: 4096, capacity: 1 << 30, cell: CELL };
@@ -2931,8 +2928,9 @@ mod tests {
             uploads: Budget::new(Limits::UNBOUNDED),
             keys: bucket_cell::keys::testing::host(),
         };
-        let bucket =
-            Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
+        let bucket = Arc::new(
+            ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), "").unrouted(),
+        );
         let dir = MemDir::new();
         let description = Description { block_size: 4096, capacity: 1 << 30, cell: CELL };
         LocalCell::make(&dir, description, Some("memory:///full"), None).unwrap();
@@ -2970,8 +2968,9 @@ mod tests {
             uploads: Budget::new(Limits::UNBOUNDED),
             keys: bucket_cell::keys::testing::host(),
         };
-        let bucket =
-            Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
+        let bucket = Arc::new(
+            ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), "").unrouted(),
+        );
         let dir = MemDir::new();
         let description = Description { block_size: 4096, capacity: 1 << 30, cell: CELL };
         LocalCell::make(&dir, description, Some("memory:///failing"), None).unwrap();
@@ -3012,7 +3011,8 @@ mod tests {
         let faults = Faults::new(Duration::ZERO, None);
         faults.set(Fault { rewrite_every: second, ..Fault::default() });
         let gcs = Faulty::new(Arc::new(object_store::memory::InMemory::new()), faults);
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(gcs), "").rewriting_every(second));
+        let bucket =
+            Arc::new(ObjectBucket::new(Arc::new(gcs), "").rewriting_every(second).unrouted());
         let dir = MemDir::new();
         let description = Description { block_size: 4096, capacity: 1 << 30, cell: CELL };
         LocalCell::make(&dir, description, Some("memory:///gcs"), None).unwrap();
@@ -3059,7 +3059,7 @@ mod tests {
         assert_eq!(stats.failures(Request::Update), 0, "writes of the head refused");
         // Each slot's a second after its last, of HEAD_SLOTS; more than one a second in all.
         let swaps = updates() - opened;
-        let most = bucket_cell::identity::DEFAULT_HEAD_SLOTS * (elapsed.as_secs() + 1);
+        let most = bucket_cell::identity::GCS_HEAD_SLOTS * (elapsed.as_secs() + 1);
         assert!(swaps <= most, "{swaps} swaps of the head in {elapsed:?}");
         assert!(swaps > 2 * (elapsed.as_secs() + 1), "{swaps} swaps of the head in {elapsed:?}");
         // A commit waits for its swap's turn: a part of a second, as long as the guest syncs no
@@ -3309,8 +3309,7 @@ mod shuttle_tests {
             let running = {
                 let (uploader, bucket) = (uploader.clone(), bucket.clone());
                 shuttle::thread::spawn(move || {
-                    let recovering = (recovering, None);
-                    let running = uploader.run(recovering, OPTIONS, bucket, holder, started);
+                    let running = uploader.run(recovering, OPTIONS, bucket, holder, started, None);
                     shuttle::future::block_on(running)
                 })
             };

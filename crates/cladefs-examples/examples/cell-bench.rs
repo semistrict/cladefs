@@ -388,7 +388,7 @@ fn nice(nice: i32) {
 /// runtime of their own, to open cells as `CLADEFS_BENCH_ENCRYPTED` says ([`Host::from_env`],
 /// TASK-411.5).
 struct Host {
-    bucket: Arc<bucket_cell::object_bucket::ObjectBucket>,
+    bucket: Arc<bucket_cell::object_bucket::RoutedBucket>,
     upload: local_cell::upload::Runtime,
     _kms: tempfile::TempDir,
 }
@@ -406,7 +406,8 @@ impl Host {
              cell-bench measures one"
         );
         let objects = Arc::new(object_store::memory::InMemory::new());
-        let bucket = Arc::new(bucket_cell::object_bucket::ObjectBucket::new(objects, ""));
+        let bucket =
+            Arc::new(bucket_cell::object_bucket::ObjectBucket::new(objects, "").unrouted());
         let kms = tempfile::tempdir().unwrap();
         let local = extent_keys::kms::LocalKms::open(kms.path().join("kms")).unwrap();
         local.create(Self::ENCRYPTED).unwrap();

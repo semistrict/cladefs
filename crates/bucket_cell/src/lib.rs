@@ -70,10 +70,10 @@ mod heap;
 pub mod host_disk;
 pub mod identity;
 pub mod keys;
-pub mod known;
 pub mod layout;
 pub mod lifecycle;
 pub mod local;
+pub mod lru;
 pub mod marks;
 pub mod mirror;
 mod moves;
@@ -84,6 +84,7 @@ pub mod passed;
 pub mod peer;
 pub mod record;
 pub mod recovery;
+pub mod routed;
 #[cfg(any(test, feature = "testing"))]
 #[cfg(not(madsim))]
 pub mod s3_server;
@@ -401,20 +402,6 @@ pub struct Rules {
     /// (TASK-395.14). Its write changes the parent's cell's listing, whose next pass finds it.
     /// TLA+: `specs/bucket/mutations/NoRetirementsMarked.cfg`.
     pub retirements_marked: bool,
-    /// cladefs: a fork of a version resumed by another than its host, a cell opening its child,
-    /// writes its reference before it makes it, as its host does
-    /// ([`lifecycle::resume_version_fork`]). Without it, as a test shows it needed, a host dying
-    /// between the fork's record and its reference leaves a clone made of no reference, whose
-    /// origin's state at the origin no pass keeps once the version is gone. TLA+:
-    /// `specs/bucket/mutations/NoResumesRefer.cfg`.
-    pub resumes_refer: bool,
-    /// cladefs: a fork of a version resumed says so in its record ([`record::Record::resumed`]),
-    /// with a condition, before its reference is written again, and a clone made so retires its
-    /// reference marked: its host, slow, may write it after the clone was made, deleted and its
-    /// cell removed. Without it, as a test shows it needed, retired unmarked, that reference stands
-    /// for good, keeping its base's state at the origin (TASK-455's review). TLA+:
-    /// `specs/bucket/mutations/NoResumesMarked.cfg`.
-    pub resumes_marked: bool,
     /// cladefs: a pass keeps, for each version a live cell's head names, the cell's whole state
     /// at it and what recovering it reads, as for an origin (doc-18, TASK-476). Without it, as a
     /// test shows it needed, a checkpoint since covers the version's segments, which the pass
@@ -469,8 +456,6 @@ impl Rules {
         origins_kept: true,
         clones_record_first: true,
         retirements_marked: true,
-        resumes_refer: true,
-        resumes_marked: true,
         versions_kept: true,
         versions_carried: true,
         versions_acked: true,

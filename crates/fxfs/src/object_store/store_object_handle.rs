@@ -1326,19 +1326,21 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
 
         // The only key we allow to be created on-the-fly is a non permanent key wrapped with the
         // volume data key.
+        // cladefs: box `get_or_create_key` and `get_key` so `multi_write_internal` stays small on
+        // 16 KiB guest kernel stacks (TASK-26.9).
         let (key_id, key) = if key_id == Some(VOLUME_DATA_KEY_ID)
             && matches!(self.encryption, Encryption::CachedKeys)
         {
             (
                 VOLUME_DATA_KEY_ID,
                 Some(
-                    self.get_or_create_key(transaction)
+                    crate::boxed(|| self.get_or_create_key(transaction))
                         .await
                         .context("get_or_create_key failed")?,
                 ),
             )
         } else {
-            self.get_key(key_id).await?
+            crate::boxed(|| self.get_key(key_id)).await?
         };
         if let Some(key) = &key {
             if !key.supports_inline_encryption() {
@@ -1368,10 +1370,12 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
 
         while !buf.is_empty() {
             let len = buf.len() as u64;
+            // cladefs: box `allocate_shared`/`allocate` and `writes` futures so
+            // `multi_write_internal` stays small on 16 KiB guest kernel stacks (TASK-26.9).
             let allocated_range = if shared {
-                allocator.allocate_shared(transaction, store_id, len).await
+                crate::boxed(|| allocator.allocate_shared(transaction, store_id, len)).await
             } else {
-                allocator.allocate(transaction, store_id, len).await
+                crate::boxed(|| allocator.allocate(transaction, store_id, len)).await
             }
             .context("allocation failed")?;
             if trace {
@@ -1412,7 +1416,9 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                 let (head, tail) = buf.split_at_mut(split as usize);
                 buf = tail;
 
-                writes.push_back(async move {
+                // cladefs: box each `write_aligned` future so `FuturesOrdered` and
+                // `multi_write_internal` stay small on 16 KiB guest kernel stacks (TASK-26.9).
+                writes.push_back(crate::boxed(|| async move {
                     let len = head.len() as u64;
                     Result::<_, Error>::Ok((
                         extent,
@@ -1427,15 +1433,17 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                         )
                         .await?,
                     ))
-                });
+                }));
                 device_range.start += split;
                 device_range_len = device_range.end - device_range.start;
             }
         }
 
         self.store().logical_write_ops.fetch_add(1, Ordering::Relaxed);
+        // cladefs: box the `try_join!` branches so `multi_write` does not keep `writes` and
+        // `deallocate_old_extents` side-by-side on 16 KiB guest kernel stacks (TASK-26.9).
         let ((mutations, checksums), deallocated) = try_join!(
-            async {
+            crate::boxed(|| async {
                 let mut current_range = 0..0;
                 let mut mutations = Vec::new();
                 let mut out_checksums = Vec::new();
@@ -1475,15 +1483,15 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                     }
                 }
                 Result::<_, Error>::Ok((mutations, out_checksums))
-            },
-            async {
+            }),
+            crate::boxed(|| async {
                 let mut deallocated = 0;
                 for r in ranges {
                     deallocated +=
                         self.deallocate_old_extents(transaction, attribute_id, r.clone()).await?;
                 }
                 Result::<_, Error>::Ok(deallocated)
-            }
+            })
         )?;
 
         for m in mutations {
@@ -1542,13 +1550,17 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         buf: MutableBufferRef<'_>,
         packed: bool,
     ) -> Result<(), Error> {
-        let (allocated, deallocated) = self
-            .multi_write_internal(transaction, attribute_id, key_id, ranges, buf, packed)
-            .await?;
+        // cladefs: box `multi_write_internal` and `update_allocated_size` separately so
+        // `multi_write`'s frame does not keep `multi_write_internal`'s 2.4 KiB locals live
+        // across `update_allocated_size` on 16 KiB guest kernel stacks (TASK-26.9).
+        let (allocated, deallocated) = crate::boxed(|| {
+            self.multi_write_internal(transaction, attribute_id, key_id, ranges, buf, packed)
+        })
+        .await?;
         if allocated == 0 && deallocated == 0 {
             return Ok(());
         }
-        self.update_allocated_size(transaction, allocated, deallocated).await
+        crate::boxed(|| self.update_allocated_size(transaction, allocated, deallocated)).await
     }
 
     /// Write data to overwrite extents with the provided set of ranges. This makes a strong

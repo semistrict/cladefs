@@ -114,12 +114,12 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 use base32_id::Short;
-use bucket_cell::bucket::Meta;
+use bucket_cell::bucket::{Bucket, Meta};
 use bucket_cell::collector::{Collector, DryRun, Marking, Options, Report};
 use bucket_cell::layout;
 use bucket_cell::layout::CellId;
 use bucket_cell::layout::Head;
-use bucket_cell::object_bucket::{ObjectBucket, Request, probe};
+use bucket_cell::object_bucket::{ObjectBucket, Request, RoutedBucket, probe};
 use bucket_cell::passed::{self, Sum, Usage};
 use bucket_cell::sweep::{self, Outcome, Ran, Requests, Sweep, Swept};
 use bucket_cell::{cell, lifecycle};
@@ -376,7 +376,7 @@ impl Tenant {
 /// the tenants and each one's cells listed a page at a time, so that it holds a page of each at
 /// most, whatever the bucket holds (TASK-395.8).
 async fn say_usage(
-    bucket: &ObjectBucket,
+    bucket: &impl Bucket,
     named: Option<u64>,
     out: &mut impl std::io::Write,
 ) -> Result<(), String> {
@@ -410,7 +410,7 @@ async fn say_usage(
 /// The cells a command goes over: the one named, or every cell of `bucket`, found by delimiter
 /// listings a page at a time, listing none of their objects (TASK-395.4, TASK-395.5).
 fn cells(
-    bucket: &ObjectBucket,
+    bucket: &impl Bucket,
     named: Option<CellId>,
 ) -> impl Stream<Item = Result<CellId, String>> + '_ {
     let cells = match named {
@@ -423,7 +423,7 @@ fn cells(
 /// Collects every cell of `bucket`, or the one `named`, a pass over each, once, or every `every`,
 /// deleting or marking as `mode` says, as `run` says; or prints what a pass would delete, once.
 async fn collect(
-    bucket: &Arc<ObjectBucket>,
+    bucket: &Arc<RoutedBucket>,
     every: Option<Duration>,
     options: Options,
     mode: Mode,
@@ -438,7 +438,7 @@ async fn collect(
     let swept_mode = match mode {
         Mode::Delete => sweep::Mode::Delete,
         Mode::MarkOnly => sweep::Mode::MarkOnly,
-        Mode::DryRun => return dry_run_cells(bucket, options, named).await,
+        Mode::DryRun => return dry_run_cells(&**bucket, options, named).await,
     };
     let sweep = Sweep {
         options,
@@ -483,15 +483,15 @@ async fn collect(
 /// KEKs through, to compact (TASK-411.6); and what a deletion authenticates its checkpoints at
 /// origins under (TASK-411.14). None chosen, or one that can't be had, stops cladefs-gc before it
 /// collects or deletes anything (TASK-411.28).
-fn kms(bucket: &Arc<ObjectBucket>) -> Result<extent_keys::kms::Shared, String> {
-    let chosen = bucket_cell::bucket_kms::from_env(|| Ok(bucket.clone()))?;
+fn kms(bucket: &Arc<RoutedBucket>) -> Result<extent_keys::kms::Shared, String> {
+    let chosen = bucket_cell::bucket_kms::from_env(|| Ok(bucket.own()))?;
     Ok(chosen.shared())
 }
 
 /// Rewraps every tenant's KEK object in `bucket` under the newest of the master keys the
 /// environment gives (TASK-411.27, `bucket_cell::bucket_kms::rotate`), saying what it did on
 /// standard error; failing, once it went over every tenant, if it left any under none of them.
-async fn rotate_master_key(bucket: &ObjectBucket) -> Result<(), String> {
+async fn rotate_master_key(bucket: &impl Bucket) -> Result<(), String> {
     use extent_keys::kms::master::{MASTER_KEY_FILE_VAR, MASTER_KEY_VAR, MasterKeys};
     let keys = MasterKeys::from_env()?.ok_or_else(|| {
         format!(
@@ -521,7 +521,7 @@ async fn rotate_master_key(bucket: &ObjectBucket) -> Result<(), String> {
 }
 
 /// Deletes `cell` of `bucket`, whichever placement took it last, as an operator does.
-async fn delete_cell(bucket: &ObjectBucket, cell: layout::CellId) -> Result<(), String> {
+async fn delete_cell(bucket: &impl Bucket, cell: layout::CellId) -> Result<(), String> {
     // Whichever placement took it last: u64::MAX is no lower than any's token.
     let deleted = lifecycle::delete(bucket, cell, rand::random(), u64::MAX);
     deleted.await.map_err(|err| format!("deleting cell {cell}: {err}"))
@@ -530,7 +530,7 @@ async fn delete_cell(bucket: &ObjectBucket, cell: layout::CellId) -> Result<(), 
 /// What a dry run over every cell of `bucket`, or the one `named`, finds, printed, a cell at a
 /// time.
 async fn dry_run_cells(
-    bucket: &ObjectBucket,
+    bucket: &impl Bucket,
     options: Options,
     named: Option<CellId>,
 ) -> Result<(), String> {
@@ -968,7 +968,7 @@ fn main() -> Result<(), String> {
                 };
                 let held = held_cells(&held)?;
                 let mut live = BTreeMap::new();
-                let mut cells = std::pin::pin!(cells(&bucket, cell));
+                let mut cells = std::pin::pin!(cells(&*bucket, cell));
                 while let Some(cell) = cells.next().await {
                     let cell = cell?;
                     let found = bucket_cell::head::live(&*bucket, cell).await;
@@ -978,10 +978,10 @@ fn main() -> Result<(), String> {
                 print!("{}", listed(&live, &held));
                 Ok(())
             }
-            Command::DeleteCell(id) => delete_cell(&bucket, id).await,
-            Command::RotateMasterKey => rotate_master_key(&bucket).await,
+            Command::DeleteCell(id) => delete_cell(&*bucket, id).await,
+            Command::RotateMasterKey => rotate_master_key(&*bucket).await,
             Command::Usage { tenant } => {
-                say_usage(&bucket, tenant, &mut std::io::stdout().lock()).await
+                say_usage(&*bucket, tenant, &mut std::io::stdout().lock()).await
             }
         }
     })

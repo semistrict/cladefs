@@ -305,16 +305,24 @@ pub(crate) fn list_numbers<D: Dir>(dir: &D, path: &str) -> Result<Vec<u64>, Erro
 /// The directories of a cell's files, each a directory for each cell's.
 pub(crate) const KINDS: [&str; 5] = [SEGMENTS, EXTENTS, LOGS, OPEN_SEGMENTS, OPEN_EXTENTS];
 
-/// Creates `cell`'s directories of segments, extents, logs and open files, where it has none.
+/// Creates the directories of segments, extents, logs and open files, and `cell`'s in each, where
+/// there are none: durable at the next sync of anything on their disk ([`make_dir`]).
 pub(crate) fn create_cell_dirs<D: Dir>(dir: &D, cell: u64) -> Result<(), Error> {
     for kind in KINDS {
-        let path = cell_dir(kind, cell);
-        match dir.create_dir(&path) {
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
-            created => created.with_context(|| format!("creating {path}"))?,
-        }
+        make_dir(dir, kind)?;
+        make_dir(dir, &cell_dir(kind, cell))?;
     }
     Ok(())
+}
+
+/// cladefs: makes the directory at `path` in `dir`, unless it is there: durable at the next sync
+/// of anything on its disk, which commits its file system's journal, and lost at a crash before,
+/// with all under it (board 5748), as ext4 and XFS have it.
+pub(crate) fn make_dir<D: Dir>(dir: &D, path: &str) -> Result<(), Error> {
+    match dir.create_dir(path) {
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        made => made.with_context(|| format!("creating {path}")),
+    }
 }
 
 /// `len` bytes of an extent's data, from `extent_offset` in the extent, at `offset` in segment

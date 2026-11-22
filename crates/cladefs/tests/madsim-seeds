@@ -22,3 +22,6 @@
 868     board 5914: a member's first append of a log failing after its file was made, the empty file was no authentic copy, and every take failed (macOS)
 1171    board 5914: the same, its take failing for good (macOS)
 636     board 5908: a host started again ran a guest's open before its boot, through what its kill left; the boot's own opening of the cell beside it, the first's close linked files the second never counted (macOS)
+29      board 5748: a read of an open cell's attached bases failing (EIO) dropped the cell open, unclosed, panicking
+90      board 5748: a host journal note unread (EIO) removed as torn, its cell then noted on no host
+34      board 5748: the same open cell dropped open, in the replicated disk-faults profile

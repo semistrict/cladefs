@@ -538,10 +538,16 @@ pub(super) async fn open_cell_at(
     })
     .await?;
     // cladefs: a fork attached to it opens when first read through to, awaited (doc-24, step 5).
-    open_cell.open_bases(Arc::new(move |base| {
+    let bases = open_cell.open_bases(Arc::new(move |base| {
         let (base, arena) = (base.to_owned(), arena.clone());
         Box::pin(async move { self::base(&base, arena.as_ref()).await })
-    }))?;
+    }));
+    // cladefs: what is attached to it unread, its disk failing, closed again, as every open cell
+    // the daemon lets go of is (board 5748: dropped open, it panicked).
+    if let Err(err) = bases {
+        open_cell.close().await;
+        return Err(err.into());
+    }
     Ok(open_cell)
 }
 
@@ -1234,7 +1240,7 @@ pub(super) async fn delete(path: PathBuf) -> Result<(), Errno> {
 /// The bucket the cell at `path`, or the fork whose handle it is, keeps its branch in, as its
 /// description names it (TASK-165.6): or, if its description is not there, as for what a
 /// deletion that stopped partway left, which deletes nothing in a bucket, the daemon's.
-fn bucket_of(path: &Path) -> Result<Arc<bucket_cell::object_bucket::ObjectBucket>, Errno> {
+fn bucket_of(path: &Path) -> Result<Arc<bucket_cell::object_bucket::RoutedBucket>, Errno> {
     match crate::host_cell::bucket_at(path) {
         Ok(Some(bucket)) => Ok(bucket),
         Ok(None) => daemon_bucket(),
@@ -1258,7 +1264,7 @@ pub(super) async fn drop_here(path: PathBuf) -> Result<(), Errno> {
 /// has it open.
 async fn delete_alone(
     path: PathBuf,
-    bucket: Option<Arc<bucket_cell::object_bucket::ObjectBucket>>,
+    bucket: Option<Arc<bucket_cell::object_bucket::RoutedBucket>>,
 ) -> Result<(), Errno> {
     let _held = hold_alone(&path).await?;
     let deleted = OpenCell::delete(&path, bucket.as_deref()).await;
@@ -1385,7 +1391,7 @@ pub(super) async fn stat(path: PathBuf) -> Result<CellState, Errno> {
 
 node_local::node_local! {
     /// The bucket [`daemon_bucket`] made, once a cell needs it.
-    static BUCKET: OnceLock<Arc<bucket_cell::object_bucket::ObjectBucket>> = OnceLock::new();
+    static BUCKET: OnceLock<Arc<bucket_cell::object_bucket::RoutedBucket>> = OnceLock::new();
 }
 
 /// What the daemon did with its bucket so far, if it made it (`metrics`).
@@ -1401,7 +1407,7 @@ pub(super) fn bucket_stats_by_bucket() -> Vec<(u16, bucket_cell::object_bucket::
 
 /// cladefs: the stats file's line of what the daemon asked of other buckets than its own
 /// (TASK-633.4): each one's GETs, downloaded and uploaded bytes, by number.
-fn buckets_line(bucket: &bucket_cell::object_bucket::ObjectBucket) -> String {
+fn buckets_line(bucket: &bucket_cell::object_bucket::RoutedBucket) -> String {
     use bucket_cell::object_bucket::{Request, Upload};
     let others: Vec<String> = (bucket.stats_by_bucket().into_iter().skip(1))
         .map(|(number, stats)| {
@@ -1442,7 +1448,7 @@ pub(super) fn follower_views() -> usize {
 
 /// cladefs: the bucket `CLADEFSD_BUCKET` names, which the cells opened are kept in:
 /// `EIO` if it names none, as the daemon's host must (`crate::bucket::Host`, TASK-45).
-pub(crate) fn daemon_bucket() -> Result<Arc<bucket_cell::object_bucket::ObjectBucket>, Errno> {
+pub(crate) fn daemon_bucket() -> Result<Arc<bucket_cell::object_bucket::RoutedBucket>, Errno> {
     if let Some(bucket) = BUCKET.get().get() {
         return Ok(bucket.clone());
     }
@@ -1483,7 +1489,7 @@ pub(super) fn uploads_when_asked() {
 /// daemon's cells and their objects. The cells naming `CLADEFSD_BUCKET`'s bucket open it
 /// (`host_cell::use_bucket`).
 #[cfg(any(test, madsim))]
-pub(super) fn use_bucket(bucket: impl Into<Arc<bucket_cell::object_bucket::ObjectBucket>>) {
+pub(super) fn use_bucket(bucket: impl Into<Arc<bucket_cell::object_bucket::RoutedBucket>>) {
     let bucket = bucket.into();
     let host = crate::bucket::Host::from_env().expect("the daemon's host");
     crate::host_cell::use_bucket(&host.bucket, bucket.clone());
@@ -1549,7 +1555,7 @@ impl FollowerStats {
 /// rewritten whole within [`STATS_POLL`] of each change, which the bench reports
 /// (`scripts/bench-report.py`); and the bucket's in the log every [`STATS_EVERY`] that it changed.
 /// cladefs: what it keeps but the bucket's, it looks at only to keep it in the file (TASK-92.17).
-fn watch_stats(bucket: std::sync::Weak<bucket_cell::object_bucket::ObjectBucket>) {
+fn watch_stats(bucket: std::sync::Weak<bucket_cell::object_bucket::RoutedBucket>) {
     let file = node_local::env::var_os("CLADEFSD_STATS").filter(|file| !file.is_empty());
     let file = file.map(PathBuf::from);
     let mut logged = Stats::default();

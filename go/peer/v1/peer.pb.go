@@ -55,7 +55,9 @@ type MigratePrepareRequest struct {
 	To string `protobuf:"bytes,8,opt,name=to,proto3" json:"to,omitempty"`
 	// The cell's epoch, as of this migration: greater than every migration's of the cell before it
 	// (board 5732).
-	Epoch         uint64 `protobuf:"varint,9,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	Epoch uint64 `protobuf:"varint,9,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	// The epoch of the parent's writer that wrote segment `at` (board 6017).
+	ParentEpoch   uint64 `protobuf:"varint,10,opt,name=parent_epoch,json=parentEpoch,proto3" json:"parent_epoch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -149,6 +151,13 @@ func (x *MigratePrepareRequest) GetTo() string {
 func (x *MigratePrepareRequest) GetEpoch() uint64 {
 	if x != nil {
 		return x.Epoch
+	}
+	return 0
+}
+
+func (x *MigratePrepareRequest) GetParentEpoch() uint64 {
+	if x != nil {
+		return x.ParentEpoch
 	}
 	return 0
 }
@@ -1675,7 +1684,7 @@ var File_cladefs_peer_v1_peer_proto protoreflect.FileDescriptor
 
 const file_cladefs_peer_v1_peer_proto_rawDesc = "" +
 	"\n" +
-	"\x1acladefs/peer/v1/peer.proto\x12\x0fcladefs.peer.v1\"\xf5\x01\n" +
+	"\x1acladefs/peer/v1/peer.proto\x12\x0fcladefs.peer.v1\"\x98\x02\n" +
 	"\x15MigratePrepareRequest\x12\x1c\n" +
 	"\tmigration\x18\x01 \x01(\x04R\tmigration\x12\x16\n" +
 	"\x06tenant\x18\x02 \x01(\x04R\x06tenant\x12\x12\n" +
@@ -1686,7 +1695,9 @@ const file_cladefs_peer_v1_peer_proto_rawDesc = "" +
 	"\x02at\x18\x06 \x01(\x04R\x02at\x12\x16\n" +
 	"\x06bucket\x18\a \x01(\tR\x06bucket\x12\x0e\n" +
 	"\x02to\x18\b \x01(\tR\x02to\x12\x14\n" +
-	"\x05epoch\x18\t \x01(\x04R\x05epoch\"P\n" +
+	"\x05epoch\x18\t \x01(\x04R\x05epoch\x12!\n" +
+	"\fparent_epoch\x18\n" +
+	" \x01(\x04R\vparentEpoch\"P\n" +
 	"\x16MigratePrepareResponse\x12 \n" +
 	"\vincarnation\x18\x01 \x01(\x04R\vincarnation\x12\x14\n" +
 	"\x05token\x18\x02 \x01(\x04R\x05token\"1\n" +

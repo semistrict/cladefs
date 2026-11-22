@@ -47,6 +47,8 @@ pub struct Parent {
     pub version: u64,
     /// The segment of the parent's the version is at: its origin.
     pub at: u64,
+    /// The epoch of the parent's writer that wrote segment `at`.
+    pub epoch: u64,
 }
 
 /// An ephemeral cell's local checkpoint (see the module's docs): its state, as of the last segment
@@ -74,7 +76,7 @@ pub struct LocalCheckpoint {
 }
 
 /// What a local checkpoint's file starts with.
-const MAGIC: &[u8; 8] = b"cfsbase1";
+const MAGIC: &[u8; 8] = b"cfsbase2";
 
 impl LocalCheckpoint {
     /// The local checkpoint of a new ephemeral cell, forked from `parent`, whose state at the
@@ -635,10 +637,8 @@ fn unlink<D: Dir>(
     Ok(())
 }
 
-/// Makes the directory at `path` in `dir`, unless it is there.
+/// Makes the directory at `path` in `dir`, unless it is there, durably
+/// ([`crate::layout::make_dir`]).
 fn create_dir<D: Dir>(dir: &D, path: &str) -> Result<(), Error> {
-    match dir.create_dir(path) {
-        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-        made => made.with_context(|| format!("creating {path}")),
-    }
+    crate::layout::make_dir(dir, path)
 }

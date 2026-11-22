@@ -197,9 +197,15 @@ impl Host {
     }
 
     /// The ephemeral cell `child`'s entry, if it has one.
-    pub fn entry(&self, child: CellId) -> Option<Entry> {
-        let bytes = host_fs::read(self.entry_path(child)).ok()?;
-        serde_json::from_slice(&bytes).ok()
+    /// cladefs: failing if it is unread, its disk failing (board 5748), rather than as none, which
+    /// a migration's prepare would write over; one torn by a crash is none.
+    pub fn entry(&self, child: CellId) -> Result<Option<Entry>, Error> {
+        let path = self.entry_path(child);
+        let bytes = match host_fs::read(&path) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            read => read.with_context(|| format!("reading {}", path.display()))?,
+        };
+        Ok(serde_json::from_slice(&bytes).ok())
     }
 
     /// Its journal's entries, those that read whole: one torn by a crash, after which no reference
@@ -212,9 +218,11 @@ impl Host {
                 host_fs::remove_file(&path)?;
                 continue;
             }
-            let read = host_fs::read(&path).map_err(Error::new);
-            match read.and_then(|bytes| serde_json::from_slice::<Entry>(&bytes).map_err(Error::new))
-            {
+            // cladefs: a note unread, its disk failing, is no torn one: said, not removed (board
+            // 5748: removed, its cell's entry went, the cell noted on no host).
+            let bytes =
+                host_fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+            match serde_json::from_slice::<Entry>(&bytes) {
                 Ok(entry) => entries.push(entry),
                 Err(err) => {
                     log::warn!("cladefsd: {} is no whole note, removed: {err:#}", path.display());
@@ -353,7 +361,7 @@ mod tests {
         let host = open(dir.path()).unwrap();
         assert_eq!(host.incarnation(), incarnation);
         let child = CellId { tenant: 3, id: 9 };
-        let origin = Origin { parent: CellId { tenant: 3, id: 1 }, at: 4 };
+        let origin = Origin { parent: CellId { tenant: 3, id: 1 }, at: 4, epoch: 1 };
         let entry = Entry {
             child,
             origin,
@@ -367,7 +375,7 @@ mod tests {
         host_fs::write(dir.path().join(CELLS).join("staged.new"), b"{}").unwrap();
         assert_eq!(host.entries().unwrap(), vec![entry.clone()]);
         assert_eq!(host_fs::read_dir(dir.path().join(CELLS)).unwrap().count(), 1);
-        assert_eq!(host.entry(child), Some(entry));
+        assert_eq!(host.entry(child).unwrap(), Some(entry));
         host.forget(child).unwrap();
         assert_eq!(host.entries().unwrap(), vec![]);
         assert!(!host.accepted(0x3c));

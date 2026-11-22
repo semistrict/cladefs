@@ -43,7 +43,7 @@ fn child_in(tenant: u64, id: u64) -> Child {
 /// hosts run on the test's runtime.
 struct World<K: Kms = LocalKms> {
     objects: Arc<object_store::memory::InMemory>,
-    bucket: Arc<ObjectBucket>,
+    bucket: Arc<RoutedBucket>,
     kms: Arc<Counted<K>>,
     _kms: Option<tempfile::TempDir>,
 }
@@ -68,7 +68,7 @@ impl<K: Kms> World<K> {
     /// A world whose KMS is `kms`, which holds [`TENANT`]'s KEK.
     fn with_kms(kms: K) -> Self {
         let objects = Arc::new(object_store::memory::InMemory::new());
-        let bucket = Arc::new(ObjectBucket::new(objects.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(objects.clone(), "").unrouted());
         Self { objects, bucket, kms: Arc::new(Counted::new(kms)), _kms: None }
     }
 
@@ -752,7 +752,7 @@ async fn versions_fork_into_other_tenants_cells_rewrapped_unless_their_keys_are_
     let record = world.head(clone.cell).await;
     let inherited: Vec<_> = record.inherited.iter().map(|had| had.cell).collect();
     assert_eq!(inherited, [test_cell(7)]);
-    assert_eq!(record.origin(), Some(layout::Origin { parent: test_cell(7), at: 1 }));
+    assert_eq!(record.origin(), Some(layout::Origin { parent: test_cell(7), at: 1, epoch: 1 }));
     let clone_dir = made(clone.cell);
     let (clone_cell, _clone_uploader) = open_on(&world, &forker, &clone_dir).await.unwrap();
     assert_eq!(read(&world, &forker, &clone_cell, a, 4096).await, Ok(noise(1, 4096)));
@@ -1304,14 +1304,14 @@ fn caching_fetcher(
     world: &World,
     memory: &Arc<Memory>,
     dir: &std::path::Path,
-) -> Fetcher<ObjectBucket> {
+) -> Fetcher<RoutedBucket> {
     let cache = Arc::new(bucket_cell::cache::Cache::open(dir, 1 << 30).unwrap());
     Fetcher::new(world.bucket.clone(), Budget::new(Limits::UNBOUNDED), memory.clone(), Some(cache))
 }
 
 /// What `fetcher` reads of `extent`, `len` bytes, at `location`.
 async fn fetched_by(
-    fetcher: &Fetcher<ObjectBucket>,
+    fetcher: &Fetcher<RoutedBucket>,
     extent: ExtentId,
     location: &Location,
     len: u64,

@@ -170,7 +170,9 @@ impl ImageDevice {
             image.committed().await
         };
         let runtime = local_cell::upload::bucket_runtime()?;
-        runtime.spawn(committing).await.map_err(Error::new)?
+        // cladefs: `unconstrained` prevents coop-budget livelock when polled from `block_on` inside
+        // a tokio task (board 6525).
+        crate::bucket::unconstrained(runtime.spawn(committing)).await.map_err(Error::new)?
     }
 }
 

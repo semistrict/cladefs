@@ -187,8 +187,12 @@ mod host {
             let writing = listen("writer")?;
             let mut writer = self.spawn(test_setup, &root, "writer", &cell_dir, &uds("writer"))?;
             let writing = writer.accept(&writing)?;
-            let mut recording =
-                vec![histories(writing, &records("writer"), history.clone(), Some(cell_dir.clone()))?];
+            let mut recording = vec![histories(
+                writing,
+                &records("writer"),
+                history.clone(),
+                Some(cell_dir.clone()),
+            )?];
             let stream = writer.accept(&listener)?;
             let mut said = String::new();
             BufReader::new(stream).read_line(&mut said)?;
@@ -289,7 +293,8 @@ mod host {
                 let Some(line) = line.strip_suffix('\n') else { break };
                 writeln!(records, "{line}")?;
                 record(line, &history, &mut || {
-                    let (control, cell_dir) = (control.as_ref().unwrap(), cell_dir.as_ref().unwrap());
+                    let (control, cell_dir) =
+                        (control.as_ref().unwrap(), cell_dir.as_ref().unwrap());
                     let commit = control.committed(cell_dir)?;
                     writeln!(answers, "{commit}")?;
                     Ok(commit)

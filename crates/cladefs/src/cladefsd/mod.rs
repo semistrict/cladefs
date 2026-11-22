@@ -136,7 +136,7 @@ pub use boot::boot;
 /// simulation's hosts share, an object store in the process (doc-24): before it boots, its
 /// `CLADEFSD_BUCKET` naming it.
 #[cfg(madsim)]
-pub fn use_bucket(bucket: std::sync::Arc<bucket_cell::object_bucket::ObjectBucket>) {
+pub fn use_bucket(bucket: std::sync::Arc<bucket_cell::object_bucket::RoutedBucket>) {
     cells::use_bucket(bucket);
 }
 pub use cells::{cache_config, replace_after};

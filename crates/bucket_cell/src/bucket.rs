@@ -298,6 +298,12 @@ pub trait Bucket: Send + Sync + 'static {
         std::future::ready(crate::identity::DEFAULT_HEAD_SLOTS)
     }
 
+    /// cladefs: default head slots when formatting this bucket without an explicit provider or
+    /// `--head-slots` override (board 6020): 10 for GCS (`rewriting_every` set), 1 otherwise.
+    fn default_head_slots(&self) -> u64 {
+        crate::identity::DEFAULT_HEAD_SLOTS
+    }
+
     /// The backend's clock, which [`Meta::modified`] is in.
     fn now(&self) -> u64;
 
@@ -311,12 +317,6 @@ pub trait Bucket: Send + Sync + 'static {
     /// share, if it keeps them: a host's bucket does, so that the forks of a base it opens decode
     /// the checkpoint they start from once (TASK-92.55).
     fn decoded(&self) -> Option<&crate::recovery::Decoded> {
-        None
-    }
-
-    /// cladefs: what the host knows of the bucket without asking it again, if it keeps it
-    /// ([`crate::known`], TASK-449): a host's bucket does, and the simulation's.
-    fn known(&self) -> Option<&crate::known::Known> {
         None
     }
 

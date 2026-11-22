@@ -48,7 +48,7 @@ fn keys() -> Arc<Ring> {
 /// A new ephemeral cell in `dir`, of the child's, forked from the parent's version.
 fn make(dir: &MemDir) {
     let checkpoint = LocalCheckpoint::fork(
-        Parent { cell: PARENT, version: 7, at: 3 },
+        Parent { cell: PARENT, version: 7, at: 3, epoch: 1 },
         &parent(),
         b"wrapped".to_vec(),
     );

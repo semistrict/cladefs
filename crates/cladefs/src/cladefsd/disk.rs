@@ -309,8 +309,16 @@ pub fn start(config: DiskConfig) -> Result<(), String> {
 /// be read keeps what it was allowed, logged once until it is read again (`errors`).
 pub fn govern_once(config: DiskConfig, errors: &mut std::collections::HashSet<u64>) {
     let disks = HostDisk::all();
+    govern_disks(&disks, config, errors);
+}
+
+fn govern_disks(
+    disks: &[Arc<HostDisk>],
+    config: DiskConfig,
+    errors: &mut std::collections::HashSet<u64>,
+) {
     let cache = super::cells::opened_cache();
-    for disk in &disks {
+    for disk in disks {
         let dev = disk.dev().unwrap_or_default();
         let sample = match disk.sample() {
             Ok(sample) => {
@@ -325,9 +333,9 @@ pub fn govern_once(config: DiskConfig, errors: &mut std::collections::HashSet<u6
             }
         };
         let headroom = super::governor::disk_headroom(sample.size, config.headroom);
-        // What it counts that its filesystem doesn't hold yet: the cells' pages dirty, and the
-        // cache's fills in flight.
-        let in_flight = local_cell::pages::shared().usage().dirty + disk.cache_writing.get();
+        // What it counts that its filesystem doesn't hold yet: this disk's cells' pages dirty in
+        // the cell page cache (board 5995), and the cache's fills in flight.
+        let in_flight = disk.dirty.get() + disk.cache_writing.get();
         let mut allowance =
             super::governor::disk_allowance(disk.held(), sample.free, in_flight, headroom);
         if let Some(fixed) = config.fixed {
@@ -667,5 +675,49 @@ mod tests {
         governing(committed + 64 * MIB);
         assert_eq!((heavy_disk.allotment.share(), light_disk.allotment.share()), (None, None));
         assert!(light_cell.footprint().admit(past, 0).is_ok());
+    }
+
+    /// board 5995: dirty pages in the cell page cache on Disk A reduce Disk A's allowance alone,
+    /// leaving an unrelated Disk B's allowance, spare, part cache limit, and pressure untouched.
+    #[test]
+    fn dirty_pages_on_one_disk_do_not_affect_another_host_disk() {
+        use bucket_cell::host_disk::{HostDisk, Sample};
+        use local_cell::pages::{Cached, Options, PageCache};
+
+        let size = 100 * MIB;
+        let free = 20 * MIB;
+        let headroom = 10 * MIB;
+        let disk_a = HostDisk::in_memory(move || Sample { size, free, used: size - free });
+        let disk_b = HostDisk::in_memory(move || Sample { size, free, used: size - free });
+
+        let dir = local_cell::MemDisk::new();
+        let cache = PageCache::without_flusher(Options::default());
+        let file_a =
+            Cached::on_disk(dir.create("a", true).unwrap(), &cache, Some(disk_a.clone())).unwrap();
+        // Dirty 12 MiB on Disk A — more than Disk B's spare headroom above `headroom`.
+        let dirty_bytes = 12 * MIB;
+        file_a.write_at(&vec![0x5a; dirty_bytes as usize], 0).unwrap();
+        disk_a.cells.charge(dirty_bytes, true);
+        assert_eq!(disk_a.dirty.get(), dirty_bytes);
+        assert_eq!(disk_b.dirty.get(), 0);
+
+        let config =
+            super::DiskConfig { headroom: Some(super::DiskHeadroom::Bytes(headroom)), fixed: None };
+        let mut errors = std::collections::HashSet::new();
+        super::govern_disks(&[disk_a.clone(), disk_b.clone()], config, &mut errors);
+
+        // Disk B has 0 held, 20 MiB free, 0 dirty, 10 MiB headroom => allowance = 10 MiB,
+        // spare = 10 MiB, not under pressure (spare == headroom).
+        assert_eq!(disk_b.allowance(), free - headroom);
+        assert!(!disk_b.under_pressure(), "Disk A's dirty pages must not pressure Disk B");
+
+        // Disk A has 12 MiB held and 12 MiB dirty not yet on disk: free(20) - in_flight(12) +
+        // held(12) - headroom(10) = 10 MiB < committed(12 MiB + reserve) => under pressure.
+        assert_eq!(disk_a.allowance(), (free - dirty_bytes) + dirty_bytes - headroom);
+        assert!(disk_a.under_pressure());
+
+        // Syncing file_a clears Disk A's dirty count cleanly.
+        file_a.sync().unwrap();
+        assert_eq!(disk_a.dirty.get(), 0);
     }
 }

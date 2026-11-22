@@ -1877,7 +1877,7 @@ mod tests {
         let parents_ring = block_on(ring(&bucket, &parents, parent, &held.head, true)).unwrap();
         let dek = Secret::from_bytes(parents_ring.encrypting().0.expose());
         let child = CellId { tenant: 2, id: 10 };
-        let origin = Origin { parent, at: 3 };
+        let origin = Origin { parent, at: 3, epoch: 1 };
         // Its head as a fork that gave it no keys makes it.
         let forked = Head::of(Made::Clone(origin), 4);
         block_on(crate::testing::make_head(&bucket, child, forked)).unwrap();

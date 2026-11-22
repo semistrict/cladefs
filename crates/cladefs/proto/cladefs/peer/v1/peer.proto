@@ -105,6 +105,8 @@ message MigratePrepareRequest {
   // The cell's epoch, as of this migration: greater than every migration's of the cell before it
   // (board 5732).
   uint64 epoch = 9;
+  // The epoch of the parent's writer that wrote segment `at` (board 6017).
+  uint64 parent_epoch = 10;
 }
 
 // A migration prepared.

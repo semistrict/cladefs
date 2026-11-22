@@ -44,6 +44,7 @@ use crate::cache::Cache;
 use crate::checkpoint::Table;
 use crate::keys::{self, HostRing};
 use crate::layout::{self, Footer, Kind, Location, Moves, PART};
+use crate::lru::LruMap;
 use crate::moves::MOVES;
 use crate::object::{self, TAIL};
 use crate::peer::{Peer, Peers};
@@ -51,9 +52,9 @@ use crate::trace::{self, Source};
 use futures::channel::oneshot;
 use futures::future::{BoxFuture, FutureExt as _, Shared};
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use storage_device::ExtentId;
 
 /// Whether a read waits for its data.
@@ -342,25 +343,72 @@ fn part_of(parts: &extent_frame::Parts, key: &str, part: u64) -> Result<extent_f
 }
 
 /// What a host's fetchers keep in memory, which they share, as they share its budget and its
-/// cache: objects' tails, and the parts fetched last, each kept once for the host however many of
-/// its cells read it, within bounds that hold for the host, not for each cell (TASK-92.21,
-/// TASK-92.22); and the GETs of parts in flight, which the reads of all of them that want a part
-/// while its GET is in flight share (TASK-92.43). The host's fetchers read one bucket, as they
-/// share one cache: what is kept is kept by key, as the cache keeps it, and a part by its object's
-/// key and its number, which name it for good, as a key is written once (TASK-407).
-#[derive(Default)]
+/// cache: objects' tails, and the parts fetched/unpacked last, each kept once for the host however
+/// many of its cells read it, within bounds that hold for the host, not for each cell (TASK-92.21,
+/// TASK-92.22, board 6026); and the GETs of parts in flight, which the reads of all of them that
+/// want a part while its GET is in flight share (TASK-92.43).
 pub struct Memory {
     tails: Mutex<Tails>,
-    recent: Mutex<Recent>,
+    recent: Arc<PartMemory>,
     parts: Mutex<Parts>,
     /// cladefs: the keys of the cells the host serves, which what it keeps is opened with
     /// (TASK-411.3).
     keys: Arc<HostRing>,
 }
 
+impl Default for Memory {
+    fn default() -> Self {
+        Self {
+            tails: Mutex::default(),
+            recent: PartMemory::new(RECENT),
+            parts: Mutex::default(),
+            keys: Arc::default(),
+        }
+    }
+}
+
 impl Memory {
     pub fn new() -> Arc<Self> {
         Arc::default()
+    }
+
+    /// A fetcher memory sharing `recent` with local framed part unpacking (board 6026).
+    pub fn with_parts(recent: Arc<PartMemory>) -> Arc<Self> {
+        Arc::new(Self {
+            tails: Mutex::default(),
+            recent,
+            parts: Mutex::default(),
+            keys: Arc::default(),
+        })
+    }
+
+    /// The shared part cache backing `recent`.
+    pub fn recent_parts(&self) -> &Arc<PartMemory> {
+        &self.recent
+    }
+
+    /// Bytes held in cached object tails.
+    pub fn tails_bytes(&self) -> u64 {
+        self.tails.lock().unwrap().bytes
+    }
+
+    /// Evicts cached object tails least-recently-used first down to `target` bytes, returning the
+    /// bytes still held.
+    pub fn evict_tails_to(&self, target: u64) -> u64 {
+        let mut tails = self.tails.lock().unwrap();
+        tails.evict_to(target);
+        tails.bytes
+    }
+
+    /// Bytes held in the unified recent/unpacked part cache.
+    pub fn recent_bytes(&self) -> u64 {
+        self.recent.bytes()
+    }
+
+    /// Evicts cached parts least-recently-used first down to `target` bytes, returning the bytes
+    /// still held.
+    pub fn evict_recent_to(&self, target: u64) -> u64 {
+        self.recent.evict_to(target)
     }
 
     /// cladefs: the keys of the cells the host serves, which its cells hold theirs in as they open
@@ -386,15 +434,8 @@ impl Memory {
             }
             doomed.len()
         };
-        let mut recent = self.recent.lock().unwrap();
-        let doomed: Vec<(String, u64)> =
-            recent.parts.keys().filter(|(key, _)| of(key)).cloned().collect();
-        for id in &doomed {
-            let (used, dropped) = recent.parts.remove(id).expect("a part kept");
-            recent.by_use.remove(&used);
-            recent.bytes -= dropped.size();
-        }
-        tails + doomed.len()
+        let parts = self.recent.forget_bucket(of);
+        tails + parts
     }
 }
 
@@ -408,15 +449,11 @@ const TAILS: u64 = 64 << 20;
 /// which reads as many at first. None is the tail of an object gone.
 #[derive(Default)]
 struct Tails {
-    kept: HashMap<String, KeptTail>,
-    by_use: BTreeMap<u64, String>,
-    clock: u64,
+    kept: LruMap<String, KeptTail>,
     bytes: u64,
 }
 
 struct KeptTail {
-    /// When it was used last: its place in `by_use`.
-    used: u64,
     /// Which read of it it is.
     read: u64,
     size: u64,
@@ -439,10 +476,6 @@ impl Tails {
     /// and moved up to demand if it waits behind it and `priority` is demand.
     fn get(&mut self, key: &str, priority: Priority) -> Option<Flight<Option<Arc<Tail>>>> {
         let kept = self.kept.get_mut(key)?;
-        self.clock += 1;
-        self.by_use.remove(&kept.used);
-        kept.used = self.clock;
-        self.by_use.insert(self.clock, key.to_owned());
         match &kept.flight {
             TailState::Reading(flight, ahead) => {
                 if let Some((budget, ticket)) =
@@ -461,8 +494,7 @@ impl Tails {
 
     /// The number of the next read of a tail.
     fn next_read(&mut self) -> u64 {
-        self.clock += 1;
-        self.clock
+        self.kept.tick()
     }
 
     /// Keeps `flight`, read `read` of the tail of the object at `key`, now going, its place in a
@@ -476,32 +508,33 @@ impl Tails {
     ) {
         self.remove(key, None);
         let flight = TailState::Reading(flight.downgrade().expect("new tail read"), ahead);
-        self.kept.insert(key.to_owned(), KeptTail { used: read, read, size: 0, flight });
-        self.by_use.insert(read, key.to_owned());
+        self.kept.insert(key.to_owned(), KeptTail { read, size: 0, flight });
         self.settle(key, read, TAIL);
     }
 
     /// Read `read` of the tail of the object at `key` takes `size` bytes, unless it was dropped
     /// since: those used least recently go while they all take more than [`TAILS`].
     fn settle(&mut self, key: &str, read: u64, size: u64) {
-        let Some(kept) = self.kept.get_mut(key).filter(|kept| kept.read == read) else { return };
+        let Some(kept) = self.kept.peek_mut(key).filter(|kept| kept.read == read) else { return };
         self.bytes = self.bytes - kept.size + size;
         kept.size = size;
-        while self.bytes > TAILS
-            && let Some((_, oldest)) = self.by_use.pop_first()
+        self.evict_to(TAILS);
+    }
+
+    fn evict_to(&mut self, target: u64) {
+        while self.bytes > target
+            && let Some((_, dropped)) = self.kept.pop_oldest()
         {
-            let dropped = self.kept.remove(&oldest).expect("a tail kept");
             self.bytes -= dropped.size;
         }
     }
 
     /// Drops the tail of the object at `key`: if it is read `read`, if one is given.
     fn remove(&mut self, key: &str, read: Option<u64>) {
-        if let Some(kept) = self.kept.get(key)
+        if let Some(kept) = self.kept.peek(key)
             && read.is_none_or(|read| read == kept.read)
         {
             let kept = self.kept.remove(key).unwrap();
-            self.by_use.remove(&kept.used);
             self.bytes -= kept.size;
         }
     }
@@ -532,107 +565,255 @@ async fn land<T: Clone>(flight: Flight<T>) -> Result<T, Error> {
 /// A part of an object, read by its tail.
 #[derive(Clone)]
 enum FetchedPart {
-    /// Its bytes.
-    Data(Arc<Fetched>),
+    /// Its bytes (either stored ciphertext/compressed or already unpacked plaintext).
+    Data(Fetched),
     /// The object is gone.
     Gone,
 }
 
-/// A part's stored bytes, checked against its CRC, unpacked once a read wants them: a read ahead
-/// never does, so that a part is unpacked once, by the read that wants it (TASK-92.21). cladefs:
-/// opened then, if encrypted, in a copy: its stored bytes are what the cache keeps and peers are
-/// served (TASK-411.2); by the part as its tail is opened then, under the host's keys, a read
-/// failing so, its key not held yet, kept for none (TASK-411.3).
-struct Fetched {
-    /// The part, as its tail says it is stored, read holding no key.
-    part: extent_frame::Part,
-    bytes: Arc<[u8]>,
-    unpacked: OnceLock<Arc<[u8]>>,
+#[derive(Clone)]
+enum PartBacking {
+    Slice(Arc<[u8]>),
+    Owned(Arc<dyn AsRef<[u8]> + Send + Sync>),
+}
+
+/// Unpacked part bytes kept in memory, counted by their held capacity (board 6026).
+#[derive(Clone)]
+pub struct PartBytes {
+    bytes: PartBacking,
+    held: u64,
+}
+
+impl PartBytes {
+    /// Wraps an `Arc<[u8]>` slice without copying.
+    pub fn from_arc(bytes: Arc<[u8]>) -> Self {
+        let held = bytes.len() as u64;
+        Self { bytes: PartBacking::Slice(bytes), held }
+    }
+
+    /// Wraps an arbitrary shared byte buffer (such as an aligned direct-I/O buffer) with its held
+    /// allocation capacity in bytes.
+    pub fn from_owned<T: AsRef<[u8]> + Send + Sync + 'static>(bytes: Arc<T>, held: u64) -> Self {
+        Self { bytes: PartBacking::Owned(bytes), held }
+    }
+
+    /// The bytes held in memory for governor accounting.
+    pub fn held(&self) -> u64 {
+        self.held
+    }
+}
+
+impl std::ops::Deref for PartBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match &self.bytes {
+            PartBacking::Slice(bytes) => bytes,
+            PartBacking::Owned(bytes) => (**bytes).as_ref(),
+        }
+    }
+}
+
+/// A part retained in a single representation (board 6026): either its stored bytes (fetched ahead
+/// or for peer serving, before unpacking) or its unpacked plaintext bytes (after a demand read),
+/// never both at once.
+#[derive(Clone)]
+enum Fetched {
+    Stored { bytes: Arc<[u8]> },
+    Unpacked(PartBytes),
 }
 
 impl Fetched {
-    /// `part` of the object at `key`, of `bytes`, which are as it says it is stored, checked.
-    fn new(part: extent_frame::Part, bytes: Vec<u8>) -> Self {
-        Self { part, bytes: bytes.into(), unpacked: OnceLock::new() }
-    }
-
-    /// Its bytes, unpacked, those of part `part` of the object at `key`, as `opened`, the part as
-    /// its tail is opened, opens them.
-    fn unpacked(
-        &self,
-        opened: &extent_frame::Part,
-        key: &str,
-        part: u64,
-    ) -> Result<Arc<[u8]>, Error> {
-        if let Some(unpacked) = self.unpacked.get() {
-            return Ok(unpacked.clone());
-        }
-        let unpacked: Arc<[u8]> = match opened.as_is() {
-            true => self.bytes.clone(),
-            false => match opened.unpack(&self.bytes) {
-                Ok(unpacked) => unpacked.into(),
-                Err(extent_frame::Error::Corrupt(err)) => {
-                    return Err(Error::Corrupt(format!("part {part} of {key}: {err}")));
-                }
-                Err(err) => return Err(Error::from(err)),
-            },
-        };
-        Ok(self.unpacked.get_or_init(|| unpacked).clone())
-    }
-
-    /// The bytes it takes, unpacked too: the unpacked bytes of a part stored as it is are its
-    /// stored bytes.
     fn size(&self) -> u64 {
-        match self.part.as_is() {
-            true => self.part.len(),
-            false => self.bytes.len() as u64 + self.part.len(),
+        match self {
+            Self::Stored { bytes } => bytes.len() as u64,
+            Self::Unpacked(plain) => plain.held(),
         }
     }
 }
 
-/// How many bytes of the parts fetched last a host's fetchers keep in memory, for the reads after:
-/// a read ahead's, until the read that wants it, a part a reader reads a little of at a time, and
-/// one a fork's cell reads after its base's did.
-const RECENT: u64 = 64 << 20;
+/// How many bytes of parts the unified recent/unpacked part cache keeps in memory (board 6026).
+pub const RECENT: u64 = 64 << 20;
 
-/// The parts fetched last, least recently used first, by their objects' keys and numbers, and the
-/// bytes they take.
+/// Per-entry key/tree metadata overhead charged for small stored parts so many tiny compressed
+/// parts cannot overrun [`PartMemory`]'s budget.
+const STORED_ENTRY_OVERHEAD: u64 = 128;
+
+/// Key of a part in the unified [`PartMemory`] cache (board 6026).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum PartKey {
+    /// A part of a local framed file: `(opening_id, part_number)`.
+    Local(u64, u64),
+    /// A part of a bucket object: `(object_key, part_number)`. Shared via `Arc<str>` so `LruMap`
+    /// keeps one copy of the key string.
+    Bucket(Arc<str>, u64),
+}
+
+impl PartKey {
+    fn stored_overhead(&self) -> u64 {
+        match self {
+            Self::Local(_, _) => STORED_ENTRY_OVERHEAD,
+            Self::Bucket(key, _) => key.len() as u64 + STORED_ENTRY_OVERHEAD,
+        }
+    }
+}
+
+/// Shared, governed LRU cache of recent bucket parts and unpacked local framed parts (board 6026).
+///
+/// Uses `std::sync::Mutex` so it is safe to lock from `Drop` (such as `local_cell::framed::Framed`)
+/// without creating Shuttle schedule points (TASK-675).
+pub struct PartMemory {
+    limit: u64,
+    kept: Mutex<Recent>,
+}
+
+impl Default for PartMemory {
+    fn default() -> Self {
+        Self { limit: RECENT, kept: Mutex::default() }
+    }
+}
+
+/// The process's (or simulated node's) unified recent/unpacked part cache (board 6026).
+pub fn shared_parts() -> &'static Arc<PartMemory> {
+    node_local::node_local! {
+        static SHARED: Arc<PartMemory> = PartMemory::new(RECENT);
+    }
+    SHARED.get()
+}
+
+impl PartMemory {
+    pub fn new(limit: u64) -> Arc<Self> {
+        Arc::new(Self { limit, kept: Mutex::default() })
+    }
+
+    /// Bytes currently held by cached parts.
+    pub fn bytes(&self) -> u64 {
+        self.kept.lock().unwrap().bytes
+    }
+
+    /// Evicts least-recently-used parts until at most `target` bytes remain, returning bytes held.
+    pub fn evict_to(&self, target: u64) -> u64 {
+        let mut kept = self.kept.lock().unwrap();
+        kept.evict_to(target);
+        kept.bytes
+    }
+
+    /// Looks up a local framed file's unpacked part.
+    pub fn get_local(&self, file: u64, part: u64) -> Option<PartBytes> {
+        let mut kept = self.kept.lock().unwrap();
+        match kept.parts.get(&PartKey::Local(file, part)) {
+            Some(Fetched::Unpacked(bytes)) => Some(bytes.clone()),
+            _ => None,
+        }
+    }
+
+    /// Inserts a local framed file's unpacked part.
+    pub fn put_local(&self, file: u64, part: u64, bytes: PartBytes) {
+        self.kept.lock().unwrap().put(
+            PartKey::Local(file, part),
+            Fetched::Unpacked(bytes),
+            self.limit,
+        );
+    }
+
+    /// Drops all unpacked parts belonging to local framed file opening `file`.
+    pub fn forget_local(&self, file: u64) {
+        let mut kept = self.kept.lock().unwrap();
+        let dropped =
+            kept.parts.remove_range(PartKey::Local(file, 0)..=PartKey::Local(file, u64::MAX));
+        for part in dropped {
+            kept.bytes -= part.size();
+        }
+    }
+
+    fn get_bucket(&self, key: &str, part: u64) -> Option<Fetched> {
+        self.kept.lock().unwrap().parts.get(&PartKey::Bucket(Arc::from(key), part)).cloned()
+    }
+
+    fn get_bucket_stored(&self, key: &str, part: u64) -> Option<Arc<[u8]>> {
+        let mut kept = self.kept.lock().unwrap();
+        match kept.parts.get(&PartKey::Bucket(Arc::from(key), part)) {
+            Some(Fetched::Stored { bytes }) => Some(bytes.clone()),
+            _ => None,
+        }
+    }
+
+    fn forget_gen(&self) -> u64 {
+        self.kept.lock().unwrap().forget_gen
+    }
+
+    fn put_bucket(&self, key: &str, part: u64, fetched: Fetched) {
+        self.kept.lock().unwrap().put(PartKey::Bucket(Arc::from(key), part), fetched, self.limit);
+    }
+
+    /// Inserts `fetched` only if no `forget_bucket` has run since `expected_gen` was captured
+    /// (atomic under `self.kept` mutex, closing the shred/revocation re-insertion race).
+    fn put_bucket_at_gen(&self, key: &str, part: u64, fetched: Fetched, expected_gen: u64) {
+        let mut kept = self.kept.lock().unwrap();
+        if kept.forget_gen != expected_gen {
+            return;
+        }
+        kept.put(PartKey::Bucket(Arc::from(key), part), fetched, self.limit);
+    }
+
+    /// Stores `fetched` if no unpacked plaintext entry already occupies `(key, part)`.
+    fn put_bucket_if_not_unpacked(&self, key: &str, part: u64, fetched: Fetched) {
+        let mut kept = self.kept.lock().unwrap();
+        let id = PartKey::Bucket(Arc::from(key), part);
+        if matches!(kept.parts.peek(&id), Some(Fetched::Unpacked(_))) {
+            return;
+        }
+        kept.put(id, fetched, self.limit);
+    }
+
+    fn forget_bucket(&self, mut matches: impl FnMut(&str) -> bool) -> usize {
+        let mut kept = self.kept.lock().unwrap();
+        kept.forget_gen += 1;
+        let doomed: Vec<PartKey> = kept
+            .parts
+            .keys()
+            .filter(|k| matches!(k, PartKey::Bucket(key, _) if matches(key)))
+            .cloned()
+            .collect();
+        let count = doomed.len();
+        for id in doomed {
+            if let Some(dropped) = kept.parts.remove(&id) {
+                kept.bytes -= Recent::entry_size(&id, &dropped);
+            }
+        }
+        count
+    }
+}
+
+/// The parts fetched or unpacked last, least recently used first, and the bytes they take.
 #[derive(Default)]
 struct Recent {
-    parts: HashMap<(String, u64), (u64, Arc<Fetched>)>,
-    by_use: BTreeMap<u64, (String, u64)>,
-    clock: u64,
+    parts: LruMap<PartKey, Fetched>,
     bytes: u64,
+    forget_gen: u64,
 }
 
 impl Recent {
-    /// Part `part` of the object at `key`, if kept.
-    fn get(&mut self, key: &str, part: u64) -> Option<Arc<Fetched>> {
-        let id = (key.to_owned(), part);
-        let (used, fetched) = self.parts.get_mut(&id)?;
-        self.clock += 1;
-        self.by_use.remove(used);
-        *used = self.clock;
-        self.by_use.insert(self.clock, id);
-        Some(fetched.clone())
+    fn entry_size(id: &PartKey, fetched: &Fetched) -> u64 {
+        match fetched {
+            Fetched::Stored { bytes } => bytes.len() as u64 + id.stored_overhead(),
+            Fetched::Unpacked(plain) => plain.held(),
+        }
     }
 
-    /// Keeps `fetched`, part `part` of the object at `key`, dropping those used least recently
-    /// past [`RECENT`] bytes.
-    fn put(&mut self, key: &str, part: u64, fetched: Arc<Fetched>) {
-        let id = (key.to_owned(), part);
-        self.clock += 1;
-        self.bytes += fetched.size();
-        if let Some((used, replaced)) = self.parts.insert(id.clone(), (self.clock, fetched)) {
-            self.by_use.remove(&used);
-            self.bytes -= replaced.size();
+    fn put(&mut self, id: PartKey, fetched: Fetched, limit: u64) {
+        self.bytes += Self::entry_size(&id, &fetched);
+        if let Some(replaced) = self.parts.insert(id.clone(), fetched) {
+            self.bytes -= Self::entry_size(&id, &replaced);
         }
-        self.by_use.insert(self.clock, id);
-        while self.bytes > RECENT
-            && let Some((_, oldest)) = self.by_use.pop_first()
+        self.evict_to(limit);
+    }
+
+    fn evict_to(&mut self, target: u64) {
+        while self.bytes > target
+            && let Some((id, dropped)) = self.parts.pop_oldest()
         {
-            let (_, dropped) = self.parts.remove(&oldest).expect("a part kept");
-            self.bytes -= dropped.size();
+            self.bytes -= Self::entry_size(&id, &dropped);
         }
     }
 }
@@ -651,12 +832,11 @@ struct Parts {
     flights: HashMap<Flown, Waited>,
 }
 
-/// What a part's GET fetches, by which reads find it in flight: its object's key and the part's
-/// number, which name it for good, as a key is written once (TASK-92.43, TASK-407). cladefs: and
-/// whether it asks the part's owner first (TASK-406.2): a read a peer asked for asks no other, so
-/// that hosts that disagree on its owner, as peers being added and removed do for a while, never
-/// ask each other round in a ring.
-type Flown = (String, u64, bool);
+/// What a part's GET fetches, by which reads find it in flight: its object's key, the part's
+/// number, whether it asks the part's owner first (TASK-406.2), and whether it requires stored
+/// bytes (peer serving after disk-cache eviction coalesces its own single bucket GET rather than
+/// returning an unpacked-only memory entry).
+type Flown = (String, u64, bool, bool);
 
 struct Waited {
     /// The budget it has its place in, the fetcher's that sent it, and its place there.
@@ -874,6 +1054,7 @@ impl<B: Bucket> Fetcher<B> {
             return Err(Error::Corrupt(format!("{range:?} past the end of {key}")));
         }
         // cladefs: opened under the host's keys (TASK-411.3).
+        let forget_gen = self.shared.memory.recent.forget_gen();
         let opened = tail.opened(&self.shared.memory.keys, key)?;
         let numbers = tail.parts().frame.parts_of(range.clone());
         let parts = numbers.clone().map(|part| self.part(key, part, tail, priority));
@@ -881,9 +1062,35 @@ impl<B: Bucket> Fetcher<B> {
         let Range { start, end } = range;
         let mut bytes = Vec::with_capacity((end - start) as usize);
         for (number, part) in numbers.zip(parts) {
+            let opened_part = part_of(&opened, key, number)?;
             let part = match part {
-                FetchedPart::Data(fetched) => {
-                    fetched.unpacked(&part_of(&opened, key, number)?, key, number)?
+                FetchedPart::Data(Fetched::Unpacked(plain)) => {
+                    opened_part.check_open()?;
+                    plain
+                }
+                FetchedPart::Data(Fetched::Stored { bytes }) => {
+                    let plain: Arc<[u8]> = match opened_part.as_is() {
+                        true => bytes,
+                        false => match opened_part.unpack(&bytes) {
+                            Ok(unpacked) => unpacked.into(),
+                            Err(extent_frame::Error::Corrupt(err)) => {
+                                return Err(Error::Corrupt(format!(
+                                    "part {number} of {key}: {err}"
+                                )));
+                            }
+                            Err(err) => return Err(Error::from(err)),
+                        },
+                    };
+                    let plain = PartBytes::from_arc(plain);
+                    if self.shared.cache.is_some() {
+                        self.shared.memory.recent.put_bucket_at_gen(
+                            key,
+                            number,
+                            Fetched::Unpacked(plain.clone()),
+                            forget_gen,
+                        );
+                    }
+                    plain
                 }
                 FetchedPart::Gone => return Ok(Found::Gone),
             };
@@ -973,12 +1180,13 @@ impl<B: Bucket> Fetcher<B> {
         if tail.part(key, part).is_err() {
             return Ok(None);
         }
-        if let Some(fetched) = self.shared.recent_part(key, part) {
+        if let Some(bytes) = self.shared.recent_stored(key, part) {
             trace::note(Some(Source::Memory));
-            return Ok(Some(fetched.bytes.clone()));
+            return Ok(Some(bytes));
         }
-        match self.flight(key, part, &tail, Priority::Demand, None).await? {
-            FetchedPart::Data(fetched) => Ok(Some(fetched.bytes.clone())),
+        match self.flight_kind(key, part, &tail, Priority::Demand, None, true).await? {
+            FetchedPart::Data(Fetched::Stored { bytes }) => Ok(Some(bytes)),
+            FetchedPart::Data(Fetched::Unpacked(_)) => unreachable!("stored flight yields stored"),
             FetchedPart::Gone => Ok(None),
         }
     }
@@ -1014,7 +1222,20 @@ impl<B: Bucket> Fetcher<B> {
         priority: Priority,
         owner: Option<Arc<dyn Peer>>,
     ) -> Result<FetchedPart, Error> {
-        let (flight, _, _reading) = self.join(key, part, tail, priority, owner)?;
+        self.flight_kind(key, part, tail, priority, owner, false).await
+    }
+
+    async fn flight_kind(
+        &self,
+        key: &str,
+        part: u64,
+        tail: &Arc<Tail>,
+        priority: Priority,
+        owner: Option<Arc<dyn Peer>>,
+        need_stored: bool,
+    ) -> Result<FetchedPart, Error> {
+        let (flight, _, _reading) =
+            self.join_kind(key, part, tail, priority, owner, need_stored)?;
         land(flight).await
     }
 
@@ -1029,8 +1250,20 @@ impl<B: Bucket> Fetcher<B> {
         priority: Priority,
         owner: Option<Arc<dyn Peer>>,
     ) -> Result<(Flight<FetchedPart>, bool, Reading<'_>), Error> {
+        self.join_kind(key, part, tail, priority, owner, false)
+    }
+
+    fn join_kind(
+        &self,
+        key: &str,
+        part: u64,
+        tail: &Arc<Tail>,
+        priority: Priority,
+        owner: Option<Arc<dyn Peer>>,
+        need_stored: bool,
+    ) -> Result<(Flight<FetchedPart>, bool, Reading<'_>), Error> {
         tail.part(key, part)?;
-        let id: Flown = (key.to_owned(), part, owner.is_some());
+        let id: Flown = (key.to_owned(), part, owner.is_some(), need_stored);
         let parts = &self.shared.memory.parts;
         let mut new = false;
         let flight = {
@@ -1040,7 +1273,8 @@ impl<B: Bucket> Fetcher<B> {
                 let budget = self.shared.budgets.of(key);
                 let (ticket, given) = budget.enter(priority, PART);
                 let (shared, tail, key) = (self.shared.clone(), tail.clone(), key.to_owned());
-                let flight = async move { shared.part(&key, part, &tail, given, owner).await };
+                let flight =
+                    async move { shared.part(&key, part, &tail, given, owner, need_stored).await };
                 Waited { budget, ticket, readers: 0, flight: fly(flight) }
             });
             if priority == Priority::Demand {
@@ -1100,10 +1334,16 @@ impl<B: Bucket> Fetching<B> {
         tail: &Tail,
         given: impl Future<Output = Slot>,
         owner: Option<Arc<dyn Peer>>,
+        need_stored: bool,
     ) -> Result<FetchedPart, Error> {
         let opened = tail.part(key, part)?;
         let stored = opened.stored;
-        if let Some(fetched) = self.recent_part(key, part) {
+        let cached = if need_stored {
+            self.recent_stored(key, part).map(|bytes| Fetched::Stored { bytes })
+        } else {
+            self.recent_part(key, part)
+        };
+        if let Some(fetched) = cached {
             trace::note(Some(Source::Memory));
             return Ok(FetchedPart::Data(fetched));
         }
@@ -1121,9 +1361,13 @@ impl<B: Bucket> Fetching<B> {
                 fetched
             }
         };
-        let fetched = Arc::new(Fetched::new(opened, bytes));
-        if let Some(mut recent) = self.recent() {
-            recent.put(key, part, fetched.clone());
+        let fetched = Fetched::Stored { bytes: bytes.into() };
+        if self.cache.is_some() {
+            if need_stored {
+                self.memory.recent.put_bucket_if_not_unpacked(key, part, fetched.clone());
+            } else {
+                self.memory.recent.put_bucket(key, part, fetched.clone());
+            }
         }
         Ok(FetchedPart::Data(fetched))
     }
@@ -1164,14 +1408,15 @@ impl<B: Bucket> Fetching<B> {
     }
 
     /// Part `part` of the object at `key`, if fetched last and kept in the host's memory.
-    fn recent_part(&self, key: &str, part: u64) -> Option<Arc<Fetched>> {
-        self.recent()?.get(key, part)
+    fn recent_part(&self, key: &str, part: u64) -> Option<Fetched> {
+        self.cache.as_ref()?;
+        self.memory.recent.get_bucket(key, part)
     }
 
-    /// The parts fetched last, in the host's memory, if it keeps the parts it fetches.
-    fn recent(&self) -> Option<MutexGuard<'_, Recent>> {
+    /// Stored bytes of part `part` of the object at `key`, if kept unpacked-not-yet in memory.
+    fn recent_stored(&self, key: &str, part: u64) -> Option<Arc<[u8]>> {
         self.cache.as_ref()?;
-        Some(self.memory.recent.lock().unwrap())
+        self.memory.recent.get_bucket_stored(key, part)
     }
 
     /// What `io` does with the files of its cache, if it keeps one: as a task that blocks may,
@@ -1219,7 +1464,7 @@ impl<B: Bucket> Fetching<B> {
             match &fetched {
                 Ok(Some((tail, size))) => {
                     if let Some(entry) =
-                        tails.kept.get_mut(&key_owned).filter(|entry| entry.read == read)
+                        tails.kept.peek_mut(&key_owned).filter(|entry| entry.read == read)
                     {
                         entry.flight = TailState::Ready(tail.clone());
                         tails.settle(&key_owned, read, *size);
@@ -2277,7 +2522,7 @@ mod tests {
         // Reads in flight of nearly as many bytes as are kept; this one's tail read again, used
         // last; then another read in flight: the other's tail, used least recently, goes, then
         // the first read in flight.
-        let kept = |key: &str| fetcher.shared.memory.tails.lock().unwrap().kept.contains_key(key);
+        let kept = |key: &str| fetcher.shared.memory.tails.lock().unwrap().kept.peek(key).is_some();
         let key = |number: u64| layout::segment(test_cell(2), number as u64, 1);
         let reading = TAILS / TAIL;
         for number in 0..reading - 1 {
@@ -2479,7 +2724,7 @@ mod tests {
         let memories = fetchers.iter().map(|fetcher| &fetcher.shared.memory);
         let memories = memories.filter(|memory| counted.insert(Arc::as_ptr(memory)));
         memories.fold((0, 0), |(parts, tails), memory| {
-            let held = (memory.recent.lock().unwrap().bytes, memory.tails.lock().unwrap().bytes);
+            let held = (memory.recent_bytes(), memory.tails_bytes());
             (parts + held.0, tails + held.1)
         })
     }
@@ -2622,9 +2867,9 @@ mod tests {
         let read = reads.read(fork, location(2 * PART), PART - 5, 10, Priority::Demand);
         assert_eq!(complete_all(&bucket, &mut reads), Vec::<String>::new());
         assert_eq!(reads.result(read), want);
-        // One copy of the parts, each as stored and unpacked.
+        // One copy of the parts, unpacked only (board 6026: stored bytes released on unpack).
         let stored = extent_frame::Parts::of(&whole(&data), &extent_frame::NoKeys).unwrap().stored;
-        assert_eq!(held(&fetchers).0, stored.iter().map(|stored| stored.len + PART).sum::<u64>());
+        assert_eq!(held(&fetchers).0, stored.len() as u64 * PART);
     }
 
     /// Reads within the part the last read ended in go on from it, and read further ahead; a read

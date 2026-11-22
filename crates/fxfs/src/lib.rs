@@ -42,3 +42,40 @@ mod stable_hash;
 #[cfg(any(test, feature = "benchmark", fuzz))]
 pub mod testing;
 pub mod zerocopy_serialization;
+
+/// cladefs: constructs and boxes a future inside its own non-inlined stack frame so the caller's
+/// async state machine and poll stack frame never reserve space for the callee's future
+/// (TASK-26.9, 16 KiB guest kernel stacks).
+#[inline(never)]
+pub(crate) fn boxed<'a, F, Fut>(make: F) -> futures::future::BoxFuture<'a, Fut::Output>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future + Send + 'a,
+{
+    Box::pin(make())
+}
+
+/// cladefs: like [`boxed`], but keeps the concrete future type so callers in a recursive
+/// `async fn` chain (`allocate_in` -> `sync`) do not trip `Send` auto-trait cycles (TASK-26.9).
+#[inline(never)]
+pub(crate) fn boxed_pin<F, Fut>(make: F) -> std::pin::Pin<Box<Fut>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future,
+{
+    Box::pin(make())
+}
+
+/// cladefs: runs `make()` on a fresh task stack (`fuchsia_async::Task::spawn` — a fresh 16 KiB
+/// kernel worker stack in the guest and executor depth 0 on the host), constructing the inner
+/// future inside the spawned task so deep mount, replay, compaction, and super-block chains stay
+/// well within 16 KiB guest kernel stacks (TASK-26.9).
+#[inline(never)]
+pub(crate) fn offload<F, Fut>(make: F) -> fuchsia_async::Task<Fut::Output>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future + Send + 'static,
+    Fut::Output: Send + 'static,
+{
+    fuchsia_async::Task::spawn(async move { crate::boxed(make).await })
+}

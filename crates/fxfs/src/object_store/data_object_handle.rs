@@ -1123,7 +1123,9 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         ranges: &[Range<u64>],
         buf: MutableBufferRef<'_>,
     ) -> Result<(), Error> {
-        self.handle.multi_write(transaction, attribute_id, None, ranges, buf).await
+        // cladefs: box `multi_write` in a non-inlined frame so compaction and write paths stay
+        // small on 16 KiB guest kernel stacks (TASK-26.9).
+        crate::boxed(|| self.handle.multi_write(transaction, attribute_id, None, ranges, buf)).await
     }
 
     // `buf` is mutable as an optimization, since the write may require encryption, we can
@@ -1145,8 +1147,12 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         let key_id = self.get_key(None).await?.0;
 
         // The transaction only ends up being used if allow_allocations is true
-        let mut transaction =
-            if options.allow_allocations { Some(self.new_transaction().await?) } else { None };
+        // cladefs: box large sub-futures in non-inlined frames to fit 16 KiB stacks (TASK-26.9).
+        let mut transaction = if options.allow_allocations {
+            Some(crate::boxed(|| self.new_transaction()).await?)
+        } else {
+            None
+        };
 
         // We build up a list of writes to perform later
         let mut writes = FuturesOrdered::new();
@@ -1345,8 +1351,12 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                 }
                 let root = if last { options.root } else { None };
                 let write_options = WriteOptions { flags, root, ..Default::default() };
-                let write =
-                    self.write_at(offset, current_buf, store_extent, device_offset, write_options);
+                // cladefs: box `write_at` in a non-inlined frame so `FuturesOrdered` and
+                // `last_write` don't bloat `overwrite`'s stack frame past 7 KiB on 16 KiB guest
+                // kernel stacks (TASK-26.9).
+                let write = crate::boxed(move || {
+                    self.write_at(offset, current_buf, store_extent, device_offset, write_options)
+                });
                 if last {
                     last_write = Some(write);
                 } else {
@@ -1375,9 +1385,9 @@ impl<S: HandleOwner> DataObjectHandle<S> {
             assert_eq!(options.allow_allocations, true);
             if !transaction.is_empty() {
                 if end > self.get_size() {
-                    self.grow(&mut transaction, self.get_size(), end).await?;
+                    crate::boxed(|| self.grow(&mut transaction, self.get_size(), end)).await?;
                 }
-                transaction.commit().await?;
+                crate::boxed(|| transaction.commit()).await?;
             }
         }
 
@@ -2110,11 +2120,19 @@ impl<'a, S: HandleOwner> DirectWriter<'a, S> {
     }
 
     async fn flush(&mut self) -> Result<(), Error> {
-        let mut transaction = self.handle.new_transaction_with_options(self.options).await?;
-        self.handle
-            .txn_write(&mut transaction, self.offset, self.buffer.subslice(0..self.buf_offset))
-            .await?;
-        transaction.commit().await?;
+        // cladefs: box flush stages in non-inlined frames so `DirectWriter` / `KeptWriter` /
+        // `PersistentLayerWriter` stay small on 16 KiB guest kernel stacks (TASK-26.9).
+        let mut transaction =
+            crate::boxed(|| self.handle.new_transaction_with_options(self.options)).await?;
+        crate::boxed(|| {
+            self.handle.txn_write(
+                &mut transaction,
+                self.offset,
+                self.buffer.subslice(0..self.buf_offset),
+            )
+        })
+        .await?;
+        crate::boxed(|| transaction.commit()).await?;
         self.offset += self.buf_offset as u64;
         self.buf_offset = 0;
         Ok(())

@@ -10,11 +10,11 @@
 //! CI, `forks_read_what_they_inherited_compacted_twice`).
 
 use crate::OpenCell;
-use bucket_cell::object_bucket::ObjectBucket;
+use bucket_cell::object_bucket::RoutedBucket;
 use std::time::{Duration, Instant};
 
 /// The newest checkpoint of `cell` that `bucket` lists, by its sequence number.
-pub(crate) async fn newest(bucket: &ObjectBucket, cell: crate::CellId) -> Option<u64> {
+pub(crate) async fn newest(bucket: &RoutedBucket, cell: crate::CellId) -> Option<u64> {
     let prefix = bucket_cell::layout::checkpoints(cell);
     let listed = bucket_cell::Bucket::list(bucket, &prefix).await;
     (listed.unwrap().iter())
@@ -27,7 +27,7 @@ pub(crate) async fn newest(bucket: &ObjectBucket, cell: crate::CellId) -> Option
 
 /// Runs `commits`, which commit `cell` into a checkpoint, and waits for its writer's checkpoint
 /// past the newest before them to be in `bucket`, 60 s at most.
-pub(crate) async fn after(cell: &OpenCell, bucket: &ObjectBucket, commits: impl AsyncFnOnce()) {
+pub(crate) async fn after(cell: &OpenCell, bucket: &RoutedBucket, commits: impl AsyncFnOnce()) {
     let before = newest(bucket, cell.cell()).await;
     commits().await;
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -43,7 +43,7 @@ pub(crate) async fn after(cell: &OpenCell, bucket: &ObjectBucket, commits: impl 
 
 /// Commits `cell` [`local_cell::upload::CHECKPOINT_EVERY`] times, a segment each, and waits for
 /// the checkpoint they make to be in `bucket` ([`after`]).
-pub(crate) async fn checkpointed(cell: &OpenCell, bucket: &ObjectBucket) {
+pub(crate) async fn checkpointed(cell: &OpenCell, bucket: &RoutedBucket) {
     after(cell, bucket, async || {
         for _ in 0..local_cell::upload::CHECKPOINT_EVERY {
             cell.commit(None).await.unwrap();

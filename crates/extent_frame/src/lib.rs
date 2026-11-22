@@ -638,6 +638,14 @@ impl Part {
         self.stored.encoding == Encoding::Raw && matches!(self.opening, Opening::Unchecked(_))
     }
 
+    /// Returns `Err(Error::NoKey)` if this part is encrypted and the reader does not hold its DEK.
+    pub fn check_open(&self) -> Result<(), Error> {
+        match &self.opening {
+            Opening::Locked(key) => Err(Error::NoKey(*key)),
+            Opening::Open(_) | Opening::Unchecked(_) => Ok(()),
+        }
+    }
+
     /// Opens `bytes` in place, its stored bytes checked against its CRC, if it is encrypted;
     /// cladefs: checks them against its tag, if it is authenticated under a key its reader holds
     /// (TASK-411.3); checks them against its tag and decrypts them, if a raw file's sectors

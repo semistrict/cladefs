@@ -12,9 +12,8 @@
 //!   futures on kernel workers, and `Timer` wakes them after a while;
 //! - randomness, from the kernel's generator.
 //!
-//! The kernel's threads have small stacks (64 KiB with cladefs's patch,
-//! guest/linux/patches/0002-stack-size.patch, rather than 16), and Fxfs's futures are large, so
-//! futures are polled from the heap.
+//! The kernel's threads have small stacks (stock 16 KiB, TASK-26.9), so large futures are polled
+//! from the heap while small ones stay inline on the stack (board 6014).
 
 #![no_std]
 

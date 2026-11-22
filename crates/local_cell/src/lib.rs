@@ -220,6 +220,9 @@ pub use dir::{Dir, DirFile, DiskDir, DiskFile, File, HostDir, HostFile, closed};
 /// cladefs: where a cell is: its tenant's cell, and its ID there (TASK-364).
 pub use extent_frame::segment::CellId;
 pub use framed::{Aligned, Located, Packed, Unpacked, read_object, read_whole, unpacked, unpacks};
+pub use framing::{
+    buffers_bytes as framing_buffers_bytes, evict_buffers_to as evict_framing_buffers_to,
+};
 pub use host::{
     create_host, create_host_at_version, create_host_ephemeral, delete_host, deleting_host,
     host_bucket, host_cell, host_ephemeral, host_local_checkpoint, host_token, host_version,

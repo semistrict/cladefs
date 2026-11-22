@@ -48,11 +48,17 @@ where
         let total_len = layer_set.sum_len();
         let mut merger = layer_set.merger();
         let iter = merger.query(Query::FullScan).await?;
+        // cladefs: box `compact_with_iterator` in non-inlined frames so `tree::flush` fits in
+        // 16 KiB guest kernel stacks (TASK-26.9).
         let bytes_written = if layers_to_keep.is_empty() {
             let major_iter = LSMTree::<K, V>::major_iter(iter).await?;
-            compact_with_iterator(major_iter, total_len, writer, block_size, yielder).await
+            crate::boxed(|| {
+                compact_with_iterator(major_iter, total_len, writer, block_size, yielder)
+            })
+            .await
         } else {
-            compact_with_iterator(iter, total_len, writer, block_size, yielder).await
+            crate::boxed(|| compact_with_iterator(iter, total_len, writer, block_size, yielder))
+                .await
         }
         .context("ObjectStore::flush")?;
 

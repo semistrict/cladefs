@@ -26,7 +26,7 @@ use super::tests::{Gated, Mishap, idle, kept_in, naming, pattern, reopened, rest
 use crate::faults::{CLEANUP_STEPS, FORK_STEPS, plan};
 use crate::{Errno, ExtentId, OpenCell, VolatileSlice, VolatileSliceMut};
 use bucket_cell::layout::{self, Kind};
-use bucket_cell::object_bucket::ObjectBucket;
+use bucket_cell::object_bucket::{ObjectBucket, RoutedBucket};
 use bucket_cell::{EPOCH_SHIFT, lifecycle};
 use fail::FailGuard;
 use futures::executor::block_on;
@@ -80,7 +80,7 @@ struct World {
     temp: tempfile::TempDir,
     /// Where the parent's host's disk is: once it died, its copy, restarted.
     host: PathBuf,
-    bucket: Arc<ObjectBucket>,
+    bucket: Arc<RoutedBucket>,
     gated: Arc<Gated>,
     parent: Option<OpenCell>,
     cell: crate::CellId,
@@ -155,9 +155,9 @@ impl World {
         let host = temp.path().join("host");
         std::fs::create_dir(&host).unwrap();
         let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(memory.clone(), "").unrouted());
         let gated = Arc::new(Gated::over(memory));
-        let reached = Arc::new(ObjectBucket::new(gated.clone(), ""));
+        let reached = Arc::new(ObjectBucket::new(gated.clone(), "").unrouted());
 
         let other =
             kept_in(temp.path().join("other"), (1 << 30, None), &bucket, options()).await.unwrap();

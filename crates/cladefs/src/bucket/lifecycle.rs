@@ -26,7 +26,7 @@ use crate::open_cell::Opening;
 use crate::{CellId, ExtentId, OpenCell, VolatileSlice};
 use base32_id::Padded;
 use bucket_cell::faults::{Fault, Faults, Faulty};
-use bucket_cell::object_bucket::ObjectBucket;
+use bucket_cell::object_bucket::{ObjectBucket, RoutedBucket};
 use futures::StreamExt as _;
 use futures::stream::BoxStream;
 use object_store::path::Path as Key;
@@ -430,7 +430,7 @@ impl Made {
     async fn new(extents: u64, objects: &Arc<dyn ObjectStore>, run: &mut Run) -> Self {
         let dir = tempfile::tempdir().unwrap();
         // The host the base is made on, and its version: another's than the one measured.
-        let elsewhere = Arc::new(ObjectBucket::new(objects.clone(), ""));
+        let elsewhere = Arc::new(ObjectBucket::new(objects.clone(), "").unrouted());
         let capacity = (8 * extents * BLOCK as u64).max(1 << 30);
         let made = dir.path().join("made");
         std::fs::create_dir(&made).unwrap();
@@ -441,7 +441,7 @@ impl Made {
 
     /// A copy of the version, made at `name` on the host measured, kept in `bucket`, and opened:
     /// as the daemon's `CreateCell` with a version, then the open cell's opening, make it.
-    async fn copied(&self, bucket: &Arc<ObjectBucket>, name: &str) -> OpenCell {
+    async fn copied(&self, bucket: &Arc<RoutedBucket>, name: &str) -> OpenCell {
         let ((cell, version), capacity) = (self.version, self.capacity);
         let url = super::tests::url_of(bucket);
         let description = local_cell::Description { block_size: BLOCK as u32, capacity, cell };
@@ -461,7 +461,7 @@ impl Made {
 async fn based(
     extents: u64,
     made: &Path,
-    (capacity, bucket): (u64, &Arc<ObjectBucket>),
+    (capacity, bucket): (u64, &Arc<RoutedBucket>),
     run: &mut Run,
 ) -> (CellId, u64) {
     let base = kept_in(made.join("base"), (capacity, None), bucket, idle()).await.unwrap();
@@ -491,7 +491,7 @@ async fn based(
 /// host does once, not for each restore: its conditional writes probed, a block of object IDs
 /// taken. Made so without the environment, which the base's open cells' threads, and the S3
 /// server's, may read meanwhile (TASK-444.16).
-async fn host(bucket: &Arc<ObjectBucket>) {
+async fn host(bucket: &Arc<RoutedBucket>) {
     crate::host_cell::use_host_bucket(url_of(bucket));
     bucket.probed(rand::random()).await.unwrap();
     host_cell::new_cell(bucket, DEFAULT_TENANT).await.unwrap();
@@ -530,7 +530,7 @@ async fn lifecycle(extents: u64, latency: Duration) {
     let made = Made::new(extents, &objects, &mut run).await;
     // The host measured: a bucket of its own over the same objects, which decoded nothing yet, and
     // directories of its own.
-    let bucket = Arc::new(ObjectBucket::new(objects, ""));
+    let bucket = Arc::new(ObjectBucket::new(objects, "").unrouted());
     host(&bucket).await;
     let at = |name: &str| made.at(name);
     run.late(true);
@@ -677,7 +677,7 @@ async fn bucket_lifecycle_by_phase() {
 async fn restores_ask_the_bucket_what_the_protocol_needs() {
     let (objects, mut run) = recorded(memory(), 64, Duration::from_millis(5));
     let made = Made::new(64, &objects, &mut run).await;
-    let bucket = Arc::new(ObjectBucket::new(objects, ""));
+    let bucket = Arc::new(ObjectBucket::new(objects, "").unrouted());
     host(&bucket).await;
     let at = |name: &str| made.at(name);
     run.late(true);
@@ -698,11 +698,11 @@ async fn restores_ask_the_bucket_what_the_protocol_needs() {
     assert_eq!(
         costs,
         [
-            ("cold copy-open", (22, 4)),
-            ("cold fork", (33, 7)),
-            ("cold fork-open", (2, 2)),
-            ("warm fork", (33, 7)),
-            ("warm fork-open", (1, 1)),
+            ("cold copy-open", (4, 4)),
+            ("cold fork", (6, 6)),
+            ("cold fork-open", (3, 3)),
+            ("warm fork", (6, 6)),
+            ("warm fork-open", (2, 2)),
         ]
     );
     drop((vm, cold, taken));
@@ -719,7 +719,7 @@ async fn restores_ask_the_bucket_what_the_protocol_needs() {
 async fn restores_refused_to_placements_superseded_since_their_forks() {
     let (objects, mut run) = recorded(memory(), 16, Duration::ZERO);
     let made = Made::new(16, &objects, &mut run).await;
-    let bucket = Arc::new(ObjectBucket::new(objects.clone(), ""));
+    let bucket = Arc::new(ObjectBucket::new(objects.clone(), "").unrouted());
     host(&bucket).await;
     let taken = made.copied(&bucket, "copy").await;
     let clone = taken.fork(made.at("vm"), DEFAULT_TENANT).await.unwrap();
@@ -748,7 +748,7 @@ async fn uploads_after_restores() {
     let server = bucket_cell::s3_server::S3Server::start(None);
     let (objects, mut run) = recorded(server.objects(), 16, Duration::ZERO);
     let made = Made::new(16, &objects, &mut run).await;
-    let bucket = Arc::new(ObjectBucket::new(server.objects(), ""));
+    let bucket = Arc::new(ObjectBucket::new(server.objects(), "").unrouted());
     host(&bucket).await;
     let taken = made.copied(&bucket, "copy").await;
     for restore in 0..restores {
@@ -798,7 +798,7 @@ async fn restores_connect_to_the_bucket_no_more() {
     let (objects, mut run) = recorded(server.objects(), 16, Duration::ZERO);
     let made = Made::new(16, &objects, &mut run).await;
     // The host measured: a client of its own, its own pool of connections, as another host's.
-    let bucket = Arc::new(ObjectBucket::new(server.objects(), ""));
+    let bucket = Arc::new(ObjectBucket::new(server.objects(), "").unrouted());
     host(&bucket).await;
     let taken = made.copied(&bucket, "copy").await;
     let restore = async |name: &str| {

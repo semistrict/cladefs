@@ -420,9 +420,7 @@ fn run_single_test(
                     }
                     Err(err) => TestOutcome::Fail(format!("{err:#}")),
                 },
-                Err(err) => {
-                    TestOutcome::Fail(format!("checking its cells are encrypted: {err:#}"))
-                }
+                Err(err) => TestOutcome::Fail(format!("checking its cells are encrypted: {err:#}")),
             }
         }
         outcome => outcome,

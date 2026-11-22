@@ -20,6 +20,8 @@
 //! A host's locks of files ([`Flock`]) are its disk's, and go with its crash, as a process's go
 //! with its death.
 
+pub mod crash;
+
 #[cfg(not(madsim))]
 pub use std::fs::{
     DirEntry, File, FileType, Metadata, OpenOptions, ReadDir, canonicalize, copy, create_dir,

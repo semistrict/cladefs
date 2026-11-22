@@ -474,7 +474,7 @@ pub(crate) async fn recover_at<B: Bucket>(
 ) -> Result<(Arc<State>, BTreeSet<String>), Error> {
     for _ in 0..RESTARTS {
         let mut touched = BTreeSet::new();
-        match state_at(checkpoints, cell, at, &mut touched, cell, true).await {
+        match state_at(checkpoints, cell, at, &mut touched, true).await {
             Ok(state) => return Ok((state, touched)),
             Err(Attempt::Restart) => {}
             Err(Attempt::Failed(error)) => return Err(error),
@@ -497,7 +497,7 @@ pub(crate) async fn recover_ats<B: Bucket>(
 ) -> Result<(Walked, BTreeSet<String>), Error> {
     for _ in 0..RESTARTS {
         let mut touched = BTreeSet::new();
-        match states_at(checkpoints, cell, ats, &mut touched, cell, true).await {
+        match states_at(checkpoints, cell, ats, &mut touched, true).await {
             Ok(walked) => return Ok((walked, touched)),
             Err(Attempt::Restart) => {}
             Err(Attempt::Failed(error)) => return Err(error),
@@ -519,7 +519,7 @@ pub async fn recover_version(
     let checkpoints = Checkpoints::new(bucket, 0).holding(ring);
     for _ in 0..RESTARTS {
         let mut touched = BTreeSet::new();
-        match state_at(&checkpoints, cell, at, &mut touched, cell, false).await {
+        match state_at(&checkpoints, cell, at, &mut touched, false).await {
             Ok(state) => {
                 let recovered = State::clone(&state);
                 return Ok(Recovered { state: recovered, head: None, touched, layer: Some(state) });
@@ -982,8 +982,7 @@ async fn attempt<B: Bucket>(
         None => match origin {
             None => Layered::of(State::new(cell)),
             Some(origin) => {
-                let at = state_at(checkpoints, origin.parent, origin.at, &mut touched, cell, false)
-                    .await;
+                let at = state_of_origin(checkpoints, origin, cell, &mut touched).await;
                 match at {
                     Ok(at) => {
                         layer = Some(at.clone());
@@ -1110,93 +1109,77 @@ fn newest_to(listed: &[Meta], at: u64) -> Option<&Meta> {
         .map(|(_, meta)| meta)
 }
 
+/// cladefs: recovers the state of `origin` for a child `from`: when crossing cells
+/// (`origin.parent != from`), GETs `checkpoint(origin.parent, origin.at, origin.epoch)` directly
+/// without touching `origin.parent`'s head (board 6017).
+async fn state_of_origin<B: Bucket>(
+    checkpoints: &Checkpoints<'_, B>,
+    origin: Origin,
+    from: CellId,
+    touched: &mut BTreeSet<String>,
+) -> Result<Arc<State>, Attempt> {
+    if origin.parent == from {
+        return state_at(checkpoints, origin.parent, origin.at, touched, false).await;
+    }
+    let key = layout::checkpoint(origin.parent, origin.at, origin.epoch);
+    match checkpoints.read_key(&key, origin.parent).await? {
+        Some(state) if state.through != Some(origin.at) => {
+            Err(Attempt::Failed(Error::Corrupt(format!("{key} holds another state"))))
+        }
+        Some(state) => {
+            touched.insert(key);
+            Ok(state)
+        }
+        None => Err(Attempt::Failed(Error::Lost(key))),
+    }
+}
+
 /// The state of `cell` as of the end of its segment `at`, which its head names: its newest
 /// checkpoint up to there, or its origin's state, then the segments its head names up to there. A
 /// checkpoint at `at` itself is the state, as read, which the forks made there share.
 ///
-/// cladefs: for a fork in `from`, a cell of its own, of `cell` in another, its checkpoint at `at`
-/// alone, of the epoch of the segment there, read by its key, listing nothing of the other cell's
-/// (TASK-395.4): whoever records a fork across cells writes it first ([`checkpoint_at`]), and the
-/// parent's cell keeps it, the origin's state, while the fork's reference stands. Gone, what
-/// the fork inherited is.
-///
-/// cladefs: `kept`, an origin's state a pass keeps ([`recover_at`]), its own first listing of the
-/// checkpoints served by the pass's listing of the cell ([`Checkpoints::listed`]); else, an
-/// origin's state a recovery of a cell starts from, the cell's listing.
+/// cladefs: `kept`, an origin's state a pass keeps ([`recover_at`]), checks the checkpoint at `at`'s
+/// exact key first and uses the pass's listing of the cell ([`Checkpoints::listed`]).
 fn state_at<'a, B: Bucket>(
     checkpoints: &'a Checkpoints<'_, B>,
     cell: CellId,
     at: u64,
     touched: &'a mut BTreeSet<String>,
-    from: CellId,
     kept: bool,
 ) -> BoxFuture<'a, Result<Arc<State>, Attempt>> {
     Box::pin(async move {
         let ats = BTreeSet::from([at]);
-        let walked = states_at(checkpoints, cell, &ats, touched, from, kept).await?;
+        let walked = states_at(checkpoints, cell, &ats, touched, kept).await?;
         Ok(walked.states.into_iter().next().expect("the state at its one segment"))
     })
 }
 
 /// cladefs: the states of `cell` as of each of its segments `ats`, which [`state_at`] recovers of
-/// each, read in one walk (TASK-476): its versions', a pass keeps, are states of one history. Each
-/// is as [`state_at`] has it: its checkpoint at its key, if `kept` or of another cell than `from`;
-/// else its newest checkpoint up to there, or its origin's state, then its segments up to there.
-/// Those sharing their newest checkpoint up to them are walked to from it at once, each footer read
-/// once for them all, not once a state: a pass over a cell of 256 versions read 16 footers a
-/// segment (`versions-pass-bench`). The first state of a walk is whole; the next, what changed of
-/// it, the extents the footers since named where it names them, which is what a pass keeps of them
-/// all ([`Walked`]).
+/// each, read in one walk (TASK-476): its versions', a pass keeps, are states of one history.
 fn states_at<'a, B: Bucket>(
     checkpoints: &'a Checkpoints<'_, B>,
     cell: CellId,
     ats: &'a BTreeSet<u64>,
     touched: &'a mut BTreeSet<String>,
-    from: CellId,
     kept: bool,
 ) -> BoxFuture<'a, Result<Walked, Attempt>> {
     Box::pin(async move {
         let bucket = checkpoints.bucket;
         let mut walked = Walked::default();
-        let mut head = None;
         let mut unread: Vec<u64> = ats.iter().copied().collect();
-        let by_key = cell != from || kept;
-        // cladefs: each read by the key of the epoch a head was seen naming the segment by, if one
-        // was: the head's to read only if the checkpoint isn't there (TASK-449, `known`). Else the
-        // epoch its head names it by: none, it is lost.
-        let known = bucket.known().filter(|_| by_key);
-        let mut epochs = Vec::with_capacity(unread.len());
-        // cladefs: a cell of another bucket, its versions' epochs learned first from the markers
-        // of their mirrors in this one, if any (TASK-633.8): its head unread, in its own bucket.
-        let mut learned = false;
-        for &at in &unread {
-            let mut epoch = known.and_then(|known| known.epoch(cell, at));
-            if epoch.is_none()
-                && !learned
-                && let (Some(known), Some(here)) = (known, bucket.mirrors())
-            {
-                here.learn(cell).await;
-                (learned, epoch) = (true, known.epoch(cell, at));
+        let head = head::get(bucket, cell).await?;
+        if kept {
+            let mut keys = Vec::with_capacity(unread.len());
+            for &at in &unread {
+                let Some(epoch) = head.as_ref().and_then(|head| head.epoch_of(at)) else {
+                    return Err(Attempt::Failed(Error::Lost(format!(
+                        "segment {at} of {cell}",
+                        at = base32_id::Short(at)
+                    ))));
+                };
+                keys.push((at, layout::checkpoint(cell, at, epoch)));
             }
-            let epoch = match epoch {
-                Some(epoch) => epoch,
-                None => {
-                    if head.is_none() {
-                        head = Some(head::get(bucket, cell).await?);
-                    }
-                    let named = head.as_ref().and_then(Option::as_ref);
-                    named_epoch(bucket, cell, named, at)?
-                }
-            };
-            epochs.push((at, layout::checkpoint(cell, at, epoch)));
-        }
-        if by_key {
-            // cladefs: an origin's a pass keeps for the forks to other cells is read as they
-            // read it, by the key of its checkpoint alone, if there is one: a later writer's
-            // checkpoint at the segment, at its own key, may name the extents along other moves,
-            // of other passes, than the forks follow from it (TASK-407, TASK-407.1). None yet, no
-            // fork read it: the newest checkpoint up to there, as whoever writes it reads it.
-            let mut reads = futures::stream::iter(epochs)
+            let mut reads = futures::stream::iter(keys)
                 .map(|(at, key)| async move {
                     let state = checkpoints.read_key(&key, cell).await;
                     (at, key, state)
@@ -1213,16 +1196,11 @@ fn states_at<'a, B: Bucket>(
                         touched.insert(key);
                         walked.states.push(state);
                     }
-                    None if kept => unread.push(at),
-                    None => return Err(Attempt::Failed(Error::Lost(key))),
+                    None => unread.push(at),
                 }
             }
         }
         let Some(&first) = unread.first() else { return Ok(walked) };
-        let head = match head {
-            Some(head) => head,
-            None => head::get(bucket, cell).await?,
-        };
         let listed = checkpoints.list(cell, kept.then_some(first)).await?;
         // The states sharing their newest checkpoint up to them, in order: the newest only grows.
         let mut walks: Vec<(Option<&Meta>, Vec<u64>)> = Vec::new();
@@ -1288,10 +1266,7 @@ async fn walk<B: Bucket>(
                     match head.origin() {
                         None => Ok(None),
                         Some(origin) => {
-                            let from = cell;
-                            state_at(checkpoints, origin.parent, origin.at, touched, from, false)
-                                .await
-                                .map(Some)
+                            state_of_origin(checkpoints, origin, cell, touched).await.map(Some)
                         }
                     }
                 }
@@ -1398,27 +1373,6 @@ impl Taking {
     }
 }
 
-/// cladefs: the epoch of the writer of segment `at` of `cell`, as `head`, its head, names it:
-/// noted as known for good (`known`, TASK-449), a head's runs of epochs only growing; or
-/// [`Error::Lost`] if it names none.
-fn named_epoch<B: Bucket>(
-    bucket: &B,
-    cell: CellId,
-    head: Option<&Head>,
-    at: u64,
-) -> Result<u64, Attempt> {
-    let Some(epoch) = head.and_then(|head| head.epoch_of(at)) else {
-        return Err(Attempt::Failed(Error::Lost(format!(
-            "segment {at} of {cell}",
-            at = base32_id::Short(at)
-        ))));
-    };
-    if let Some(known) = bucket.known() {
-        known.named(cell, at, epoch);
-    }
-    Ok(epoch)
-}
-
 /// cladefs: makes sure `cell` has a checkpoint as of its segment `at`, which its head names: the
 /// state a fork made there to another cell inherits, which the fork's recovery reads by its key
 /// alone, so that a pass over the fork's cell lists nothing of `cell`'s ([`state_at`],
@@ -1451,7 +1405,7 @@ pub async fn checkpoint_at(
     debug_assert_eq!(keys.encrypting().1.cell, cell.id);
     let checkpoints = Checkpoints::new(bucket, 0);
     for _ in 0..RESTARTS {
-        match state_at(&checkpoints, cell, at, &mut BTreeSet::new(), cell, false).await {
+        match state_at(&checkpoints, cell, at, &mut BTreeSet::new(), false).await {
             Ok(state) => {
                 let checkpoint = crate::checkpoint::encode(&state, keys.encrypting());
                 bucket::create(bucket, &key, checkpoint).await?;
@@ -1759,12 +1713,20 @@ mod tests {
             };
             let forked =
                 resize(1, 1 << 20).close(&mut parent.chain()).frame(parent.keys().encrypting());
-            let forked = Origin { parent: test_cell(1), at: landed(&parent, forked).await };
+            let forked = Origin {
+                parent: test_cell(1),
+                at: landed(&parent, forked).await,
+                epoch: parent.epoch(),
+            };
             crate::testing::forked_at(&*bucket, test_cell(2), forked).await;
             let pointed = SegmentBuilder::default()
                 .close(&mut parent.chain())
                 .frame(parent.keys().encrypting());
-            let pointed = Origin { parent: test_cell(1), at: landed(&parent, pointed).await };
+            let pointed = Origin {
+                parent: test_cell(1),
+                at: landed(&parent, pointed).await,
+                epoch: parent.epoch(),
+            };
             crate::testing::forked_at(&*bucket, test_cell(3), pointed).await;
             landed(
                 &parent,
@@ -1813,9 +1775,9 @@ mod tests {
                 .unwrap();
             parent.upload(at).await.unwrap();
             parent.acknowledge().await.unwrap();
-            crate::testing::forked_at(&*bucket, test_cell(2), Origin { parent: test_cell(1), at })
-                .await;
-            let origin = Some(Origin { parent: test_cell(1), at });
+            let origin = Origin { parent: test_cell(1), at, epoch: parent.epoch() };
+            crate::testing::forked_at(&*bucket, test_cell(2), origin).await;
+            let origin = Some(origin);
             assert_eq!(
                 crate::head::get(&*bucket, test_cell(2)).await.unwrap().unwrap().origin(),
                 origin

@@ -543,11 +543,16 @@ impl FxFilesystemBuilder {
 
         filesystem.journal.set_trace(self.trace);
         if self.format {
-            filesystem.journal.init_empty(filesystem.clone()).await?;
+            // cladefs: offload deep mount/format futures onto fresh task stacks to fit 16 KiB
+            // guest kernel stacks (TASK-26.9).
+            let journal = filesystem.journal.clone();
+            let fs = filesystem.clone();
+            crate::offload(move || async move { journal.init_empty(fs).await }).await?;
             if image_builder_mode.is_none() {
                 // The filesystem isn't valid until superblocks are written but we want to defer
                 // that until last when migrating filesystems or building system images.
-                filesystem.journal.init_superblocks().await?;
+                let journal = filesystem.journal.clone();
+                crate::offload(move || async move { journal.init_superblocks().await }).await?;
 
                 // Start the graveyard's background reaping task.
                 filesystem.graveyard.clone().reap_async();
@@ -556,27 +561,34 @@ impl FxFilesystemBuilder {
             // Create the root volume directory.
             let root_store = filesystem.root_store();
             root_store.set_trace(self.trace);
-            let root_directory =
+            let root_directory = crate::boxed(|| {
                 Directory::open(&root_store, root_store.root_directory_object_id())
-                    .await
-                    .context("Unable to open root volume directory")?;
-            let mut transaction = root_store
-                .new_transaction(
+            })
+            .await
+            .context("Unable to open root volume directory")?;
+            let mut transaction = crate::boxed(|| {
+                root_store.new_transaction(
                     lock_keys![LockKey::object(
                         root_store.store_object_id(),
                         root_directory.object_id()
                     )],
                     transaction::Options::default(),
                 )
-                .await?;
-            let volume_directory =
-                root_directory.create_child_dir(&mut transaction, VOLUMES_DIRECTORY).await?;
-            transaction.commit().await?;
+            })
+            .await?;
+            let volume_directory = crate::boxed(|| {
+                root_directory.create_child_dir(&mut transaction, VOLUMES_DIRECTORY)
+            })
+            .await?;
+            crate::boxed(|| transaction.commit()).await?;
             objects.set_volume_directory(volume_directory);
         } else {
-            filesystem
-                .journal
-                .replay(filesystem.clone(), self.on_new_allocator)
+            // cladefs: offload deep mount/replay future onto a fresh task stack to fit 16 KiB
+            // guest kernel stacks (TASK-26.9).
+            let journal = filesystem.journal.clone();
+            let fs = filesystem.clone();
+            let on_new_allocator = self.on_new_allocator;
+            crate::offload(move || async move { journal.replay(fs, on_new_allocator).await })
                 .await
                 .context("Journal replay failed")?;
             filesystem.root_store().set_trace(self.trace);
@@ -591,8 +603,8 @@ impl FxFilesystemBuilder {
             }
             let mounted = async {
                 if compacts {
-                    if filesystem.renew_journal_tail().await? {
-                        filesystem.record_journal_tail().await?;
+                    if crate::boxed(|| filesystem.renew_journal_tail()).await? {
+                        crate::boxed(|| filesystem.record_journal_tail()).await?;
                     }
                     // cladefs: the extents a crash orphaned go with a flush, now: they hold room on
                     // the device Fxfs doesn't count, so that writes would find it full before Fxfs
@@ -602,7 +614,9 @@ impl FxFilesystemBuilder {
                     if filesystem.allocator().has_dead_extents() {
                         filesystem.maybe_start_flush_task();
                         let journal = &filesystem.journal;
-                        journal.flush_for_frees().await.context("freeing what the crash left")?;
+                        crate::boxed(|| journal.flush_for_frees())
+                            .await
+                            .context("freeing what the crash left")?;
                     }
                 }
 
@@ -612,7 +626,11 @@ impl FxFilesystemBuilder {
                     // might get caught in the initial reap and cause objects to be prematurely
                     // tombstoned.
                     for store in objects.unlocked_stores() {
-                        filesystem.graveyard.initial_reap(&store).await?;
+                        // cladefs: offload onto a fresh task stack to keep `open`'s future off
+                        // 16 KiB guest kernel stacks (TASK-26.9).
+                        let graveyard = filesystem.graveyard.clone();
+                        crate::offload(move || async move { graveyard.initial_reap(&store).await })
+                            .await?;
                     }
                 }
                 anyhow::Ok(())
@@ -871,7 +889,9 @@ impl FxFilesystem {
     /// ([`FxFilesystem::renew_journal_tail`]). It waits for the frees the last flush let die,
     /// which commit: so commits must go on.
     pub async fn record_journal_tail(&self) -> Result<(), Error> {
-        self.journal.write_super_block().await
+        // cladefs: box `write_super_block` in a non-inlined frame so mount/replay and thaw paths
+        // fit 16 KiB guest kernel stacks (TASK-26.9).
+        crate::boxed(|| self.journal.write_super_block()).await
     }
 
     #[trace]

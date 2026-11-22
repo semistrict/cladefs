@@ -192,7 +192,7 @@ pub struct OpenCell {
     local: Arc<LocalCell<HostDir>>,
     /// cladefs: the bucket the open cell's description names, which its cell is kept in
     /// (`host_cell::Opened`, TASK-165.6).
-    bucket: Arc<bucket_cell::object_bucket::ObjectBucket>,
+    bucket: Arc<bucket_cell::object_bucket::RoutedBucket>,
     /// cladefs: where it was opened: its directory, which keeps what is attached to it (backlog
     /// doc-10), and what it was forked from.
     path: std::path::PathBuf,
@@ -860,7 +860,7 @@ impl OpenCell {
         path: &Path,
         (local, bucket, uploader): (
             Arc<LocalCell<HostDir>>,
-            Arc<bucket_cell::object_bucket::ObjectBucket>,
+            Arc<bucket_cell::object_bucket::RoutedBucket>,
             Option<local_cell::upload::Uploader<HostDir>>,
         ),
         forked: Option<local_cell::upload::Forked>,
@@ -1353,7 +1353,7 @@ impl OpenCell {
     /// with `ESTALE` if a later placement holds its cell in `bucket`.
     pub async fn delete(
         path: impl AsRef<Path>,
-        bucket: Option<&bucket_cell::object_bucket::ObjectBucket>,
+        bucket: Option<&bucket_cell::object_bucket::RoutedBucket>,
     ) -> Result<(), Error> {
         host_cell::delete(path.as_ref(), bucket, crate::bucket::host_token).await
     }
@@ -1363,13 +1363,13 @@ impl OpenCell {
     /// another format is refused (`local_cell::Format`).
     pub fn bucket_at(
         path: impl AsRef<Path>,
-    ) -> Result<Option<Arc<bucket_cell::object_bucket::ObjectBucket>>, Error> {
+    ) -> Result<Option<Arc<bucket_cell::object_bucket::RoutedBucket>>, Error> {
         host_cell::bucket_at(path.as_ref()).map_err(Error::new)
     }
 
     /// cladefs: the bucket the open cell's description names, which its cell is kept in: what its
     /// daemon attaches it to (TASK-165.6).
-    pub fn bucket(&self) -> &Arc<bucket_cell::object_bucket::ObjectBucket> {
+    pub fn bucket(&self) -> &Arc<bucket_cell::object_bucket::RoutedBucket> {
         &self.bucket
     }
 

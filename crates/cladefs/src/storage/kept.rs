@@ -153,7 +153,7 @@ mod tests {
     use super::super::{Kind, Storage};
     use super::*;
     use crate::{Filesystem, Owner};
-    use bucket_cell::object_bucket::ObjectBucket;
+    use bucket_cell::object_bucket::RoutedBucket;
     use bucket_cell::record::Made;
     use futures::executor::block_on;
     use rand::rngs::StdRng;
@@ -180,14 +180,14 @@ mod tests {
     }
 
     /// The bucket the cell directory at `path` names.
-    fn bucket_of(path: &Path) -> Arc<ObjectBucket> {
+    fn bucket_of(path: &Path) -> Arc<RoutedBucket> {
         host_cell::bucket_at(path).unwrap().expect("a bucket")
     }
 
     /// The extents `cell`'s state in `bucket` holds, by their lengths, those it inherited too,
     /// and its root.
     async fn kept(
-        bucket: &ObjectBucket,
+        bucket: &RoutedBucket,
         cell: crate::CellId,
     ) -> (BTreeMap<ExtentId, u64>, Vec<u8>) {
         let recovered = async {

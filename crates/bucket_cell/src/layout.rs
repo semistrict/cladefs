@@ -76,7 +76,7 @@ pub struct Child {
 /// ([`crate::identity::Settings`]); nothing reads 22's, whose head was one object. 24: a version's
 /// read evidence, what forks of it read of it as they opened, each tenant's under the version's
 /// cell's prefix ([`evidence`], [`crate::evidence`], TASK-702.2); nothing reads 23's.
-pub const FORMAT: u32 = 24;
+pub const FORMAT: u32 = 25;
 
 /// cladefs: the most slots a cell's head is kept in ([`crate::identity::Settings::head_slots`],
 /// TASK-691): keys past it are no head's.
@@ -779,11 +779,13 @@ pub const fn test_cell(id: u64) -> CellId {
 pub const DEFAULT_TENANT: u64 = 0;
 
 /// Where a cell was forked from: ordered by its parent, then its segment, so that the forks made
-/// at one segment sort together.
+/// at one segment sort together. Carries the writer `epoch` of segment `at` so cross-cell recovery
+/// reads `checkpoint(parent, at, epoch)` directly without reading `parent`'s head (board 6017).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Origin {
     pub parent: CellId,
     pub at: u64,
+    pub epoch: u64,
 }
 
 /// A cell's head (TASK-407, TASK-515), its one swapped object: what made it and whose it is
@@ -810,11 +812,6 @@ pub struct Head {
     pub owner: u64,
     /// What made the cell ([`crate::record::Made`]).
     pub made: crate::record::Made,
-    /// cladefs: of a fork of a version, being made or made, whether another than the host that
-    /// began it resumed it ([`crate::lifecycle::resume_version_fork`], TASK-455's review): so a
-    /// clone made says it if anyone but its host may write its reference after, whose retirement
-    /// is then marked ([`Head::retires_unmarked`]).
-    pub resumed: bool,
     /// cladefs: what the cell holds, which says what opens it, given by its first writer (doc-20).
     pub kind: Option<crate::cell::Kind>,
     /// cladefs: the cell's KEK, every generation of it, each wrapped by its tenant's KEK in the
@@ -932,12 +929,14 @@ pub struct Member {
 }
 
 /// cladefs: a version a head names ([`Head::versions`], doc-18, doc-20): its ID, which the footer
-/// of the segment making it named ([`NewVersion`]); the segment it is at, its cell's state as of
-/// which it names; and whether forks of it may be of other tenants' cells (doc-7, Shared versions).
+/// of the segment making it named ([`NewVersion`]); the segment it is at and that segment's writer
+/// `epoch` (board 6017); and whether forks of it may be of other tenants' cells (doc-7, Shared
+/// versions).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Version {
     pub id: u64,
     pub at: u64,
+    pub epoch: u64,
     pub shared: bool,
 }
 
@@ -1015,7 +1014,8 @@ impl Head {
                 continue;
             }
             let NewVersion { id, keep_last } = *cut;
-            self.versions.push(Version { id, at, shared: false });
+            let epoch = self.epoch_of(at).unwrap_or(self.epoch);
+            self.versions.push(Version { id, at, epoch, shared: false });
             if let Some(keep) = keep_last {
                 let keep = usize::try_from(keep).unwrap_or(usize::MAX).max(1);
                 let dropped = self.versions.len().saturating_sub(keep);
@@ -1078,21 +1078,15 @@ impl Reference {
     }
 }
 
-/// cladefs: a mirror's marker's bytes ([`mirror`], TASK-633.8): the format of the bucket's objects,
-/// and the epoch of the writer whose checkpoint at the version it copied, as the parent's head
-/// named it, so that the version's state is found by key in the mirror's bucket, its head being in
-/// another ([`checkpoint`]).
+/// cladefs: a mirror's marker's bytes ([`mirror`], TASK-633.8, board 6017): the format of the
+/// bucket's objects alone; the checkpoint epoch is carried directly in `Origin`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mirror {
     pub format: u32,
-    pub epoch: u64,
 }
 
 impl Mirror {
-    /// The marker of a mirror of the checkpoint of epoch `epoch`.
-    pub fn of(epoch: u64) -> Self {
-        Self { format: FORMAT, epoch }
-    }
+    pub const NOW: Self = Self { format: FORMAT };
 }
 
 /// cladefs: a reference's mark's bytes ([`retired`]): the format of the bucket's objects alone, the

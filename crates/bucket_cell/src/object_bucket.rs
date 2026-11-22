@@ -39,6 +39,7 @@ use crate::bucket::{
 };
 use crate::client::Client;
 use crate::layout::{self, Kind};
+pub use crate::routed::{Resolve, RoutedBucket};
 use futures::{StreamExt as _, TryStreamExt as _, stream};
 use object_store::list::{PaginatedListOptions, PaginatedListStore};
 use object_store::path::Path;
@@ -50,7 +51,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// A bucket's objects under a prefix.
+/// A single bucket's objects under a prefix (for multi-bucket routing, wrap in [`RoutedBucket`]).
 pub struct ObjectBucket {
     backend: Arc<dyn ObjectStore>,
     /// cladefs: the same backend, which lists a level of keys a page a request, if it does (S3,
@@ -62,33 +63,18 @@ pub struct ObjectBucket {
     honoured: std::sync::atomic::AtomicBool,
     /// cladefs: the checkpoints' states its recoveries decoded ([`Bucket::decoded`]).
     decoded: crate::recovery::Decoded,
-    /// cladefs: what this host knows of the bucket without asking it again ([`Bucket::known`]).
-    known: crate::known::Known,
     /// cladefs: what the collector's newest mark-only pass marked, which its reads warn of reaching
     /// (TASK-264).
     marks: crate::marks::Watch,
     /// cladefs: what gives this process's new cells their IDs, out of blocks of the bucket's
     /// (TASK-364).
     objectids: crate::objectid::Allocator,
-    /// cladefs: the other buckets its requests go to, by the bucket of their keys' cells
-    /// ([`ObjectBucket::routed`], TASK-633.4): none for a bucket whose requests all stay in it.
-    route: Option<Route>,
-    /// cladefs: its own bucket, unrouted, once asked for ([`ObjectBucket::own`], TASK-633.8).
-    own: std::sync::OnceLock<Arc<ObjectBucket>>,
-    /// cladefs: whether this bucket holds a mirror of a version of each cell of another bucket it
-    /// was asked of, and when it last listed that cell's markers ([`ObjectBucket::mirrored`]).
-    mirrored:
-        std::sync::Mutex<std::collections::HashMap<layout::CellId, (bool, std::time::Instant)>>,
-    /// cladefs: the versions of cells of other buckets whose mirrors here it found marked, and
-    /// those this process mirrors ([`ObjectBucket::mirror_wanted`]), each by its cell and where it
-    /// is.
-    mirrors: crate::mirror::Mirrors,
     /// cladefs: how far apart its backend takes writes of one key, and when it last wrote each
-    /// (TASK-690): shared with its own bucket's twin ([`ObjectBucket::own`]).
-    rewrites: Arc<Rewrites>,
+    /// (TASK-690).
+    rewrites: Rewrites,
     /// cladefs: its settings, as its identity says, once read, or written by its formatting
-    /// (TASK-691): the defaults' for a bucket with none; shared with its twin.
-    settings: Arc<std::sync::OnceLock<crate::identity::Settings>>,
+    /// (TASK-691): the defaults' for a bucket with none.
+    settings: std::sync::OnceLock<crate::identity::Settings>,
 }
 
 /// cladefs: how long after GCS takes a write of an object it takes another: about one a second,
@@ -150,29 +136,6 @@ impl Rewrites {
         }
         written.at.insert(path.clone(), now);
     }
-}
-
-/// cladefs: how long a bucket goes by what it last listed of a cell's mirror markers here before it
-/// lists them again ([`ObjectBucket::mirrored`]): a mirror marked since is read from here at most
-/// this late, its objects from the cell's own bucket meanwhile, which holds them too.
-const MIRRORED_FOR: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// cladefs: what opens the bucket numbered `number`, other than `home`, for `home`'s requests of
-/// that bucket's cells (TASK-633.4): [`Registered`] reads it in the registry of buckets.
-pub trait Resolve: Send + Sync {
-    fn open<'a>(
-        &'a self,
-        home: &'a ObjectBucket,
-        number: u16,
-    ) -> futures::future::BoxFuture<'a, Result<Arc<ObjectBucket>, crate::Error>>;
-}
-
-/// cladefs: a routing bucket's other buckets ([`ObjectBucket::routed`]): how it opens them, its own
-/// number once read, and those it opened, each once.
-struct Route {
-    resolve: Arc<dyn Resolve>,
-    home: std::sync::Mutex<Option<u16>>,
-    members: std::sync::Mutex<std::collections::BTreeMap<u16, Arc<ObjectBucket>>>,
 }
 
 /// The kinds of request a bucket makes.
@@ -656,10 +619,9 @@ impl ObjectBucket {
         prefix: &str,
     ) -> Self {
         let prefix = prefix.trim_matches('/').to_owned();
-        let (counts, honoured, decoded, known) = Default::default();
+        let (counts, honoured, decoded) = Default::default();
         let (marks, objectids) = (crate::marks::Watch::new(), crate::objectid::Allocator::new());
-        let (route, own, mirrored) = (None, std::sync::OnceLock::new(), Default::default());
-        let (mirrors, rewrites, settings) = Default::default();
+        let (rewrites, settings) = Default::default();
         Self {
             backend,
             pages,
@@ -667,13 +629,8 @@ impl ObjectBucket {
             counts,
             honoured,
             decoded,
-            known,
             marks,
             objectids,
-            route,
-            own,
-            mirrored,
-            mirrors,
             rewrites,
             settings,
         }
@@ -689,106 +646,31 @@ impl ObjectBucket {
     /// cladefs: the same bucket, each write of a key at least `every` after the last of it was
     /// answered, as its backend takes them no faster (TASK-690): GCS's [`GCS_REWRITE_EVERY`].
     pub fn rewriting_every(self, every: std::time::Duration) -> Self {
-        Self { rewrites: Arc::new(Rewrites { every, ..Rewrites::default() }), ..self }
+        Self { rewrites: Rewrites { every, ..Rewrites::default() }, ..self }
     }
 
-    /// cladefs: its own bucket, every request of it there whatever cell its keys are of, unrouted
-    /// (TASK-633.8): what a mirror of another bucket's cell's version writes and reads in this
-    /// bucket at that cell's keys, and what this bucket's collector keeps or deletes of it. Itself,
-    /// if it routes nothing; else the same backend, made once, its requests counted apart.
-    pub fn own(self: &Arc<Self>) -> Arc<ObjectBucket> {
-        match self.route {
-            None => self.clone(),
-            Some(_) => self.twin().clone(),
-        }
+    /// cladefs: wraps this bucket in a [`RoutedBucket`] routing other buckets' cells via `resolve`
+    /// (board 6023).
+    pub fn routed(self, resolve: Arc<dyn Resolve<ObjectBucket>>) -> RoutedBucket<ObjectBucket> {
+        RoutedBucket::new(Arc::new(self), resolve)
     }
 
-    /// cladefs: its own bucket, unrouted, made once ([`ObjectBucket::own`]).
-    fn twin(&self) -> &Arc<ObjectBucket> {
-        let own = || {
-            let twin = ObjectBucket::paged(self.backend.clone(), self.pages.clone(), &self.prefix);
-            let (rewrites, settings) = (self.rewrites.clone(), self.settings.clone());
-            Arc::new(ObjectBucket { rewrites, settings, ..twin })
-        };
-        self.own.get_or_init(own)
+    /// cladefs: wraps this bucket in an unrouted [`RoutedBucket`].
+    pub fn unrouted(self) -> RoutedBucket<ObjectBucket> {
+        RoutedBucket::unrouted(Arc::new(self))
     }
 
-    /// cladefs: the mirror here of the version `child` was forked from, `origin`, which `child`'s
-    /// fork into this bucket asks for (TASK-633.8, [`crate::mirror::wanted`]): none if this bucket
-    /// routes nothing, or the mirror is known marked or known unnamed. This process's mirrors of a
-    /// version take turns, each taking its own as it is asked for, before its future first runs:
-    /// one asked for later waits for it, and finds it marked. Under way from another process, or
-    /// begun again, the mirror says so ([`crate::mirror::mirror`]).
-    pub fn mirror_wanted(
-        self: &Arc<Self>,
-        child: layout::CellId,
-        origin: layout::Origin,
-    ) -> impl Future<Output = Result<Option<crate::mirror::Mirrored>, crate::Error>> + Send + 'static
-    {
-        let turn = self.route.as_ref().and_then(|_| self.mirrors.turn(origin));
-        let bucket = self.clone();
-        async move {
-            let Some(turn) = turn else { return Ok(None) };
-            let route = bucket.route.as_ref().expect("routed");
-            let number = bucket.own_number(route).await;
-            let number =
-                number.map_err(|err| crate::Error::Read(format!("its identity: {err}")))?;
-            let Some(number) = number else { return Ok(None) };
-            turn.mirror(&*bucket, &**bucket.twin(), number, child, origin).await
-        }
-    }
-
-    /// cladefs: the mirror here of the version `cell` was forked from
-    /// ([`ObjectBucket::mirror_wanted`]): what a host opening `cell` asks for, the host
-    /// that forked it perhaps dead before it did (TASK-633.8). With the version, its origin.
-    pub async fn mirror_for(
-        self: Arc<Self>,
-        cell: layout::CellId,
-    ) -> Result<Option<(layout::Origin, crate::mirror::Mirrored)>, crate::Error> {
-        if self.route.is_none() {
-            return Ok(None);
-        }
-        let Some(origin) = crate::head::get(&*self, cell).await?.and_then(|head| head.origin())
-        else {
-            return Ok(None);
-        };
-        let mirrored = self.mirror_wanted(cell, origin).await?;
-        Ok(mirrored.map(|mirrored| (origin, mirrored)))
-    }
-
-    /// cladefs: this bucket, its requests of the objects of cells of other buckets sent there
-    /// (TASK-633.4, backlog doc-23): each key's cell's ID names its bucket
-    /// ([`crate::objectid::bucket_of`]), which `resolve` opens, once, unless it is this one, or
-    /// none (the IDs tests name); keys of no cell's (its identity, its registry, blocks of IDs,
-    /// tenants' KEKs) stay here. A listing goes where its prefix's cell is, a batch of deletions to
-    /// each bucket of its keys. A bucket that can't be opened is unavailable to the request, as a
-    /// bucket failing is, logged: requests try again, so that a registry spread meanwhile lets them
-    /// on.
-    pub fn routed(self, resolve: Arc<dyn Resolve>) -> Self {
-        let (home, members) = Default::default();
-        Self { route: Some(Route { resolve, home, members }), ..self }
-    }
-
-    /// cladefs: the bucket numbered `number`, as this one's requests reach it
-    /// ([`ObjectBucket::routed`]): opened by its resolver, unless opened before. `NoBucket` for a
-    /// bucket that routes nothing.
-    pub async fn numbered(&self, number: u16) -> Result<Arc<ObjectBucket>, crate::Error> {
-        let route = self.route.as_ref().ok_or(crate::Error::NoBucket(number))?;
-        if let Some(member) = route.members.lock().unwrap().get(&number) {
-            return Ok(member.clone());
-        }
-        let opened = route.resolve.open(self, number).await?;
-        Ok(route.members.lock().unwrap().entry(number).or_insert(opened).clone())
-    }
-
-    /// cladefs: its own number, read once from its identity: none if it has none yet.
     /// cladefs: its settings, as its identity says, read once (TASK-691): the defaults' for a
-    /// bucket not formatted, as tests' are, which a host's allocator formats before it gives any
-    /// cell an ID, its write of the identity noted ([`ObjectBucket::object_put`]).
+    /// bucket not formatted (1 head slot, or 10 for GCS where `rewrites.every > 0`, board 6020).
     async fn settings(&self) -> crate::identity::Settings {
         if let Some(settings) = self.settings.get() {
             return *settings;
         }
+        let default_settings = if !self.rewrites.every.is_zero() {
+            crate::identity::Settings { head_slots: crate::identity::GCS_HEAD_SLOTS }
+        } else {
+            crate::identity::Settings::default()
+        };
         let mut failures = 0;
         let settings = loop {
             match self.object_get(layout::IDENTITY).await {
@@ -796,10 +678,10 @@ impl ObjectBucket {
                     Ok(identity) => break identity.settings,
                     Err(err) => {
                         log::warn!("bucket: reading its identity's settings: {err}");
-                        break crate::identity::Settings::default();
+                        break default_settings;
                     }
                 },
-                Err(Error::NotFound) => break crate::identity::Settings::default(),
+                Err(Error::NotFound) => break default_settings,
                 Err(_) => {
                     failures += 1;
                     tokio::time::sleep(backoff(failures)).await;
@@ -807,91 +689,6 @@ impl ObjectBucket {
             }
         };
         *self.settings.get_or_init(|| settings)
-    }
-
-    async fn own_number(&self, route: &Route) -> Result<Option<u16>, Error> {
-        if let Some(number) = *route.home.lock().unwrap() {
-            return Ok(Some(number));
-        }
-        let identity = match self.object_get(layout::IDENTITY).await {
-            Ok(object) => crate::identity::parse(&object.bytes).map_err(|err| {
-                log::warn!("bucket: reading its own identity: {err}");
-                Error::Unavailable
-            })?,
-            Err(Error::NotFound) => return Ok(None),
-            Err(err) => return Err(err),
-        };
-        *route.home.lock().unwrap() = Some(identity.number);
-        Ok(Some(identity.number))
-    }
-
-    /// cladefs: whether this bucket holds a mirror of a version of `cell`, a cell of another bucket
-    /// (doc-23, Mirrors; TASK-633.8): any of its markers listed here, at most [`MIRRORED_FOR`]
-    /// ago. Each marker found tells the epoch of the checkpoint at its version ([`Bucket::known`]),
-    /// so that the version's state is found by key here, the cell's head in its own bucket unread.
-    /// A listing failed holds none.
-    async fn mirrored(&self, cell: layout::CellId) -> bool {
-        if let Some(&(held, listed)) = self.mirrored.lock().unwrap().get(&cell)
-            && listed.elapsed() < MIRRORED_FOR
-        {
-            return held;
-        }
-        let listed = std::time::Instant::now();
-        let markers = self.object_list(&layout::mirrors(cell)).await.unwrap_or_default();
-        let mut held = false;
-        for meta in markers {
-            let layout::Kind::Mirror { at, .. } = layout::kind(&meta.key) else { continue };
-            let Ok(object) = self.object_get(&meta.key).await else { continue };
-            let Ok(marker) = layout::decode::<layout::Mirror>(&object.bytes) else { continue };
-            self.known.named(cell, at, marker.epoch);
-            held = true;
-        }
-        self.mirrored.lock().unwrap().insert(cell, (held, listed));
-        held
-    }
-
-    /// cladefs: whether a read of `key`, an object written once of a cell of another bucket, is
-    /// tried here first: this bucket holding a mirror of a version of that cell, which copied it
-    /// here at its key, byte for byte, if it is one of that version's (TASK-633.8).
-    async fn read_here_first(&self, key: &str) -> bool {
-        let Some(route) = &self.route else { return false };
-        let Some(number) = layout::routed_to(key) else { return false };
-        if !crate::peer::served(key) || self.own_number(route).await.ok().flatten() == Some(number)
-        {
-            return false;
-        }
-        let Some(cell) = layout::cell_of(key) else { return false };
-        self.mirrored(cell).await
-    }
-
-    /// cladefs: whether a listing of `prefix`, under a cell of another bucket's moves, takes this
-    /// bucket's too: those of the objects a mirror copied here (TASK-633.8).
-    async fn lists_here_too(&self, prefix: &str) -> bool {
-        let Some(route) = &self.route else { return false };
-        let (Some(number), Some(cell)) = (layout::routed_to(prefix), layout::cell_of(prefix))
-        else {
-            return false;
-        };
-        if !prefix.starts_with(&layout::moves_prefix(cell))
-            || self.own_number(route).await.ok().flatten() == Some(number)
-        {
-            return false;
-        }
-        self.mirrored(cell).await
-    }
-
-    /// cladefs: the bucket `key`'s request goes to, if another than this one
-    /// ([`ObjectBucket::routed`]).
-    async fn member(&self, key: &str) -> Result<Option<Arc<ObjectBucket>>, Error> {
-        let Some(route) = &self.route else { return Ok(None) };
-        let Some(number) = layout::routed_to(key) else { return Ok(None) };
-        if self.own_number(route).await? == Some(number) {
-            return Ok(None);
-        }
-        self.numbered(number).await.map(Some).map_err(|err| {
-            log::warn!("bucket: reaching bucket {number}, for {key}: {err}");
-            Error::Unavailable
-        })
     }
 
     /// cladefs: a new object ID of the bucket's, which no other cell of any bucket has, nor will
@@ -909,19 +706,6 @@ impl ObjectBucket {
             self.honoured.store(true, Ordering::Relaxed);
         }
         Ok(())
-    }
-
-    /// What it did so far.
-    /// cladefs: what it asked of each bucket (TASK-633.4): its own requests under its number (0
-    /// until read), then each other bucket's its requests went to, by number.
-    pub fn stats_by_bucket(&self) -> Vec<(u16, Stats)> {
-        let own = self.route.as_ref().and_then(|route| *route.home.lock().unwrap());
-        let mut all = vec![(own.unwrap_or(0), self.stats())];
-        if let Some(route) = &self.route {
-            let members = route.members.lock().unwrap();
-            all.extend(members.iter().map(|(number, member)| (*number, member.stats())));
-        }
-        all
     }
 
     pub fn stats(&self) -> Stats {
@@ -1124,7 +908,10 @@ impl Registered {
     }
 
     /// The bucket `entry` records, checked to be it.
-    async fn reach(&self, entry: &crate::identity::Entry) -> Result<ObjectBucket, crate::Error> {
+    pub(crate) async fn reach(
+        &self,
+        entry: &crate::identity::Entry,
+    ) -> Result<ObjectBucket, crate::Error> {
         let number = entry.number;
         let url = entry.details.url.as_deref().ok_or(crate::Error::NoBucket(number))?;
         let options = numbered_options(self.vars.iter().cloned(), number);
@@ -1142,7 +929,7 @@ impl Registered {
     /// tries again (board 5528); never waiting for that bucket.
     pub async fn entry(
         &self,
-        home: &ObjectBucket,
+        home: &impl Bucket,
         number: u16,
     ) -> Result<crate::identity::Entry, crate::Error> {
         use crate::identity::{self, ROOT};
@@ -1159,16 +946,6 @@ impl Registered {
         let registry = identity::registry_once(&root).await?;
         let entry = registry.as_ref().and_then(|registry| registry.bucket(number));
         entry.cloned().ok_or(crate::Error::NoBucket(number))
-    }
-}
-
-impl Resolve for Registered {
-    fn open<'a>(
-        &'a self,
-        home: &'a ObjectBucket,
-        number: u16,
-    ) -> futures::future::BoxFuture<'a, Result<Arc<ObjectBucket>, crate::Error>> {
-        Box::pin(async move { Ok(Arc::new(self.reach(&self.entry(home, number).await?).await?)) })
     }
 }
 
@@ -1613,135 +1390,65 @@ impl Bucket for ObjectBucket {
         Some(&self.decoded)
     }
 
-    fn known(&self) -> Option<&crate::known::Known> {
-        Some(&self.known)
+    fn get(&self, key: &str) -> impl Future<Output = Result<Object, Error>> + Send {
+        self.object_get(key)
     }
 
-    fn mirrors(&self) -> Option<&dyn crate::mirror::Here> {
-        self.route.as_ref().map(|_| self as &dyn crate::mirror::Here)
+    fn get_range(
+        &self,
+        key: &str,
+        range: ByteRange,
+    ) -> impl Future<Output = Result<Vec<u8>, Error>> + Send {
+        self.object_get_range(key, range)
     }
 
-    /// cladefs: an object a mirror copied here read here first (TASK-633.8), else its cell's
-    /// bucket.
-    async fn get(&self, key: &str) -> Result<Object, Error> {
-        if self.read_here_first(key).await
-            && let Ok(object) = self.object_get(key).await
-        {
-            return Ok(object);
-        }
-        match self.member(key).await? {
-            Some(member) => member.object_get(key).await,
-            None => self.object_get(key).await,
-        }
+    fn head(&self, key: &str) -> impl Future<Output = Result<Meta, Error>> + Send {
+        self.object_head(key)
     }
 
-    async fn get_range(&self, key: &str, range: ByteRange) -> Result<Vec<u8>, Error> {
-        if self.read_here_first(key).await
-            && let Ok(bytes) = self.object_get_range(key, range.clone()).await
-        {
-            return Ok(bytes);
-        }
-        match self.member(key).await? {
-            Some(member) => member.object_get_range(key, range).await,
-            None => self.object_get_range(key, range).await,
-        }
+    fn list(&self, prefix: &str) -> impl Future<Output = Result<Vec<Meta>, Error>> + Send {
+        self.object_list(prefix)
     }
 
-    async fn head(&self, key: &str) -> Result<Meta, Error> {
-        if self.read_here_first(key).await
-            && let Ok(meta) = self.object_head(key).await
-        {
-            return Ok(meta);
-        }
-        match self.member(key).await? {
-            Some(member) => member.object_head(key).await,
-            None => self.object_head(key).await,
-        }
+    fn list_delimited(
+        &self,
+        prefix: &str,
+        page: Page<'_>,
+    ) -> impl Future<Output = Result<Listing, Error>> + Send {
+        self.object_list_delimited(prefix, page)
     }
 
-    /// cladefs: the moves of a cell of another bucket a mirror copied here listed with its own
-    /// bucket's, or alone if that bucket is out of reach (TASK-633.8): moves are written once, at
-    /// keys of their own.
-    async fn list(&self, prefix: &str) -> Result<Vec<Meta>, Error> {
-        if self.lists_here_too(prefix).await {
-            let mut listed = self.object_list(prefix).await?;
-            let there = match self.member(prefix).await {
-                Ok(Some(member)) => member.object_list(prefix).await.unwrap_or_default(),
-                _ => Vec::new(),
-            };
-            let here: std::collections::BTreeSet<String> =
-                listed.iter().map(|meta| meta.key.clone()).collect();
-            listed.extend(there.into_iter().filter(|meta| !here.contains(&meta.key)));
-            listed.sort_by(|a, b| a.key.cmp(&b.key));
-            return Ok(listed);
-        }
-        match self.member(prefix).await? {
-            Some(member) => member.object_list(prefix).await,
-            None => self.object_list(prefix).await,
+    fn put(
+        &self,
+        key: &str,
+        bytes: crate::Bytes,
+        mode: PutMode,
+    ) -> impl Future<Output = Result<Version, Error>> + Send {
+        self.object_put(key, bytes, mode)
+    }
+
+    async fn head_slots(&self, _cell: layout::CellId) -> u64 {
+        self.settings().await.head_slots
+    }
+
+    fn default_head_slots(&self) -> u64 {
+        if !self.rewrites.every.is_zero() {
+            crate::identity::GCS_HEAD_SLOTS
+        } else {
+            crate::identity::DEFAULT_HEAD_SLOTS
         }
     }
 
-    async fn list_delimited(&self, prefix: &str, page: Page<'_>) -> Result<Listing, Error> {
-        match self.member(prefix).await? {
-            Some(member) => member.object_list_delimited(prefix, page).await,
-            None => self.object_list_delimited(prefix, page).await,
-        }
-    }
-
-    async fn put(&self, key: &str, bytes: crate::Bytes, mode: PutMode) -> Result<Version, Error> {
-        match self.member(key).await? {
-            Some(member) => member.object_put(key, bytes, mode).await,
-            None => self.object_put(key, bytes, mode).await,
-        }
-    }
-
-    /// cladefs: as the bucket `cell` is of says, its own or another it routes to (TASK-691).
-    async fn head_slots(&self, cell: layout::CellId) -> u64 {
-        match self.member(&layout::heads(cell)).await {
-            Ok(Some(member)) => member.settings().await.head_slots,
-            Ok(None) | Err(_) => self.settings().await.head_slots,
-        }
-    }
-
-    /// cladefs: as the backend its writes of `key` go to takes them (TASK-690); its own, if which
-    /// that is can't be told now, as the write will find out.
     async fn rewritable(&self, key: &str) {
-        match self.member(key).await {
-            Ok(Some(member)) => member.rewrites.wait(&member.path(key)).await,
-            Ok(None) | Err(_) => self.rewrites.wait(&self.path(key)).await,
-        }
+        self.rewrites.wait(&self.path(key)).await
     }
 
-    async fn delete(&self, key: &str) -> Result<(), Error> {
-        match self.member(key).await? {
-            Some(member) => member.object_delete(key).await,
-            None => self.object_delete(key).await,
-        }
+    fn delete(&self, key: &str) -> impl Future<Output = Result<(), Error>> + Send {
+        self.object_delete(key)
     }
 
-    /// cladefs: each bucket's keys deleted there, in one batch each (TASK-633.4).
-    async fn delete_batch(&self, keys: &[&str]) -> Result<(), Error> {
-        if self.route.is_none() {
-            return self.object_delete_batch(keys).await;
-        }
-        let mut here = Vec::new();
-        let mut there: Vec<(Arc<ObjectBucket>, Vec<&str>)> = Vec::new();
-        for &key in keys {
-            match self.member(key).await? {
-                None => here.push(key),
-                Some(member) => match there.iter_mut().find(|(m, _)| Arc::ptr_eq(m, &member)) {
-                    Some((_, keys)) => keys.push(key),
-                    None => there.push((member, vec![key])),
-                },
-            }
-        }
-        if !here.is_empty() {
-            self.object_delete_batch(&here).await?;
-        }
-        for (member, keys) in there {
-            member.object_delete_batch(&keys).await?;
-        }
-        Ok(())
+    fn delete_batch(&self, keys: &[&str]) -> impl Future<Output = Result<(), Error>> + Send {
+        self.object_delete_batch(keys)
     }
 
     fn now(&self) -> u64 {
@@ -1750,74 +1457,6 @@ impl Bucket for ObjectBucket {
 
     fn pause(&self, failures: u32) -> impl Future<Output = ()> + Send {
         tokio::time::sleep(backoff(failures))
-    }
-}
-
-/// cladefs: a routed bucket's mirrors of other buckets' cells' versions, in its own bucket
-/// (TASK-633.8).
-impl crate::mirror::Here for ObjectBucket {
-    /// A marker found tells its version's checkpoint epoch, as [`ObjectBucket::mirrored`]'s do,
-    /// and has reads of the cell's objects tried here from then on.
-    fn marked(
-        &self,
-        parent: layout::CellId,
-        at: u64,
-    ) -> futures::future::BoxFuture<'_, Result<bool, crate::bucket::Refused>> {
-        Box::pin(async move {
-            let Some(route) = &self.route else { return Ok(false) };
-            let Some(of) = layout::routed_to(&parent.prefix()) else { return Ok(false) };
-            // Its own number not to be read: a cell of its own, for all it knows.
-            if self.own_number(route).await.ok().flatten().is_none_or(|number| number == of) {
-                return Ok(false);
-            }
-            let marker = layout::mirror(parent, at);
-            let Some(found) = crate::bucket::get(&**self.twin(), &marker).await? else {
-                return Ok(false);
-            };
-            if let Ok(marker) = layout::decode::<layout::Mirror>(&found.bytes) {
-                self.known.named(parent, at, marker.epoch);
-            }
-            self.mirrored.lock().unwrap().insert(parent, (true, std::time::Instant::now()));
-            self.mirrors.marked(parent, at);
-            Ok(true)
-        })
-    }
-
-    fn create<'a>(
-        &'a self,
-        key: &'a str,
-        bytes: Vec<u8>,
-    ) -> futures::future::BoxFuture<'a, Result<(), crate::bucket::Refused>> {
-        Box::pin(async move { crate::bucket::create(&**self.twin(), key, bytes).await.map(drop) })
-    }
-
-    fn retire<'a>(
-        &'a self,
-        keys: &'a [&'a str],
-    ) -> futures::future::BoxFuture<'a, Result<usize, crate::bucket::Refused>> {
-        Box::pin(async move {
-            let Some(route) = &self.route else { return Ok(0) };
-            // Its own number not to be read: retired by the copy's pass, its children gone.
-            let Ok(Some(number)) = self.own_number(route).await else { return Ok(0) };
-            let theirs: Vec<&str> = (keys.iter().copied())
-                .filter(|key| layout::routed_to(key).is_some_and(|of| of != number))
-                .collect();
-            if !theirs.is_empty() {
-                crate::lifecycle::retire(&**self.twin(), &theirs).await?;
-            }
-            Ok(theirs.len())
-        })
-    }
-
-    /// As [`ObjectBucket::mirrored`] lists them, at most [`MIRRORED_FOR`] ago.
-    fn learn(&self, cell: layout::CellId) -> futures::future::BoxFuture<'_, ()> {
-        Box::pin(async move {
-            let Some(route) = &self.route else { return };
-            let Some(of) = layout::routed_to(&cell.prefix()) else { return };
-            if self.own_number(route).await.ok().flatten().is_some_and(|number| number != of) {
-                self.mirrored(cell).await;
-            }
-        })
     }
 }
 
@@ -1948,8 +1587,8 @@ pub(crate) mod tests {
             let two = Two::new(dir.path()).await;
             let bucket = two.routed();
             let parent = test_cell(2 << 48 | 1);
-            let (at, _, extent) = Two::versioned(&bucket, parent).await;
-            let origin = Origin { parent, at };
+            let (at, epoch, extent) = Two::versioned(&bucket, parent).await;
+            let origin = Origin { parent, at, epoch };
             let child = test_cell(1 << 48 | 2);
             fork_version_given(&*bucket, child, VERSION, origin, 7).await.unwrap();
             assert_eq!(two.refers(origin, child).await, (true, false, false));
@@ -2095,7 +1734,7 @@ pub(crate) mod tests {
         }
 
         /// A host's bucket, `home`, its requests of `other`'s cells sent there.
-        fn routed(&self) -> Arc<ObjectBucket> {
+        fn routed(&self) -> Arc<RoutedBucket> {
             let resolve = Arc::new(Registered::new(Vec::<(String, String)>::new()));
             Arc::new(ObjectBucket::from_url(&self.home_url).unwrap().routed(resolve))
         }
@@ -2103,7 +1742,7 @@ pub(crate) mod tests {
         /// `parent`, a cell of `other`, made, with a version: where it is, the epoch of the
         /// checkpoint there, and the extent it holds, `versioned`.
         async fn versioned(
-            bucket: &Arc<ObjectBucket>,
+            bucket: &Arc<RoutedBucket>,
             parent: layout::CellId,
         ) -> (u64, u64, ExtentId) {
             lifecycle::create(&**bucket, parent, 0).await.unwrap();
@@ -2118,7 +1757,7 @@ pub(crate) mod tests {
         /// Whether the reference of the fork of `origin` to `child` is in `other`, in `home`, and
         /// its retirement's mark in `other`.
         async fn refers(&self, origin: Origin, child: layout::CellId) -> (bool, bool, bool) {
-            let Origin { parent, at } = origin;
+            let Origin { parent, at, .. } = origin;
             let reference = layout::reference(parent, at, child);
             (
                 self.other.object_get(&reference).await.is_ok(),
@@ -2131,22 +1770,22 @@ pub(crate) mod tests {
     /// TASK-633.8: a bucket, `own`, its clock `ahead` of its own, a mirror's pin taken over by
     /// another mirror as its `taken_at`th conditional write lands, if any, and the keys it deletes
     /// noted, in order, in `deleted`.
-    struct Watched {
-        own: Arc<ObjectBucket>,
+    struct Watched<B: Bucket = ObjectBucket> {
+        own: Arc<B>,
         ahead: u64,
         taken_at: Option<usize>,
         updates: Arc<std::sync::atomic::AtomicUsize>,
         deleted: Arc<std::sync::Mutex<Vec<String>>>,
     }
 
-    impl Watched {
-        fn new(own: Arc<ObjectBucket>, ahead: u64, taken_at: Option<usize>) -> Self {
+    impl<B: Bucket> Watched<B> {
+        fn new(own: Arc<B>, ahead: u64, taken_at: Option<usize>) -> Self {
             let (updates, deleted) = Default::default();
             Self { own, ahead, taken_at, updates, deleted }
         }
     }
 
-    impl Bucket for Watched {
+    impl<B: Bucket> Bucket for Watched<B> {
         async fn get(&self, key: &str) -> Result<Object, Error> {
             self.own.get(key).await
         }
@@ -2178,7 +1817,7 @@ pub(crate) mod tests {
                 let updates = self.updates.fetch_add(1, Ordering::Relaxed) + 1;
                 if self.taken_at == Some(updates) {
                     let another = layout::encode(&layout::Reference::of(u64::MAX));
-                    self.own.object_put(key, another.into(), PutMode::Overwrite).await?;
+                    self.own.put(key, another.into(), PutMode::Overwrite).await?;
                 }
             }
             self.own.put(key, bytes, mode).await
@@ -2215,7 +1854,7 @@ pub(crate) mod tests {
                 (ExtentId::new(parent.id, first), ExtentId::new(parent.id, first + 1));
             let large_bytes: Vec<u8> = (0..20_000u32).map(|i| (i * 7 % 251) as u8).collect();
             let extents = vec![(small, b"small".to_vec()), (large, large_bytes)];
-            async fn commit(writer: &Writer<ObjectBucket>, commit: Commit) {
+            async fn commit(writer: &Writer<RoutedBucket>, commit: Commit) {
                 let objects = crate::batch::SegmentBuilder::from(commit).close(&mut writer.chain());
                 let segment =
                     writer.add_segment(objects.frame(writer.keys().encrypting())).unwrap();
@@ -2235,7 +1874,7 @@ pub(crate) mod tests {
 
             let later = ExtentId::new(parent.id, writer.chain().next_sequence());
             let at = versioned_by(&writer, vec![(later, b"later".to_vec())], VERSION).await;
-            let origin = Origin { parent, at };
+            let origin = Origin { parent, at, epoch: writer.epoch() };
             let child = test_cell(1 << 48 | 2);
             fork_version_given(&*bucket, child, VERSION, origin, 7).await.unwrap();
             let mirrored = mirror(&*bucket, &*bucket.own(), 1, parent, at).await.unwrap();
@@ -2269,15 +1908,16 @@ pub(crate) mod tests {
             let two = Two::new(dir.path()).await;
             let bucket = two.routed();
             let grand = test_cell(2 << 48 | 1);
-            let (grand_at, _, inherited) = Two::versioned(&bucket, grand).await;
+            let (grand_at, grand_epoch, inherited) = Two::versioned(&bucket, grand).await;
             let parent = test_cell(2 << 48 | 3);
-            let from = Origin { parent: grand, at: grand_at };
+            let from = Origin { parent: grand, at: grand_at, epoch: grand_epoch };
             fork_version_given(&*bucket, parent, VERSION, from, 5).await.unwrap();
             let writer = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
             let own = ExtentId::new(parent.id, writer.chain().next_sequence());
             let at = versioned_by(&writer, vec![(own, b"own".to_vec())], VERSION).await;
+            let epoch = writer.epoch();
             drop(writer);
-            let origin = Origin { parent, at };
+            let origin = Origin { parent, at, epoch };
             let child = test_cell(1 << 48 | 2);
             fork_version_given(&*bucket, child, VERSION, origin, 7).await.unwrap();
             let mirrored = mirror(&*bucket, &*bucket.own(), 1, parent, at).await.unwrap();
@@ -2316,8 +1956,8 @@ pub(crate) mod tests {
             let two = Two::new(dir.path()).await;
             let bucket = two.routed();
             let parent = test_cell(2 << 48 | 1);
-            let (at, _, inherited) = Two::versioned(&bucket, parent).await;
-            let origin = Origin { parent, at };
+            let (at, epoch, inherited) = Two::versioned(&bucket, parent).await;
+            let origin = Origin { parent, at, epoch };
             let child = test_cell(1 << 48 | 2);
             fork_version_given(&*bucket, child, VERSION, origin, 7).await.unwrap();
             let mirrored = mirror(&*bucket, &*bucket.own(), 1, parent, at).await.unwrap();
@@ -2325,9 +1965,12 @@ pub(crate) mod tests {
             let writer = Writer::open(bucket.clone(), child, 10, 0).await.unwrap();
             let own = ExtentId::new(child.id, writer.chain().next_sequence());
             let child_at = versioned_by(&writer, vec![(own, b"own".to_vec())], VERSION).await;
+            let child_epoch = writer.epoch();
             drop(writer);
-            let (grandchild, forked) =
-                (test_cell(1 << 48 | 3), Origin { parent: child, at: child_at });
+            let (grandchild, forked) = (
+                test_cell(1 << 48 | 3),
+                Origin { parent: child, at: child_at, epoch: child_epoch },
+            );
             fork_version_given(&*bucket, grandchild, VERSION, forked, 9).await.unwrap();
 
             for cell in [child, parent] {
@@ -2363,18 +2006,18 @@ pub(crate) mod tests {
             let two = Two::new(dir.path()).await;
             let bucket = two.routed();
             let parent = test_cell(2 << 48 | 1);
-            let (at, ..) = Two::versioned(&bucket, parent).await;
+            let (at, epoch, _) = Two::versioned(&bucket, parent).await;
             let child = test_cell(1 << 48 | 2);
-            fork_version_given(&*bucket, child, VERSION, Origin { parent, at }, 7).await.unwrap();
-            let origin = Origin { parent, at };
+            let origin = Origin { parent, at, epoch };
+            fork_version_given(&*bucket, child, VERSION, origin, 7).await.unwrap();
             let (first, second) =
                 (bucket.mirror_wanted(child, origin), bucket.mirror_wanted(child, origin));
             // The second polled first: it waits for the first's turn, taken as it was asked for.
             let (second, first) = futures::join!(second, first);
             assert!(matches!(first.unwrap(), Some(Mirrored::Done { referred: 1, .. })));
             assert_eq!(second.unwrap(), None, "the second's turn");
-            assert!(bucket.mirrors.idle(), "turns left");
-            let own = Origin { parent: test_cell(1 << 48 | 9), at: 3 };
+            assert!(bucket.mirrors_idle(), "turns left");
+            let own = Origin { parent: test_cell(1 << 48 | 9), at: 3, epoch: 1 };
             assert_eq!(bucket.mirror_wanted(child, own).await.unwrap(), None);
         });
     }
@@ -2391,9 +2034,11 @@ pub(crate) mod tests {
             let two = Two::new(dir.path()).await;
             let bucket = two.routed();
             let parent = test_cell(2 << 48 | 1);
-            let (at, ..) = Two::versioned(&bucket, parent).await;
+            let (at, epoch, _) = Two::versioned(&bucket, parent).await;
             let child = test_cell(1 << 48 | 2);
-            fork_version_given(&*bucket, child, VERSION, Origin { parent, at }, 7).await.unwrap();
+            fork_version_given(&*bucket, child, VERSION, Origin { parent, at, epoch }, 7)
+                .await
+                .unwrap();
             let own = bucket.own();
             for step in ["mirror::checked", "mirror::copied"] {
                 fail::cfg(step, "return").unwrap();
@@ -2423,14 +2068,14 @@ pub(crate) mod tests {
             let bucket = two.routed();
             let parent = test_cell(2 << 48 | 1);
             let (at, epoch, _) = Two::versioned(&bucket, parent).await;
-            let origin = Origin { parent, at };
+            let origin = Origin { parent, at, epoch };
 
             let before = test_cell(1 << 48 | 2);
             fork_version(&*bucket, before, VERSION, origin, 7).await.unwrap();
             assert_eq!(two.refers(origin, before).await, (true, false, false), "unmirrored");
 
             let (marker, marked) =
-                (layout::mirror(parent, at), layout::encode(&layout::Mirror::of(epoch)));
+                (layout::mirror(parent, at), layout::encode(&layout::Mirror::NOW));
             let put = PutMode::Overwrite;
             two.home.object_put(&marker, marked.clone().into(), put.clone()).await.unwrap();
             let after = test_cell(1 << 48 | 3);
@@ -2467,7 +2112,7 @@ pub(crate) mod tests {
             .unwrap();
             two.home.object_delete(&marker).await.unwrap();
             let path = dir.path().join("home").join(&marker);
-            let marked = layout::encode(&layout::Mirror::of(epoch));
+            let marked = layout::encode(&layout::Mirror::NOW);
             fail::cfg_callback("version::referred", move || {
                 std::fs::create_dir_all(path.parent().unwrap()).unwrap();
                 std::fs::write(&path, &marked).unwrap();
@@ -2496,8 +2141,8 @@ pub(crate) mod tests {
             let two = Two::new(dir.path()).await;
             let bucket = two.routed();
             let parent = test_cell(2 << 48 | 1);
-            let (at, ..) = Two::versioned(&bucket, parent).await;
-            let origin = Origin { parent, at };
+            let (at, epoch, _) = Two::versioned(&bucket, parent).await;
+            let origin = Origin { parent, at, epoch };
             let child = test_cell(1 << 48 | 2);
             crate::testing::fork_version(&*bucket, child, crate::testing::VERSION, origin, 7)
                 .await
@@ -2550,8 +2195,8 @@ pub(crate) mod tests {
             let two = Two::new(dir.path()).await;
             let bucket = two.routed();
             let parent = test_cell(2 << 48 | 1);
-            let (at, _, extent) = Two::versioned(&bucket, parent).await;
-            let origin = Origin { parent, at };
+            let (at, epoch, extent) = Two::versioned(&bucket, parent).await;
+            let origin = Origin { parent, at, epoch };
             let child = test_cell(1 << 48 | 2);
             fork_version_given(&*bucket, child, VERSION, origin, 7).await.unwrap();
             let mirrored = mirror(&*bucket, &*bucket.own(), 1, parent, at).await.unwrap();
@@ -2578,9 +2223,12 @@ pub(crate) mod tests {
             let writer = Writer::open(cut.clone(), child, 10, 0).await.unwrap();
             let own = ExtentId::new(child.id, writer.chain().next_sequence());
             let child_at = versioned_by(&writer, vec![(own, b"own".to_vec())], VERSION).await;
+            let child_epoch = writer.epoch();
             drop(writer);
-            let (grandchild, forked) =
-                (test_cell(1 << 48 | 3), Origin { parent: child, at: child_at });
+            let (grandchild, forked) = (
+                test_cell(1 << 48 | 3),
+                Origin { parent: child, at: child_at, epoch: child_epoch },
+            );
             fork_version_given(&*cut, grandchild, VERSION, forked, 7).await.unwrap();
             let state = recovery::recover(&*cut, grandchild, Some(forked)).await.unwrap().state;
             let ring = ring_of(&*cut, grandchild).await.unwrap();
@@ -2634,7 +2282,7 @@ pub(crate) mod tests {
             let bucket = two.routed();
             let parent = test_cell(2 << 48 | 1);
             let (at, epoch, extent) = block_on(Two::versioned(&bucket, parent));
-            let origin = Origin { parent, at };
+            let origin = Origin { parent, at, epoch };
             let child = test_cell(1 << 48 | 2);
             block_on(fork_version(&*bucket, child, VERSION, origin, 7)).unwrap();
 
@@ -2708,7 +2356,7 @@ pub(crate) mod tests {
             let (routed, (home, other)) = (two.routed(), (&two.home, &two.other));
             let own = routed.own();
             let (parent, child) = (test_cell(2 << 48 | 1), test_cell(1 << 48 | 5));
-            let origin = Origin { parent, at: 3 };
+            let origin = Origin { parent, at: 3, epoch: 1 };
             async fn put(bucket: &ObjectBucket, key: &str, bytes: Vec<u8>) {
                 bucket.object_put(key, bytes.into(), PutMode::Overwrite).await.unwrap();
             }
@@ -2716,7 +2364,7 @@ pub(crate) mod tests {
                 let listed = bucket.object_list(&cell.prefix()).await.unwrap();
                 listed.into_iter().map(|meta| meta.key).collect()
             }
-            let version = Version { id: 9, at: 3, shared: false };
+            let version = Version { id: 9, at: 3, epoch: 1, shared: false };
             let named = Head { versions: vec![version], ..Head::of(Made::Root, 4) };
             put_head(other, parent, named).await;
             // And a version a mirror copied and never marked, its hold left.
@@ -2731,7 +2379,7 @@ pub(crate) mod tests {
                 put(home, key, b"copied".to_vec()).await;
             }
             let (marker, hold) = (layout::mirror(parent, 3), layout::hold(parent, 3, 1));
-            put(home, &marker, layout::encode(&Mirror::of(1))).await;
+            put(home, &marker, layout::encode(&Mirror::NOW)).await;
             put(other, &hold, layout::encode(&layout::Reference::of(0))).await;
             let pass = || Collector::new(Options { compact_below: 0.5, grace: 0 });
             let all = listed(home, parent).await;
@@ -2799,7 +2447,7 @@ pub(crate) mod tests {
             let copy = || async {
                 for (key, bytes) in [
                     (layout::checkpoint(parent, 3, 1), b"copied".to_vec()),
-                    (layout::mirror(parent, 3), layout::encode(&Mirror::of(1))),
+                    (layout::mirror(parent, 3), layout::encode(&Mirror::NOW)),
                 ] {
                     home.object_put(&key, bytes.into(), PutMode::Overwrite).await.unwrap();
                 }
@@ -2889,11 +2537,10 @@ pub(crate) mod tests {
             // TASK-633.8: its own bucket, unrouted, takes a key of another bucket's cell here.
             let pin = layout::pin(theirs, 3);
             let resolve = Arc::new(Registered::new(Vec::<(String, String)>::new()));
-            let own = Arc::new(ObjectBucket::from_url(&home_url).unwrap().routed(resolve)).own();
+            let own = ObjectBucket::from_url(&home_url).unwrap().routed(resolve).own().clone();
             own.put(&pin, b"pin".to_vec().into(), PutMode::Create).await.unwrap();
             let (here, there) = (home.object_get(&pin).await, other.object_get(&pin).await);
             assert_eq!((here.is_ok(), there.is_ok()), (true, false));
-            assert!(Arc::ptr_eq(&own, &own.own()), "an unrouted bucket's own is itself");
 
             let (theirs_key, ours_key) = (layout::head(theirs, 0), layout::head(ours, 0));
             routed.delete_batch(&[&theirs_key, &ours_key]).await.unwrap();
@@ -3397,7 +3044,7 @@ pub(crate) mod tests {
             let fork = writer.add_segment(forking.frame(writer.keys().encrypting())).unwrap();
             writer.upload(fork).await.unwrap();
             writer.acknowledge().await.unwrap();
-            let origin = Origin { parent, at: fork };
+            let origin = Origin { parent, at: fork, epoch: writer.epoch() };
             crate::testing::forked_at(&*routed, child, origin).await;
 
             async fn at(bucket: &ObjectBucket, key: String) -> bool {
@@ -3475,7 +3122,7 @@ pub(crate) mod tests {
         let fork = first.add_segment(forking.frame(first.keys().encrypting())).unwrap();
         first.upload(fork).await.unwrap();
         first.acknowledge().await.unwrap();
-        let origin = Origin { parent: test_cell(root), at: fork };
+        let origin = Origin { parent: test_cell(root), at: fork, epoch: first.epoch() };
         crate::testing::forked_at(&*bucket, test_cell(child), origin).await;
         let segment = add(&first, Commit { tag: 2, frees: vec![small], ..Commit::default() });
         first.upload(segment).await.unwrap();
@@ -3504,7 +3151,7 @@ pub(crate) mod tests {
 
         let state = recovery::recover(&*bucket, test_cell(root), None).await.unwrap().state;
         assert_eq!(state.extents.keys().copied().collect::<Vec<_>>(), [large]);
-        let origin = Some(Origin { parent: test_cell(root), at: fork });
+        let origin = Some(Origin { parent: test_cell(root), at: fork, epoch: first.epoch() });
         assert_eq!(
             crate::head::get(&*bucket, test_cell(child)).await.unwrap().unwrap().origin(),
             origin

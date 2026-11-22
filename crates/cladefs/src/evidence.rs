@@ -26,7 +26,7 @@ use crate::stats::{self, Counter};
 use bucket_cell::evidence::{Of, Prediction, UNIT, Unit};
 use bucket_cell::keys::Ring;
 use bucket_cell::layout::CellId;
-use bucket_cell::object_bucket::ObjectBucket;
+use bucket_cell::object_bucket::RoutedBucket;
 use futures::future::{BoxFuture, Shared};
 use futures::{FutureExt as _, StreamExt as _};
 use local_cell::upload::Forked;
@@ -111,7 +111,7 @@ impl Evidence {
     pub(crate) fn opened(
         forked: Forked,
         own: CellId,
-        bucket: Arc<ObjectBucket>,
+        bucket: Arc<RoutedBucket>,
         reading: Reading,
     ) -> Self {
         let Forked { origin, ring } = forked;
@@ -225,7 +225,7 @@ impl Drop for Evidence {
 /// of its version the host opens in the interval.
 fn predict(
     runtime: &tokio::runtime::Handle,
-    bucket: Arc<ObjectBucket>,
+    bucket: Arc<RoutedBucket>,
     of: Of,
     ring: Arc<Ring>,
 ) -> Predicted {
@@ -287,7 +287,7 @@ async fn ahead(reading: &Reading, unit: Unit) -> [u64; 2] {
 
 /// What writes a boot as a recording of its version's.
 struct Recorded {
-    bucket: Arc<ObjectBucket>,
+    bucket: Arc<RoutedBucket>,
     ring: Arc<Ring>,
 }
 
@@ -395,7 +395,7 @@ mod tests {
     /// within its window; none of its fork's own extents.
     #[test]
     fn boots_take_the_versions_units_first_read() {
-        let of = Of { origin: Origin { parent: test_cell(3), at: 7 }, tenant: 1 };
+        let of = Of { origin: Origin { parent: test_cell(3), at: 7, epoch: 1 }, tenant: 1 };
         let boot = Boot::new(of, 9, None);
         let opened = boot.opened;
         let extent = ExtentId { cell: 3, sequence: 1 };

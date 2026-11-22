@@ -1514,17 +1514,19 @@ impl Allocator {
                 anyhow!(FxfsError::NoSpace).context("Sync failed to yield sufficient free space.")
             );
             syncs += 1;
-            self.filesystem
-                .upgrade()
-                .unwrap()
-                .sync(SyncOptions {
+            // cladefs: box rare `sync` in a non-inlined frame so `allocate_in` stays small on
+            // 16 KiB guest kernel stacks (TASK-26.9).
+            let fs = self.filesystem.upgrade().unwrap();
+            crate::boxed_pin(|| {
+                fs.sync(SyncOptions {
                     flush_device: true,
                     precondition: Some(Box::new(|| self.needs_sync(len))),
                     // cladefs: the journal's own transaction's, as a commit makes room (TASK-233).
                     holding_commits: transaction.holding_commits,
                     ..Default::default()
                 })
-                .await?;
+            })
+            .await?;
         }
 
         let reservation_owner = reservation.either(
@@ -1623,6 +1625,12 @@ impl Allocator {
         let mutation = AllocatorMutation::Allocate { device_range, owner_object_id };
         transaction.add(self.object_id(), Mutation::Allocator(mutation));
         Ok(())
+    }
+
+    /// cladefs: whether dropped shared-extent allocations have unrecorded reaches that must be
+    /// journaled before a barrier seals them (TASK-213, board 6011).
+    pub fn has_unrecorded_reaches(&self) -> bool {
+        !self.inner.lock().unrecorded_reaches.is_empty()
     }
 
     /// cladefs: records the ranges of shared extents alive that allocations which dropped took
@@ -2122,8 +2130,10 @@ impl Allocator {
 
         let fs = self.filesystem.upgrade().unwrap();
         let mut flusher = Flusher::new(self, &fs).await;
-        let (new_layer_file, info) = flusher.start().await?;
-        flusher.finish(new_layer_file, info, reason).await
+        // cladefs: box `Flusher::start`/`finish` and the returned `(handle, info)` pair in
+        // non-inlined frames to keep `Allocator::flush` small on 16 KiB guest stacks (TASK-26.9).
+        let started = crate::boxed(|| flusher.start()).await?;
+        crate::boxed(|| flusher.finish(started, reason)).await
     }
 }
 
@@ -2411,7 +2421,11 @@ impl<'a> Flusher<'a> {
         }
     }
 
-    async fn start(&mut self) -> Result<(DataObjectHandle<ObjectStore>, AllocatorInfo), Error> {
+    // cladefs: return `Box<(handle, info)>` so `Allocator::flush` does not hold `AllocatorInfo`
+    // and `DataObjectHandle` by value on its 16 KiB guest kernel stack frame (TASK-26.9).
+    async fn start(
+        &mut self,
+    ) -> Result<Box<(DataObjectHandle<ObjectStore>, AllocatorInfo)>, Error> {
         let object_manager = self.fs.object_manager();
         let root_store = self.fs.root_store();
         let mut transaction = root_store
@@ -2442,15 +2456,15 @@ impl<'a> Flusher<'a> {
                 AllocatorInfo { dying: inner.extents.recorded_dying(), ..inner.info.clone() }
             })
             .await?;
-        Ok((layer_object_handle, info))
+        Ok(Box::new((layer_object_handle, info)))
     }
 
     async fn finish(
         self,
-        layer_object_handle: DataObjectHandle<ObjectStore>,
-        mut info: AllocatorInfo,
+        started: Box<(DataObjectHandle<ObjectStore>, AllocatorInfo)>,
         reason: FlushReason,
     ) -> Result<Version, Error> {
+        let (layer_object_handle, mut info) = *started;
         let object_manager = self.fs.object_manager();
         let txn_options = Self::txn_options(object_manager.metadata_reservation());
 
@@ -2475,27 +2489,37 @@ impl<'a> Flusher<'a> {
         let (layer_set, layers_to_keep) =
             tree::layers_to_merge(&self.allocator.tree, full_compaction, 0);
         let total_len = layer_set.sum_len();
+        // cladefs: box each compaction branch directly so `Flusher::finish` does not carry an
+        // extra 2.8 KiB wrapper frame on top of `compact_with_iterator` (TASK-26.9).
         {
             let start_time = std::time::Instant::now();
             let merged_layer_count = layer_set.layers.len();
             let mut merger = layer_set.merger();
-            let iter = merger.query(Query::FullScan).await?;
-            let writer = DirectWriter::new(&layer_object_handle, txn_options).await;
             let block_size = layer_object_handle.block_size();
             let yielder = Some(self.fs.journal().get_compaction_yielder());
             // cladefs: only a compaction of all the layers leaves out removals, and the records of
             // owners freed: the layers kept may hold records they hide.
             let bytes_written = if layers_to_keep.is_empty() {
-                let iter = filter_marked_for_deletion(
-                    filter_tombstones(iter).await?,
-                    freed_owners.clone(),
-                )
-                .await?;
-                let iter = CoalescingIterator::new(iter).await?;
-                compact_with_iterator(iter, total_len, writer, block_size, yielder).await?
+                crate::boxed(|| async {
+                    let iter = merger.query(Query::FullScan).await?;
+                    let writer = DirectWriter::new(&layer_object_handle, txn_options).await;
+                    let iter = filter_marked_for_deletion(
+                        filter_tombstones(iter).await?,
+                        freed_owners.clone(),
+                    )
+                    .await?;
+                    let iter = CoalescingIterator::new(iter).await?;
+                    compact_with_iterator(iter, total_len, writer, block_size, yielder).await
+                })
+                .await?
             } else {
-                let iter = CoalescingIterator::new(iter).await?;
-                compact_with_iterator(iter, total_len, writer, block_size, yielder).await?
+                crate::boxed(|| async {
+                    let iter = merger.query(Query::FullScan).await?;
+                    let writer = DirectWriter::new(&layer_object_handle, txn_options).await;
+                    let iter = CoalescingIterator::new(iter).await?;
+                    compact_with_iterator(iter, total_len, writer, block_size, yielder).await
+                })
+                .await?
             };
 
             self.allocator.tree.report_compaction_metrics(
@@ -2510,24 +2534,29 @@ impl<'a> Flusher<'a> {
         // Both of these forward-declared variables need to outlive the transaction.
         let object_handle;
         let reservation_update;
-        let mut transaction = root_store
-            .new_transaction(
+        // cladefs: box `new_transaction` and `open_object` so `Flusher::finish` stays small on
+        // 16 KiB guest kernel stacks (TASK-26.9).
+        let mut transaction = crate::boxed(|| {
+            root_store.new_transaction(
                 lock_keys![LockKey::object(
                     root_store.store_object_id(),
                     self.allocator.object_id()
                 )],
                 txn_options,
             )
-            .await?;
+        })
+        .await?;
         let mut serialized_info = Vec::new();
 
         debug!(oid = layer_object_handle.object_id(); "new allocator layer file");
-        object_handle = ObjectStore::open_object(
-            &root_store,
-            self.allocator.object_id(),
-            HandleOptions::default(),
-            None,
-        )
+        object_handle = crate::boxed(|| {
+            ObjectStore::open_object(
+                &root_store,
+                self.allocator.object_id(),
+                HandleOptions::default(),
+                None,
+            )
+        })
         .await?;
 
         // Move all the existing layers to the graveyard. cladefs: those merged; those kept stay.
@@ -2549,7 +2578,9 @@ impl<'a> Flusher<'a> {
         // cladefs: the layer written, with those kept, older, which the info names, and whose sizes
         // the reservation is for, as an object store's flush does.
         let layer_object_id = layer_object_handle.object_id();
-        let mut layers = vec![layer_from_handle(layer_object_handle, None).await?];
+        // cladefs: box `layer_from_handle` in a non-inlined frame to keep `Flusher::finish` small
+        // on 16 KiB guest kernel stacks (TASK-26.9).
+        let mut layers = vec![crate::boxed(|| layer_from_handle(layer_object_handle, None)).await?];
         layers.extend(layers_to_keep.iter().map(|layer| (*layer).clone()));
         info.layers = layers
             .iter()
@@ -2561,7 +2592,9 @@ impl<'a> Flusher<'a> {
 
         let mut buf = object_handle.allocate_buffer(serialized_info.len()).await;
         buf.copy_from_slice(&serialized_info);
-        object_handle.txn_write(&mut transaction, 0u64, buf.as_ref()).await?;
+        // cladefs: box `txn_write`, `commit_with_callback`, and `tombstone_object` so
+        // `Flusher::finish` stays small on 16 KiB guest kernel stacks (TASK-26.9).
+        crate::boxed(|| object_handle.txn_write(&mut transaction, 0u64, buf.as_ref())).await?;
 
         reservation_update = ReservationUpdate::new(tree::reservation_amount_from_layer_size(
             layers.iter().filter_map(|layer| layer.handle()).map(ReadObjectHandle::get_size).sum(),
@@ -2576,8 +2609,8 @@ impl<'a> Flusher<'a> {
         );
         root_store.remove_from_graveyard(&mut transaction, layer_object_id);
 
-        transaction
-            .commit_with_callback(|_| {
+        crate::boxed(|| {
+            transaction.commit_with_callback(|_| {
                 self.allocator.tree.set_layers(layers);
 
                 // At this point we've committed the new layers to disk so we can start using them.
@@ -2589,14 +2622,15 @@ impl<'a> Flusher<'a> {
                     inner.info.marked_for_deletion.remove(&owner_id);
                 }
             })
-            .await?;
+        })
+        .await?;
 
         // Now close the layers and purge them. cladefs: those merged.
         for layer in layer_set.layers {
             let object_id = layer.handle().map(|h| h.object_id());
             layer.close_layer().await;
             if let Some(object_id) = object_id {
-                root_store.tombstone_object(object_id, txn_options, None).await?;
+                crate::boxed(|| root_store.tombstone_object(object_id, txn_options, None)).await?;
             }
         }
 

@@ -180,8 +180,12 @@ impl Filesystem {
         let freezer = device.freezer();
         let reclaim_size = (memory.min(device.capacity()) / JOURNAL_SHARE)
             .clamp(DEFAULT_RECLAIM_SIZE, JOURNAL_MAX);
-        let journal =
-            JournalOptions { reclaim_size, lazy_flush: Some(LAZY_FLUSH), ..Default::default() };
+        let journal = JournalOptions {
+            reclaim_size,
+            barriers_enabled: true,
+            lazy_flush: Some(LAZY_FLUSH),
+            ..Default::default()
+        };
         let filesystem = FxFilesystemBuilder::new()
             .read_only(read_only)
             .format(format)
@@ -190,6 +194,10 @@ impl Filesystem {
             .object_cache_items((memory / CACHE_SHARE / CACHED_OBJECT_SIZE) as usize)
             .graveyard_batch_delay(GRAVEYARD_BATCH_DELAY)
             .journal_options(journal)
+            // cladefs: ExtentDevice honors WriteFlags::PRE_BARRIER (`WRITE_BARRIER` + `Seal`), so
+            // journaled data writes need no per-4 KiB Fletcher64 checksums or extra recorded
+            // flushes (board 6011).
+            .barriers_enabled(true)
             .open(DeviceHolder::new(device))
             .await?;
         if format {

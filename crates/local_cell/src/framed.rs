@@ -8,9 +8,9 @@
 use crate::dir::File;
 use crate::raw::RawFile;
 use anyhow::{Context as _, Error, bail};
+use bucket_cell::fetch::{PartBytes, PartMemory};
+use bucket_cell::lru::LruMap;
 use extent_frame::{ALIGN, Corrupt, Encoding, Frame, Keys, PART, Parts, Stored, TRAILER};
-use std::collections::{BTreeMap, HashMap};
-use std::hash::Hash;
 use std::io;
 use std::ops::Range;
 use std::sync::Arc;
@@ -60,6 +60,12 @@ impl std::ops::Deref for Aligned {
     type Target = [u8];
 
     fn deref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl AsRef<[u8]> for Aligned {
+    fn as_ref(&self) -> &[u8] {
         self.as_slice()
     }
 }
@@ -192,40 +198,30 @@ impl<F> Drop for Framed<F> {
 /// cladefs: framed files kept open, by their keys: at most `limit` of them, but for those reads
 /// use, the least lately read of the others closing as more open; not all of them, which reads
 /// would open again, each opening anew a file whose parts unpacked no read finds then (TASK-92.2).
-pub(crate) struct Files<K, F> {
-    /// Each file, and when it was last read.
-    files: HashMap<K, (Arc<Framed<F>>, u64)>,
-    by_use: BTreeMap<u64, K>,
-    clock: u64,
+pub(crate) struct Files<K: Ord, F> {
+    files: LruMap<K, Arc<Framed<F>>>,
     limit: usize,
 }
 
 /// cladefs: its files let go of least lately read first: the last holder of a file writes its
 /// dirty pages back as it goes, and so in an order the cell's reads decide, not the map's, which
 /// differs from one run to the next (TASK-675).
-impl<K, F> Drop for Files<K, F> {
+impl<K: Ord, F> Drop for Files<K, F> {
     fn drop(&mut self) {
-        let mut files: Vec<(Arc<Framed<F>>, u64)> =
-            std::mem::take(&mut self.files).into_values().collect();
-        files.sort_unstable_by_key(|(_, used)| *used);
+        let files = std::mem::take(&mut self.files).into_lru_values();
         // A vector's elements drop in order, first to last.
         drop(files);
     }
 }
 
-impl<K: Copy + Eq + Hash, F: File> Files<K, F> {
+impl<K: Copy + Ord, F: File> Files<K, F> {
     pub(crate) fn new(limit: usize) -> Self {
-        Self { files: HashMap::new(), by_use: BTreeMap::new(), clock: 0, limit }
+        Self { files: LruMap::new(), limit }
     }
 
     /// The file of `key`, if open, read now.
     pub(crate) fn get(&mut self, key: K) -> Option<Arc<Framed<F>>> {
-        let (file, used) = self.files.get_mut(&key)?;
-        self.clock += 1;
-        self.by_use.remove(used);
-        *used = self.clock;
-        self.by_use.insert(self.clock, key);
-        Some(file.clone())
+        self.files.get(&key).cloned()
     }
 
     /// Keeps `file` open, the file of `key`, read now, unless one is open already, as one opened
@@ -235,17 +231,16 @@ impl<K: Copy + Eq + Hash, F: File> Files<K, F> {
         if let Some(open) = self.get(key) {
             return open;
         }
-        self.clock += 1;
-        self.files.insert(key, (file.clone(), self.clock));
-        self.by_use.insert(self.clock, key);
+        self.files.insert(key, file.clone());
         let excess = self.files.len().saturating_sub(self.limit);
-        let idle: Vec<(u64, K)> = (self.by_use.iter())
-            .filter(|(_, key)| self.files[*key].0.is_idle())
+        let idle: Vec<K> = self
+            .files
+            .iter_lru()
+            .filter(|(_, file)| file.is_idle())
             .take(excess)
-            .map(|(used, key)| (*used, *key))
+            .map(|(key, _)| *key)
             .collect();
-        for (used, key) in idle {
-            self.by_use.remove(&used);
+        for key in idle {
             self.files.remove(&key);
         }
         file
@@ -253,9 +248,7 @@ impl<K: Copy + Eq + Hash, F: File> Files<K, F> {
 
     /// Closes the file of `key`, if open.
     pub(crate) fn remove(&mut self, key: K) {
-        if let Some((_, used)) = self.files.remove(&key) {
-            self.by_use.remove(&used);
-        }
+        self.files.remove(&key);
     }
 }
 
@@ -356,7 +349,7 @@ pub enum Located<F> {
         len: u64,
     },
     Unpacked {
-        bytes: Arc<Aligned>,
+        bytes: PartBytes,
         skip: u64,
         len: u64,
     },
@@ -429,8 +422,9 @@ impl<F> Packed<F> {
                 part
             }
         };
+        let held = part.held();
         let part = Arc::new(part);
-        unpacked.put(self.key, part.clone());
+        unpacked.put(self.key, PartBytes::from_owned(part.clone(), held));
         Ok(part)
     }
 }
@@ -454,70 +448,39 @@ pub fn unpacks() -> u64 {
     UNPACKS.load(Ordering::Relaxed)
 }
 
-/// The parts of framed files unpacked lately, by their files' openings and their numbers: most
-/// reads of extents are of neighbouring blocks, which a part holds. cladefs: the process's, every
-/// cell's reads sharing it ([`unpacked`]), its bytes counted, [`UNPACKED_BYTES`] at most, which a
-/// host's governor counts and evicts as it does every cache on a data path; and a file's parts
-/// gone with the file, which no read finds after (TASK-603). Each cell kept its own before, 32
-/// parts, 32 MiB, for its life, outside any budget, of files long gone.
-///
-/// Its lock is std's under Shuttle too: no thread waits holding it, nor yields, so no schedule is
-/// one of its interleavings; and a framed file's drop, which takes it, is no point of a schedule,
-/// whatever order a map drops its files in (TASK-675).
-#[derive(Default)]
+/// The parts of framed files unpacked lately, unified with `bucket_cell::fetch::PartMemory`
+/// (board 6026): counted once under the daemon's governor alongside fetched bucket parts.
 pub struct Unpacked {
-    kept: std::sync::Mutex<Recent>,
+    parts: Arc<PartMemory>,
+}
+
+impl Default for Unpacked {
+    fn default() -> Self {
+        Self { parts: PartMemory::new(bucket_cell::fetch::RECENT) }
+    }
 }
 
 /// A part unpacked: its file's opening, and its number.
 type Key = (u64, u64);
 
-/// The parts [`Unpacked`] keeps, by when they were last read.
-#[derive(Default)]
-struct Recent {
-    /// Each part, and when it was last read, by its file's opening first, as a file's go at once.
-    parts: BTreeMap<Key, (Arc<Aligned>, u64)>,
-    by_use: BTreeMap<u64, Key>,
-    clock: u64,
-    /// The bytes of the parts.
-    bytes: u64,
-}
-
-impl Recent {
-    /// Lets go of the part `key`, if kept.
-    fn remove(&mut self, key: Key) {
-        if let Some((part, used)) = self.parts.remove(&key) {
-            self.by_use.remove(&used);
-            self.bytes -= part.held();
-        }
-    }
-
-    /// Lets go of the parts least lately read until it holds `bytes` at most.
-    fn evict_to(&mut self, bytes: u64) {
-        while self.bytes > bytes {
-            let Some((_, oldest)) = self.by_use.first_key_value() else { break };
-            self.remove(*oldest);
-        }
-    }
-}
-
-/// cladefs: the most bytes of parts unpacked the process keeps: 64 parts' of a MiB.
-const UNPACKED_BYTES: u64 = 64 << 20;
-
-/// cladefs: the process's parts unpacked lately ([`Unpacked`]). Under Shuttle, an execution's: each
-/// run of a schedule starts with nothing unpacked, as its replay does, and runs at once evict none
-/// of each other's parts (TASK-675).
+/// cladefs: the process's parts unpacked lately ([`Unpacked`]), sharing `bucket_cell::fetch`'s
+/// unified `PartMemory` off Shuttle (board 6026). Under Shuttle, an execution's: each run of a
+/// schedule starts with nothing unpacked, as its replay does, and runs at once evict none of each
+/// other's parts (TASK-675).
 pub fn unpacked() -> &'static Unpacked {
     #[cfg(not(feature = "shuttle"))]
     {
-        static UNPACKED: std::sync::LazyLock<Unpacked> =
-            std::sync::LazyLock::new(Unpacked::default);
-        &UNPACKED
+        node_local::node_local! {
+            static UNPACKED: Unpacked = Unpacked { parts: bucket_cell::fetch::shared_parts().clone() };
+        }
+        UNPACKED.get()
     }
     #[cfg(feature = "shuttle")]
     {
         shuttle::lazy_static! {
-            static ref UNPACKED: Unpacked = Unpacked::default();
+            static ref UNPACKED: Unpacked = Unpacked {
+                parts: PartMemory::new(bucket_cell::fetch::RECENT),
+            };
         }
         &UNPACKED
     }
@@ -526,44 +489,25 @@ pub fn unpacked() -> &'static Unpacked {
 impl Unpacked {
     /// cladefs: the bytes of the parts it keeps.
     pub fn bytes(&self) -> u64 {
-        self.kept.lock().unwrap().bytes
+        self.parts.bytes()
     }
 
     /// cladefs: lets go of the parts least lately read until it keeps `bytes` at most.
     pub fn evict_to(&self, bytes: u64) {
-        self.kept.lock().unwrap().evict_to(bytes);
+        self.parts.evict_to(bytes);
     }
 
     /// cladefs: lets go of the parts of the file of the opening `file`.
     fn forget(&self, file: u64) {
-        let mut kept = self.kept.lock().unwrap();
-        let keys: Vec<Key> =
-            kept.parts.range((file, 0)..=(file, u64::MAX)).map(|(k, _)| *k).collect();
-        for key in keys {
-            kept.remove(key);
-        }
+        self.parts.forget_local(file);
     }
 
-    fn get(&self, key: Key) -> Option<Arc<Aligned>> {
-        let mut kept = self.kept.lock().unwrap();
-        let kept = &mut *kept;
-        let (bytes, used) = kept.parts.get_mut(&key)?;
-        kept.clock += 1;
-        kept.by_use.remove(used);
-        *used = kept.clock;
-        kept.by_use.insert(kept.clock, key);
-        Some(bytes.clone())
+    fn get(&self, key: Key) -> Option<PartBytes> {
+        self.parts.get_local(key.0, key.1)
     }
 
-    fn put(&self, key: Key, bytes: Arc<Aligned>) {
-        let mut kept = self.kept.lock().unwrap();
-        let kept = &mut *kept;
-        kept.remove(key);
-        kept.clock += 1;
-        kept.bytes += bytes.held();
-        kept.parts.insert(key, (bytes, kept.clock));
-        kept.by_use.insert(kept.clock, key);
-        kept.evict_to(UNPACKED_BYTES);
+    fn put(&self, key: Key, bytes: PartBytes) {
+        self.parts.put_local(key.0, key.1, bytes);
     }
 }
 
@@ -586,7 +530,11 @@ mod tests {
         file.write_at(&bytes, 0).unwrap();
         let framed = Framed::new(Arc::new(file), Parts::of(&bytes, &extent_frame::NoKeys).unwrap());
         let before = unpacked().bytes();
-        let part = || Arc::new(Aligned::new(4096));
+        let part = || {
+            let aligned = Arc::new(Aligned::new(4096));
+            let held = aligned.held();
+            PartBytes::from_owned(aligned, held)
+        };
         let held = part().held();
         unpacked().put((framed.id, 0), part());
         unpacked().put((framed.id, 1), part());
