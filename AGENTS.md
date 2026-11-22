@@ -34,16 +34,16 @@ of a batch.
 - Measure a change on its own only when isolating it is the point of the measurement (an A/B on
   one test host).
 
-### Run expensive commands on hotbed, not locally
+### Every compile runs on hotbed; the workstation compiles nothing
 
-The user's rule (2026-11-22): do not run expensive commands locally on the workstation (macOS):
-`cargo build`, `cargo check`, `cargo clippy`, `cargo nextest`, `scripts/test.sh`, simulations,
-`make check-tla`, guest kernel builds, or Firecracker builds. Offload them to `hotbed`
-(`hotbed run -- ...`; read `hotbed skills get hotbed` before your first call), which runs them
-on the Linux cluster in a fork of a repo whose `main` is already built and syncs uncommitted
-changes automatically. Keep local commands on the workstation cheap: editing, `git`, `rg`,
-`rustfmt`, `vb`, and fast Python checks. Run a macOS-specific build or test locally only when
-verifying a macOS-only change (such as `F_NOCACHE` or macOS compilation).
+The user's rule (2026-11-22): every Rust compile runs on `hotbed` (`hotbed run -- ...`; read
+`hotbed skills get hotbed` before your first call), which runs it on the Linux cluster in a fork
+of a repo whose `main` is already built and syncs uncommitted changes automatically. That is
+`cargo build`, `cargo check` (one crate's included), `cargo clippy`, `cargo nextest`,
+`scripts/test.sh`, simulations, mutants, benches, `make check-tla`, guest kernel and Firecracker
+builds; long ones with `--detach`. The workstation (macOS) compiles no Rust at all, macOS-only
+code included: CI's `macos` job compiles and tests that, so push and read its result. Local
+commands stay cheap: editing, `git`, `rg`, `cargo fmt -p CRATE`, `vb`, and fast Python checks.
 
 ### Linux runs go to the least loaded test host
 
