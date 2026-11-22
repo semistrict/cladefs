@@ -549,6 +549,10 @@ fn transfer_areas_are_checked() {
         )
     };
     assert_eq!(seal, 0);
+    // Non-page-aligned transfer area lengths are refused (board 7411).
+    let unaligned =
+        Header::new(TRANSFER, 0).with_body(&TransferBody { len: crate::pages::page_size() + 1 });
+    assert_eq!(client.call(unaligned, &[], &[sealed.as_fd()]).err(), Some(Errno::EINVAL));
     let again = Header::new(TRANSFER, 0).with_body(&TransferBody { len: 1 << 20 });
     assert_eq!(client.call(again, &[], &[sealed.as_fd()]).err(), Some(Errno::EEXIST));
     let extent = [client.cell(), 1];
@@ -2145,17 +2149,60 @@ impl ServedArea {
 /// refused; one into bytes it wrote is served.
 #[test]
 fn transfer_areas_are_their_vm_processes_memory() {
+    use super::wire::*;
     use std::os::fd::AsRawFd;
     let len = 1 << 20;
+    let page = crate::pages::page_size() as usize;
     let mut area = ServedArea::new(len);
     assert_eq!(area.read_into(4, len / 2), -Errno::EINVAL.raw());
+    let seeks = || super::server::TRANSFER_SEEK_HOLES.load(std::sync::atomic::Ordering::Relaxed);
+    let before_first = seeks();
     assert_eq!(area.read_into(5, 0), 0);
+    assert!(seeks() > before_first, "first access to written pages checks SEEK_HOLE");
     assert_eq!(area.block(0), &pattern(2, BLOCK)[..]);
-    // Sealed against writes: no page of it punched out.
+    // Repeated reads and writes on already-verified pages make zero SEEK_HOLE calls (board 7411).
+    let after_first = seeks();
+    assert_eq!(area.read_into(50, 0), 0);
+    let write_from = Header::new(WRITE, 51)
+        .with_body(&WriteBody {
+            cell: area.cell,
+            sequence: 2,
+            offset: 0,
+            transfer_at: 0,
+            data_len: BLOCK as u64,
+        })
+        .with_flags(WRITE_TRANSFER);
+    assert_eq!(area.call(write_from, &[]), 0);
+    assert_eq!(seeks(), after_first, "cached pages must not invoke lseek(SEEK_HOLE)");
+    // A range straddling the last verified page and an unwritten page still fails with EINVAL.
+    let straddle = Header::new(READ, 52)
+        .with_body(&ReadBody {
+            cell: area.cell,
+            sequence: 1,
+            offset: 0,
+            len: (2 * page) as u64,
+            transfer_at: (len / 2 - page) as u64,
+        })
+        .with_flags(READ_TRANSFER);
+    assert_eq!(area.call(straddle, &[]), -Errno::EINVAL.raw());
+    // Writing a previously unwritten page makes it verifiable, and subsequent accesses cache it.
+    // SAFETY: Within the mapping, at the start of the second half.
+    unsafe { area.addr.add(len / 2).write_bytes(2, page.max(BLOCK)) };
+    let before_second = seeks();
+    assert_eq!(area.read_into(53, len / 2), 0);
+    assert!(seeks() > before_second, "newly written page checks SEEK_HOLE once");
+    let after_second = seeks();
+    assert_eq!(area.read_into(54, len / 2), 0);
+    assert_eq!(seeks(), after_second, "newly verified page cached on subsequent access");
+    // Sealed against writes: no page of it punched out via fallocate or MADV_REMOVE (board 7411).
     let mode = libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE;
     // SAFETY: Of what this test made.
-    let punched = unsafe { libc::fallocate(area.file.as_raw_fd(), mode, 0, 4096) };
+    let punched = unsafe { libc::fallocate(area.file.as_raw_fd(), mode, 0, page as libc::off_t) };
     assert_eq!(punched, -1, "a page of the area punched out");
+    assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));
+    // SAFETY: Of the mapping, page-aligned.
+    let removed = unsafe { libc::madvise(area.addr.cast(), page, libc::MADV_REMOVE) };
+    assert_eq!(removed, -1, "a page of the area removed via MADV_REMOVE");
     assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));
 }
 
@@ -2184,7 +2231,10 @@ fn transfer_areas_written_and_swapped_out_are_read_into() {
     let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
     let swap = meminfo.lines().filter(|line| line.starts_with("Swap")).collect::<Vec<_>>();
     assert!(resident.iter().all(|page| page & 1 == 0), "not paged out, the host's swap {swap:?}");
+    let seeks = || super::server::TRANSFER_SEEK_HOLES.load(std::sync::atomic::Ordering::Relaxed);
+    let before = seeks();
     assert_eq!(area.read_into(6, at), 0);
+    assert!(seeks() > before, "swapped-out uncached page checked via SEEK_HOLE");
     assert_eq!(area.block(at), &pattern(2, BLOCK)[..]);
 }
 

@@ -1988,15 +1988,26 @@ impl Guest for Connection {
     }
 }
 
+/// cladefs: how many `lseek(SEEK_HOLE)` checks [`TransferArea::written`] has run (board 7411).
+#[cfg(test)]
+pub(super) static TRANSFER_SEEK_HOLES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// A connection's transfer area ([`TRANSFER`]), shared memory its VM process made, mapped here:
 /// which `READ`s write and `WRITE`s read their data in, as the VM process says, which may change
 /// it meanwhile: it is accessed as volatile memory, its ranges checked against its length.
 struct TransferArea {
     addr: std::ptr::NonNull<u8>,
     len: usize,
+    num_pages: usize,
     /// cladefs: its memory opened anew, read-only, for [`TransferArea::written`] to seek in with
     /// an offset of its own, not the VM process's descriptor's.
     memory: std::os::fd::OwnedFd,
+    /// cladefs: bitmap of pages already verified non-hole by `SEEK_HOLE` (board 7411). Because
+    /// [`TransferArea::map`] seals the memfd with `F_SEAL_FUTURE_WRITE | F_SEAL_GROW | F_SEAL_SEAL`
+    /// before returning, once a page is written by the VM process it can never become a hole again;
+    /// steady-state transfer-area I/O checks this bitmap with zero syscalls.
+    verified: Box<[std::sync::atomic::AtomicU64]>,
 }
 
 // SAFETY: Shared memory mapped for the area's life, accessed as volatile memory alone.
@@ -2006,8 +2017,9 @@ unsafe impl Send for TransferArea {}
 unsafe impl Sync for TransferArea {}
 
 impl TransferArea {
-    /// The `len` bytes of the shared memory `fd`, mapped: `EINVAL` unless it has that many and is
-    /// sealed against shrinking, which would fault the daemon's accesses past its new end.
+    /// The `len` bytes of the shared memory `fd`, mapped: `EINVAL` unless it has that many, is a
+    /// whole number of host pages, and is sealed against shrinking, which would fault the daemon's
+    /// accesses past its new end.
     /// cladefs: sealed here, once mapped, against future writes, which takes the VM process's
     /// punching holes in it away, the VM process's own mappings writing on; and accessed only
     /// where its VM process wrote it first ([`TransferArea::range`]): the kernel charges a page of
@@ -2016,7 +2028,9 @@ impl TransferArea {
     /// connection gone (TASK-547).
     fn map(fd: std::os::fd::BorrowedFd<'_>, len: u64) -> Result<Self, Errno> {
         use std::os::fd::AsRawFd;
-        if len == 0 || len > MAX_TRANSFER_AREA {
+        use std::sync::atomic::AtomicU64;
+        let page = crate::pages::page_size();
+        if len == 0 || len > MAX_TRANSFER_AREA || !len.is_multiple_of(page) {
             return Err(Errno::EINVAL);
         }
         if !seals::against_shrinking(fd) {
@@ -2028,7 +2042,9 @@ impl TransferArea {
         if unsafe { libc::fstat(fd.as_raw_fd(), &mut stat) } != 0 || (stat.st_size as u64) < len {
             return Err(Errno::EINVAL);
         }
-        let len = len as usize;
+        let num_pages = usize::try_from(len / page).map_err(|_| Errno::EINVAL)?;
+        let words = num_pages.div_ceil(64);
+        let len = usize::try_from(len).map_err(|_| Errno::EINVAL)?;
         let memory = reopen_read_only(fd).map_err(|err| {
             log::warn!("cladefsd: a transfer area not to be opened anew: {err}");
             Errno::EINVAL
@@ -2048,12 +2064,85 @@ impl TransferArea {
             log::warn!("cladefsd: mapping a transfer area: {}", std::io::Error::last_os_error());
             return Err(Errno::ENOMEM);
         }
-        let area = Self { addr: std::ptr::NonNull::new(addr.cast()).unwrap(), len, memory };
+        let verified = (0..words).map(|_| AtomicU64::new(0)).collect();
+        let area = Self {
+            addr: std::ptr::NonNull::new(addr.cast()).unwrap(),
+            len,
+            num_pages,
+            memory,
+            verified,
+        };
         if let Err(err) = seals::against_writes(fd) {
             log::warn!("cladefsd: a transfer area not to be sealed against writes: {err}");
             return Err(Errno::EINVAL);
         }
         Ok(area)
+    }
+
+    /// Bitmask for bits `[lo, hi)` within one 64-bit word (`0 <= lo < hi <= 64`).
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+    fn word_mask(lo: u32, hi: u32) -> u64 {
+        let count = hi.saturating_sub(lo);
+        if count >= 64 {
+            u64::MAX
+        } else {
+            1u64.wrapping_shl(count).wrapping_sub(1).wrapping_shl(lo)
+        }
+    }
+
+    /// First page in `from..to` whose bit is not yet set in [`Self::verified`].
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+    fn first_unverified(&self, from: usize, to: usize) -> Option<usize> {
+        use std::sync::atomic::Ordering;
+        if from >= to {
+            return None;
+        }
+        let first_word = from / 64;
+        let last_word = to.checked_sub(1)? / 64;
+        for word in first_word..=last_word {
+            let lo = if word == first_word { (from % 64) as u32 } else { 0 };
+            let hi = if word == last_word {
+                let rem = (to % 64) as u32;
+                if rem == 0 { 64 } else { rem }
+            } else {
+                64
+            };
+            let mask = Self::word_mask(lo, hi);
+            let bits = self.verified.get(word).map_or(0, |slot| slot.load(Ordering::Relaxed));
+            let missing = mask & !bits;
+            if missing != 0 {
+                return word.checked_mul(64)?.checked_add(missing.trailing_zeros() as usize);
+            }
+        }
+        None
+    }
+
+    /// Marks every page in `from..to` as verified non-hole in [`Self::verified`].
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+    fn mark_verified(&self, from: usize, to: usize) {
+        use std::sync::atomic::Ordering;
+        let to = to.min(self.num_pages);
+        let Some(last_page) = to.checked_sub(1) else {
+            return;
+        };
+        if from >= to {
+            return;
+        }
+        let first_word = from / 64;
+        let last_word = last_page / 64;
+        for word in first_word..=last_word {
+            let lo = if word == first_word { (from % 64) as u32 } else { 0 };
+            let hi = if word == last_word {
+                let rem = (to % 64) as u32;
+                if rem == 0 { 64 } else { rem }
+            } else {
+                64
+            };
+            let mask = Self::word_mask(lo, hi);
+            if let Some(slot) = self.verified.get(word) {
+                slot.fetch_or(mask, Ordering::Relaxed);
+            }
+        }
     }
 
     /// cladefs: whether its VM process wrote each page of the `len` bytes at `offset`, within it:
@@ -2062,18 +2151,44 @@ impl TransferArea {
     /// no memory, which `mincore` asked before, and refused the reads into it of a host short of
     /// memory, its guests' reads failing with EIO (board 6881). The daemon faulting such a page
     /// in charges it to whom it was charged when it went to swap, the VM process.
+    ///
+    /// Verified non-hole pages are cached in [`Self::verified`] (board 7411) so steady-state
+    /// transfer-area I/O makes no `lseek(SEEK_HOLE)` syscalls.
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
     fn written(&self, offset: usize, len: usize) -> Result<bool, Errno> {
         use std::os::fd::AsRawFd;
-        let page = crate::pages::page_size() as usize;
-        let (start, end) = (offset / page * page, (offset + len).div_ceil(page) * page);
+        let page = usize::try_from(crate::pages::page_size()).map_err(|_| Errno::EINVAL)?;
+        if page == 0 {
+            return Err(Errno::EINVAL);
+        }
+        let end = offset.checked_add(len).ok_or(Errno::EINVAL)?;
+        if end > self.len {
+            return Err(Errno::EINVAL);
+        }
+        let start_page = offset.checked_div(page).ok_or(Errno::EINVAL)?;
+        let end_page = end.div_ceil(page);
+        let Some(miss) = self.first_unverified(start_page, end_page) else {
+            return Ok(true);
+        };
+        #[cfg(test)]
+        TRANSFER_SEEK_HOLES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let seek_at = miss.checked_mul(page).ok_or(Errno::EINVAL)?;
+        let seek_at = libc::off_t::try_from(seek_at).map_err(|_| Errno::EINVAL)?;
         // SAFETY: Seeks in a descriptor of its own.
-        let hole =
-            unsafe { libc::lseek(self.memory.as_raw_fd(), start as libc::off_t, libc::SEEK_HOLE) };
+        let hole = unsafe { libc::lseek(self.memory.as_raw_fd(), seek_at, libc::SEEK_HOLE) };
         if hole < 0 {
             log::warn!("cladefsd: a transfer area's holes: {}", std::io::Error::last_os_error());
             return Err(Errno::EINVAL);
         }
-        Ok(hole as usize >= end)
+        let hole_pages = usize::try_from(hole)
+            .map_err(|_| Errno::EINVAL)?
+            .checked_div(page)
+            .ok_or(Errno::EINVAL)?;
+        let verified_end = hole_pages.min(self.num_pages);
+        if verified_end > miss {
+            self.mark_verified(miss, verified_end);
+        }
+        Ok(hole_pages >= end_page)
     }
 
     /// The `len` bytes at `offset`, checked: `EINVAL` past its end; cladefs: and where its VM
