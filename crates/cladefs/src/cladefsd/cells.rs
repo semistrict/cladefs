@@ -538,10 +538,16 @@ pub(super) async fn open_cell_at(
     })
     .await?;
     // cladefs: a fork attached to it opens when first read through to, awaited (doc-24, step 5).
-    open_cell.open_bases(Arc::new(move |base| {
+    let bases = open_cell.open_bases(Arc::new(move |base| {
         let (base, arena) = (base.to_owned(), arena.clone());
         Box::pin(async move { self::base(&base, arena.as_ref()).await })
-    }))?;
+    }));
+    // cladefs: what is attached to it unread, its disk failing, closed again, as every open cell
+    // the daemon lets go of is (board 5748: dropped open, it panicked).
+    if let Err(err) = bases {
+        open_cell.close().await;
+        return Err(err.into());
+    }
     Ok(open_cell)
 }
 

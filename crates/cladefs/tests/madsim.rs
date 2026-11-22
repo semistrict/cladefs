@@ -119,8 +119,9 @@ async fn boot(host: u8, root: &Path, bucket: Arc<RoutedBucket>, kept: Kept) {
 /// host's supervisor starts its daemon (board 5654: a disk's fault may fail a boot).
 const BOOT_FAILED: &str = "the daemon's boot failed";
 
-/// The odds a call changing a host's disk fails at in the profiles with disk faults (board 5654).
-const DISK_FAULTS: host_fs::faults::Odds = host_fs::faults::Odds { fail: 0.002 };
+/// The odds a call changing a host's disk fails at in the profiles with disk faults (board 5654),
+/// and a read of a file's data (board 5748).
+const DISK_FAULTS: host_fs::faults::Odds = host_fs::faults::Odds { fail: 0.002, reads: 0.002 };
 
 /// How long a host's control API may not answer, its daemon started again: madsim starts a node
 /// whose boot failed ([`BOOT_FAILED`]) again 1 to 10 s after (`restart_on_panic_matching`), and

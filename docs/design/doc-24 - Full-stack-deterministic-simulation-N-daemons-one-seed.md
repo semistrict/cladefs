@@ -559,7 +559,7 @@ Within the simulation:
 - Joshua-scale thresholds.
 - Knobs randomized in the production binary: compiled out instead.
 - Whether `MemDir::crash_corrupting` covers what `AsyncFileNonDurable` models (writes reordered
-  unless they overlap, sectors torn) is not checked yet.
+  unless they overlap, sectors torn): answered below, and closed by board 5748.
 
 ## A second pass over FoundationDB (2026-11-21)
 
@@ -576,6 +576,23 @@ which copies it, model less than `AsyncFileNonDurable`:
 - they inject no read errors, stalls, or bit flips in what was synced (`AsyncFileChaos`,
   `SimpleFile`'s `io_error` and `io_timeout`).
 Board 5748.
+
+**What both crash models do since board 5748** (`host_fs::crash`, shared by `local_cell::MemDisk`
+and `host_fs::sim`): a write lands in 512-byte sectors at the file's offsets; a crash keeps each
+sector or not, and, corrupting, also garbage or torn at a random offset, its left or right part
+written and the rest as it was or garbage, garbage only in the bytes the write changes (powersafe
+overwrite, decision-3). Writes since a sync land or not each on its own, so they reorder, as
+`AsyncFileNonDurable`'s do. A directory made is durable at the next sync of anything on its
+disk, which commits a journaling file system's journal as ext4 and XFS do, and lost with all
+under it at a crash before; `AsyncFileNonDurable`'s stricter rule, durable only once its parent is
+synced, cost a fork 2.5 times its time in the forks-failing test for no file system cladefs runs
+on, so the models take the journal's. A cell's directories of each kind are made before its own
+in them, as a real file system needs (`local_cell::layout::make_dir`). A simulated disk fails reads of a file's data with `EIO` at the odds the disk-fault profiles set
+(`host_fs::faults::Odds::reads`), which found an open cell dropped unclosed as its attached bases
+failed to read, and a journal note removed as torn when only unread. Not modelled, and why: a
+stall, as a simulated disk's calls are synchronous, and madsim's time advances only at an await;
+bit flips in synced data, which a cell with one copy can only refuse, never repair, so they need a
+profile that expects that refusal (board 6550).
 
 **For the simulation** (posted on board 2830): `buggify!` has four sites in the whole tree, so
 every overload bound runs at its production size in the simulation, where FoundationDB shrinks

@@ -222,7 +222,11 @@ pub(super) async fn migrate(path: PathBuf, peer: String, to: String) -> Result<u
         Ok((checkpoint.ok_or(Errno::EINVAL)?, cell))
     })
     .await?;
-    let entry = host.entry(cell).ok_or(Errno::ENOENT)?;
+    let entry = host.entry(cell).map_err(|err| {
+        log::warn!("cladefsd: the journal: {err:#}");
+        Errno::EIO
+    })?;
+    let entry = entry.ok_or(Errno::ENOENT)?;
     // Taken here by a migration not yet accepted, or handed over and being let go of.
     if entry.migrating.is_some() {
         return Err(Errno::EBUSY);
@@ -561,7 +565,11 @@ pub(super) async fn hand_over(path: PathBuf) -> Result<(), Errno> {
     // Accepted: noted so in the cell's entry, durably, then let go of, as asking again, or the
     // daemon starting again, finds it noted (board 5730).
     let cell = local_cell::host_cell(&path).map_err(|_| Errno::EIO)?;
-    let entry = host.entry(cell).ok_or(Errno::EIO)?;
+    let entry = host.entry(cell).map_err(|err| {
+        log::warn!("cladefsd: the journal: {err:#}");
+        Errno::EIO
+    })?;
+    let entry = entry.ok_or(Errno::EIO)?;
     let peer = outgoing.peer.clone();
     let handed = Entry { migrating: Some(Migrating::HandedOver { id: migration, peer }), ..entry };
     host.note(&handed).map_err(|err| {
@@ -602,7 +610,7 @@ async fn let_go(host: &ephemeral_host::Host, entry: &Entry) -> Result<(), Errno>
         // The entry gone, its directory's sync failing: let go of all the same (board 5721), as
         // asking again would find nothing to go on from (`ENOENT`). A crash may bring the entry
         // back, which the daemon starting lets go of again, each step again as before.
-        Err(err) if host.entry(child).is_none() => {
+        Err(err) if matches!(host.entry(child), Ok(None)) => {
             log::warn!("cladefsd: {child} let go of, its entry's removal not durable: {err:#}");
             Ok(())
         }
@@ -828,7 +836,7 @@ pub(super) mod target {
     async fn noted_taken(host: &ephemeral_host::Host, migration: u64) -> Result<(), Status> {
         let Some(child) = host.accepted_cell(migration) else { return Ok(()) };
         let _taking = taking(child).await;
-        let Some(entry) = host.entry(child) else { return Ok(()) };
+        let Some(entry) = host.entry(child).map_err(journal)? else { return Ok(()) };
         let its = match entry.migrating {
             None => true,
             Some(Migrating::Receiving { id, .. }) => id == migration,
@@ -893,7 +901,7 @@ pub(super) mod target {
             return Err(Status::already_exists(format!("migration {migration:x} accepted")));
         }
         let path = PathBuf::from(to);
-        let found = host.entry(child);
+        let found = host.entry(child).map_err(journal)?;
         let prepared = |id: &u64| PREPARED.get().lock().unwrap().contains(id);
         let mut superseded = None;
         let token = match found.as_ref().map(|found| (found, &found.migrating)) {

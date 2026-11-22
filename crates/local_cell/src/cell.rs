@@ -12,10 +12,10 @@ use crate::framing::{self, Look, Seen};
 use crate::held::{HeldParts, Hold};
 use crate::kept::{self, Kept, KeptExtents};
 use crate::layout::{
-    CellFile, Change, DESCRIPTION, Data, Description, EXTENTS, Extent, FileKey, KINDS, LOGS,
-    OPEN_EXTENTS, OPEN_SEGMENTS, Piece, Place, SEGMENTS, SegmentId, add_piece, cell_dir,
-    create_cell_dirs, extent_path, files_of, list_numbers, log_path, numbered_path,
-    open_extent_path, open_segment_path, segment_path, spare_path,
+    CellFile, Change, DESCRIPTION, Data, Description, EXTENTS, Extent, FileKey, LOGS, OPEN_EXTENTS,
+    OPEN_SEGMENTS, Piece, Place, SEGMENTS, SegmentId, add_piece, cell_dir, create_cell_dirs,
+    extent_path, files_of, list_numbers, log_path, numbered_path, open_extent_path,
+    open_segment_path, segment_path, spare_path,
 };
 use crate::pool::spawn_or_return;
 use crate::raw::{RawEncryption, RawFile};
@@ -1522,9 +1522,6 @@ impl<D: Dir> LocalCell<D> {
         let _pledge = dir.footprint().map(|footprint| footprint.admit_made()).transpose()?;
         dir.take().context("taking the cell directory")?;
         let made = || -> Result<(), Error> {
-            for path in KINDS {
-                dir.create_dir(path).with_context(|| format!("creating {path}"))?;
-            }
             create_cell_dirs(dir, cell.id)?;
             dir.create(UNMADE, false)?.sync()?;
             extra(dir)?;
@@ -3648,12 +3645,7 @@ impl<D: Dir> LocalCell<D> {
         let root = SPOOL.to_owned();
         let dir = crate::layout::cell_dir(SPOOL, self.cell.id);
         for path in [&root, &dir] {
-            match self.dir.create_dir(path) {
-                Err(err) if err.kind() != io::ErrorKind::AlreadyExists => {
-                    return Err(Error::new(err).context(format!("making {path}")));
-                }
-                _ => {}
-            }
+            crate::layout::make_dir(&*self.dir, path)?;
         }
         for name in self.dir.list(&dir).with_context(|| format!("listing {dir}"))? {
             let path = format!("{dir}/{name}");

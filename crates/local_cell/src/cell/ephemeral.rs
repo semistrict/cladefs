@@ -637,10 +637,8 @@ fn unlink<D: Dir>(
     Ok(())
 }
 
-/// Makes the directory at `path` in `dir`, unless it is there.
+/// Makes the directory at `path` in `dir`, unless it is there, durably
+/// ([`crate::layout::make_dir`]).
 fn create_dir<D: Dir>(dir: &D, path: &str) -> Result<(), Error> {
-    match dir.create_dir(path) {
-        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-        made => made.with_context(|| format!("creating {path}")),
-    }
+    crate::layout::make_dir(dir, path)
 }

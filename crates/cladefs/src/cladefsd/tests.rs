@@ -5508,7 +5508,7 @@ fn ephemeral_cells_fork_from_versions_and_retire_their_references() {
     local_cell::remove_cell_dir(&dir.path().join("gone")).unwrap();
     assert_eq!(control(ephemeral.retire_stale()).unwrap(), 1);
     assert_eq!(references(), vec![kept]);
-    assert!(ephemeral.entry(gone).is_none());
+    assert!(ephemeral.entry(gone).unwrap().is_none());
     let retired = control(bucket_cell::lifecycle::decommission(&*bucket, ephemeral.incarnation()));
     assert_eq!(retired, Ok(1));
     assert_eq!(references(), vec![]);
@@ -5586,11 +5586,11 @@ fn targets_take_a_cells_migrations_by_its_epoch() {
     // Released, an acceptance whose cell's noting failed has it noted taken first.
     let (_, token) = control(target::prepare(prepare(0x19, 4))).unwrap();
     ephemeral.accept(0x19, child).unwrap();
-    assert_eq!(ephemeral.entry(child).unwrap().receiving(), Some((0x19, token)));
+    assert_eq!(ephemeral.entry(child).unwrap().unwrap().receiving(), Some((0x19, token)));
     control(target::release(0x19)).unwrap();
     assert!(!ephemeral.accepted(0x19));
     assert_eq!(
-        ephemeral.entry(child).unwrap().migrating,
+        ephemeral.entry(child).unwrap().unwrap().migrating,
         None,
         "noted taken before it was forgotten"
     );

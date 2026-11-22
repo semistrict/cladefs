@@ -132,7 +132,10 @@ fn calls_changing_a_disk_fail_as_its_faults_say() {
             let file = host_fs::File::create("/disk/d/f").unwrap();
             file.write_all_at(b"kept", 0).unwrap();
 
-            host_fs::faults::set(host_fs::faults::Odds { fail: 1.0 });
+            host_fs::faults::set(host_fs::faults::Odds {
+                fail: 1.0,
+                ..host_fs::faults::Odds::NONE
+            });
             assert!([libc::EIO, libc::ENOSPC].contains(&errno(file.write_all_at(b"gone", 0))));
             assert_eq!(errno(file.sync_all()), libc::EIO);
             assert_eq!(errno(host_fs::rename("/disk/d/f", "/disk/d/g")), libc::EIO);
@@ -170,7 +173,10 @@ fn which_calls_fail_is_the_seeds() {
                 .block_on(node.spawn(async {
                     host_fs::create_dir_all("/disk").unwrap();
                     let file = host_fs::File::create("/disk/f").unwrap();
-                    host_fs::faults::set(host_fs::faults::Odds { fail: 0.5 });
+                    host_fs::faults::set(host_fs::faults::Odds {
+                        fail: 0.5,
+                        ..host_fs::faults::Odds::NONE
+                    });
                     (0..32u64).map(|at| file.write_all_at(b"x", at).is_err()).collect::<Vec<_>>()
                 }))
                 .unwrap()

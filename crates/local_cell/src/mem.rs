@@ -6,12 +6,14 @@
 //!
 //! It keeps what a host's file system would have made durable: a file's contents as of its last
 //! sync, and a directory's entries as of its last sync. A crash ([`MemDir::crash`]) keeps that, and
-//! any of what happened since, at random: each block of each write since the file's last sync, and
-//! each file created or removed since the directory's last sync, in order. Directories themselves
-//! are durable once created. cladefs: a crash may also corrupt what it kept of the writes since
+//! any of what happened since, at random: each sector of each write since the file's last sync,
+//! and each file created or removed since the directory's last sync, in order. cladefs: a
+//! directory made is durable at the next sync of anything, which commits a journaling file
+//! system's journal, as ext4 and XFS have it (board 5748); a crash before loses it, or keeps it, at
+//! random, with all under it. A crash may also corrupt what it kept of the writes since
 //! ([`MemDir::crash_corrupting`], TASK-680, as FoundationDB's simulation's power losses do): each
-//! block written since its file's last sync there whole, not at all, garbage, or torn, its first
-//! half written and the rest as it was. [`MemDir::fail_after`] makes the file system fail every
+//! sector written since its file's last sync there whole, not at all, garbage, or torn, at a
+//! random offset ([`host_fs::crash`]). [`MemDir::fail_after`] makes the file system fail every
 //! operation that would change it after a number of them, as a crash would interrupt them. cladefs:
 //! which of them fails, and so what a crash keeps, is a function of the cell's calls, and of the
 //! crash's seed, only if the cell does no I/O on threads of its own, in a directory made
@@ -29,9 +31,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::sync::Arc;
 
-/// The granularity of a crash: a write survives it in blocks of this size, each whole or not at
-/// all.
-const BLOCK: usize = 512;
+/// The granularity of a crash: a write survives it in sectors of this size at the file's offsets,
+/// each whole or not at all ([`host_fs::crash`]).
+#[cfg(test)]
+const BLOCK: usize = host_fs::crash::SECTOR;
 
 /// A cell directory in memory, under its page cache ([`MemDir`]). See the module docs.
 #[derive(Clone)]
@@ -63,6 +66,10 @@ struct Fs {
     durable_dirs: BTreeMap<String, BTreeMap<String, u64>>,
     /// The entries created and removed in each directory since its last sync, in order.
     dir_changes: BTreeMap<String, Vec<DirChange>>,
+    /// cladefs: the directories whose making is durable, something synced since (board 5748).
+    made_dirs: std::collections::BTreeSet<String>,
+    /// cladefs: the directories made since the last sync of anything, by their paths.
+    making_dirs: Vec<String>,
     /// How many more operations that change the file system succeed, if limited.
     budget: Option<u64>,
     /// cladefs: the thread that last set the budget ([`MemDir::fail_after`]), if any.
@@ -140,6 +147,13 @@ fn split(path: &str) -> (&str, &str) {
 }
 
 impl Fs {
+    /// cladefs: a sync's commit of the file system's journal: every directory made since durable
+    /// (board 5748).
+    fn journaled(&mut self) {
+        let made = std::mem::take(&mut self.making_dirs);
+        self.made_dirs.extend(made);
+    }
+
     /// Spends one of the operations the budget allows, failing if none are left.
     fn spend(&mut self) -> io::Result<()> {
         match &mut self.budget {
@@ -222,6 +236,7 @@ impl MemDisk {
         let mut fs = Fs::default();
         fs.dirs.insert(String::new(), BTreeMap::new());
         fs.durable_dirs.insert(String::new(), BTreeMap::new());
+        fs.made_dirs.insert(String::new());
         Self::over(fs, false)
     }
 
@@ -326,23 +341,32 @@ impl MemDisk {
     }
 
     fn crash_with(&self, seed: u64, corrupting: bool) -> MemDisk {
-        // cladefs: a block a crash cut short as garbage: the bytes its write changes, at random;
-        // those it writes as they were, as they were: powersafe overwrite, which cladefs assumes of
-        // its disks, as SQLite does of Linux's by default (board 5890, decision-3).
-        fn garbled(on: &mut [u8], written: &[u8], rng: &mut StdRng) {
-            let mut noise = vec![0; on.len()];
-            rng.fill(&mut noise[..]);
-            for ((byte, &new), noise) in on.iter_mut().zip(written).zip(noise) {
-                if *byte != new {
-                    *byte = noise;
-                }
-            }
-        }
         let mut rng = StdRng::seed_from_u64(seed);
         let fs = self.fs.lock().unwrap();
+        // cladefs: the directories kept, their making durable or, at random, kept anyway, each
+        // only if its parent is (board 5748).
+        let mut made = fs.made_dirs.clone();
+        for path in &fs.making_dirs {
+            if rng.random::<bool>() {
+                made.insert(path.clone());
+            }
+        }
+        let kept = |path: &str| {
+            let mut at = path;
+            loop {
+                if !made.contains(at) {
+                    return false;
+                }
+                match at.rsplit_once('/') {
+                    Some((parent, _)) => at = parent,
+                    None if at.is_empty() => return true,
+                    None => at = "",
+                }
+            }
+        };
         let mut dirs = BTreeMap::new();
-        for (path, durable) in &fs.durable_dirs {
-            let mut entries = durable.clone();
+        for path in fs.dirs.keys().filter(|path| kept(path)) {
+            let mut entries = fs.durable_dirs.get(path).cloned().unwrap_or_default();
             for change in fs.dir_changes.get(path).into_iter().flatten() {
                 if rng.random::<bool>() {
                     match change {
@@ -373,29 +397,8 @@ impl MemDisk {
             let file = &fs.inodes[inode];
             let mut data = file.durable.clone();
             for (offset, written) in &file.writes {
-                for (i, block) in written.chunks(BLOCK).enumerate() {
-                    // Kept, not, and, corrupting, garbage or torn.
-                    let fate = match corrupting {
-                        true => rng.random_range(0..4u8),
-                        false => u8::from(rng.random::<bool>()),
-                    };
-                    if fate == 0 {
-                        continue;
-                    }
-                    let start = offset + i * BLOCK;
-                    if data.len() < start + block.len() {
-                        data.resize(start + block.len(), 0);
-                    }
-                    let at = &mut data[start..start + block.len()];
-                    match fate {
-                        1 => at.copy_from_slice(block),
-                        2 => garbled(at, block, &mut rng),
-                        _ => {
-                            let half = block.len() / 2;
-                            at[..half].copy_from_slice(&block[..half]);
-                        }
-                    }
-                }
+                let draw = &mut |n| rng.random_range(0..n);
+                host_fs::crash::write(&mut data, *offset, written, corrupting, draw);
             }
             inodes.insert(*inode, Inode { durable: data.clone(), data, ..Inode::default() });
         }
@@ -403,6 +406,8 @@ impl MemDisk {
             inodes,
             next_inode: fs.next_inode,
             durable_dirs: dirs.clone(),
+            made_dirs: dirs.keys().cloned().collect(),
+            making_dirs: Vec::new(),
             dirs,
             dir_changes: BTreeMap::new(),
             budget: None,
@@ -605,7 +610,8 @@ impl Dir for MemDisk {
             return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{path} exists")));
         }
         fs.dirs.insert(path.to_owned(), BTreeMap::new());
-        fs.durable_dirs.insert(path.to_owned(), BTreeMap::new());
+        // cladefs: durable at the next sync of anything (board 5748).
+        fs.making_dirs.push(path.to_owned());
         Ok(())
     }
 
@@ -653,6 +659,7 @@ impl Dir for MemDisk {
         let entries = fs.dirs.get(path).ok_or_else(|| not_found(path))?.clone();
         fs.durable_dirs.insert(path.to_owned(), entries);
         fs.dir_changes.remove(path);
+        fs.journaled();
         fs.io.synced_dirs += 1;
         Ok(())
     }
@@ -721,6 +728,7 @@ impl File for MemDiskFile {
         inode.durable = inode.data.clone();
         inode.writes.clear();
         let unwritten = std::mem::take(&mut inode.unwritten);
+        fs.journaled();
         fs.io.synced_files += 1;
         fs.io.most_synced_unwritten = fs.io.most_synced_unwritten.max(unwritten);
         Ok(())
@@ -766,6 +774,7 @@ mod tests {
     fn crashes_keep_what_was_synced() {
         let dir = MemDisk::new();
         dir.create_dir("d").unwrap();
+        dir.sync_dir("").unwrap();
         let synced = dir.create("d/synced", true).unwrap();
         synced.write_at(&[1; BLOCK], 0).unwrap();
         synced.sync().unwrap();
@@ -774,8 +783,13 @@ mod tests {
         let unsynced = dir.create("d/unsynced", true).unwrap();
         unsynced.write_at(&[2; BLOCK], 0).unwrap();
         synced.write_at(&[3; 4 * BLOCK], BLOCK as u64).unwrap();
+        // cladefs: a directory made, nothing synced since: kept or lost, with all under it (board
+        // 5748).
+        dir.create_dir("e").unwrap();
+        dir.create("e/f", true).unwrap();
 
         let mut seen_unsynced = [false; 2];
+        let mut seen_e = [false; 2];
         let mut lens = std::collections::BTreeSet::new();
         for seed in 0..64 {
             let crashed = dir.crash(seed);
@@ -788,14 +802,26 @@ mod tests {
             }
             lens.insert(data.len());
             seen_unsynced[crashed.list("d").unwrap().len() - 1] = true;
-            assert_eq!(crashed.list("").unwrap(), ["d"]);
+            let listed = crashed.list("").unwrap();
+            match listed.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+                ["d"] => seen_e[0] = true,
+                ["d", "e"] => seen_e[1] = true,
+                _ => panic!("{listed:?}"),
+            }
         }
         assert_eq!(seen_unsynced, [true, true]);
+        assert_eq!(seen_e, [true, true]);
+        // Anything synced after, as a journaling file system's commit makes it, it is kept.
+        dir.create("d/later", true).unwrap().sync().unwrap();
+        for seed in 0..16 {
+            assert!(dir.crash(seed).list("").unwrap().contains(&"e".to_owned()), "seed {seed}");
+        }
         assert!(lens.len() > 2, "{lens:?}");
     }
 
-    /// cladefs: a corrupting crash keeps what was synced, and leaves each block written since
-    /// whole, as it was, garbage, or torn: its first half written, the rest as it was (TASK-680).
+    /// cladefs: a corrupting crash keeps what was synced, and leaves each sector written since
+    /// whole, as it was, garbage, or torn at a random offset, its left part or its right part
+    /// written, the rest as it was or garbage (TASK-680, board 5748).
     #[test]
     fn corrupting_crashes_keep_what_was_synced_and_mangle_the_rest() {
         let dir = MemDisk::new();
@@ -804,24 +830,31 @@ mod tests {
         file.sync().unwrap();
         dir.sync_dir("").unwrap();
         file.write_at(&[3; 2 * BLOCK], 0).unwrap();
-        let (mut torn, mut garbage) = (false, false);
+        // A sector of `first` bytes, then of `then` from where they stop, if it is one.
+        let cut = |block: &[u8], first: u8, then: u8| {
+            let at = block.iter().position(|&byte| byte != first)?;
+            (at > 0 && block[at..].iter().all(|&byte| byte == then)).then_some(at)
+        };
+        let (mut torn, mut cuts, mut garbage) =
+            ([false; 2], std::collections::BTreeSet::new(), false);
         let mut whole = [false; 2];
         for seed in 0..64 {
             let data = read(&dir.crash_corrupting(seed).open("f", true).unwrap());
             assert_eq!(data.len(), 2 * BLOCK);
             for block in data.chunks(BLOCK) {
-                let half = BLOCK / 2;
                 match block {
                     _ if block == [1; BLOCK] => whole[0] = true,
                     _ if block == [3; BLOCK] => whole[1] = true,
-                    _ if block[..half] == [3; BLOCK / 2] && block[half..] == [1; BLOCK / 2] => {
-                        torn = true;
-                    }
-                    _ => garbage = true,
+                    _ => match (cut(block, 3, 1), cut(block, 1, 3)) {
+                        (Some(at), _) => (torn[0], _) = (true, cuts.insert(at)),
+                        (_, Some(at)) => (torn[1], _) = (true, cuts.insert(at)),
+                        _ => garbage = true,
+                    },
                 }
             }
         }
-        assert_eq!((whole, torn, garbage), ([true, true], true, true));
+        assert_eq!((whole, torn, garbage), ([true, true], [true, true], true));
+        assert!(cuts.len() > 2, "torn at {cuts:?} alone");
     }
 
     /// cladefs: a corrupting crash damages no byte a write leaves as it was, the block's others
