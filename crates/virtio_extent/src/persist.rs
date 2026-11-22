@@ -177,4 +177,9 @@ pub enum SnapshotError {
     Version(String, cladefs::Errno),
     #[error("Extent device {0}: cannot list its DAX window's mappings: {1}")]
     Mappings(String, cladefs::Errno),
+    #[error(
+        "Extent device {0}: its DAX window holds {1} private pages, whose bytes no extent holds \
+         (freeze the guest's filesystem, which rebinds them)"
+    )]
+    Private(String, u64),
 }

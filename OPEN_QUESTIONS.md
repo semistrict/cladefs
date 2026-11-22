@@ -31,6 +31,29 @@ Decided without you, building Wave 2's track 2A:
 - **Hand mutants may name features** (`# Features: shuttle`), for Shuttle models as killers
   (`crates/cladefs/mutants.sh`).
 
+## doc-26 as built: copy on write in the VM process (board 6210, 2026-11-22)
+
+Decided without you:
+- **`OPEN`'s reply carries no zeros page location.** Its five args are taken. The zeros page is a
+  page of the default arena, which every VM process reads, so a write to it copies zeros by the
+  same `pread` as any page's, some microseconds, rather than none. *Undo:* a payload on `OPEN`'s
+  reply, and `UffdSecondStage` filling zeros for that location.
+- **The private pages ride `STAGE_COUNTS`'s `args[4]`**, its high 32 bits, beside the runs
+  installed in its low 32: all five args were taken. `STAGE_PRIVATE_COUNTS` stays (doc-26 dropped
+  it): its runs of private pages, now the VM process's own copies, and the `PRIVATE`s it serves
+  are costs the daemon's stats still show.
+- **The window remembers what the host's changes took away keeping private pages** (an
+  eviction's, a free's, a rebind's: `WindowState::kept`, runs of pages), as the daemon knows
+  nothing of which pages are private: a private page is where the window has a page mapped, or one
+  of those. The guest's `MAP` and `UNMAP` of a window that copies unmap both, ending their private
+  pages (`Rules::guests_changes_end_private`); a `MAP` of a range never touched unmaps nothing.
+  Doc-26 left this open. *Undo:* unmapping the whole range, which a restore's `MAP_MANY` paid an
+  unmap a mapping for (2,817 stage operations against 1,280).
+- **`CellClient::make_version` refuses `EBUSY` with private pages**, as the daemon's did, and
+  `Device::take_snapshot` refuses first with `SnapshotError::Private`, after quiescing.
+- **The daemon's `FaultRefusals` count stays at 0**: write refusals are the VM process's now, which
+  logs them. The counter is kept in the stats API.
+
 ## doc-26: part slabs, quarantine scoped to what was staged, copy on write in the VM process (board 6124, 2026-11-21)
 
 Decided without you, designing Wave 2's track 2A:

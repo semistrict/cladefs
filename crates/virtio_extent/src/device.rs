@@ -418,7 +418,10 @@ impl Device {
     /// guest's filesystem is frozen, with nothing open (TASK-39.1): `quiesce` has the VMM's
     /// workers serve the requests they took and stop, as they do for the snapshot, so that none
     /// changes the window meanwhile; then a version of the cell is made, which restores
-    /// fork, and the window's mappings recorded, which [`Device::state`] says.
+    /// fork, and the window's mappings recorded, which [`Device::state`] says. cladefs: not while
+    /// the window holds private pages, once the workers stopped, whose bytes no extent holds: a VM
+    /// restored from the version would read their sources' old bytes (TASK-203, doc-26). The
+    /// guest's freeze writes them back and rebinds them first, so none is left but one it couldn't.
     pub fn take_snapshot(&mut self, quiesce: impl FnOnce()) -> Result<(), SnapshotError> {
         let id = self.config.id.clone();
         if self.config.read_only {
@@ -428,6 +431,10 @@ impl Device {
             return Err(SnapshotError::NotFrozen(id));
         }
         quiesce();
+        let private = self.cell().private_pages();
+        if private > 0 {
+            return Err(SnapshotError::Private(id, private));
+        }
         let version = self
             .cell()
             .make_version()

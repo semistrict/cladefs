@@ -1483,7 +1483,7 @@ mod shuttle_tests {
             }
         }
 
-        fn unmap(&self, offset: u64, len: u64) {
+        fn unmap(&self, offset: u64, len: u64, _: crate::dax::Private) {
             let mut pages = self.0.lock().unwrap();
             for at in (offset..offset + len).step_by(page_size() as usize) {
                 assert!(pages.remove(&at).is_some(), "unmapped {at:#x}, not mapped");

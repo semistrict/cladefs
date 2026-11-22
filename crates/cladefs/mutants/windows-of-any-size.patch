@@ -11,9 +11,9 @@
 -                if args[0] > MAX_WINDOW {
 -                    return Err(Errno::EINVAL);
 -                }
-                 // cladefs: some private pages, no more than the window's, or none (backlog doc-13).
-                 let private_max = (args[1] != 0).then_some(args[1]);
-                 if args[1] > args[0] / crate::pages::page_size() {
+                 // cladefs: its private pages are its VM process's to bound (doc-26).
+                 if args[1] != 0 {
+                     return Err(Errno::EINVAL);
 --- a/crates/cladefs/src/cladefsd/server.rs
 +++ b/crates/cladefs/src/cladefsd/server.rs
 @@ -1889,7 +1889,6 @@
