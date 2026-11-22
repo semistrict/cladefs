@@ -244,8 +244,8 @@ pub fn write_at(file: &File, tail: &mut Tail, bytes: &[u8], offset: u64) -> io::
         return Ok(());
     }
     if aligned(bytes, offset) {
-        file.write_all_at(bytes, offset)?;
         tail.held = None;
+        file.write_all_at(bytes, offset)?;
         return Ok(());
     }
     let range = offset..offset + bytes.len() as u64;
@@ -263,6 +263,10 @@ pub fn write_at(file: &File, tail: &mut Tail, bytes: &[u8], offset: u64) -> io::
     }
     let from = (offset - around.start) as usize;
     buf.bytes_mut()[from..from + bytes.len()].copy_from_slice(bytes);
+    // cladefs: held no more until this write and its truncation are done (board 5746): failing
+    // part way, the disk holds what neither the block held nor this write says, which the next
+    // write merging into it reads back.
+    tail.held = None;
     file.write_all_at(buf.bytes(), around.start)?;
     // What a plain write would leave: the file as long as what it held, or what this wrote.
     let end = len.max(range.end);
@@ -384,6 +388,28 @@ mod tests {
     /// A file system that refuses to bypass the page cache, as the failpoint makes every one, fails
     /// the bypass, naming the file, rather than leave the file to be read and written through the
     /// host's cache (TASK-433.6).
+    /// Board 5746: a write that fails leaves no block held: the next write merging into the block
+    /// reads what the disk holds, which a write failing part way may have changed, not what the
+    /// block held before it.
+    #[test]
+    fn failed_writes_hold_no_block() {
+        use std::os::unix::fs::FileExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        let file = opened(dir.path());
+        let mut tail = Tail::default();
+        write_at(&file, &mut tail, &[1; 100], 0).unwrap();
+        // What a write failing part way left on the disk: bytes other than the block held.
+        let plain = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        plain.write_all_at(&[2; 100], 0).unwrap();
+        let read_only = std::fs::File::open(&path).unwrap();
+        write_at(&read_only, &mut tail, &[3; 10], 100).unwrap_err();
+        write_at(&file, &mut tail, &[4; 10], 100).unwrap();
+        let mut read = vec![0; 110];
+        std::fs::File::open(&path).unwrap().read_exact_at(&mut read, 0).unwrap();
+        assert_eq!(read, [[2; 100].as_slice(), &[4; 10]].concat());
+    }
+
     #[test]
     fn a_refused_bypass_fails() {
         let dir = tempfile::tempdir().unwrap();

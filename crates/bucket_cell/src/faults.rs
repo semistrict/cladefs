@@ -23,6 +23,7 @@
 
 use futures::StreamExt as _;
 use futures::stream::BoxStream;
+use object_store::list::{PaginatedListOptions, PaginatedListResult, PaginatedListStore};
 use object_store::path::Path;
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
@@ -47,11 +48,26 @@ pub enum Failing {
     /// Every request fails as an object store out of service answers them, `503 Service
     /// Unavailable` once `object_store`'s own retries gave up.
     Unavailable,
+    /// cladefs: every request fails as one with credentials no longer valid, `401 Unauthorized`
+    /// (board 5736).
+    Unauthenticated,
+    /// cladefs: every request fails as one its credentials' permissions don't reach, `403
+    /// Forbidden`: a revoked policy (board 5736).
+    Forbidden,
+    /// cladefs: every request fails as S3 answers one under a session token expired, `400 Bad
+    /// Request`, `ExpiredToken` (board 5736).
+    ExpiredToken,
 }
 
 impl Failing {
-    const NAMES: [(Self, &'static str); 3] =
-        [(Self::Not, "not"), (Self::NoSpace, "no-space"), (Self::Unavailable, "unavailable")];
+    const NAMES: [(Self, &'static str); 6] = [
+        (Self::Not, "not"),
+        (Self::NoSpace, "no-space"),
+        (Self::Unavailable, "unavailable"),
+        (Self::Unauthenticated, "unauthenticated"),
+        (Self::Forbidden, "forbidden"),
+        (Self::ExpiredToken, "expired-token"),
+    ];
 
     /// Its name in a [`Fault`]'s words.
     pub fn name(self) -> &'static str {
@@ -90,7 +106,11 @@ impl Fault {
                     fault.failing = (Failing::NAMES.iter())
                         .find(|(_, known)| *known == name)
                         .map(|(failing, _)| *failing)
-                        .ok_or_else(|| format!("failing={name}: not, no-space or unavailable"))?;
+                        .ok_or_else(|| {
+                            let names: Vec<_> =
+                                Failing::NAMES.iter().map(|(_, name)| *name).collect();
+                            format!("failing={name}: one of {}", names.join(", "))
+                        })?;
                 }
                 _ => {
                     return Err(format!(
@@ -112,9 +132,23 @@ impl Fault {
 
     /// What it fails a request with, a write if `write`, if it fails it.
     fn failure(&self, write: bool) -> object_store::Result<()> {
+        let path = String::new();
         let source: Box<dyn std::error::Error + Send + Sync> = match self.failing {
             Failing::NoSpace if write => Box::new(std::io::Error::from_raw_os_error(libc::ENOSPC)),
             Failing::Unavailable => "HTTP status server error (503 Service Unavailable)".into(),
+            Failing::Unauthenticated => {
+                let source = "Server returned non-2xx status code: 401 Unauthorized".into();
+                return Err(object_store::Error::Unauthenticated { path, source });
+            }
+            Failing::Forbidden => {
+                let source = "Server returned non-2xx status code: 403 Forbidden: \
+                              <Code>AccessDenied</Code>"
+                    .into();
+                return Err(object_store::Error::PermissionDenied { path, source });
+            }
+            Failing::ExpiredToken => "Server returned non-2xx status code: 400 Bad Request: \
+                                      <Code>ExpiredToken</Code>"
+                .into(),
             Failing::Not | Failing::NoSpace => return Ok(()),
         };
         Err(object_store::Error::Generic { store: "Faulty", source })
@@ -270,6 +304,37 @@ impl Faulty {
             }
         };
         futures::stream::once(waited).flatten().boxed()
+    }
+}
+
+/// cladefs: a backend's pages of a level of keys ([`PaginatedListStore`]) as degraded as its
+/// [`Faults`] say, each page's request waiting and failing as a [`Faulty`] store's do (board 5740):
+/// so that a degraded bucket lists a page a request as the cloud's do, rather than its paging go
+/// around its faults, never tested under them.
+pub struct FaultyPages {
+    pages: Arc<dyn PaginatedListStore>,
+    faults: Arc<Faults>,
+}
+
+impl FaultyPages {
+    pub fn new(pages: Arc<dyn PaginatedListStore>, faults: Arc<Faults>) -> Self {
+        Self { pages, faults }
+    }
+}
+
+#[async_trait::async_trait]
+impl PaginatedListStore for FaultyPages {
+    async fn list_paginated(
+        &self,
+        prefix: Option<&str>,
+        opts: PaginatedListOptions,
+    ) -> object_store::Result<PaginatedListResult> {
+        let fault = self.faults.now();
+        if !fault.latency.is_zero() {
+            tokio::time::sleep(fault.latency).await;
+        }
+        fault.failure(false)?;
+        self.pages.list_paginated(prefix, opts).await
     }
 }
 
