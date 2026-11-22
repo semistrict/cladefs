@@ -687,15 +687,17 @@ fn cpu_seconds() -> f64 {
 }
 
 /// cladefs: on Linux, what the extent daemon's governor does at its first look (TASK-433.8): the
-/// cells' page cache sized to what the host's memory, less the daemon's headroom, leaves it.
+/// cells' page cache sized to what the host's memory, less the daemon's headroom, leaves it, its
+/// floor at least (board 5662).
 #[cfg(target_os = "linux")]
 fn govern() {
     use cladefs::cladefsd::{governor, memory};
     let host = governor::host_memory().expect("reading the host's memory");
     let headroom = governor::headroom(host.total).expect("the daemon's headroom");
+    let floor = governor::floor(governor::limit(host.total)).expect("the daemon's floor");
     // The bench's outermost entry, before its runtime: what the governor's turn awaits, here.
-    let allowance = governor::allowance(memory::governed_bytes(), host, headroom);
-    futures::executor::block_on(memory::govern(allowance));
+    let allowance = governor::allowance(memory::governed_bytes(), host, headroom, floor, false);
+    futures::executor::block_on(memory::govern(allowance.bytes));
 }
 
 /// cladefs: elsewhere, no governor: the cells' page cache goes by its defaults, as a process's

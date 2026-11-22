@@ -3,3 +3,12 @@
 # replaces these; the guest's Rust (scripts/build-guest-sysroot.sh) sets its own, with them too.
 [build]
 rustflags = ["-Cforce-frame-pointers=yes"]
+
+# cladefs: the extent daemons tests start, in their processes or as processes of their own, leave no
+# headroom of the host's memory (cladefs::cladefsd::governor::headroom), so that the host's memory
+# full, which makes a daemon refuse cells (governor::full, board 5662), is its last 256 MiB (the
+# floor's), not a sixteenth of it: a test host others load has less than a sixteenth free at times,
+# and every daemon's test refused its cells there (asahimbp, 2026-11-21). A variable set outright
+# keeps its value, as cells-per-host's driver's.
+[env]
+CLADEFSD_HEADROOM = { value = "0", force = false }
