@@ -24,15 +24,26 @@ of a batch.
 - Read the code a change touches, and its tests, before writing it, so that the batch compiles
   with few fixes.
 - Write the tests for each change with it, in the same batch.
-- Then: `cargo build` (or `cargo check`) once, `cargo clippy`, the macOS suite
-  (`scripts/test.sh`), and one test host run of the workspace and the guest cases.
-- While a batch's test host run goes, write the next batch rather than wait for it.
+- Then, on `hotbed` (below): `cargo build` (or `cargo check`) once, `cargo clippy`, and one run
+  of the workspace and guest suites.
+- While a batch's remote run goes, write the next batch rather than wait for it.
 - Between, the unit tests alone, about a minute: `cargo nextest run --workspace --profile unit`
   (`CLADEFS_TEST_PARTS=unit scripts/test.sh`). They leave out the simulations, the fault
   explorations and every test that takes 5 s or more (`.config/nextest.toml`), which the suite
   runs.
 - Measure a change on its own only when isolating it is the point of the measurement (an A/B on
   one test host).
+
+### Run expensive commands on hotbed, not locally
+
+The user's rule (2026-11-22): do not run expensive commands locally on the workstation (macOS):
+`cargo build`, `cargo check`, `cargo clippy`, `cargo nextest`, `scripts/test.sh`, simulations,
+`make check-tla`, guest kernel builds, or Firecracker builds. Offload them to `hotbed`
+(`hotbed run -- ...`; read `hotbed skills get hotbed` before your first call), which runs them
+on the Linux cluster in a fork of a repo whose `main` is already built and syncs uncommitted
+changes automatically. Keep local commands on the workstation cheap: editing, `git`, `rg`,
+`rustfmt`, `vb`, and fast Python checks. Run a macOS-specific build or test locally only when
+verifying a macOS-only change (such as `F_NOCACHE` or macOS compilation).
 
 ### Linux runs go to the least loaded test host
 
