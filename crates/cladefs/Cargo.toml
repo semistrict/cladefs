@@ -17,7 +17,7 @@ testing = ["extent_keys/testing"]
 # TASK-44.3), on Shuttle's locks, whose scheduler then chooses every interleaving of their tests'
 # threads. Only for those tests: `cargo nextest run -p cladefs --features shuttle --lib
 # shuttle_tests::`.
-shuttle = ["dep:shuttle", "physmem/shuttle"]
+shuttle = ["dep:shuttle"]
 # cladefs: the failpoints (the fail crate's) of the extent daemon's requests, and of the steps of a
 # fork's protocol here and in local_cell and bucket_cell (`faults`), which the FAILPOINTS
 # environment variable sets, or CLADEFS_FAULT_SEED from a seed: a request of a kind failing or
@@ -51,7 +51,7 @@ fxfs-posix.workspace = true
 libc.workspace = true
 log.workspace = true
 rand.workspace = true
-physmem.workspace = true
+smallvec.workspace = true
 pin-project-lite.workspace = true
 storage_device.workspace = true
 block_device.workspace = true

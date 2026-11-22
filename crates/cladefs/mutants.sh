@@ -12,7 +12,9 @@
 # doesn't build. A killer may be a script of the repository's instead, with its arguments
 # (`# Killer: scripts/sandboxes.sh short`, guests on KVM, TASK-330.1), which builds what it runs:
 # killed if it exits 1, a run that failed, MISSED if 0, BROKEN otherwise, a run it couldn't set
-# up; its fate says the checks it says failed. This fails unless each is killed. Linux alone, as
+# up; its fate says the checks it says failed. A test killer is built with the features its
+# header names, if any (`# Features: shuttle`, for a Shuttle model). This fails unless each is
+# killed. Linux alone, as
 # cladefsd is.
 #
 #   mutants.sh [--check] [-c CASES] [NAME...]
@@ -86,8 +88,10 @@ for name in "${names[@]}"; do
         # A run that failed exits 1, as a test that failed exits 100.
         case $status in 1) status=100 ;; 100) status=2 ;; esac
     else
+        features=$(sed -n 's/^# Features: //p' "$patch")
         patch_run "$patch" "$log" env CLADEFS_HOSTILE_CASES="$cases" PROPTEST_MAX_SHRINK_ITERS=0 \
-            cargo nextest run -p cladefs --lib --no-fail-fast --run-ignored all -E "test(=$killer)"
+            cargo nextest run -p cladefs --lib ${features:+--features "$features"} --no-fail-fast \
+            --run-ignored all -E "test(=$killer)"
         status=$?
     fi
     case $status in

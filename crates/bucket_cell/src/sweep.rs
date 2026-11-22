@@ -233,7 +233,7 @@ impl Sweep {
         cell: CellId,
         observe: impl FnMut(&Ran),
     ) -> Swept {
-        self.over(bucket, None::<(Arc<B>, u16)>, futures::stream::iter([cell]), observe).await
+        self.over(bucket, None::<(Arc<B>, u16)>, futures::stream::iter([Ok(cell)]), observe).await
     }
 
     /// Passes over `cells` of `bucket`, [`Sweep::at_once`] at once, telling `observe` of each.
@@ -241,7 +241,7 @@ impl Sweep {
         &self,
         bucket: &Arc<B>,
         copies: Option<(Arc<O>, u16)>,
-        cells: impl futures::Stream<Item = CellId>,
+        cells: impl futures::Stream<Item = Result<CellId, crate::bucket::Refused>>,
         mut observe: impl FnMut(&Ran),
     ) -> Swept {
         assert!(self.at_once >= 1, "a sweep of no passes at once");
@@ -252,6 +252,16 @@ impl Sweep {
         // (TASK-411.13).
         let heard = Heard::new();
         let mut swept = Swept::default();
+        // cladefs: the listing refused, the sweep ends there, failed, saying why (board 5861).
+        let refused = std::sync::Mutex::new(None);
+        let cells = cells
+            .take_while(|cell| {
+                if let Err(error) = cell {
+                    *refused.lock().unwrap() = Some(error.clone());
+                }
+                std::future::ready(cell.is_ok())
+            })
+            .filter_map(|cell| std::future::ready(cell.ok()));
         // The cells taken only as `buffer_unordered` has room for another pass: a page of them
         // listed as the passes before it end.
         let passes = cells.map(|cell| {
@@ -279,6 +289,11 @@ impl Sweep {
         while let Some(passed) = passes.next().await {
             observe(&passed);
             swept.add(passed, self.slowest);
+        }
+        let refused = refused.lock().unwrap().take();
+        if let Some(refused) = refused {
+            log::error!("cladefs-gc: listing the cells: the bucket refuses {refused}");
+            swept.failed += 1;
         }
         swept.took = started.elapsed();
         swept
@@ -982,7 +997,7 @@ mod tests {
         let bucket = Arc::new(Direct(SimBucket::new()));
         block_on(async {
             for n in 0..2001 {
-                crate::bucket::create(&*bucket, &format!("many/{n:05}"), vec![1]).await;
+                crate::bucket::create(&*bucket, &format!("many/{n:05}"), vec![1]).await.unwrap();
             }
         });
         let counted = Counted::new(bucket);
@@ -1086,7 +1101,7 @@ mod tests {
         // A reference written in the cell: the next pass, either's, goes over it in full.
         let reference = layout::reference(cell, 1, CellId { tenant: cell.tenant, id: 2 });
         let bytes = layout::encode(&layout::Reference::of(2));
-        block_on(crate::bucket::create(&*bucket, &reference, bytes));
+        block_on(crate::bucket::create(&*bucket, &reference, bytes)).unwrap();
         assert_eq!(run(&first).report, Report::default());
         let rewritten = recorded().unwrap();
         assert_ne!(rewritten.listing, settled.listing);

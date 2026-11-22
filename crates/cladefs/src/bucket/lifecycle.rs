@@ -872,7 +872,9 @@ async fn versions_forked_on_a_host_of_another_bucket_make_children_there() {
     assert!(head(&raw(&url_a), child).await.is_none(), "the child's head is in A");
     let origin = childs.origin().expect("the child names no origin");
     let reference = bucket_cell::layout::reference(cell, origin.at, child);
-    let got = async |url: &str, key: &str| bucket_cell::bucket::get(&raw(url), key).await.is_some();
+    let got = async |url: &str, key: &str| {
+        bucket_cell::bucket::get(&raw(url), key).await.unwrap().is_some()
+    };
     let mirrored = bucket_b.mirror_wanted(child, origin);
     assert_eq!(mirrored.await.unwrap(), None, "not mirrored");
     let marker = bucket_cell::layout::mirror(cell, origin.at);

@@ -16,8 +16,8 @@ Firecracker (one VM     vendor/firecracker: the extent device, a client of the
   │  Unix socket; the daemon's memory (a memfd), mapped into the DAX window
 cladefsd            crates/cladefs: cladefsd, the open cells, the extent cache,
   │                      the DAX windows
-physical memory          crates/physmem: arenas of shared memory (memfds),
-  │                      their caps, relief and quarantine
+physical memory          crates/cladefs/src/slabs.rs: arenas of part slabs
+  │                      (memfds), their caps, relief and quarantine
 extent store             crates/local_cell: segments, large extents' files,
                          an index
 ```

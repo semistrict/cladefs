@@ -129,7 +129,7 @@ impl<B: Bucket> BucketKms<B> {
     }
 
     /// Shreds `tenant` ([`destroy`]), and forgets its KEK here.
-    pub async fn destroy(&self, tenant: u64) -> Destroyed {
+    pub async fn destroy(&self, tenant: u64) -> Result<Destroyed, bucket::Refused> {
         let destroyed = destroy(&*self.bucket, tenant).await;
         self.forget(tenant);
         destroyed
@@ -162,7 +162,8 @@ impl<B: Bucket> BucketKms<B> {
     /// finding another host's object there takes that.
     async fn read(&self, tenant: u64, make: bool) -> Result<Arc<TenantKek>, Error> {
         let key = layout::kek(tenant);
-        if let Some(object) = bucket::get(&*self.bucket, &key).await {
+        let refused = |refused| refused_kms(tenant, refused);
+        if let Some(object) = bucket::get(&*self.bucket, &key).await.map_err(refused)? {
             return self.opened(tenant, &object.bytes);
         }
         // A key wrapped under a KEK names one that was there: deleted since, by someone other than
@@ -172,7 +173,8 @@ impl<B: Bucket> BucketKms<B> {
         }
         let kek = TenantKek::random();
         let newest = self.keys.newest();
-        match bucket::create(&*self.bucket, &key, KekObject::seal(newest, tenant, &kek)).await {
+        let sealed = KekObject::seal(newest, tenant, &kek);
+        match bucket::create(&*self.bucket, &key, sealed).await.map_err(refused)? {
             Created::Created(_) => {
                 log::info!(
                     "cladefs: tenant {tenant}: its KEK made, {key}, under master key {}",
@@ -228,6 +230,16 @@ impl<B: Bucket> Kms for BucketKms<B> {
     }
 }
 
+/// cladefs: what the KMS answers when the bucket refuses `tenant`'s KEK object's request for good
+/// (board 5861): the KMS failed, as it does when out of reach, saying why, never a revocation.
+fn refused_kms(tenant: u64, refused: bucket::Refused) -> Error {
+    let kind = match refused.refusal {
+        bucket::Refusal::Denied => std::io::ErrorKind::PermissionDenied,
+        bucket::Refusal::Request => std::io::ErrorKind::InvalidInput,
+    };
+    Error::Io { tenant, source: std::io::Error::new(kind, refused) }
+}
+
 /// What [`destroy`] did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Destroyed {
@@ -242,23 +254,24 @@ pub enum Destroyed {
 /// master key. Every host reading it from then on refuses the tenant as destroyed: those holding
 /// its KEK within [`FRESH_FOR`], or at once once told (`ForgetTenantKeys`). Only as strong as the
 /// bucket keeps no older version of the object: with versioning on, a lifecycle rule must expire
-/// non-current versions of `tenants/<tenant>/kek`.
-pub async fn destroy(bucket: &impl Bucket, tenant: u64) -> Destroyed {
+/// non-current versions of `tenants/<tenant>/kek`. cladefs: refused by the bucket, [`bucket::Refused`]
+/// (board 5861).
+pub async fn destroy(bucket: &impl Bucket, tenant: u64) -> Result<Destroyed, bucket::Refused> {
     let key = layout::kek(tenant);
     loop {
-        let Some(object) = bucket::get(bucket, &key).await else {
-            match bucket::create(bucket, &key, KekObject::tombstone(tenant)).await {
-                Created::Created(_) => return Destroyed::Now,
+        let Some(object) = bucket::get(bucket, &key).await? else {
+            match bucket::create(bucket, &key, KekObject::tombstone(tenant)).await? {
+                Created::Created(_) => return Ok(Destroyed::Now),
                 Created::Exists(_) => continue,
             }
         };
         // A KEK object, or bytes that are none: a tombstone in their place all the same.
         if let Ok(KekObject::Tombstone { .. }) = KekObject::decode(tenant, &object.bytes) {
-            return Destroyed::Already;
+            return Ok(Destroyed::Already);
         }
         let tombstone = KekObject::tombstone(tenant);
-        match bucket::update(bucket, &key, tombstone, &object.meta.version).await {
-            Updated::Updated(_) => return Destroyed::Now,
+        match bucket::update(bucket, &key, tombstone, &object.meta.version).await? {
+            Updated::Updated(_) => return Ok(Destroyed::Now),
             Updated::Changed => {}
         }
     }
@@ -282,15 +295,17 @@ pub struct Rotated {
 /// KMS): each one under an older key, one of `keys`, by a conditional update, read again and done
 /// again if another changed it meanwhile. The KEKs stay as they are. Once done, refusing none,
 /// hosts need the newest key alone: the others may be dropped from `CLADEFS_MASTER_KEY`. Tenants
-/// are listed a page at a time; done again, it rewraps nothing more.
-pub async fn rotate<B: Bucket>(bucket: &B, keys: &MasterKeys) -> Rotated {
+/// are listed a page at a time; done again, it rewraps nothing more. cladefs: refused by the bucket,
+/// [`bucket::Refused`] (board 5861), what it rewrapped before rewrapped.
+pub async fn rotate<B: Bucket>(bucket: &B, keys: &MasterKeys) -> Result<Rotated, bucket::Refused> {
     let mut rotated = Rotated::default();
     let mut tenants = std::pin::pin!(bucket::prefixes(bucket, layout::TENANTS.to_owned()));
     while let Some(prefix) = tenants.next().await {
+        let prefix = prefix?;
         let Some(tenant) = layout::tenant_of_prefix(&prefix) else { continue };
         let key = layout::kek(tenant);
         loop {
-            let Some(object) = bucket::get(bucket, &key).await else { break };
+            let Some(object) = bucket::get(bucket, &key).await? else { break };
             let resealed = KekObject::decode(tenant, &object.bytes)
                 .and_then(|kek| Ok((kek.resealed(keys)?, kek)));
             match resealed {
@@ -298,7 +313,7 @@ pub async fn rotate<B: Bucket>(bucket: &B, keys: &MasterKeys) -> Rotated {
                 Ok((None, KekObject::Tombstone { .. })) => rotated.destroyed += 1,
                 Ok((None, KekObject::Kek { .. })) => rotated.newest += 1,
                 Ok((Some(bytes), _)) => {
-                    match bucket::update(bucket, &key, bytes, &object.meta.version).await {
+                    match bucket::update(bucket, &key, bytes, &object.meta.version).await? {
                         Updated::Updated(_) => rotated.rewrapped += 1,
                         Updated::Changed => continue,
                     }
@@ -307,7 +322,7 @@ pub async fn rotate<B: Bucket>(bucket: &B, keys: &MasterKeys) -> Rotated {
             break;
         }
     }
-    rotated
+    Ok(rotated)
 }
 
 /// A host's KMS, as [`from_env`] chose it.
@@ -366,22 +381,38 @@ fn choose<B: Bucket>(
     recorded: Option<&str>,
     bucket: impl FnOnce() -> Result<Arc<B>, String>,
 ) -> Result<HostKms<B>, String> {
+    match named(var, recorded)? {
+        Some(named) => Ok(named),
+        None => over_bucket(var, bucket),
+    }
+}
+
+/// cladefs: the KMS [`choose`] chooses by name, if it names one: `recorded`'s, else
+/// [`KMS_VAR`]'s; its bucket never asked (board 5528).
+fn named<B: Bucket>(
+    var: &dyn Fn(&str) -> Option<OsString>,
+    recorded: Option<&str>,
+) -> Result<Option<HostKms<B>>, String> {
     let set = |name: &str| var(name).filter(|value| !value.is_empty());
-    let given = [MASTER_KEY_VAR, MASTER_KEY_FILE_VAR]
-        .into_iter()
-        .filter(|name| set(name).is_some())
-        .collect::<Vec<_>>();
     let named = match recorded {
         Some(url) => Some((url.to_owned(), "the registry of buckets".to_owned())),
         None => set(KMS_VAR).map(|url| (url.to_string_lossy().into_owned(), KMS_VAR.to_owned())),
     };
-    if let Some((url, source)) = named {
-        if let Some(name) = given.first() {
-            log::warn!("cladefs: {name} is set, and unused: {source} names the KMS");
-        }
-        let kms = kms::from_url(&url).map_err(|why| format!("{source}: {why}"))?;
-        return Ok(HostKms::Named(url, kms));
+    let Some((url, source)) = named else { return Ok(None) };
+    let given = [MASTER_KEY_VAR, MASTER_KEY_FILE_VAR].into_iter().find(|name| set(name).is_some());
+    if let Some(name) = given {
+        log::warn!("cladefs: {name} is set, and unused: {source} names the KMS");
     }
+    let kms = kms::from_url(&url).map_err(|why| format!("{source}: {why}"))?;
+    Ok(Some(HostKms::Named(url, kms)))
+}
+
+/// cladefs: the bucket KMS over `bucket()`, given master keys, as [`choose`] chooses it when no
+/// KMS is named; else refused ([`no_kms`]).
+fn over_bucket<B: Bucket>(
+    var: &dyn Fn(&str) -> Option<OsString>,
+    bucket: impl FnOnce() -> Result<Arc<B>, String>,
+) -> Result<HostKms<B>, String> {
     let keys = MasterKeys::from_vars(var)?.ok_or_else(no_kms)?;
     let bucket = bucket().map_err(|why| {
         format!("{MASTER_KEY_VAR}: the bucket KMS keeps tenants' KEKs in the host's bucket: {why}")
@@ -415,6 +446,8 @@ pub struct ByBucket {
     chosen: Mutex<HashMap<u16, (KmsKey, kms::Shared)>>,
     named: Mutex<HashMap<String, kms::Shared>>,
     buckets: Mutex<BTreeMap<u16, Arc<BucketKms<ObjectBucket>>>>,
+    /// How long [`ByBucket::shred`] waits for each other bucket: [`SHRED_WITHIN`], but in tests.
+    shred_within: std::time::Duration,
 }
 
 impl ByBucket {
@@ -439,6 +472,7 @@ impl ByBucket {
             chosen: Mutex::default(),
             named: Mutex::new(named),
             buckets: Mutex::default(),
+            shred_within: SHRED_WITHIN,
         }
     }
 
@@ -459,6 +493,9 @@ impl ByBucket {
     /// host's own first, then each other bucket the registry records, its copy in the host's
     /// bucket and the root bucket's, the authority. A bucket under a KMS named by its URL keeps
     /// the tenant's KEK there, out of reach: destroyed there, out of band (doc-16). Says which.
+    /// cladefs: the other buckets at once, each within [`SHRED_WITHIN`], the registries read once:
+    /// a bucket out of reach, opened before or not, is said failed, and the others shredded
+    /// all the same (board 5528).
     pub async fn shred(&self, tenant: u64) -> Shredded {
         let mut shredded = Shredded::default();
         let own = match self.own_number().await {
@@ -470,15 +507,15 @@ impl ByBucket {
         };
         match &self.own {
             HostKms::Bucket(kms) => {
-                shredded.destroyed.push((own.unwrap_or(NAMED), kms.destroy(tenant).await))
+                shredded.destroying(own.unwrap_or(NAMED), kms.destroy(tenant).await)
             }
             HostKms::Named(url, _) => shredded.named.push((own.unwrap_or(NAMED), url.clone())),
         }
         let mut numbers = BTreeSet::new();
-        let mut registries = vec![identity::registry(&*self.home).await];
+        let mut registries = vec![identity::registry_once(&*self.home).await];
         if own.is_some_and(|own| own != identity::ROOT) {
             match self.home.numbered(identity::ROOT).await {
-                Ok(root) => registries.push(identity::registry(&*root).await),
+                Ok(root) => registries.push(identity::registry_once(&*root).await),
                 Err(err) => shredded.failed.push((identity::ROOT, err.to_string())),
             }
         }
@@ -491,19 +528,32 @@ impl ByBucket {
                 Err(err) => shredded.failed.push((identity::ROOT, format!("the registry: {err}"))),
             }
         }
-        for number in numbers.into_iter().filter(|&number| Some(number) != own) {
-            match self.of(number).await {
+        let others = numbers.into_iter().filter(|&number| Some(number) != own);
+        let wait = self.shred_within;
+        let shredding = others.map(|number| async move {
+            let within = tokio::time::timeout(wait, self.shredding(number, tenant)).await;
+            let out_of_reach = || format!("no answer within {wait:?}");
+            (number, within.unwrap_or_else(|_| Err(out_of_reach())))
+        });
+        for (number, shred) in futures::future::join_all(shredding).await {
+            match shred {
                 Err(why) => shredded.failed.push((number, why)),
-                Ok((key, _)) => {
-                    let kms = self.buckets.lock().unwrap().get(&number).cloned();
-                    match kms {
-                        Some(kms) => shredded.destroyed.push((number, kms.destroy(tenant).await)),
-                        None => shredded.named.push((number, key.0.to_string())),
-                    }
-                }
+                Ok(Shred::Destroyed(destroyed)) => shredded.destroying(number, destroyed),
+                Ok(Shred::Named(url)) => shredded.named.push((number, url)),
             }
         }
         shredded
+    }
+
+    /// Shreds `tenant` in the bucket numbered `number`, another than the host's: its KMS chosen,
+    /// its bucket KMS's KEK object destroyed, or the KMS it is under named.
+    async fn shredding(&self, number: u16, tenant: u64) -> Result<Shred, String> {
+        let (key, _) = self.of(number).await?;
+        let kms = self.buckets.lock().unwrap().get(&number).cloned();
+        Ok(match kms {
+            Some(kms) => Shred::Destroyed(kms.destroy(tenant).await),
+            None => Shred::Named(key.0.to_string()),
+        })
     }
 
     /// The home bucket's number, read once: none if it has no identity.
@@ -534,8 +584,15 @@ impl ByBucket {
         let var = |name: &str| {
             vars.iter().rev().find(|(of, _)| of == name).map(|(_, value)| OsString::from(value))
         };
-        let member = self.home.numbered(number).await.map_err(|err| format!("the bucket: {err}"));
-        match choose(&var, entry.details.kms.as_deref(), || member)? {
+        // cladefs: the bucket opened only for its bucket KMS, none named (board 5528).
+        let chosen = match named(&var, entry.details.kms.as_deref())? {
+            Some(named) => named,
+            None => {
+                let member = self.home.numbered(number).await;
+                over_bucket(&var, || member.map_err(|err| format!("the bucket: {err}")))?
+            }
+        };
+        match chosen {
             HostKms::Named(url, kms) => {
                 let kms = self.named.lock().unwrap().entry(url.clone()).or_insert(kms).clone();
                 Ok(((KmsKey(url.into()), kms), None))
@@ -556,6 +613,18 @@ impl ByBucket {
             }
         }
     }
+}
+
+/// cladefs: how long [`ByBucket::shred`] waits for each other bucket's shredding before it says
+/// it failed, the bucket out of reach: shredding again finishes it (board 5528).
+pub const SHRED_WITHIN: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// What shredding a tenant in a bucket did ([`ByBucket::shredding`]).
+enum Shred {
+    /// Its bucket KMS's destroy of the tenant's KEK object: done, or refused by the bucket.
+    Destroyed(Result<Destroyed, bucket::Refused>),
+    /// Under the KMS named by this URL, which keeps the tenant's KEK: to destroy there.
+    Named(String),
 }
 
 /// What [`ByBucket::other`] chose: the KMS and its name, and the bucket KMS it is, if it is one.
@@ -586,6 +655,17 @@ pub struct Shredded {
     pub named: Vec<(u16, String)>,
     /// The buckets it could not shred in, and why: shredding again finishes them.
     pub failed: Vec<(u16, String)>,
+}
+
+impl Shredded {
+    /// Notes what destroying the tenant's KEK object in bucket `number` did: destroyed, or
+    /// refused by the bucket (board 5861), shredding again to finish it.
+    pub fn destroying(&mut self, number: u16, destroyed: Result<Destroyed, bucket::Refused>) {
+        match destroyed {
+            Ok(destroyed) => self.destroyed.push((number, destroyed)),
+            Err(refused) => self.failed.push((number, refused.to_string())),
+        }
+    }
 }
 
 impl Kmses for ByBucket {
@@ -646,7 +726,7 @@ mod tests {
 
     /// The bytes of `tenant`'s KEK object, if any.
     fn object(bucket: &impl Bucket, tenant: u64) -> Option<Vec<u8>> {
-        block_on(bucket::get(bucket, &layout::kek(tenant))).map(|object| object.bytes)
+        block_on(bucket::get(bucket, &layout::kek(tenant))).unwrap().map(|object| object.bytes)
     }
 
     fn keys(bucket: &impl Bucket) -> Vec<String> {
@@ -702,7 +782,7 @@ mod tests {
         let key = Secret::random();
         let wrapped = wrap(&before, 7, &key).unwrap();
         let shredded = wrap(&before, 9, &key).unwrap();
-        block_on(destroy(&*bucket, 9));
+        block_on(destroy(&*bucket, 9)).unwrap();
         let made = object(&*bucket, 7).unwrap();
 
         let both = host(&bucket, &[&new, &old]);
@@ -717,7 +797,7 @@ mod tests {
         );
         assert_eq!(refusal(unwrap(&host(&bucket, &[&new]), 7, &wrapped)), refused);
 
-        let rotated = block_on(rotate(&*bucket, &keys_of(&[&new, &old])));
+        let rotated = block_on(rotate(&*bucket, &keys_of(&[&new, &old]))).unwrap();
         let expected = Rotated { rewrapped: 1, newest: 1, destroyed: 1, refused: vec![] };
         assert_eq!(rotated, expected);
         assert_eq!(&object(&*bucket, 7).unwrap()[22..30], &new_id.0);
@@ -731,11 +811,11 @@ mod tests {
              {old_id}): CLADEFS_MASTER_KEY"
         );
         assert_eq!(refusal(unwrap(&host(&bucket, &[&old]), 7, &wrapped)), refused);
-        let again = block_on(rotate(&*bucket, &keys_of(&[&new, &old])));
+        let again = block_on(rotate(&*bucket, &keys_of(&[&new, &old]))).unwrap();
         assert_eq!(again, Rotated { rewrapped: 0, newest: 2, destroyed: 1, refused: vec![] });
 
         // A rotation given keys none of which opens an object leaves it, naming it.
-        let lost = block_on(rotate(&*bucket, &keys_of(&[&Secret::random()])));
+        let lost = block_on(rotate(&*bucket, &keys_of(&[&Secret::random()]))).unwrap();
         assert_eq!((lost.rewrapped, lost.newest, lost.destroyed, lost.refused.len()), (0, 0, 1, 2));
         assert!(
             lost.refused[0].starts_with("tenant 7: its KEK is wrapped by master key "),
@@ -764,7 +844,7 @@ mod tests {
             assert_eq!(unwrap(kms, 7, &wrapped).unwrap().expose(), key.expose());
         }
 
-        assert_eq!(block_on(shredder.destroy(7)), Destroyed::Now);
+        assert_eq!(block_on(shredder.destroy(7)), Ok(Destroyed::Now));
         assert_eq!(object(&*bucket, 7), Some(b"fxkt\x01\x02\0\0\0\0\0\0\0\x07".to_vec()));
         for kms in [&shredder, &fresh] {
             assert_eq!(refusal(unwrap(kms, 7, &wrapped)), "tenant 7: its KEK is destroyed");
@@ -779,9 +859,9 @@ mod tests {
             "tenant 7: its KEK is destroyed"
         );
         assert_eq!(object(&*bucket, 7), Some(KekObject::tombstone(7)));
-        assert_eq!(block_on(destroy(&*bucket, 7)), Destroyed::Already);
+        assert_eq!(block_on(destroy(&*bucket, 7)).unwrap(), Destroyed::Already);
 
-        assert_eq!(block_on(destroy(&*bucket, 9)), Destroyed::Now);
+        assert_eq!(block_on(destroy(&*bucket, 9)).unwrap(), Destroyed::Now);
         assert_eq!(refusal(wrap(&shredder, 9, &key)), "tenant 9: its KEK is destroyed");
         assert_eq!(keys(&*bucket), [layout::kek(7), layout::kek(9)]);
         assert_eq!(object(&*bucket, 9), Some(KekObject::tombstone(9)));
@@ -852,10 +932,10 @@ mod tests {
         wrap(&both, 4, &key).unwrap();
         refusals.push(refusal(unwrap(&host(&bucket, &[&wrong]), 1, &wrapped[0])));
         refusals.push(refusal(wrap(&host(&bucket, &[&new]), 2, &key)));
-        let rotated = block_on(rotate(&*bucket, &keys_of(&[&new, &old])));
+        let rotated = block_on(rotate(&*bucket, &keys_of(&[&new, &old]))).unwrap();
         assert_eq!(rotated.rewrapped, 3);
-        refusals.extend(block_on(rotate(&*bucket, &keys_of(&[&wrong]))).refused);
-        block_on(both.destroy(3));
+        refusals.extend(block_on(rotate(&*bucket, &keys_of(&[&wrong]))).unwrap().refused);
+        block_on(both.destroy(3)).unwrap();
         refusals.push(refusal(unwrap(&both, 3, &wrapped[2])));
         refusals.push(format!("{:?}", keys_of(&[&new, &old])));
         assert_eq!(refusals.len(), 8, "{refusals:?}");
@@ -863,7 +943,7 @@ mod tests {
 
         let objects: Vec<Vec<u8>> = keys(&*bucket)
             .iter()
-            .map(|key| block_on(bucket::get(&*bucket, key)).unwrap().bytes)
+            .map(|key| block_on(bucket::get(&*bucket, key)).unwrap().unwrap().bytes)
             .collect();
         assert_eq!(objects.len(), 4);
         let logged = LOGGED.lock().unwrap().clone();
@@ -896,7 +976,9 @@ mod tests {
         use crate::identity::Details;
         use crate::keys::CachingKms;
         use crate::layout::CellId;
-        futures::executor::block_on(async {
+        // A runtime's, as shredding waits for each bucket for so long (board 5528).
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
             let dir = tempfile::tempdir().unwrap();
             let url = |name: &str| {
                 std::fs::create_dir(dir.path().join(name)).unwrap();
@@ -955,7 +1037,7 @@ mod tests {
                 kms.new_kek(cell).await.unwrap();
             }
             async fn kek(bucket: &ObjectBucket) -> Option<Vec<u8>> {
-                bucket::get(bucket, &layout::kek(7)).await.map(|object| object.bytes)
+                bucket::get(bucket, &layout::kek(7)).await.unwrap().map(|object| object.bytes)
             }
             let opens = |bytes: &[u8], hex: &str| {
                 KekObject::decode(7, bytes).unwrap().open(&parsed(hex)).is_ok()
@@ -980,7 +1062,7 @@ mod tests {
             );
             assert!(second.unwrap_dyn(8, &wrapped).await.is_ok());
 
-            assert_eq!(destroy(&other, 7).await, Destroyed::Now);
+            assert_eq!(destroy(&other, 7).await.unwrap(), Destroyed::Now);
             let fresh = host(&theirs);
             let mut made = Vec::new();
             for cell in cells {
@@ -1013,6 +1095,58 @@ mod tests {
                 let object = KekObject::decode(7, &kek(bucket).await.unwrap()).unwrap();
                 assert!(matches!(object, KekObject::Tombstone { .. }), "a KEK left");
             }
+        });
+    }
+
+    /// board 5528: shredding a tenant goes on past buckets out of reach, saying each failed, and
+    /// shreds those after them: of four buckets, the host's (1), one under its bucket KMS out of
+    /// reach since that KMS was opened (2), one under its bucket KMS (3), one under a KMS its entry
+    /// names, out of reach and never opened (4). 2 failed within the wait; 1 and 3 destroyed; 4
+    /// named, its bucket never asked (asked, it would have failed).
+    #[test]
+    fn shreds_go_on_past_buckets_out_of_reach() {
+        use crate::identity::{Asked, Details};
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = |number: u16| dir.path().join(format!("bucket-{number}"));
+            let url = |number| format!("file://{}", path(number).display());
+            let buckets = [1, 2, 3, 4].map(|number| {
+                std::fs::create_dir(path(number)).unwrap();
+                ObjectBucket::from_url(&url(number)).unwrap()
+            });
+            let local = dir.path().join("kms");
+            extent_keys::kms::LocalKms::open(&local).unwrap().create(7).unwrap();
+            let local = format!("local://{}", local.display());
+            let root = &buckets[0];
+            identity::format(root, &Details::default(), Asked::default()).await.unwrap();
+            for (number, bucket) in (2..).zip(&buckets[1..]) {
+                let kms = (number == 4).then(|| local.clone());
+                let details = Details { url: Some(url(number)), kms, ..Details::default() };
+                identity::add(root, &Details::default(), bucket, details, Asked::default())
+                    .await
+                    .unwrap();
+            }
+            let master = "11".repeat(32);
+            let vars = vec![(MASTER_KEY_VAR.to_owned(), master.clone())];
+            let home = ObjectBucket::from_url(&url(1)).unwrap();
+            let home = Arc::new(home.routed(Arc::new(Registered::new(vars.clone()))));
+            let keys = MasterKeys::parse(&master, "a test's").unwrap();
+            let own = HostKms::Bucket(Arc::new(BucketKms::new(home.clone(), keys)));
+            let mut by_bucket = ByBucket::new(home, own, vars);
+            by_bucket.shred_within = std::time::Duration::from_secs(1);
+            by_bucket.of(2).await.unwrap();
+            // 2 and 4 out of reach: their directories files.
+            for number in [2, 4] {
+                std::fs::rename(path(number), dir.path().join(format!("gone-{number}"))).unwrap();
+                std::fs::write(path(number), b"").unwrap();
+            }
+            let expected = Shredded {
+                destroyed: vec![(1, Destroyed::Now), (3, Destroyed::Now)],
+                named: vec![(4, local.clone())],
+                failed: vec![(2, "no answer within 1s".to_owned())],
+            };
+            assert_eq!(by_bucket.shred(7).await, expected);
         });
     }
 }

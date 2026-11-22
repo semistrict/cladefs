@@ -650,26 +650,39 @@ pub(super) fn gauges() -> Vec<(&'static str, &'static str, u64)> {
             "Of those, private copies of pages the guest wrote, of windows that copy on write.",
             live.private_pages,
         ),
-        ("memory_bytes", "Memory extents' pages hold, every tenant's.", physmem::arenas_bytes()),
-        ("memory_capacity_bytes", "The most memory the daemon has.", physmem::count_total_bytes()),
-        // cladefs: what a page-in finding no pages has to go on (board 5662).
+        (
+            "memory_bytes",
+            "Memory extents' parts hold, every tenant's.",
+            crate::slabs::arenas_bytes(),
+        ),
+        (
+            "memory_capacity_bytes",
+            "The most memory the daemon has.",
+            crate::slabs::count_total_bytes(),
+        ),
+        (
+            "memory_leaked_bytes",
+            "Memory of runs freed whose punch failed, counted still: what should never be.",
+            crate::slabs::leaked_bytes(),
+        ),
+        // cladefs: what a page-in finding no memory has to go on (board 5662).
         (
             "memory_free_bytes",
-            "Of the daemon's memory, pages free, of any arena's or none's.",
-            physmem::count_free_pages() * crate::pages::page_size(),
+            "Of the daemon's memory, what no arena holds in use.",
+            crate::slabs::count_total_bytes().saturating_sub(crate::slabs::arenas_bytes_in_use()),
         ),
         (
             "memory_quarantined_bytes",
-            "Pages freed and quarantined, waiting for VM processes to unmap them.",
-            physmem::count_quarantined_pages() * crate::pages::page_size(),
+            "Memory of runs freed and quarantined, waiting for VM processes to unmap them.",
+            crate::slabs::quarantined_bytes(),
         ),
         (
             "memory_exhausted_arenas",
             "Arenas whose relief found nothing to free: their allocations fail.",
-            physmem::count_exhausted_arenas(),
+            crate::slabs::exhausted_arenas(),
         ),
     ];
-    if let Some(limit) = physmem::total_cap() {
+    if let Some(limit) = crate::slabs::total_cap() {
         gauges.push(("memory_limit_bytes", "The limit of every tenant's memory.", limit));
     }
     // cladefs: TASK-94.

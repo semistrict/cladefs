@@ -119,10 +119,56 @@ UNSEAMED_REASON_LINES = 3
 MODULE = re.compile(r"(pub(\([\w:]+\))? )?mod ")
 
 
+# A `#[cfg(...)]` line, its predicate; and the predicate's tokens.
+CFG = re.compile(r"#\[cfg\((.*)\)\]$")
+CFG_TOKEN = re.compile(r'\w+|"[^"]*"|[(),=]')
+
+
+def cfg_tree(predicate):
+    """A cfg `predicate` as (name, children): children None for an option, `name = "value"`
+    named `=`."""
+    tokens = CFG_TOKEN.findall(predicate)
+    position = 0
+
+    def node():
+        nonlocal position
+        name = tokens[position]
+        position += 1
+        if position < len(tokens) and tokens[position] == "=":
+            position += 2
+            return ("=", None)
+        if position == len(tokens) or tokens[position] != "(":
+            return (name, None)
+        position += 1
+        children = []
+        while tokens[position] != ")":
+            children.append(node())
+            if tokens[position] == ",":
+                position += 1
+        position += 1
+        return (name, children)
+
+    return node()
+
+
+def only_in_tests(tree):
+    """Whether a cfg predicate, as cfg_tree says it, holds only where `test` does: `test`, `all`
+    of one such among others, `any` of such alone (board 6490: `all(test, target_os = "linux")`)."""
+    name, children = tree
+    if children is None:
+        return name == "test"
+    if name == "all":
+        return any(only_in_tests(child) for child in children)
+    if name == "any":
+        return bool(children) and all(only_in_tests(child) for child in children)
+    return False
+
+
 def starts_tests(lines, number):
-    """Whether line `number` of `lines`, from 1, begins a test module: `#[cfg(test)]` on a
-    module's declaration, at any depth."""
-    return lines[number - 1].lstrip().startswith("#[cfg(test)]") and number < len(lines) and \
+    """Whether line `number` of `lines`, from 1, begins a test module: a `#[cfg(...)]` holding
+    only in tests on a module's declaration, at any depth."""
+    cfg = CFG.match(lines[number - 1].strip())
+    return cfg is not None and only_in_tests(cfg_tree(cfg.group(1))) and number < len(lines) and \
         MODULE.match(lines[number].lstrip()) is not None
 
 

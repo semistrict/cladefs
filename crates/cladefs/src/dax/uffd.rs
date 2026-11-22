@@ -412,7 +412,7 @@ pub(crate) type TakenCounts = [u64; 2];
 const MAPPINGS_RESERVED: usize = 4096;
 
 /// The runs of pages a second stage keeps installed at most, in a process the host lets make
-/// `max_map_count` mappings, if it limits them (`physmem::max_map_count`): half of those beyond
+/// `max_map_count` mappings, if it limits them (`pages::max_map_count`): half of those beyond
 /// [`MAPPINGS_RESERVED`], as each run, a mapping of its own, splits the memory around it, a mapping
 /// too. cladefs: told the limit, as a VM process in a jail without /proc can't read it, which once
 /// had it budget by Linux's default, a seventeenth of the hosts' (TASK-172).
@@ -949,7 +949,7 @@ impl Memories {
 /// How many mappings the host lets a test's process make, which a test, with /proc, reads.
 #[cfg(test)]
 pub(crate) fn host_max_map_count() -> Option<u64> {
-    physmem::max_map_count().expect("the host's vm.max_map_count")
+    crate::pages::max_map_count().expect("the host's vm.max_map_count")
 }
 
 impl UffdSecondStage {
@@ -2751,7 +2751,6 @@ mod tests {
     /// extent's page as it was. The kernel's writes are a pipe's reads into the window.
     #[test]
     fn worker_writes_copy_nothing_and_the_guests_writes_copy() {
-        use crate::dax::Source as _;
         let ps = page_size() as usize;
         // SAFETY: Maps anonymous memory, which this test owns.
         let memory = unsafe {
@@ -2802,10 +2801,7 @@ mod tests {
         assert_eq!(window.private_pages(), 1);
         // SAFETY: The window's page, private now, which nothing else accesses.
         assert_eq!(unsafe { (base as *const u8).read_volatile() }, 7);
-        let mut shared = 1;
-        // SAFETY: The extent's page is in memory while its lock is held.
-        file.each_present(0..1, &mut |_, frame| shared = unsafe { *frame.as_ptr() });
-        assert_eq!(shared, 0, "the write reached the extent's page");
+        assert_eq!(file.byte(0), 0, "the write reached the extent's page");
 
         drop(dax);
         // SAFETY: Closes the pipe and unmaps the memory, which nothing uses any more.
@@ -2828,7 +2824,6 @@ mod tests {
     /// `vm.max_map_count` past OrbStack's kept installed (GCE r691, TASK-190).
     #[test]
     fn writes_to_pages_here_are_writes_of_the_guests_alone() {
-        use crate::dax::Source as _;
         let ps = page_size() as usize;
         // SAFETY: Maps anonymous memory, which this test owns.
         let memory = unsafe {
@@ -2869,12 +2864,7 @@ mod tests {
             }
         };
 
-        let extent_byte = || {
-            let mut shared = 0;
-            // SAFETY: The extent's page is in memory while its lock is held.
-            file.each_present(0..1, &mut |_, frame| shared = unsafe { *frame.as_ptr() });
-            shared
-        };
+        let extent_byte = || file.byte(0);
         // A thread not the guest's, as KVM's worker is.
         let worker = std::thread::spawn(move || read_into(base)).join().unwrap();
         assert_eq!(worker, Err(libc::EFAULT), "a worker's write was made");

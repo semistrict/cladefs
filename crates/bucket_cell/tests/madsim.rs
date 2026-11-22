@@ -22,7 +22,7 @@ const CELL: CellId = CellId { tenant: 1, id: 3 };
 async fn take(bucket: &ObjectBucket, holder: u64, token: u64) -> Result<u64, String> {
     let cell = CELL;
     let taking = head::Taking { holder, token, ..head::Taking::default() };
-    let read = head::read(bucket, cell).await;
+    let read = head::read(bucket, cell).await.map_err(|e| e.to_string())?;
     head::take(bucket, cell, read, &taking)
         .await
         .map(|held| held.head.epoch)

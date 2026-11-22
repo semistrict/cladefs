@@ -94,8 +94,8 @@ fn max_map_count() -> Option<u64> {
     if let Some(&given) = MAX_MAP_COUNT_GIVEN.get() {
         return Some(given);
     }
-    physmem::max_map_count().unwrap_or_else(|err| {
-        let default = physmem::DEFAULT_MAX_MAP_COUNT;
+    crate::pages::max_map_count().unwrap_or_else(|err| {
+        let default = crate::pages::DEFAULT_MAX_MAP_COUNT;
         log::warn!("cladefsd: the host's vm.max_map_count: {err}: telling VM processes {default}");
         Some(default)
     })
@@ -252,7 +252,7 @@ struct Memory {
 impl Memory {
     /// An arena of its own, and the default one, read-only.
     fn new() -> std::io::Result<Self> {
-        let public = reopen_read_only(crate::pages::physical_memory())?;
+        let public = reopen_read_only(std::os::fd::AsFd::as_fd(&*crate::pages::physical_memory()))?;
         let arena = crate::pages::Arena::new();
         let memory = crate::pages::arena_memory(arena.id()).expect("a new arena");
         let (connections, in_flight) = Default::default();
@@ -410,8 +410,8 @@ fn reopen_read_only(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<std::os:
     Ok(unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(raw) })
 }
 
-/// cladefs: `fd` again, on macOS, where the daemon builds under madsim alone (board 2912): a
-/// shared memory object there is unlinked as it is made (physmem), and so can't be opened anew,
+/// cladefs: `fd` again, on macOS, where the daemon builds under madsim alone (board 2912): an
+/// arena's object there is a file unlinked as it is made (`slabs`), and so can't be opened anew,
 /// read-only or not. Writable, then; but no process maps it: a simulated guest is in the
 /// simulation's process, and maps nothing it is handed.
 #[cfg(not(target_os = "linux"))]
@@ -1658,6 +1658,7 @@ impl Connection {
                 let stage = Arc::new(VmProcessStage {
                     sender,
                     acks,
+                    vm: self.peer.id,
                     change: SharedLock::new("stage change", Mutex::default()),
                 });
                 // cladefs: a writer's copies on write, and only a writer's (backlog doc-13).
@@ -2464,7 +2465,7 @@ impl std::fmt::Display for Silence {
 /// unacknowledged may acknowledge nothing before the daemon takes it to have stopped answering,
 /// and lets it go ([`Peer::let_go`], TASK-79.9): long past what making one takes, and well within
 /// what an allocation waits for the pages freed meanwhile, which wait for it, before it fails.
-const UNRESPONSIVE: std::time::Duration = std::time::Duration::from_secs(5);
+pub(super) const UNRESPONSIVE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// cladefs: how long a VM process that goes on acknowledging may be behind, over a backlog of stage
 /// operations, before the daemon looks at its pace (TASK-148, TASK-249): long past the seconds a
@@ -2499,6 +2500,9 @@ const WATCH_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 /// ([`Peer::connected`]): let go, it would map pages the daemon gives others; kept, every page
 /// freed would wait for it.
 struct Peer {
+    /// What the runs staged to it know it by (`slabs::PartSlab::stage_to`): the quarantine of each
+    /// waits for the VM processes it was staged to alone (doc-26). Never another's.
+    id: crate::slabs::VmProcessId,
     acks: Arc<Acks>,
     sender: Arc<AsyncSender>,
     /// Its process: none if it is this one, as tests' are, whose code the daemon's own is.
@@ -2515,6 +2519,14 @@ node_local::node_local! {
     static PEERS: Mutex<Vec<Arc<Peer>>> = Mutex::new(Vec::new());
 }
 
+impl Drop for Peer {
+    /// Gone: the runs staged to it forget it ([`crate::slabs::VmProcessId::gone`]), as it has
+    /// exited, its mappings with it, once its connection is forgotten ([`Peer::gone`]).
+    fn drop(&mut self) {
+        self.id.gone();
+    }
+}
+
 impl Peer {
     /// The VM process at the other end of `stream`, which `sender` sends to, among those
     /// connected, until [`Peer::forget`]; with the quarantine of the pages freed that it, or
@@ -2529,10 +2541,10 @@ impl Peer {
             static WATCHING: std::sync::Once = std::sync::Once::new();
         }
         WATCHING.get().call_once(|| {
-            // cladefs: physical memory's quarantine is the process's, as physmem is, given once,
-            // whichever simulated host is first (TASK-685.14); the watchdog is each daemon's.
+            // cladefs: physical memory's quarantine is the process's, given once, whichever
+            // simulated host is first (TASK-685.14); the watchdog is each daemon's.
             static QUARANTINED: std::sync::Once = std::sync::Once::new();
-            QUARANTINED.call_once(|| physmem::quarantine_with(quarantine));
+            QUARANTINED.call_once(|| crate::slabs::quarantine_with(quarantine));
             io().spawn(watch());
         });
         let process = peer_process(stream)?;
@@ -2543,6 +2555,7 @@ impl Peer {
             })?;
         }
         let peer = Arc::new(Self {
+            id: crate::slabs::VmProcessId::connected(),
             acks: Arc::default(),
             sender,
             process,
@@ -2784,31 +2797,36 @@ mod refusal_tests {
     }
 }
 
-/// cladefs: quarantines `pages`, freed, which a VM process may still reach, as a stage operation
-/// taking them away may be unacknowledged (`physmem::quarantine_with`, TASK-79.9): until
-/// every VM process connected has made those it was sent so far, or gone. The pages are freed as
-/// the last of them lets go: at once, if none waits for any.
-fn quarantine(pages: physmem::Quarantined) {
+/// cladefs: quarantines `freed`, a run freed, which the VM processes it was staged to may still
+/// reach, as a stage operation taking it away may be unacknowledged (`slabs::quarantine_with`,
+/// TASK-79.9): until each of them still connected has made those it was sent so far, or gone
+/// (doc-26, spec rules waitsForStaged and scopedWaits). No other VM process holds it back: a
+/// tenant's runs are staged to that tenant's VM processes alone, so another tenant's frozen VM
+/// never holds them; a public base's, to those that mapped it. One staged that is gone has exited,
+/// its mappings with it ([`Peer::gone`]). The run is freed as the last of them lets go: at once, if
+/// none waits.
+fn quarantine(freed: crate::slabs::Quarantined) {
     let waiting = PARKING.with_borrow(Clone::clone);
     if let Some(waiting) = &waiting {
         waiting.parked.fetch_add(1, Ordering::SeqCst);
     }
-    let pages: Arc<dyn Send + Sync> = Arc::new(Parked { pages: Some(pages), waiting });
-    for peer in PEERS.get().lock().unwrap().iter() {
-        peer.acks.park(&pages);
+    let staged = freed.staged().to_vec();
+    let freed: Arc<dyn Send + Sync> = Arc::new(Parked { freed: Some(freed), waiting });
+    for peer in PEERS.get().lock().unwrap().iter().filter(|peer| staged.contains(&peer.id)) {
+        peer.acks.park(&freed);
     }
 }
 
-/// cladefs: pages quarantined ([`quarantine`]), freed as they are dropped; and, if they were freed
-/// by what counts what it frees, what it waits on ([`Parking`]).
+/// cladefs: a run quarantined ([`quarantine`]), freed as it is dropped; and, if it was freed by
+/// what counts what it frees, what it waits on ([`Parking`]).
 struct Parked {
-    pages: Option<physmem::Quarantined>,
+    freed: Option<crate::slabs::Quarantined>,
     waiting: Option<Arc<Waiting>>,
 }
 
 impl Drop for Parked {
     fn drop(&mut self) {
-        drop(self.pages.take());
+        drop(self.freed.take());
         if let Some(waiting) = &self.waiting {
             waiting.parked.fetch_sub(1, Ordering::SeqCst);
             waiting.freed.notify(usize::MAX);
@@ -2914,6 +2932,8 @@ async fn watch() {
 struct VmProcessStage {
     sender: Arc<AsyncSender>,
     acks: Arc<Acks>,
+    /// Its VM process: what the runs it maps are staged to (doc-26).
+    vm: crate::slabs::VmProcessId,
     /// cladefs: the operations of the change the window is making, if it is, held back to be sent
     /// together as it ends (TASK-91.16). The window makes its changes, and every call here, under
     /// its lock (`SecondStage::begin_change`): nothing else of the window's comes between, nor
@@ -2943,6 +2963,10 @@ impl VmProcessStage {
 }
 
 impl SecondStage for VmProcessStage {
+    fn vm_process(&self) -> Option<crate::slabs::VmProcessId> {
+        Some(self.vm)
+    }
+
     fn map(&self, offset: u64, phys: crate::pages::PhysLocation, len: u64) {
         self.send(StageOp::Map { offset, phys, len });
         crate::stats::add(crate::stats::Counter::StageMaps, 1);

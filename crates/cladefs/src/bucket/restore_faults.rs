@@ -467,7 +467,8 @@ impl Hosts {
                 // A head is left over if its cell lives (TASK-407, TASK-515).
                 // cladefs: but a failed head's marks, a day (TASK-691).
                 Kind::Head { cell, .. } => {
-                    let read = block_on(bucket_cell::head::read(&*self.bucket, cell)).slots();
+                    let read =
+                        block_on(bucket_cell::head::read(&*self.bucket, cell)).unwrap().slots();
                     let failed = *read.found() == bucket_cell::head::Found::Failed;
                     !failed && !read.head(cell).unwrap().is_some_and(|head| head.deleted())
                 }

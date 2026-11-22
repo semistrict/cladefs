@@ -238,7 +238,7 @@ pub(super) fn writes_race_frees<G: Guest>(mut dax: Dax, guest: Arc<G>) {
     let window = DaxWindow(dax.window.clone());
     dax.map(0, &sealed.source(), 0, 2 * ps);
     let mut extent = Vec::new();
-    sealed.each_present(0..2, &mut |_, frame| extent.push(guest.place(frame.location())));
+    sealed.each_present(0..2, &mut |present| extent.push(guest.place(present.at)));
 
     let vcpus: Vec<_> = [[Access::Write, Access::Read], [Access::Read, Access::Write]]
         .into_iter()
@@ -481,7 +481,7 @@ fn copies_race_maps() {
     let _dax = map.join().unwrap();
 
     let mut shared = None;
-    second.each_present(0..1, &mut |_, frame| shared = Some(Frame::Phys(frame.location())));
+    second.each_present(0..1, &mut |present| shared = Some(Frame::Phys(present.at)));
     let frame = stage.0.lock().unwrap().pages[&0];
     let writable = guest.writable();
     assert_eq!(window.private_pages(), writable.len() as u64, "private pages miscounted");

@@ -688,10 +688,10 @@ fn act() -> impl Strategy<Value = Act> {
     let at =
         move || prop_oneof![Just(0u64), (0u64..1024).prop_map(move |page| page * ps), any::<u64>()];
     let abuse = prop_oneof![
-        (which(), prop_oneof![Just(0u64), Just(ps), Just(physmem::CHUNK_SIZE as u64)])
+        (which(), prop_oneof![Just(0u64), Just(ps), Just(2u64 << 20)])
             .prop_map(|(which, to)| Abuse::Shrink { which, to }),
         which().prop_map(|which| Abuse::Grow { which }),
-        (which(), at(), prop_oneof![Just(ps), Just(physmem::CHUNK_SIZE as u64), Just(1u64 << 40)])
+        (which(), at(), prop_oneof![Just(ps), Just(2u64 << 20), Just(1u64 << 40)])
             .prop_map(|(which, at, len)| Abuse::Punch { which, at, len }),
         (which(), at()).prop_map(|(which, at)| Abuse::Scribble { which, at }),
     ];
@@ -2173,13 +2173,13 @@ fn vm_processes_shrinking_their_memory_crash_nothing() {
     // shrunk it.
     assert_eq!(read(&client, extent(1), 0, BLOCK), Ok(super::pattern(1, BLOCK)));
     assert_eq!(shrunk, (Err(Some(libc::EPERM)), Err(Some(libc::EINVAL))));
-    // Grown, by a tebibyte, as the daemon grows it further, as its extents take more chunks.
+    // Grown, by a tebibyte, as the daemon grows it further, as its extents take more slabs.
     // SAFETY: A stat buffer the call fills, of a descriptor the test holds.
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: a descriptor the test holds open, and the buffer above.
     assert_eq!(unsafe { libc::fstat(own, &mut stat) }, 0);
     assert_eq!(truncated(own, stat.st_size + (1 << 40)), Ok(()));
-    let extents = 2 * physmem::CHUNK_SIZE / (8 * BLOCK);
+    let extents = (4 << 20) / (8 * BLOCK);
     for sequence in 2..2 + extents as u64 {
         write(&client, extent(sequence), 0, &super::pattern(sequence as u8, 8 * BLOCK)).unwrap();
     }
@@ -2389,7 +2389,7 @@ async fn page_ins_in_flight_are_bounded() {
     // page-ins wait for the bucket, and of the heap as their fetches answer: each a part, cold.
     let burst = |what: &str, headers: Vec<Header>| {
         super::super::super::cache::evict_least_used(Some(arena), |_| false);
-        let (before, frames) = (held(), physmem::arena_bytes(arena));
+        let (before, frames) = (held(), crate::slabs::arena_bytes(arena));
         gated.hold(true);
         let ids: Vec<u64> = headers.iter().map(|header| header.id).collect();
         for header in headers {
@@ -2399,7 +2399,7 @@ async fn page_ins_in_flight_are_bounded() {
         let mut paging = 0;
         for _ in 0..50 {
             std::thread::park_timeout(Duration::from_millis(200));
-            let now = physmem::arena_bytes(arena).saturating_sub(frames);
+            let now = crate::slabs::arena_bytes(arena).saturating_sub(frames);
             if now == paging && gated.waiting() > 0 {
                 break;
             }

@@ -7,9 +7,11 @@
 //!
 //! A cell opened for a guest, a fork of a version, has its version's evidence of its tenant's
 //! ([`Evidence::opened`]). Its prediction, which the host reads once an interval ([`EVERY`]) for
-//! all the forks of the version it opens, not for each, is fetched into the host's cache as soon
-//! as it is read, as read-ahead: behind the guests' reads, from the peers that own its parts
-//! first, many at once ([`prefetch`]). Its guest's boot is what the guest reads of the version in
+//! all the forks of the version it opens, not for each, once it holds any recording, is fetched
+//! into the host's cache as soon as it is read, as read-ahead: behind the guests' reads, from the
+//! peers that own its parts first, many at once; and read from there into memory, as the guest's
+//! page-ins would read it ([`prefetch`]): the host's cache is on disk, which the guest would
+//! otherwise wait on a part at a time (board 6225). Its guest's boot is what the guest reads of the version in
 //! its first [`RECORDED_FOR`]: every `READ`, `MAP` and fault of the version's extents the daemon
 //! serves it ([`Evidence::read`]), as TASK-702.1 found a warm host's guest faults on none of what
 //! its `MAP`s install. At the window's end, or as the cell closes or drops, if that comes first,
@@ -19,6 +21,7 @@
 
 use crate::ExtentId;
 use crate::bucket::HostFetcher;
+use crate::open_cell::Arenas;
 use crate::stats::{self, Counter};
 use bucket_cell::evidence::{Of, Prediction, UNIT, Unit};
 use bucket_cell::keys::Ring;
@@ -47,7 +50,8 @@ pub(crate) const EVERY: Duration = Duration::from_secs(600);
 const PREFETCHED_AT_ONCE: usize = 128;
 
 /// A prediction, read once for the forks a host opens of a version in an interval: none if it
-/// could not be read, which the next fork the host opens of the version reads again.
+/// could not be read, which the next fork the host opens of the version reads again, as it does
+/// one of no recordings.
 pub(crate) type Predicted = Shared<BoxFuture<'static, Option<Arc<Prediction>>>>;
 
 /// What the host keeps of a version's evidence of a tenant's.
@@ -78,6 +82,16 @@ pub(crate) fn kept() -> usize {
     HOST.get().lock().unwrap().len()
 }
 
+/// What a cell opened for a guest reads its extents through: what its prefetch reads them into
+/// memory with, as its guest's reads would.
+pub(crate) struct Reading {
+    pub local: Arc<LocalCell<local_cell::HostDir>>,
+    /// The arenas of physical memory its extents' pages are of.
+    pub arenas: Arenas,
+    /// What reads its extents' data from the bucket, and fetches it ahead.
+    pub fetcher: Arc<HostFetcher>,
+}
+
 /// What a cell opened for a guest, a fork of a version, has of its version's evidence.
 pub(crate) struct Evidence {
     #[cfg(test)]
@@ -90,22 +104,21 @@ pub(crate) struct Evidence {
 }
 
 impl Evidence {
-    /// The evidence of `local`, the cell of `own`, `forked`'s fork, its cell kept in `bucket`,
-    /// read through `fetcher`, opened now: its version's prediction, read now if the host read it
-    /// not in the interval, and fetched ahead; and its guest's boot, recorded if no fork here began
-    /// a recording of the version in the interval.
+    /// The evidence of the cell of `own`, `forked`'s fork, its cell kept in `bucket`, read as
+    /// `reading` says, opened now: its version's prediction, read now if the host read none of
+    /// recordings in the interval, and read ahead; and its guest's boot, recorded if no fork here
+    /// began a recording of the version in the interval.
     pub(crate) fn opened(
         forked: Forked,
         own: CellId,
-        local: Arc<LocalCell<local_cell::HostDir>>,
         bucket: Arc<ObjectBucket>,
-        fetcher: Arc<HostFetcher>,
+        reading: Reading,
     ) -> Self {
         let Forked { origin, ring } = forked;
         let of = Of { origin, tenant: own.tenant };
         let now = Instant::now();
         let fresh = |at: &Instant| now.saturating_duration_since(*at) < EVERY;
-        let runtime = fetcher.runtime().clone();
+        let runtime = reading.fetcher.runtime().clone();
         let mut host = HOST.get().lock().unwrap();
         // What it read or recorded an interval ago or more it keeps no more, but for `of`.
         host.retain(|kept, Kept { recorded, predicted }| {
@@ -114,7 +127,13 @@ impl Evidence {
                 || predicted.as_ref().is_some_and(|(at, _)| fresh(at))
         });
         let kept = host.entry(of).or_default();
-        let read = |predicted: &Predicted| predicted.peek().is_none_or(Option::is_some);
+        // Shared while it is read, and once read of recordings; read again if it failed, or found
+        // none, as a host that boots a version first does, whose first boot's recording lands
+        // seconds later (board 5337).
+        let of_recordings = |read: &Option<Arc<Prediction>>| {
+            read.as_ref().is_some_and(|prediction| prediction.recordings > 0)
+        };
+        let read = |predicted: &Predicted| predicted.peek().is_none_or(of_recordings);
         let predicted = match &kept.predicted {
             Some((at, predicted)) if fresh(at) && read(predicted) => predicted.clone(),
             _ => {
@@ -132,7 +151,7 @@ impl Evidence {
         };
         drop(host);
         let (prefetch, stop_prefetching) =
-            futures::future::abortable(prefetch(predicted.clone(), local, fetcher));
+            futures::future::abortable(prefetch(predicted.clone(), reading));
         let prefetched = runtime.spawn(prefetch).map(drop).boxed().shared();
         let recorded = recorded.then_some(Recorded { bucket, ring });
         let boot = Arc::new(Boot::new(of, own.id, recorded));
@@ -164,6 +183,13 @@ impl Evidence {
     #[cfg(test)]
     pub(crate) fn recorded(&self) -> bool {
         self.boot.recorded.is_some()
+    }
+
+    /// Its prefetch, done: all it predicted read ahead, or stopped: for the daemon's tests.
+    #[cfg(test)]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn prefetched(&self) -> Shared<BoxFuture<'static, ()>> {
+        self.prefetching.0.clone()
     }
 
     /// Whether it takes what the guest reads now into its boot: within its window.
@@ -210,42 +236,53 @@ fn predict(
     reading.map(|read| read.ok().flatten()).boxed().shared()
 }
 
-/// Fetches what `predicted` predicts the guest of `local`, a fork of its version, reads into the
-/// host's cache, once it is read, through `fetcher`, in its order, [`PREFETCHED_AT_ONCE`] units at
-/// once, behind the guests' reads: the parts of the extents `local` holds whose data is in the
-/// bucket, not kept already.
-async fn prefetch(
-    predicted: Predicted,
-    local: Arc<LocalCell<local_cell::HostDir>>,
-    fetcher: Arc<HostFetcher>,
-) {
+/// Reads what `predicted` predicts the guest of a fork of its version reads ahead of it, once it
+/// is read, as `reading` says, in its order, [`PREFETCHED_AT_ONCE`] units at once: of the extents
+/// the fork's cell holds whose data is in the bucket, the parts fetched into the host's cache
+/// behind the guests' reads, then read from there into memory ([`ahead`]). Nothing without a
+/// host's cache, which would have it read into memory at the guest's priority.
+async fn prefetch(predicted: Predicted, reading: Reading) {
     let Some(prediction) = predicted.await else { return };
+    if !reading.fetcher.keeps_parts() {
+        return;
+    }
     let units = futures::stream::iter(prediction.units.iter().copied());
-    let fetches = units.map(|unit| fetch_ahead(&local, &fetcher, unit));
-    let fetches = fetches.buffer_unordered(PREFETCHED_AT_ONCE);
-    let fetched = fetches.fold(0, |all, fetched| std::future::ready(all + fetched)).await;
-    log::debug!("cladefs: {fetched} parts of {} predicted fetched ahead", prediction.units.len());
+    let read = units.map(|unit| ahead(&reading, unit)).buffer_unordered(PREFETCHED_AT_ONCE);
+    let [fetched, paged_in] = (read.fold([0, 0], |[all, ins], [fetched, paged_in]| {
+        std::future::ready([all + fetched, ins + paged_in])
+    }))
+    .await;
+    let predicted = prediction.units.len();
+    log::debug!(
+        "cladefs: of {predicted} units predicted, {fetched} parts fetched, {paged_in} read in"
+    );
 }
 
-/// Fetches the parts holding `unit` into the host's cache through `fetcher` ahead of the guest of
-/// `local`, if the cell holds its extent, its data in the bucket: how many it fetched itself.
-async fn fetch_ahead(
-    local: &LocalCell<local_cell::HostDir>,
-    fetcher: &HostFetcher,
-    unit: Unit,
-) -> u64 {
-    let Ok(Some(Place::Bucket(location))) = local.place(unit.extent) else { return 0 };
+/// Reads `unit` ahead of the guest as `reading` says, if the fork's cell holds its extent sealed,
+/// its data in the bucket: its parts fetched into the host's cache, then read into memory from
+/// there, as a page-in of the guest's would. How many parts it fetched itself, and read in.
+async fn ahead(reading: &Reading, unit: Unit) -> [u64; 2] {
+    let Reading { local, arenas, fetcher } = reading;
+    let Ok(Some(Place::Bucket(location))) = local.place(unit.extent) else { return [0, 0] };
+    let Ok(Some((len, false))) = local.extent(unit.extent) else { return [0, 0] };
     let offset = unit.mib * UNIT;
-    match fetcher.fetch_ahead(unit.extent, &location, offset, UNIT).await {
-        Ok(fetched) => {
-            stats::add(Counter::Prefetches, fetched);
-            fetched
-        }
+    let fetched = match fetcher.fetch_ahead(unit.extent, &location, offset, UNIT).await {
+        Ok(fetched) => fetched,
         Err(err) => {
             log::debug!("cladefs: fetching {:?} at {offset} ahead: {err}", unit.extent);
+            return [0, 0];
+        }
+    };
+    stats::add(Counter::Prefetches, fetched);
+    let paged_in = match arenas.cached(local, fetcher.clone(), unit.extent, len).await {
+        Ok(cached) => cached.read_ahead(offset, UNIT).await,
+        Err(errno) => {
+            log::debug!("cladefs: reading {:?} at {offset} ahead: {errno:?}", unit.extent);
             0
         }
-    }
+    };
+    stats::add(Counter::PrefetchPageIns, paged_in);
+    [fetched, paged_in]
 }
 
 /// What writes a boot as a recording of its version's.

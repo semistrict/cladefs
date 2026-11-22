@@ -165,7 +165,9 @@ being down blocks only additions.
 A host finds another bucket by its number (TASK-633.3): in the record in its own bucket's root,
 or, for a number that copy lacks, in the root bucket's. It opens the bucket at the URL recorded and
 refuses it unless the bucket's identity is the one recorded (`ESTALE`); a number no record holds
-is `ENOENT`. Each bucket is opened with the host's environment, its own variables first:
+is `ENOENT`. It asks each of these once: a bucket out of reach fails the request it was for, as
+that bucket failing would, and the request goes on without it (a mirror's copies here, TASK-633.8)
+or tries again, rather than waiting for it to come back (board 5528). Each bucket is opened with the host's environment, its own variables first:
 `CLADEFSD_BUCKET_<N>_<NAME>` stands for `NAME` for bucket N, so that buckets of other clouds,
 regions or accounts each get their own credentials:
 
@@ -174,6 +176,12 @@ AWS_REGION=us-east-1                                  # the host's own bucket, a
 CLADEFSD_BUCKET_2_AWS_REGION=eu-west-1                # bucket 2's
 CLADEFSD_BUCKET_3_GOOGLE_SERVICE_ACCOUNT=/etc/cladefs/gcs-3.json
 ```
+
+`add-bucket` opens each bucket so too, the root as bucket 1, the one added as the number it is to
+get, so give its variables before adding it. If another addition takes that number first, it is
+added under the next and refused (`EAGAIN`): give it that number's variables and add it again,
+which finishes it. A bucket that refuses a request for good, credentials it does not take or a key
+too long, fails it at once (`EACCES`, `EIO`), naming the key, rather than retrying it.
 
 The cells of another bucket are under that bucket's KMS (TASK-633.6): the one its record names
 (`--kms`), else the one its variables name (`CLADEFSD_BUCKET_<N>_CLADEFS_KMS`, or `CLADEFS_KMS`),
@@ -234,7 +242,10 @@ tenant's KEK under NEW, then give the hosts NEW alone. To shred a tenant, run
 `cladefsctl shred-tenant TENANT` (`ShredTenant`) against every host's daemon: it
 replaces the tenant's KEK object by a tombstone, so that nothing of the tenant's
 unwraps anywhere and no KEK is made for it again, and has each host forget its
-keys (a host not told refuses it within a minute). As for a cell, a bucket with
+keys (a host not told refuses it within a minute). It shreds in every bucket at
+once, each within 30 s: one out of reach is said failed, the others shredded,
+and shredding again finishes it. A bucket under a KMS its record names is never
+asked. As for a cell, a bucket with
 versioning on needs non-current versions of `tenants/<tenant>/kek` expired, by
 the rule above. It is not BYOK: a tenant holding its own key uses a real KMS.
 

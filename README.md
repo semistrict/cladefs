@@ -89,7 +89,7 @@ guest (Linux + Fxfs)     guest/: Fxfs in the kernel; DAX reads and writes
   │  virtio extent store device: READ, WRITE, MAP, UNMAP, FREE, COMMIT
 Firecracker              vendor/firecracker: the device, a client of the daemon
   │  Unix socket; shared memfd arenas mirrored into KVM via userfaultfd
-cladefsd                 crates/cladefs, crates/physmem: extent cache, DAX windows, peer network
+cladefsd                 crates/cladefs: extent cache in part slabs, DAX windows, peer network
   │  O_DIRECT / F_NOCACHE (one memory budget, one disk governor)
 local disk               crates/local_cell: open segment, write-ahead log, part cache
   │  async framing & upload (optional quorum replication over peer daemons first)
@@ -165,7 +165,7 @@ See [docs/architecture.md](docs/architecture.md) for the full mechanics.
 
 ### Multi-tenancy and security
 
-- **Per-tenant isolation:** each tenant gets its own Unix socket, its own `physmem` shared-memory
+- **Per-tenant isolation:** each tenant gets its own Unix socket, its own shared-memory (memfd)
   arena (plus read-only access to the default arena for public bases), memory and disk limits, and
   keys. A VM process reaches only its own tenant's data.
 - **Encryption at rest, always:** envelope encryption with a tenant KEK in OpenBao, AWS KMS or
@@ -261,7 +261,6 @@ read [docs/integrator-guide.md](docs/integrator-guide.md).
 |---|---|
 | `crates/cladefs` | The extent daemon (`cladefsd`), `cladefsctl`, `cladefs-mount`, and the host's library. |
 | `crates/local_cell`, `crates/bucket_cell` | An extent store on local disk, and cells in the bucket (including replication and `cladefs-gc`). |
-| `crates/physmem` | The daemon's physical memory: arenas of shared memory (`memfd`), relief and quarantine. |
 | `crates/virtio_extent` | The extent store device, transport-independent, for a VMM to host. |
 | `crates/sqlite_cladefs`, `crates/block_device` | SQLite over a block device kept on extents, and the block device itself (one a SQLite or VM memory-image cell). |
 | `crates/fxfs`, `crates/fxfs-posix` | Fxfs, copied from Fuchsia, and the POSIX layer the guest and the host both call. |
@@ -298,9 +297,6 @@ before, such as `docs/measurements` and tasks closed before it, keep the old nam
   `AUTHORS`). What was copied or adapted from Fuchsia keeps The Fuchsia
   Authors' copyright; cladefs's own code, and its changes, are The cladefs
   Authors'.
-- **`physmem`:** MIT (its `LICENSE`), as the Zircon kernel port it was lifted
-  from was (deleted, TASK-96.1), keeping the copyrights of the sources it
-  ports.
 - **The parts of Rust's std imported into the guest's
   (`scripts/import-guest-std.py`):** MIT OR Apache-2.0, as Rust is (the
   licenses and Rust's `COPYRIGHT` in `guest/rust/std`).

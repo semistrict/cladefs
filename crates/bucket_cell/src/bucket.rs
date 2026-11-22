@@ -158,6 +158,57 @@ pub enum Error {
     /// of a version (TASK-699): an answer, never retried, where [`Error::Unavailable`] is none.
     #[error("the store does not do what the request asks")]
     Unsupported,
+    /// cladefs: refused, whatever is tried again (board 5861): an answer, never retried, as
+    /// [`Error::Unsupported`] is, where [`Error::Unavailable`] is none. Retried, a request the
+    /// bucket refuses each time hung its caller for good. A probe, and so a bucket's opening and a
+    /// tool's, fails on it at once (board 5736), as every request does.
+    #[error("the store refuses the request: {0}")]
+    Refused(Refusal),
+    /// cladefs: the store's credentials expired (`ExpiredToken`, board 5736): refreshed by the
+    /// backend's credential provider as its next request goes, a cheap one first ([`readmitted`]).
+    #[error("the store's credentials expired")]
+    Expired,
+}
+
+impl Error {
+    /// cladefs: whether the request failed, the store giving no answer of what it holds: out of
+    /// reach, refusing it, or its credentials expired.
+    pub fn failed(self) -> bool {
+        matches!(self, Self::Unavailable | Self::Refused(_) | Self::Expired)
+    }
+}
+
+/// cladefs: why a bucket refuses a request for good ([`Error::Refused`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum Refusal {
+    /// Its credentials: none, or none it lets in (401, 403).
+    #[error("its credentials are not let in")]
+    Denied,
+    /// The request itself: a key past the backend's limit, a request it takes as malformed (400
+    /// and the like).
+    #[error("it refuses the request itself")]
+    Request,
+}
+
+/// cladefs: a request of `key` that the bucket refuses for good ([`Error::Refused`]): what a call
+/// that retries its requests while they fail returns rather than retrying it (board 5861).
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{key}: {refusal}")]
+pub struct Refused {
+    pub key: String,
+    pub refusal: Refusal,
+}
+
+impl Refused {
+    pub(crate) fn of(key: &str, refusal: Refusal) -> Self {
+        Self { key: key.to_owned(), refusal }
+    }
+}
+
+impl From<Refused> for crate::Error {
+    fn from(refused: Refused) -> Self {
+        Self::Refused(refused)
+    }
 }
 
 /// Which bytes of an object a ranged read reads: an object shorter than the range reads short.
@@ -277,22 +328,53 @@ pub trait Bucket: Send + Sync + 'static {
     }
 }
 
-/// The object at `key`, if any, its reads retried while they fail.
-pub async fn get(bucket: &impl Bucket, key: &str) -> Option<Object> {
+/// The object at `key`, if any, its reads retried while they fail; refused, [`Refused`].
+pub async fn get(bucket: &impl Bucket, key: &str) -> Result<Option<Object>, Refused> {
     let mut failures = 0;
     loop {
         match bucket.get(key).await {
-            Ok(object) => return Some(object),
-            Err(Error::NotFound) => return None,
-            Err(_) => failed(bucket, &mut failures).await,
+            Ok(object) => return Ok(Some(object)),
+            Err(Error::NotFound) => return Ok(None),
+            Err(error) => failed(bucket, &mut failures, error, key).await?,
         }
     }
 }
 
-/// Counts a failure, and waits before the request goes again.
-async fn failed(bucket: &impl Bucket, failures: &mut u32) {
+/// Counts a failure, `error`, of a request of `key`, and waits before the request goes again:
+/// credentials expired, until the store takes a cheap request of `key` again ([`readmitted`]).
+/// A refusal ends the request (board 5861): the one a call met it found is its caller's to answer.
+async fn failed(
+    bucket: &impl Bucket,
+    failures: &mut u32,
+    error: Error,
+    key: &str,
+) -> Result<(), Refused> {
     *failures += 1;
-    bucket.pause(*failures).await;
+    match error {
+        Error::Refused(refusal) => Err(Refused::of(key, refusal)),
+        Error::Expired => readmitted(bucket, key).await,
+        _ => {
+            bucket.pause(*failures).await;
+            Ok(())
+        }
+    }
+}
+
+/// cladefs: waits, a request of `key` finding the store's credentials expired, until the store
+/// answers a cheap one of `key` again, a HEAD, which refreshes them as it goes: never sending the
+/// request's payload again meanwhile, a segment's 32 MiB each time (board 5736). Refused, it
+/// ends, [`Refused`].
+async fn readmitted(bucket: &impl Bucket, key: &str) -> Result<(), Refused> {
+    let mut checks = 0;
+    loop {
+        checks += 1;
+        bucket.pause(checks).await;
+        match bucket.head(key).await {
+            Ok(_) | Err(Error::NotFound) => return Ok(()),
+            Err(Error::Refused(refusal)) => return Err(Refused::of(key, refusal)),
+            Err(_) => {}
+        }
+    }
 }
 
 /// A ranged read of an object that holds none of its range, which begins past the object's end
@@ -311,6 +393,25 @@ impl From<Past> for crate::Error {
     }
 }
 
+/// cladefs: what a ranged read finds instead of its bytes: its range [`Past`] the object's end,
+/// or the read [`Refused`].
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum Unread {
+    #[error(transparent)]
+    Past(#[from] Past),
+    #[error(transparent)]
+    Refused(#[from] Refused),
+}
+
+impl From<Unread> for crate::Error {
+    fn from(unread: Unread) -> Self {
+        match unread {
+            Unread::Past(past) => past.into(),
+            Unread::Refused(refused) => refused.into(),
+        }
+    }
+}
+
 /// The bytes of `range` of the object at `key`, if there is one; of a range of no bytes, none,
 /// asking nothing. `object_store` refuses a range that begins past the object's end as it fails
 /// when the backend is out of reach (`Generic`, [`Error::Unavailable`] here): a read that fails
@@ -320,7 +421,7 @@ pub(crate) async fn get_range(
     bucket: &impl Bucket,
     key: &str,
     range: ByteRange,
-) -> Result<Option<Vec<u8>>, Past> {
+) -> Result<Option<Vec<u8>>, Unread> {
     if let ByteRange::Bounded(bounded) = &range {
         assert!(bounded.start <= bounded.end, "{key}: {bounded:?}, reversed");
         if bounded.is_empty() {
@@ -332,12 +433,14 @@ pub(crate) async fn get_range(
         match bucket.get_range(key, range.clone()).await {
             Ok(bytes) => return Ok(Some(bytes)),
             Err(Error::NotFound) => return Ok(None),
+            Err(Error::Refused(refusal)) => return Err(Refused::of(key, refusal).into()),
             Err(_) => match bucket.head(key).await {
                 Err(Error::NotFound) => return Ok(None),
+                Err(Error::Refused(refusal)) => return Err(Refused::of(key, refusal).into()),
                 Ok(meta) if !range.begins_within(meta.size) => {
-                    return Err(Past { key: key.to_owned(), range, size: meta.size });
+                    return Err(Past { key: key.to_owned(), range, size: meta.size }.into());
                 }
-                _ => failed(bucket, &mut failures).await,
+                _ => failed(bucket, &mut failures, Error::Unavailable, key).await?,
             },
         }
     }
@@ -354,12 +457,12 @@ pub(crate) fn under(objects: &std::collections::BTreeMap<String, Meta>, prefix: 
         .collect()
 }
 
-pub(crate) async fn list(bucket: &impl Bucket, prefix: &str) -> Vec<Meta> {
+pub(crate) async fn list(bucket: &impl Bucket, prefix: &str) -> Result<Vec<Meta>, Refused> {
     let mut failures = 0;
     loop {
         match bucket.list(prefix).await {
-            Ok(list) => return list,
-            Err(_) => failed(bucket, &mut failures).await,
+            Ok(list) => return Ok(list),
+            Err(error) => failed(bucket, &mut failures, error, prefix).await?,
         }
     }
 }
@@ -370,12 +473,12 @@ pub(crate) async fn list_delimited_page(
     bucket: &impl Bucket,
     prefix: &str,
     page: Page<'_>,
-) -> Listing {
+) -> Result<Listing, Refused> {
     let mut failures = 0;
     loop {
         match bucket.list_delimited(prefix, page).await {
-            Ok(listing) => return listing,
-            Err(_) => failed(bucket, &mut failures).await,
+            Ok(listing) => return Ok(listing),
+            Err(error) => failed(bucket, &mut failures, error, prefix).await?,
         }
     }
 }
@@ -384,20 +487,26 @@ pub(crate) async fn list_delimited_page(
 /// their order, a page at a time, each page listed once those before it are taken, and retried
 /// while it fails: so that a level of millions, a tenant's cells, is held no more than a page of it
 /// at a time (TASK-395.5, TASK-395.8). A request for every [`LIST_PAGE`] keys of the level.
+/// cladefs: a page refused, the stream's last item, [`Refused`] (board 5861).
 pub(crate) fn prefixes<B: Bucket>(
     bucket: &B,
     prefix: String,
-) -> impl futures::Stream<Item = String> + Send + '_ {
+) -> impl futures::Stream<Item = Result<String, Refused>> + Send + '_ {
     use futures::StreamExt as _;
-    // The page after the one listed last: none once the last was.
+    // The page after the one listed last: none once the last was, or one was refused.
     let first = Some(None::<String>);
     futures::stream::unfold(first, move |after| {
         let prefix = prefix.clone();
         async move {
             let after = after?;
             let page = Page { after: after.as_deref(), max: LIST_PAGE };
-            let Listing { prefixes, next, .. } = list_delimited_page(bucket, &prefix, page).await;
-            Some((futures::stream::iter(prefixes), next.map(Some)))
+            match list_delimited_page(bucket, &prefix, page).await {
+                Ok(Listing { prefixes, next, .. }) => {
+                    let prefixes: Vec<_> = prefixes.into_iter().map(Ok).collect();
+                    Some((futures::stream::iter(prefixes), next.map(Some)))
+                }
+                Err(refused) => Some((futures::stream::iter(vec![Err(refused)]), None)),
+            }
         }
     })
     .flatten()
@@ -406,17 +515,17 @@ pub(crate) fn prefixes<B: Bucket>(
 /// cladefs: the whole listing of `prefix` by delimiter, its pages one after another, each retried
 /// while it fails: for a level of a cell's, whose keys are few (its parents with references, a
 /// parent's origins), never one of every cell's.
-pub(crate) async fn list_delimited(bucket: &impl Bucket, prefix: &str) -> Listing {
+pub(crate) async fn list_delimited(bucket: &impl Bucket, prefix: &str) -> Result<Listing, Refused> {
     let mut whole = Listing::default();
     let mut after = None;
     loop {
         let page = Page { after: after.as_deref(), max: LIST_PAGE };
-        let Listing { prefixes, objects, next } = list_delimited_page(bucket, prefix, page).await;
+        let Listing { prefixes, objects, next } = list_delimited_page(bucket, prefix, page).await?;
         whole.prefixes.extend(prefixes);
         whole.objects.extend(objects);
         match next {
             Some(next) => after = Some(next),
-            None => return whole,
+            None => return Ok(whole),
         }
     }
 }
@@ -424,32 +533,42 @@ pub(crate) async fn list_delimited(bucket: &impl Bucket, prefix: &str) -> Listin
 /// cladefs: deletes the objects at `keys`, in batches of [`DELETE_BATCH`]
 /// ([`Bucket::delete_batch`]), [`BATCHES_AT_ONCE`] at once, in any order, each batch retried whole
 /// while it fails: deleting what is gone is no error (TASK-395.5).
-pub(crate) async fn delete_all(bucket: &impl Bucket, keys: &[&str]) {
+/// cladefs: a batch refused, [`Refused`], the others deleted all the same (board 5861).
+pub(crate) async fn delete_all(bucket: &impl Bucket, keys: &[&str]) -> Result<(), Refused> {
     use futures::StreamExt as _;
     // The batches' futures made first: a stream mapping them in holds the closure in its type,
     // which a future awaiting this one is then not seen to be `Send` with.
     let batches: Vec<_> =
         keys.chunks(DELETE_BATCH).map(|batch| delete_batch(bucket, batch)).collect();
-    futures::stream::iter(batches).buffer_unordered(BATCHES_AT_ONCE).collect::<()>().await;
+    let deleted: Vec<Result<(), Refused>> =
+        futures::stream::iter(batches).buffer_unordered(BATCHES_AT_ONCE).collect().await;
+    deleted.into_iter().collect()
 }
 
 /// cladefs: deletes the objects at `keys` in one batch ([`Bucket::delete_batch`]), retried whole
 /// while it fails. A function of its own, not a closure's future, so that a future awaiting
 /// [`delete_all`] is seen to be `Send` (TASK-395.15: a sweep spawning its passes).
-async fn delete_batch(bucket: &impl Bucket, keys: &[&str]) {
+async fn delete_batch(bucket: &impl Bucket, keys: &[&str]) -> Result<(), Refused> {
     let mut failures = 0;
-    while bucket.delete_batch(keys).await.is_err() {
-        failed(bucket, &mut failures).await;
+    let key = keys.first().copied().unwrap_or_default();
+    loop {
+        match bucket.delete_batch(keys).await {
+            Ok(()) => return Ok(()),
+            Err(error) => failed(bucket, &mut failures, error, key).await?,
+        }
     }
 }
 
 /// cladefs: deletes the object at `key`, retried while it fails: deleting what is gone is no error.
 /// One key's, with no stream of batches, so that a writer's future, which the uploader's runtime
 /// needs `Send`, may await it (TASK-395.10).
-pub(crate) async fn delete(bucket: &impl Bucket, key: &str) {
+pub(crate) async fn delete(bucket: &impl Bucket, key: &str) -> Result<(), Refused> {
     let mut failures = 0;
-    while bucket.delete(key).await.is_err() {
-        failed(bucket, &mut failures).await;
+    loop {
+        match bucket.delete(key).await {
+            Ok(()) => return Ok(()),
+            Err(error) => failed(bucket, &mut failures, error, key).await?,
+        }
     }
 }
 
@@ -464,24 +583,68 @@ pub(crate) enum Created {
 
 /// Writes `bytes` at `key` unless an object is there: held once, however often it is tried
 /// (TASK-317).
-pub(crate) async fn create(bucket: &impl Bucket, key: &str, bytes: Vec<u8>) -> Created {
+pub(crate) async fn create(
+    bucket: &impl Bucket,
+    key: &str,
+    bytes: Vec<u8>,
+) -> Result<Created, Refused> {
     let bytes = Bytes::from(bytes);
     let mut failures = 0;
     loop {
         match bucket.put(key, bytes.clone(), PutMode::Create).await {
-            Ok(version) => return Created::Created(version),
+            Ok(version) => return Ok(Created::Created(version)),
+            // Perhaps this one's own write, which landed though its answer was lost; deleted
+            // since, tried again.
             Err(Error::AlreadyExists) => {
-                // Perhaps this one's own write, which landed though its answer was lost.
-                match get(bucket, key).await {
-                    Some(object) if bytes == object.bytes => {
-                        return Created::Created(object.meta.version);
-                    }
-                    Some(object) => return Created::Exists(object),
-                    // Deleted since: try again.
-                    None => {}
+                if let Some(found) = landed(bucket, key, &bytes).await? {
+                    return Ok(found);
                 }
             }
-            Err(_) => failed(bucket, &mut failures).await,
+            Err(error) => failed(bucket, &mut failures, error, key).await?,
+        }
+    }
+}
+
+/// cladefs: what is at `key`, where a create of `bytes` found an object (board 5738): this write,
+/// which landed though its answer was lost, or another's; none if it went since. A frame's is told
+/// by its size and its trailer, which holds a salt drawn at random for that framing and the MACs of
+/// its footer and table ([`extent_frame::trailer_of`]): a HEAD and a read of its last few hundred
+/// bytes, where a segment's whole read cost 32 MiB, and the memory for them. Anything else, and
+/// another's object, is read whole.
+async fn landed(
+    bucket: &impl Bucket,
+    key: &str,
+    bytes: &Bytes,
+) -> Result<Option<Created>, Refused> {
+    if let Some(trailer) = extent_frame::trailer_of(bytes) {
+        let Some(meta) = head(bucket, key).await? else { return Ok(None) };
+        if meta.size == bytes.len() as u64 {
+            let suffix = ByteRange::Suffix(trailer.len() as u64);
+            match get_range(bucket, key, suffix).await {
+                Ok(Some(tail)) if tail == trailer => {
+                    return Ok(Some(Created::Created(meta.version)));
+                }
+                Ok(None) => return Ok(None),
+                Err(Unread::Refused(refused)) => return Err(refused),
+                Ok(Some(_)) | Err(Unread::Past(_)) => {}
+            }
+        }
+    }
+    Ok(get(bucket, key).await?.map(|object| match object {
+        object if *bytes == object.bytes => Created::Created(object.meta.version),
+        object => Created::Exists(object),
+    }))
+}
+
+/// cladefs: what the backend says of the object at `key`, if any, its HEADs retried while they
+/// fail; refused, [`Refused`].
+pub(crate) async fn head(bucket: &impl Bucket, key: &str) -> Result<Option<Meta>, Refused> {
+    let mut failures = 0;
+    loop {
+        match bucket.head(key).await {
+            Ok(meta) => return Ok(Some(meta)),
+            Err(Error::NotFound) => return Ok(None),
+            Err(error) => failed(bucket, &mut failures, error, key).await?,
         }
     }
 }
@@ -501,19 +664,19 @@ pub(crate) async fn update(
     key: &str,
     bytes: Vec<u8>,
     version: &Version,
-) -> Updated {
+) -> Result<Updated, Refused> {
     let bytes = Bytes::from(bytes);
     let mut failures = 0;
     loop {
         match bucket.put(key, bytes.clone(), PutMode::Update(version.clone())).await {
-            Ok(version) => return Updated::Updated(version),
+            Ok(version) => return Ok(Updated::Updated(version)),
             Err(Error::Precondition | Error::NotFound) => {
-                return match get(bucket, key).await {
+                return Ok(match get(bucket, key).await? {
                     Some(object) if bytes == object.bytes => Updated::Updated(object.meta.version),
                     _ => Updated::Changed,
-                };
+                });
             }
-            Err(_) => failed(bucket, &mut failures).await,
+            Err(error) => failed(bucket, &mut failures, error, key).await?,
         }
     }
 }
@@ -764,7 +927,7 @@ mod tests {
         let tail = short[(size - 10) as usize..].to_vec();
         assert_eq!(read("key", size - 10..size + 10), Ok(Some(tail)));
         let past = Past { key: "key".into(), range: ByteRange::Bounded(size..size + 1), size };
-        assert_eq!(read("key", size..size + 1), Err(past));
+        assert_eq!(read("key", size..size + 1), Err(Unread::Past(past)));
         assert_eq!(read("key", 5..5), Ok(Some(Vec::new())));
         assert_eq!(read("gone", 0..10), Ok(None));
     }

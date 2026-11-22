@@ -292,7 +292,7 @@ fn sweeps_drop_what_heads_name_no_more() {
         let held = bucket_cell::head::take(
             &bucket,
             cell,
-            bucket_cell::head::read(&bucket, cell).await,
+            bucket_cell::head::read(&bucket, cell).await.unwrap(),
             &taking,
         )
         .await
@@ -307,7 +307,7 @@ fn sweeps_drop_what_heads_name_no_more() {
         // A replicated cell whose head names no configuration yet: its first may be installed
         // now, and nothing of it goes (TASK-537.3.2's review).
         bucket_cell::lifecycle::create(&bucket, unconfigured, 1).await.unwrap();
-        let read = bucket_cell::head::read(&bucket, unconfigured).await;
+        let read = bucket_cell::head::read(&bucket, unconfigured).await.unwrap();
         bucket_cell::head::take(&bucket, unconfigured, read, &taking).await.unwrap();
         // Nor of one whose head, read, is not replicated: a take may make it so, and install its
         // first configuration, before the sweep acts (Codex's review).
@@ -369,4 +369,35 @@ fn writers_append_to_members_through_their_links() {
     let refused = members.link(cell, &configuration, &wrong);
     let refused = runtime.block_on(refused.append(log_of(1), 0, b"x".to_vec()));
     assert!(matches!(refused, Err(LinkError::Refused(_))), "{refused:?}");
+}
+
+/// board 5416: a takeover's read of a member's log goes to the end its fence said and no further,
+/// the stream dropped there, whatever more the member sends; a member that stops answering, its
+/// keepalives answered as its disk stalls, fails it within the deadline, a piece's wait (50 ms
+/// here, `DEADLINE` for members); a log
+/// ending short of the end reads short, as its caller refuses.
+#[tokio::test]
+async fn logs_read_from_members_end_at_their_fences_or_a_stall() {
+    use futures::StreamExt as _;
+    let piece = |byte: u8| Ok(ReadLogResponse { bytes: vec![byte; 10] });
+    let pieces = |n: u8| futures::stream::iter((1..=n).map(piece));
+    const WAIT: Duration = Duration::from_millis(50);
+
+    // Past its end, a member streaming for ever: none of what comes after asked for.
+    let endless = pieces(2).chain(futures::stream::repeat_with(|| piece(9)));
+    let read = read_to(Box::pin(endless), 15, WAIT).await;
+    assert_eq!(read, Ok([vec![1; 10], vec![2; 5]].concat()));
+
+    // Stalled after a piece.
+    let start = tokio::time::Instant::now();
+    let stalled = pieces(1).chain(futures::stream::pending());
+    let read = read_to(Box::pin(stalled), 15, WAIT).await;
+    assert_eq!(read, Err("no answer within 50ms".to_owned()));
+    assert!(start.elapsed() >= WAIT, "{:?}", start.elapsed());
+
+    // Ending short; refusing.
+    assert_eq!(read_to(Box::pin(pieces(1)), 15, WAIT).await, Ok(vec![1; 10]));
+    let refused = futures::stream::iter([Err(Status::not_found("no log"))]);
+    let read = read_to(Box::pin(refused), 15, WAIT).await;
+    assert_eq!(read, Err("NotFound: no log".to_owned()));
 }

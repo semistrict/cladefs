@@ -121,6 +121,15 @@ mod at {
 /// before that MAC; the CRC32C of its table and trailer before it; and [`MAGIC`].
 pub const TRAILER: u64 = (at::MAGIC + MAGIC.len()) as u64;
 
+/// cladefs: the trailer of a frame's `bytes`, if they end as a frame does ([`MAGIC`]): what tells
+/// this framing of an object from every other, its salt drawn at random for it, the MACs of its
+/// footer and table and the lengths and CRCs beside them, as a bucket's create tells its own write
+/// from another's without reading the object whole (board 5738).
+pub fn trailer_of(bytes: &[u8]) -> Option<&[u8]> {
+    let at = bytes.len().checked_sub(TRAILER as usize)?;
+    bytes.ends_with(&MAGIC).then(|| &bytes[at..])
+}
+
 /// The format of the frames this crate writes and reads, the last byte of [`MAGIC`], as a digit:
 /// a frame says its format, and a reader of another names it rather than call it corrupt (doc-11,
 /// rule 1; TASK-141.2). cladefs: 2 since objects may be encrypted (TASK-411.2); a reader of 2 reads

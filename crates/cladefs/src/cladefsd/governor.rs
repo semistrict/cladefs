@@ -24,7 +24,7 @@
 //! and says the host is full while the room for the daemon is under it ([`full`]): the daemon then
 //! refuses to make cells (`CreateCell`, `ForkCell`), so that the VM manager places no VM more here,
 //! and what more the guests already running take comes out of the host's own headroom. And a
-//! page-in finding no page waits for one rather than fails (`crate::cache`, `physmem::room_may_come`).
+//! page-in finding no page waits for one rather than fails (`crate::cache`, `slabs::room_may_come`).
 //!
 //! A daemon given its memory's size (`cladefsd SOCKET MEMORY_BYTES`) is not governed: its
 //! memory is that, as a test's daemon's may be.
@@ -38,7 +38,7 @@
 //! `super::disk`.
 
 use super::memory;
-use physmem::CHUNK_SIZE;
+use crate::slabs::SLAB;
 use std::time::Duration;
 
 /// How often the governor looks at the host's memory.
@@ -58,19 +58,18 @@ pub fn headroom(total: u64) -> Result<u64, String> {
 
 /// cladefs: the least the governor leaves the daemon's memory, however little the host has left:
 /// `CLADEFSD_MEMORY_FLOOR` bytes, or a sixty-fourth of the memory the daemon may have, `limit`
-/// ([`limit`]), 256 MiB at least and an eighth of it at most, in whole chunks: room for what the
+/// ([`limit`]), 256 MiB at least and an eighth of it at most, in whole slabs: room for what the
 /// VMs' windows use, their guests' DAX faults' pages (board 5662; 176 small VMs on one base used
 /// about 40 MiB of it). Of the cgroup's limit, not the host's, where that is less: a floor past
 /// what the cgroup holds would have its OOM killer end what relief would have shrunk.
 pub fn floor(limit: u64) -> Result<u64, String> {
-    let chunk = CHUNK_SIZE as u64;
     let bytes = match node_local::env::var("CLADEFSD_MEMORY_FLOOR") {
         Ok(bytes) if !bytes.is_empty() => {
             bytes.parse().map_err(|_| format!("CLADEFSD_MEMORY_FLOOR is bytes, not {bytes:?}"))?
         }
         _ => (limit / 64).max(256 << 20).min(limit / 8),
     };
-    Ok((bytes / chunk * chunk).max(chunk))
+    Ok((bytes / SLAB * SLAB).max(SLAB))
 }
 
 /// cladefs: the memory the daemon may have: the host's, `total`, or, if less, the least limit of
@@ -154,7 +153,7 @@ pub fn host_memory() -> std::io::Result<HostMemory> {
 /// The host's memory now (macOS: its pages free and speculative, as the VM statistics count them).
 #[cfg(target_os = "macos")]
 pub fn host_memory() -> std::io::Result<HostMemory> {
-    let page = physmem::page_size();
+    let page = crate::slabs::page_size();
     let total = sysctl_u64(c"hw.memsize")?;
     let free = sysctl_u64(c"vm.page_free_count")? + sysctl_u64(c"vm.page_speculative_count")?;
     Ok(HostMemory { total, available: free * page })
@@ -233,17 +232,16 @@ pub struct Allowance {
 }
 
 /// What the daemon may hold, holding `held`, of `host`, leaving `headroom`, and `floor` at least
-/// ([`floor`]): whole chunks, one at least. cladefs: and whether the host is full, the room under
+/// ([`floor`]): whole slabs, one at least. cladefs: and whether the host is full, the room under
 /// the floor, `was` it as the last look found it: entered under the floor, left only past it and a
 /// quarter more, so that a host at its edge doesn't refuse and take cells by turns (board 5662).
 pub fn allowance(held: u64, host: HostMemory, headroom: u64, floor: u64, was: bool) -> Allowance {
-    let chunk = CHUNK_SIZE as u64;
     let room = (held + host.available).saturating_sub(headroom);
     let full = match was {
         true => room < floor + floor / 4,
         false => room < floor,
     };
-    Allowance { bytes: (room.max(floor) / chunk * chunk).max(chunk), full }
+    Allowance { bytes: (room.max(floor) / SLAB * SLAB).max(SLAB), full }
 }
 
 /// Each tenant's share of `target` bytes by its weight, of `tenants`' (ID, weight): what it keeps
@@ -351,20 +349,11 @@ pub fn pressured(was: bool, spare: u64, headroom: u64) -> bool {
     }
 }
 
-/// The size of physical memory for a governed daemon: all of the host's, in whole chunks. Fails if
-/// the host maps less (`vm.max_map_count` on Linux): a daemon whose cache can't grow into the
-/// host's memory doesn't start.
+/// The size of physical memory for a governed daemon: all of the host's, in whole slabs. The
+/// host's limit on mappings bounds none of it, as the daemon maps none of it (doc-26).
 pub fn memory_bytes() -> Result<u64, String> {
     let host = host_memory().map_err(|err| format!("reading the host's memory: {err}"))?;
-    let chunk = CHUNK_SIZE as u64;
-    let bytes = host.total / chunk * chunk;
-    if let Some(max) = physmem::max_size().filter(|&max| bytes > max) {
-        return Err(format!(
-            "the host's memory, {bytes} bytes, is more than the daemon can map, {max}: raise \
-             vm.max_map_count"
-        ));
-    }
-    Ok(bytes)
+    Ok(host.total / SLAB * SLAB)
 }
 
 #[cfg(test)]

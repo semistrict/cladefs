@@ -58,7 +58,7 @@ export const anchors = {
   uffd_serve: { path: "crates/cladefs/src/dax/uffd.rs", snippet: "pub fn serve(self: &Arc<Self>, window: Arc<dyn Faults>) -> Result<FaultThread, Error> {", note: "The VM process's thread taking KVM's faults by userfaultfd." },
   cached_extent: { path: "crates/cladefs/src/cache.rs", snippet: "pub(crate) struct CachedExtent", note: "One sealed extent in the cache: a table of its pages." },
   evict: { path: "crates/cladefs/src/cache.rs", snippet: "pub(crate) fn evict_least_used(arena: Option<ArenaId>, enough: impl FnMut(u64) -> bool) -> u64 {", note: "Eviction, least used first, windows' mappings last." },
-  relieve: { path: "crates/physmem/src/pmm/relief.rs", snippet: "pub fn relieve_with(", note: "Relief of arenas starved at their caps." },
+  relieve: { path: "crates/cladefs/src/slabs/relief.rs", snippet: "pub fn relieve_with(", note: "Relief of arenas starved at their caps." },
   arena: { path: "crates/cladefs/src/pages.rs", snippet: "pub struct Arena(ArenaId);", note: "An arena of physical memory: a tenant's." },
   guest_fault: { path: "guest/linux/fs/cladefs/dax.c", snippet: "static vm_fault_t cladefs_dax_do_fault(struct vm_fault *vmf, unsigned int order, bool write)", note: "The guest's DAX fault." },
   guest_writeback: { path: "guest/linux/fs/cladefs/dax.c", snippet: "int cladefs_dax_write_back(struct inode *inode)", note: "The guest's DAX writeback." },

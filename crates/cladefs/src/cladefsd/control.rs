@@ -578,7 +578,13 @@ impl Cladefsd for Control {
         let DecommissionHostRequest { incarnation } = request.into_inner();
         let decommissioned = async {
             let bucket = cells::daemon_bucket()?;
-            Ok(bucket_cell::lifecycle::decommission(&*bucket, incarnation).await as u64)
+            let decommissioned = bucket_cell::lifecycle::decommission(&*bucket, incarnation).await;
+            let retired = decommissioned.map_err(|refused| {
+                let failure = local_cell::upload::Failure::from(refused);
+                log::error!("cladefsd: decommissioning host {incarnation}: {failure}");
+                crate::bucket::errno(&failure).unwrap_or(Errno::EIO)
+            })?;
+            Ok(retired as u64)
         };
         reply(decommissioned.await.map(|retired| DecommissionHostResponse { retired }))
     }
@@ -765,10 +771,12 @@ impl Cladefsd for Control {
             stage_private_ns: _,
             vm_private_requests: _,
             vm_private_request_ns: _,
-            // How well forks' boots were predicted, which its stats file and metrics report.
+            // How well forks' boots were predicted, and what of it was read into memory ahead of
+            // them, which its stats file and metrics report.
             predicted_read: _,
             predicted_unread: _,
             read_unpredicted: _,
+            prefetch_page_ins: _,
         } = crate::stats::stats();
         use bucket_cell::object_bucket::{Request, Upload};
         let bucket = cells::daemon_bucket().map_err(status)?.stats();
@@ -1438,6 +1446,7 @@ impl Client {
             predicted_read: 0,
             predicted_unread: 0,
             read_unpredicted: 0,
+            prefetch_page_ins: 0,
         })
     }
 

@@ -143,8 +143,8 @@ jobs:
   # assertions and overflow checks on.
   # The workspace's suite, the Shuttle suites and the full-stack simulation on macOS,
   # scripts/test.sh's parts as a Mac runs them: what cladefs compiles for macOS alone, and its tests,
-  # ran on laptops alone, so a regression there landed green (TASK-149.20.2): physmem's physical
-  # map, extent_store's syncs (F_FULLFSYNC), extent_bucket's cache, cladefs's storage I/O; and the
+  # ran on laptops alone, so a regression there landed green (TASK-149.20.2): the slabs' arenas'
+  # files (doc-26), extent_store's syncs (F_FULLFSYNC), extent_bucket's cache, cladefs's storage I/O; and the
   # daemon's build under madsim, which runs on Macs too, its default 20 seeds (board 2912). The
   # guest's, the VMM's and the daemon's own are Linux's.
   macos:
@@ -175,7 +175,7 @@ jobs:
           key: cargo-${{ runner.os }}-${{ matrix.parts }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-${{ matrix.parts }}-
       # Every failure, not the first alone. Within macOS's 256 open files a process, as the
-      # stores', the bucket's and physmem's tests were run within, all passing (TASK-149.20.2).
+      # stores', the bucket's and physical memory's tests were run within, all passing (TASK-149.20.2).
       - name: scripts/test.sh
         run: scripts/test.sh --no-fail-fast
 

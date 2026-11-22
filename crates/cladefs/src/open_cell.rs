@@ -889,7 +889,8 @@ impl OpenCell {
         // predicts, fetched ahead, and records (TASK-702.2, TASK-702.3).
         let evidence = (forked.filter(|_| guest)).map(|forked| {
             let (local, bucket, fetcher) = (local.clone(), bucket.clone(), fetcher.clone());
-            crate::evidence::Evidence::opened(forked, cell, local, bucket, fetcher)
+            let reading = crate::evidence::Reading { local, arenas: arenas.clone(), fetcher };
+            crate::evidence::Evidence::opened(forked, cell, bucket, reading)
         });
         Ok(Self {
             evidence,
@@ -2392,22 +2393,7 @@ impl OpenCell {
     /// The sealed `extent`, of `len` bytes, in the cache: read from this open cell if no other open
     /// cell has it cached.
     async fn cached(&self, extent: ExtentId, len: u64) -> Result<Arc<CachedExtent>> {
-        let fetcher = Some(self.fetcher());
-        let cached_in = match self.public_reach(extent) {
-            Some(reach) => CachedIn::Public(reach),
-            None => CachedIn::Arena(self.arenas.of(extent)),
-        };
-        cache::cached(&self.local, cached_in, fetcher, extent, len).await
-    }
-
-    /// cladefs: that `extent` is reachable from a published generation, if it is: the open cell is
-    /// public, a generation or a base its directory marks so, and holds it sealed (TASK-234).
-    fn public_reach(&self, extent: ExtentId) -> Option<PublicReach> {
-        if !self.is_public() {
-            return None;
-        }
-        let held = self.local.extent(extent);
-        matches!(held, Ok(Some((_, false)))).then_some(PublicReach(extent))
+        self.arenas.cached(&self.local, self.fetcher(), extent, len).await
     }
 
     /// cladefs: makes the cell public, and those it inherited from (TASK-43): a base,
@@ -2500,7 +2486,7 @@ impl OpenCell {
 
 /// cladefs: that an extent is reachable from a published generation (TASK-234): a public open cell,
 /// a generation or a base, holds it, so that every tenant attaching or forking it may read it. Only
-/// an open cell makes one, having found so ([`OpenCell::public_reach`]): its field is this
+/// an open cell makes one, having found so ([`Arenas::public_reach`]): its field is this
 /// module's. The extent cache moves a tenant's copy of an extent to the default arena, which every
 /// VM process maps, only with one naming that extent (`cache::CachedIn::Public`).
 pub(crate) struct PublicReach(ExtentId);
@@ -2514,7 +2500,7 @@ impl PublicReach {
 
 /// cladefs: the arenas of physical memory an open cell's extents' pages are of (TASK-43).
 #[derive(Clone)]
-struct Arenas {
+pub(crate) struct Arenas {
     /// The open cell's, its tenant's, held for as long as the open cell and what reads into the
     /// extent cache for it, which clone these, allocate in it (TASK-79.36); or none, the default.
     own: Option<Arc<Arena>>,
@@ -2532,6 +2518,34 @@ impl Arenas {
     /// The arena `extent`'s pages are of.
     fn of(&self, extent: ExtentId) -> ArenaId {
         if self.public.contains(&extent.cell) { ArenaId::DEFAULT } else { self.own() }
+    }
+
+    /// The sealed `extent`, of `len` bytes, of `local`, the cell of the open cell these are the
+    /// arenas of, in the cache: read from `local`, or through `fetcher`, if no other open cell has
+    /// it cached. What the open cell reads, and what its fork's prefetch reads ahead of its guest
+    /// (`crate::evidence`), read through.
+    pub(crate) async fn cached(
+        &self,
+        local: &Arc<LocalCell<HostDir>>,
+        fetcher: Arc<crate::bucket::HostFetcher>,
+        extent: ExtentId,
+        len: u64,
+    ) -> Result<Arc<CachedExtent>> {
+        let cached_in = match self.public_reach(local, extent) {
+            Some(reach) => CachedIn::Public(reach),
+            None => CachedIn::Arena(self.of(extent)),
+        };
+        cache::cached(local, cached_in, Some(fetcher), extent, len).await
+    }
+
+    /// cladefs: that `extent` is reachable from a published generation, if it is: `local`'s cell
+    /// is public, a generation or a base its directory marks so, and holds it sealed (TASK-234).
+    fn public_reach(&self, local: &LocalCell<HostDir>, extent: ExtentId) -> Option<PublicReach> {
+        if !self.public.contains(&local.description().cell.id) {
+            return None;
+        }
+        let held = local.extent(extent);
+        matches!(held, Ok(Some((_, false)))).then_some(PublicReach(extent))
     }
 }
 
@@ -3324,13 +3338,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let held = Arena::new();
         let arena = held.id();
-        physmem::set_arena_cap(arena, Some(4 * chunk));
+        crate::slabs::set_arena_cap(arena, Some(4 * chunk));
         let (cell, window) = mapped_extents(&dir.path().join("store"), 16, &held).await;
         let first = id(&cell, 1);
         // What the cache holds of extent 1.
         let cached = || cache::find(arena, first).expect("extent 1 cached").held();
         read_twice(&window, 16, |round, sequence| {
-            let held = physmem::arena_bytes(arena);
+            let held = crate::slabs::arena_bytes(arena);
             assert!(held <= 4 * chunk, "round {round}, extent {sequence}: {held}");
             // Once all were read, the one asked for longest ago gave its pages back, as its
             // first page's read in again.
@@ -3339,6 +3353,31 @@ mod tests {
             }
         })
         .await;
+    }
+
+    /// TASK-602 (board 2600): an extent the guest MAPs over its own range, again and again, as a
+    /// guest rebinding a file's blocks does, is on its window set once (spec rule registerOnce):
+    /// its window list had an entry a MAP, every one of them visited by each of its evictions. A
+    /// window that maps it anew after it unmapped it all is on it once again; one unmapped, off it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn maps_over_an_extents_own_range_put_its_window_on_it_once() {
+        const EXTENT: u64 = 1 << 20;
+        let dir = tempfile::tempdir().unwrap();
+        let held = Arena::new();
+        let (cell, window) = mapped_extents(&dir.path().join("store"), 2, &held).await;
+        for _ in 0..1000 {
+            cell.map(id(&cell, 1), 0, EXTENT, 0).await.unwrap();
+        }
+        block_on(window.fault(0, Access::Read)).unwrap();
+        let cached = cache::find(held.id(), id(&cell, 1)).expect("extent 1 cached");
+        assert_eq!(cached.windows_held(), 1, "MAPs over its own range");
+        // Over the other extent's range, and back.
+        cell.map(id(&cell, 1), 0, EXTENT, EXTENT).await.unwrap();
+        cell.unmap(0, EXTENT).unwrap();
+        cell.map(id(&cell, 1), 0, EXTENT, 0).await.unwrap();
+        assert_eq!(cached.windows_held(), 1, "mapped twice, then once");
+        cell.unmap(0, 2 * EXTENT).unwrap();
+        assert_eq!(cached.windows_held(), 0, "unmapped");
     }
 
     /// TASK-92.32: relief takes first what no window maps, though what one maps was used longer
@@ -3395,7 +3434,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (_cell, window) = mapped_extents(&dir.path().join("store"), 64, &Arena::new()).await;
         read_twice(&window, 64, |_, _| ()).await;
-        assert_eq!(physmem::count_free_chunks(), 0, "memory never ran out");
+        let peak = crate::slabs::arenas_peak_bytes();
+        assert!(peak + crate::slabs::SLAB > memory, "memory never ran out: {peak} bytes at most");
     }
 
     /// An open cell holds a block at least; one asked for less is not made, nor its directory.
@@ -3615,9 +3655,9 @@ mod tests {
     }
 
     /// TASK-702.2: forks of a version opened for guests read their tenant's evidence of it, once an
-    /// interval for all the forks a host opens, and the first of them in the interval records what
-    /// its guest reads of the version's extents, written as its open cell closes; another tenant's
-    /// forks read and write theirs alone.
+    /// interval for all the forks a host opens, once it holds a recording (board 5337), and the
+    /// first of them in the interval records what its guest reads of the version's extents,
+    /// written as its open cell closes; another tenant's forks read and write theirs alone.
     #[tokio::test(flavor = "multi_thread")]
     async fn forks_of_a_version_read_and_record_their_tenants_evidence() {
         use bucket_cell::evidence::{Prediction, UNIT, Unit};
@@ -3640,16 +3680,18 @@ mod tests {
         let predicted = async |cell: &OpenCell| cell.predicted().unwrap().await.unwrap();
 
         // The first of tenant 5's forks reads none, and records its reads; the second, opened
-        // within the interval, shares its prediction and records nothing.
-        let (one, two) = (open(&first).await, open(&second).await);
+        // within the interval, records nothing, and, the first's read having found no recording,
+        // reads it again (board 5337).
+        let one = open(&first).await;
+        assert_eq!(*predicted(&one).await, Prediction::default());
+        let two = open(&second).await;
         // Reads after the openings, in order: the first 5 ms on, the next 9.
         let now = std::time::Instant::now();
         let at = |ms| now + std::time::Duration::from_millis(ms);
         assert!(one.records_reads() && two.records_reads());
         let recorded = |cell: &OpenCell| cell.evidence().unwrap().recorded();
         assert!(recorded(&one) && !recorded(&two));
-        assert!(one.predicted().unwrap().ptr_eq(&two.predicted().unwrap()));
-        assert_eq!(*predicted(&one).await, Prediction::default());
+        assert!(!one.predicted().unwrap().ptr_eq(&two.predicted().unwrap()));
         one.guest_read(extent, 2 * UNIT, 1, at(5));
         one.guest_read(extent, 0, 4096, at(9));
         one.guest_read(id(&one, 1), 0, 4096, at(1));
@@ -3673,6 +3715,10 @@ mod tests {
         let (two, other) = (open(&second).await, open(&theirs).await);
         assert_eq!(units(&two).await, [(extent, 2), (extent, 0)]);
         assert_eq!(units(&other).await, [(extent, 1)]);
+        // One read of a recording is kept for the interval: the next fork shares it.
+        let again = open(&first).await;
+        assert!(again.predicted().unwrap().ptr_eq(&two.predicted().unwrap()));
+        close(again).await;
         let origin = origin.unwrap().origin;
         assert_eq!(origin.parent, version_cell);
         let bucket = two.bucket.clone();

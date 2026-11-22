@@ -12,7 +12,10 @@
 //! too (TASK-395.5), in pages of `max-keys` (1,000 by default) objects and prefixes together, each
 //! going on from its `continuation-token`: the last key or prefix of the page before, which it
 //! names as `NextContinuationToken`. An update of no object is a failed precondition, as RustFS and
-//! Azure have it. It counts the requests it serves by kind ([`S3Server::requests`]).
+//! Azure have it. It counts the requests it serves by kind ([`S3Server::requests`]). A key longer
+//! than S3's 1,024 bytes it refuses, `400 Bad Request`, as S3 does (`KeyTooLongError`); and told to,
+//! it refuses every request so, as a bucket refuses credentials it no longer takes, `403
+//! Forbidden` (board 5861, [`S3Server::answering`]).
 
 use bytes::Bytes;
 use http_body_util::{BodyExt as _, Full};
@@ -53,6 +56,8 @@ struct Objects {
     versions: u64,
     /// The requests served, by kind.
     requests: BTreeMap<&'static str, u64>,
+    /// What it answers every request, if it is told to answer them all so (board 5861).
+    answer: Option<StatusCode>,
 }
 
 impl Objects {
@@ -114,6 +119,14 @@ impl S3Server {
     pub fn requests(&self) -> BTreeMap<&'static str, u64> {
         let objects = self.objects.as_ref().expect("a server of its own");
         objects.lock().unwrap().requests.clone()
+    }
+
+    /// Has it answer every request with HTTP status `answer` from now on, or, `None`, serve them
+    /// again (board 5861).
+    pub fn answering(&self, answer: Option<u16>) {
+        let answer = answer.map(|answer| StatusCode::from_u16(answer).unwrap());
+        let objects = self.objects.as_ref().expect("a server of its own");
+        objects.lock().unwrap().answer = answer;
     }
 
     /// Its bucket's objects, through cladefs's client, as a host reaches S3: for other crates'
@@ -254,6 +267,14 @@ async fn serve(objects: &Mutex<Objects>, request: Request<hyper::body::Incoming>
         return status(StatusCode::BAD_REQUEST);
     };
     let mut objects = objects.lock().unwrap();
+    if let Some(answer) = objects.answer {
+        objects.count("answered");
+        return status(answer);
+    }
+    if key.len() > crate::layout::MAX_KEY {
+        objects.count("too-long");
+        return status(StatusCode::BAD_REQUEST);
+    }
     match (&parts.method, key) {
         (&Method::GET, "") => {
             let query = parts.uri.query().unwrap_or("");

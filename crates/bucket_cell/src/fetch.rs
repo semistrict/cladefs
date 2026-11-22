@@ -771,6 +771,12 @@ impl<B: Bucket> Fetcher<B> {
         .await
     }
 
+    /// cladefs: whether it keeps the parts it fetches in a cache, which [`Fetcher::fetch_ahead`]
+    /// fetches into: what a read of them after it then reads, with no request (board 6225).
+    pub fn keeps_parts(&self) -> bool {
+        self.shared.cache.is_some()
+    }
+
     /// cladefs: fetches the parts that hold the `len` bytes at `offset` in `extent`, at `location`
     /// or where the collector moved it from there, into the cache, as read-ahead: behind reads that
     /// wait for their data, its object's tail too, from the host that owns each first, if another
@@ -894,7 +900,7 @@ impl<B: Bucket> Fetcher<B> {
     /// names it, as the collector and writers follow them ([`crate::moves::MovesMaps`],
     /// TASK-407.1).
     async fn moved(&self, extent: ExtentId, key: &str) -> Result<Option<String>, Error> {
-        let listed = bucket::list(&*self.shared.bucket, &layout::moves_of(key)?).await;
+        let listed = bucket::list(&*self.shared.bucket, &layout::moves_of(key)?).await?;
         trace::note(Some(Source::Bucket));
         for meta in listed.iter().rev() {
             let tail = land(self.shared.tail(&meta.key)).await?;
@@ -1150,9 +1156,10 @@ impl<B: Bucket> Fetching<B> {
             Ok(Some(fetched)) if stored.check(&fetched).is_ok() => Ok(Some(fetched)),
             Ok(None) => Ok(None),
             Ok(Some(_)) => Err(Error::Corrupt(format!("part {part} of {key}, by its CRC"))),
-            Err(bucket::Past { .. }) => {
+            Err(bucket::Unread::Past(_)) => {
                 Err(Error::Corrupt(format!("part {part} of {key}, past its end")))
             }
+            Err(bucket::Unread::Refused(refused)) => Err(refused.into()),
         }
     }
 

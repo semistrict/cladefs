@@ -129,6 +129,17 @@ async fn answer(
         Failing::Unavailable => {
             Some((StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailable", "Service unavailable"))
         }
+        // cladefs: refusals as faults.rs's own make them, which object_store tells apart by their
+        // status and code (boards 5736, 6666).
+        Failing::Unauthenticated => {
+            Some((StatusCode::UNAUTHORIZED, "Unauthorized", "The credentials are no longer valid"))
+        }
+        Failing::Forbidden => Some((StatusCode::FORBIDDEN, "AccessDenied", "Access Denied")),
+        Failing::ExpiredToken => Some((
+            StatusCode::BAD_REQUEST,
+            "ExpiredToken",
+            "The provided token has expired.",
+        )),
         Failing::Not | Failing::NoSpace => None,
     };
     if let Some((status, code, message)) = failure {

@@ -159,7 +159,7 @@ impl<B: Bucket> Writer<B> {
         (holder, token): (u64, u64),
         kms: &Arc<crate::keys::CachingKms>,
     ) -> Result<Self, Error> {
-        let read = head::read(&*bucket, cell).await;
+        let read = head::read(&*bucket, cell).await?;
         let taking = head::Taking { holder, token, ..head::Taking::default() };
         let (held, keys) = crate::keys::taking(&*bucket, kms, cell, read, taking).await?;
         let ring = crate::keys::ring(&*bucket, &keys, cell, &held.head, true).await?;
@@ -410,7 +410,7 @@ impl<B: Bucket> Writer<B> {
         let _grant = self.budget.enter(Priority::Demand, body.len).1.await;
         let bytes = body.read().map_err(|err| Error::Read(format!("{key}: {err}")))?;
         check(&bytes)?;
-        Ok(bucket::create(&*self.bucket, key, bytes).await)
+        Ok(bucket::create(&*self.bucket, key, bytes).await?)
     }
 
     /// cladefs: activates `configuration` as the cell's replicated configuration (doc-21,
@@ -660,7 +660,7 @@ impl<B: Bucket> Writer<B> {
         // One this writer wrote before, of the same segment, holds the same extents, perhaps
         // elsewhere: it stands, at its key, written once.
         let checkpoint = crate::checkpoint::encode(&state, self.keys.encrypting());
-        bucket::create(&*self.bucket, &key, checkpoint).await;
+        bucket::create(&*self.bucket, &key, checkpoint).await?;
         {
             let mut held = self.held.lock().await;
             if held.head.checkpoint.is_none_or(|(at, _)| at < segment) {
@@ -738,7 +738,7 @@ mod tests {
             let cell = test_cell(1);
             lifecycle::create(&*bucket, cell, 0).await.unwrap();
             let kms = crate::keys::testing::host_kms();
-            let read = head::read(&*bucket, cell).await;
+            let read = head::read(&*bucket, cell).await.unwrap();
             let wish = Wish::new(1, Fsync::Replicated);
             let taking = head::Taking { holder: 10, replication: wish, ..head::Taking::default() };
             let (held, keys) =
@@ -898,7 +898,7 @@ mod tests {
             // answer was lost (each framing encrypted under a salt of its own, TASK-411.28).
             let [(key, again_bytes)] = &objects.own[..] else { panic!("one of its own") };
             assert_eq!(key, &again_key);
-            bucket::create(&*bucket, &again_key, again_bytes.read().unwrap()).await;
+            bucket::create(&*bucket, &again_key, again_bytes.read().unwrap()).await.unwrap();
             let segment = writer.add_segment(objects).unwrap();
             assert_eq!(writer.upload(segment).await, Ok(()));
             assert_eq!(writer.acknowledge().await, Ok(Some(segment)));
@@ -918,7 +918,8 @@ mod tests {
                     crate::testing::encrypting(layout::test_cell(1)),
                 ),
             )
-            .await;
+            .await
+            .unwrap();
             let own = vec![(other.sequence, b"other".to_vec())];
             let segment = add(&writer, Commit { tag: 2, own, ..Commit::default() }).unwrap();
             let corrupt = Error::Corrupt(format!("{other_key} holds another extent"));
@@ -982,7 +983,7 @@ mod tests {
         commit(2);
         let keys = first.keys().clone();
         let opening = async {
-            let read = head::read(&*bucket, test_cell(1)).await;
+            let read = head::read(&*bucket, test_cell(1)).await.unwrap();
             let held = head::take(&*bucket, test_cell(1), read, &taking(11)).await?;
             Writer::holding(bucket.clone(), test_cell(1), held, Some(before), keys).await
         };
@@ -1038,7 +1039,7 @@ mod tests {
         };
         let found = || {
             let before = bucket.served(recovery::recover(&*bucket, test_cell(1), None)).0.unwrap();
-            let read = bucket.served(head::read(&*bucket, test_cell(1))).0;
+            let read = bucket.served(head::read(&*bucket, test_cell(1))).0.unwrap();
             (before, read)
         };
         let opening = |(before, read): (Recovered, head::Read), holder| {

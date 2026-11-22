@@ -104,7 +104,7 @@ class OffHostFs(unittest.TestCase):
         source = "fn f() { let _ = std::fs::read(\"x\"); }\n"
         self.assertEqual(self.matches(source, "crates/cladefs/src/fuse/x.rs"), [])
         self.assertEqual(self.matches(source, "crates/cladefs/src/cladefsd/tests.rs"), [])
-        self.assertEqual(self.matches(source, "crates/physmem/src/x.rs"), [])
+        self.assertEqual(self.matches(source, "crates/virtio_extent/src/x.rs"), [])
         self.assertEqual(self.matches("""\
             fn f() {}
             #[cfg(test)]
@@ -119,6 +119,22 @@ class OffHostFs(unittest.TestCase):
                 fn t() { let _ = std::fs::read("x"); }
             }
             """), [])
+
+    def test_a_module_compiled_only_in_tests_passes_and_one_compiled_beside_them_is_flagged(self):
+        """Board 6490: timings.rs's tests are `all(test, target_os = "linux")`."""
+        def module(cfg):
+            return self.matches(f"""\
+                #[cfg({cfg})]
+                mod tests {{
+                    fn t() {{ let _ = std::fs::read("x"); }}
+                }}
+                """)
+
+        self.assertEqual(module('all(test, target_os = "linux")'), [])
+        self.assertEqual(module("any(test, all(test, madsim))"), [])
+        self.assertEqual(module("any(test, madsim)"), [(3, "off-host-fs")])
+        self.assertEqual(module("not(test)"), [(3, "off-host-fs")])
+        self.assertEqual(module('target_os = "linux"'), [(3, "off-host-fs")])
 
     def test_a_test_module_within_a_module_passes_to_its_end_alone(self):
         """Board 6105: migration.rs's tests are a module within one of the file's."""

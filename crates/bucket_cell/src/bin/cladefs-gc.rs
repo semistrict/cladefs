@@ -381,18 +381,23 @@ async fn say_usage(
     out: &mut impl std::io::Write,
 ) -> Result<(), String> {
     let tenants = match named {
-        Some(tenant) => futures::stream::iter([tenant]).left_stream(),
+        Some(tenant) => futures::stream::iter([Ok(tenant)]).left_stream(),
         None => cell::tenants(bucket).right_stream(),
     };
     let mut tenants = std::pin::pin!(tenants);
     while let Some(tenant) = tenants.next().await {
+        let tenant = tenant.map_err(|err| err.to_string())?;
         let reads = cell::of_tenant(bucket, tenant)
-            .map(|cell| async move { (cell, passed::read(bucket, cell).await) })
+            .map(|cell| async move {
+                let cell = cell.map_err(|err| err.to_string())?;
+                let read = passed::read(bucket, cell).await;
+                read.map(|lease| (cell, lease)).map_err(|err| format!("cell {cell}: {err}"))
+            })
             .buffered(USAGES_AT_ONCE);
         let mut reads = std::pin::pin!(reads);
         let mut sum = Tenant::default();
-        while let Some((cell, read)) = reads.next().await {
-            let lease = read.map_err(|err| format!("cell {cell}: {err}"))?;
+        while let Some(read) = reads.next().await {
+            let (cell, lease) = read?;
             let usage = lease.and_then(|lease| lease.passed).map(|passed| passed.usage);
             writeln!(out, "{}", cell_line(cell, usage.as_ref())).map_err(|err| err.to_string())?;
             sum.add(usage.as_ref());
@@ -404,11 +409,15 @@ async fn say_usage(
 
 /// The cells a command goes over: the one named, or every cell of `bucket`, found by delimiter
 /// listings a page at a time, listing none of their objects (TASK-395.4, TASK-395.5).
-fn cells(bucket: &ObjectBucket, named: Option<CellId>) -> impl Stream<Item = CellId> + '_ {
-    match named {
-        Some(cell) => futures::stream::iter([cell]).left_stream(),
+fn cells(
+    bucket: &ObjectBucket,
+    named: Option<CellId>,
+) -> impl Stream<Item = Result<CellId, String>> + '_ {
+    let cells = match named {
+        Some(cell) => futures::stream::iter([Ok(cell)]).left_stream(),
         None => cell::listed(bucket).right_stream(),
-    }
+    };
+    cells.map(|cell| cell.map_err(|err| err.to_string()))
 }
 
 /// Collects every cell of `bucket`, or the one `named`, a pass over each, once, or every `every`,
@@ -491,6 +500,7 @@ async fn rotate_master_key(bucket: &ObjectBucket) -> Result<(), String> {
         )
     })?;
     let rotated = bucket_cell::bucket_kms::rotate(bucket, &keys).await;
+    let rotated = rotated.map_err(|err| format!("--rotate-master-key: {err}"))?;
     let bucket_cell::bucket_kms::Rotated { rewrapped, newest, destroyed, refused } = rotated;
     eprintln!(
         "cladefs-gc: master key {}: rewrapped {rewrapped} tenants' KEKs, {newest} under it already, \
@@ -528,6 +538,7 @@ async fn dry_run_cells(
     let mut dry = DryRun::default();
     let mut cells = std::pin::pin!(cells(bucket, named));
     while let Some(cell) = cells.next().await {
+        let cell = cell?;
         let found = collector.dry_run_cell(bucket, cell).await;
         let found = found.map_err(|err| format!("cell {cell}: {err}"))?;
         dry.doomed.extend(found.doomed);
@@ -959,6 +970,7 @@ fn main() -> Result<(), String> {
                 let mut live = BTreeMap::new();
                 let mut cells = std::pin::pin!(cells(&bucket, cell));
                 while let Some(cell) = cells.next().await {
+                    let cell = cell?;
                     let found = bucket_cell::head::live(&*bucket, cell).await;
                     let found = found.map_err(|err| format!("cell {cell}: {err}"))?;
                     live.extend(found.map(|record| (cell, record)));

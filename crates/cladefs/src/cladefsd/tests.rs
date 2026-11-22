@@ -1123,13 +1123,14 @@ fn freeze(child: &std::process::Child) {
 /// process maps it from its tenant's arena, is free.
 fn page_is_free(arena: crate::pages::ArenaId, offset: u64) -> bool {
     let location = crate::pages::PhysLocation { arena, offset };
-    physmem::is_free(location).unwrap_or_else(|| panic!("no chunk of {arena:?} holds {offset:#x}"))
+    crate::slabs::is_free(location)
+        .unwrap_or_else(|| panic!("no slab of {arena:?} holds {offset:#x}"))
 }
 
 /// Whether the page of the daemon's physical memory at `offset` in the memory of `arena` is held:
 /// neither free, nor of memory that went back, every page of it free.
 fn page_is_held(arena: crate::pages::ArenaId, offset: u64) -> bool {
-    physmem::is_free(crate::pages::PhysLocation { arena, offset }) == Some(false)
+    crate::slabs::is_free(crate::pages::PhysLocation { arena, offset }) == Some(false)
 }
 
 /// TASK-79.9: a VM process that stops answering, frozen as SIGSTOP or a cgroup's freezer freezes
@@ -2431,6 +2432,67 @@ fn a_restored_vms_reads_are_its_versions_evidence() {
         read.recordings.concat().iter().map(|unit| (unit.extent, unit.mib)).collect();
     assert_eq!((units, read.refused), (vec![(extent(1), 0), (extent(2), 0)], 0));
     drop((again, client));
+}
+
+/// Board 6225, 5337: a host that keeps parts in its part cache, a version's parts there and not in
+/// its memory, reads what its tenant's evidence predicts a fork reads into memory ahead of the
+/// fork's guest, as its first fork's recording, written seconds after the host read the
+/// version's evidence of none, predicts: the guest's reads then wait on no page-in.
+#[test]
+fn forks_read_their_prediction_into_memory_from_the_part_cache() {
+    use bucket_cell::evidence::UNIT;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
+    // environment yet.
+    unsafe { std::env::set_var("CLADEFSD_PART_CACHE", dir.path().join("parts")) };
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let client = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let extent = ExtentId { cell: client.cell(), sequence: 1 };
+    let data = pattern(3, 2 * UNIT as usize);
+    for (at, chunk) in data.chunks(64 << 10).enumerate() {
+        write(&client, extent, at as u64 * (64 << 10), chunk).unwrap();
+    }
+    client.commit(None).unwrap();
+    let version = client.make_version().unwrap();
+    // Its cell's prefetch, done: awaited holding nothing of the daemon's.
+    let prefetched = |path: &Path| {
+        let held = super::cells::table().writer(&super::cells::cell_dir_key(path)).unwrap();
+        let prefetching = held.cell().unwrap().evidence().unwrap().prefetched();
+        drop(held);
+        futures::executor::block_on(prefetching);
+    };
+
+    // The first fork's guest reads both units, which the host fetches into its part cache; its
+    // cell, closed, records them. Opened again, it prefetches them, in memory already.
+    let first = dir.path().join("first");
+    let one = CellClient::connect_forked(&socket, &first, version, 0).unwrap();
+    prefetched(&first);
+    assert_eq!(read(&one, extent, 0, 512), Ok(data[..512].to_vec()));
+    assert_eq!(read(&one, extent, UNIT, 512), Ok(data[UNIT as usize..][..512].to_vec()));
+    drop(one);
+    let again = CellClient::connect(&socket, &first, 1 << 24).unwrap();
+    prefetched(&first);
+    drop(again);
+
+    // Its pages evicted, as memory pressure evicts them, the next fork's prefetch reads them into
+    // memory from the part cache, fetching nothing; its guest's reads page nothing in.
+    crate::cache::evict_least_used(None, |_| false);
+    let before = crate::stats::stats();
+    let second = dir.path().join("second");
+    let two = CellClient::connect_forked(&socket, &second, version, 0).unwrap();
+    prefetched(&second);
+    let counted = crate::stats::stats().since(&before);
+    assert_eq!((counted.prefetches, counted.prefetch_page_ins), (0, 2));
+    assert_eq!(
+        read(&two, extent, UNIT + 4096, 512),
+        Ok(data[UNIT as usize + 4096..][..512].to_vec())
+    );
+    assert_eq!(read(&two, extent, 8192, 512), Ok(data[8192..][..512].to_vec()));
+    assert_eq!(crate::stats::stats().since(&before).page_ins, 2);
+    drop((two, client));
 }
 
 /// TASK-79.17, TASK-702.3: a cell the daemon opens to work on, as no VM process has it open,
@@ -3930,12 +3992,13 @@ fn call(
 /// TASK-79.9: a shrink of a tenant's memory evicts what it must, and returns what the tenant holds,
 /// once the pages it evicted are free: a window's, which wait, freed, for its VM process to
 /// acknowledge their unmapping, or for the daemon to let go of it, as here of one that acknowledges
-/// nothing. Of two extents of a chunk each, read and mapped, it evicts the one asked for longest
-/// ago, which leaves the tenant the other's chunk alone.
+/// nothing. Of two extents of two slabs each, read and mapped, it evicts the one asked for longest
+/// ago, which leaves the tenant the other's slabs alone: those it freed, kept spare as they were,
+/// given back too.
 #[tokio::test(flavor = "multi_thread")]
 async fn shrinks_return_once_the_pages_they_evict_are_free() {
     use super::wire::*;
-    const CHUNK: u64 = physmem::CHUNK_SIZE as u64;
+    const CHUNK: u64 = 2 * crate::slabs::SLAB;
     host();
     let dir = tempfile::tempdir().unwrap();
     let tenant = super::server::Tenant::new(1, dir.path()).unwrap();
@@ -3973,6 +4036,212 @@ async fn shrinks_return_once_the_pages_they_evict_are_free() {
         unmapped.push(message.header.args[..2].to_vec());
     }
     assert_eq!((shrinking.await.unwrap(), unmapped), (Ok(CHUNK), vec![vec![0, CHUNK]]));
+}
+
+/// A VM process made by hand ([`raw_connection`]), of its cell open: it acknowledges the stage
+/// operations it is sent only when told, so that it may stay frozen with an unmap unacknowledged.
+struct HandVm {
+    sender: super::wire::Sender,
+    receiver: super::wire::Receiver,
+    stream: UnixStream,
+    cell: u64,
+    /// Its next request's ID.
+    next: u64,
+}
+
+impl HandVm {
+    /// A VM process of the daemon at `socket`, its cell at `path` created.
+    fn open(socket: &Path, path: &Path) -> Self {
+        let (sender, receiver, stream, cell) = raw_connection(socket, path, 1 << 26);
+        Self { sender, receiver, stream, cell, next: 2 }
+    }
+
+    /// Sends the request `kind`, of `args` and `payload`, and returns its reply, which must
+    /// succeed, and the stage operations sent before it, acknowledged if `ack`.
+    fn call(
+        &mut self,
+        kind: u32,
+        args: &[u64],
+        payload: &[u8],
+        ack: bool,
+    ) -> (super::wire::Message, Vec<super::wire::Header>) {
+        use super::wire::*;
+        let header = Header::new(kind, self.next).with_args(args);
+        self.next += 1;
+        self.sender.send(header, payload, &[]).unwrap();
+        let mut staged = Vec::new();
+        loop {
+            let message = self.receiver.receive(|| 0).unwrap().expect("the daemon let it go");
+            match message.header.kind {
+                REPLY => {
+                    assert_eq!(message.header.status, 0, "request {kind}");
+                    return (message, staged);
+                }
+                _ if message.header.flags & STAGE_ACK != 0 => {
+                    if ack {
+                        self.ack(message.header.id);
+                    }
+                    staged.push(message.header);
+                }
+                _ => staged.push(message.header),
+            }
+        }
+    }
+
+    /// Acknowledges the stage operations up to `id`.
+    fn ack(&self, id: u64) {
+        let ack = super::wire::Header::new(super::wire::ACK, id);
+        self.sender.send(ack, &[], &[]).unwrap();
+    }
+
+    /// Writes its cell's extent 1, `len` bytes, and commits it: the extent.
+    fn write_an_extent(&mut self, len: u64) -> ExtentId {
+        use super::wire::*;
+        let cell = self.cell;
+        self.call(WRITE, &[cell, 1, 0], &pattern(1, len as usize), true);
+        self.call(COMMIT, &[], &[], true);
+        ExtentId { cell, sequence: 1 }
+    }
+
+    /// Reads `extent`'s `len` bytes, which pages them in, and maps them into a window of its own,
+    /// acknowledging what it is sent: where its pages are, as its STAGE_MAPs said.
+    fn map_an_extent(&mut self, extent: ExtentId, len: u64) -> Vec<crate::pages::PhysLocation> {
+        use super::wire::*;
+        let (cell, sequence) = (extent.cell, extent.sequence);
+        self.call(READ, &[cell, sequence, 0, len], &[], true);
+        self.call(WINDOW, &[len, 1], &[], true);
+        let (_, staged) = self.call(MAP, &[cell, sequence, 0, len, 0], &[], true);
+        (staged.into_iter())
+            .filter(|header| header.kind == STAGE_MAP)
+            .map(|header| crate::pages::PhysLocation {
+                arena: crate::pages::ArenaId(header.args[4] as u32),
+                offset: header.args[1],
+            })
+            .collect()
+    }
+
+    /// Maps `extent` again over its window's first `len` bytes, as its guest rebinding it does,
+    /// acknowledging nothing it is sent: then frozen, an unmap unacknowledged.
+    fn freeze_with_an_unmap(&mut self, extent: ExtentId, len: u64) {
+        use super::wire::*;
+        let (cell, sequence) = (extent.cell, extent.sequence);
+        let (_, staged) = self.call(MAP, &[cell, sequence, 0, len, 0], &[], false);
+        assert!(staged.iter().any(|header| header.kind == STAGE_UNMAP), "{staged:?}");
+    }
+}
+
+/// The socket of a daemon serving tenant `id`, whose cells are in `dir`'s directory `id`.
+fn serve_tenant_at(dir: &Path, id: u64) -> std::path::PathBuf {
+    let cells = dir.join(id.to_string());
+    std::fs::create_dir_all(&cells).unwrap();
+    let tenant = super::server::Tenant::new(id, &cells).unwrap();
+    let socket = dir.join(format!("{id}.sock"));
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || super::server::serve_tenant(listener, tenant));
+    socket
+}
+
+/// Board 6208 (doc-26, spec rule scopedWaits): a VM process of tenant 1's, frozen with an unmap
+/// unacknowledged, holds none of tenant 2's memory: a shrink of tenant 2's, whose VM process
+/// acknowledges what it is sent, frees what it evicts and returns at once, the frozen VM process
+/// served still, long before the daemon would let it go ([`super::server::UNRESPONSIVE`]). Every
+/// VM process connected held every slab freed, a tenant's frozen VM every other tenant's memory.
+#[tokio::test(flavor = "multi_thread")]
+async fn frozen_vm_processes_hold_no_other_tenants_memory() {
+    const EXTENT: u64 = 2 << 20;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let (one, two) = (serve_tenant_at(dir.path(), 1), serve_tenant_at(dir.path(), 2));
+    let mut frozen = HandVm::open(&one, &dir.path().join("1").join("store"));
+    let its = frozen.write_an_extent(EXTENT);
+    frozen.map_an_extent(its, EXTENT);
+    frozen.freeze_with_an_unmap(its, EXTENT);
+    let mut live = HandVm::open(&two, &dir.path().join("2").join("store"));
+    let its = live.write_an_extent(EXTENT);
+    live.map_an_extent(its, EXTENT);
+
+    let started = std::time::Instant::now();
+    let shrinking = tokio::spawn(super::memory::shrink(Some(2), 0));
+    // It acknowledges the unmaps it is sent, as it makes them, until the test is done with it.
+    let stream = live.stream.try_clone().unwrap();
+    let acking = std::thread::spawn(move || {
+        while let Ok(Some(message)) = live.receiver.receive(|| 0) {
+            if message.header.flags & super::wire::STAGE_ACK != 0 {
+                live.ack(message.header.id);
+            }
+        }
+    });
+    assert_eq!(shrinking.await.unwrap(), Ok(0));
+    let took = started.elapsed();
+    assert!(took < super::server::UNRESPONSIVE, "tenant 2's shrink took {took:?}");
+    // Served still: not let go.
+    frozen.call(super::wire::INFO, &[], &[], false);
+    stream.shutdown(std::net::Shutdown::Both).unwrap();
+    acking.join().unwrap();
+}
+
+/// Board 6208 (doc-26, spec rules waitsForStaged, scopedWaits): a public base's slab, of the
+/// default arena, which two tenants' VM processes map, evicted, waits for both to acknowledge what
+/// took it away, one after the other, and for no third, frozen with an unmap unacknowledged: free
+/// once the second has. A wait for the arena's tenant alone, the default tenant's, waited for
+/// neither.
+#[tokio::test(flavor = "multi_thread")]
+async fn public_slabs_wait_for_the_vm_processes_they_were_staged_to_alone() {
+    const EXTENT: u64 = 1 << 20;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("base");
+    let open_cell = OpenCell::create(&base, 1 << 26).await.unwrap();
+    let extent = ExtentId { cell: open_cell.cell().id, sequence: 1 };
+    let bytes = pattern(1, EXTENT as usize);
+    open_cell.write(extent, 0, &[VolatileSlice::from(&bytes[..])]).await.unwrap();
+    open_cell.commit(None).await.unwrap();
+    open_cell.make_public().unwrap();
+    let base_cell = open_cell.cell();
+    drop(open_cell);
+    let opened = OpenCell::open(&base).await.unwrap();
+    let forks: Vec<_> = (1..=2u64)
+        .map(|tenant| (tenant, dir.path().join(tenant.to_string()).join("fork")))
+        .collect();
+    for (tenant, fork) in &forks {
+        std::fs::create_dir_all(fork.parent().unwrap()).unwrap();
+        // A fork of the base, a cell of the tenant's.
+        opened.fork_to(fork, crate::host_cell::named(*tenant)).await.unwrap();
+    }
+    drop((opened, base_cell));
+    let forks: Vec<_> = forks.into_iter().map(|(_, fork)| fork).collect();
+    let sockets = [serve_tenant_at(dir.path(), 1), serve_tenant_at(dir.path(), 2)];
+    let mut vms: Vec<HandVm> =
+        (sockets.iter().zip(&forks)).map(|(socket, fork)| HandVm::open(socket, fork)).collect();
+    let mapped: Vec<_> = vms.iter_mut().map(|vm| vm.map_an_extent(extent, EXTENT)).collect();
+    let at = mapped[0][0];
+    assert_eq!(at.arena, crate::pages::ArenaId::DEFAULT, "a public base's extent");
+    assert_eq!(mapped[1], [at], "the same slab mapped");
+    // A third, of the default tenant's, frozen with an unmap of its own unacknowledged.
+    let default = dir.path().join("default.sock");
+    let listener = UnixListener::bind(&default).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let mut frozen = HandVm::open(&default, &dir.path().join("frozen"));
+    let its = frozen.write_an_extent(EXTENT);
+    frozen.map_an_extent(its, EXTENT);
+    frozen.freeze_with_an_unmap(its, EXTENT);
+
+    let evicted = crate::cache::evict_least_used(Some(crate::pages::ArenaId::DEFAULT), |evicted| {
+        evicted >= EXTENT
+    });
+    assert_eq!(evicted, EXTENT);
+    assert!(page_is_held(at.arena, at.offset), "freed with its unmaps unacknowledged");
+    for (n, vm) in vms.iter_mut().enumerate() {
+        // Its unmap, sent as the slab was evicted, acknowledged; and a request after it
+        // answered, which the daemon reads after the acknowledgement.
+        let unmap = vm.receiver.receive(|| 0).unwrap().unwrap().header;
+        assert_eq!(unmap.kind, super::wire::STAGE_UNMAP, "{unmap:?}");
+        vm.ack(unmap.id);
+        vm.call(super::wire::INFO, &[], &[], true);
+        let free = page_is_free(at.arena, at.offset);
+        assert_eq!(free, n == 1, "free once both acknowledged, after VM process {n}");
+    }
+    frozen.call(super::wire::INFO, &[], &[], false);
 }
 
 /// TASK-79.35: the daemon's metrics are served on through a failure to accept a scrape's
@@ -4776,7 +5045,7 @@ fn a_panic_holding_a_cells_lock_halts_it_alone() {
 const SHARED_LOCKS: &[&str] = &[
     "extent cache",
     "cached extent holders",
-    "cached extent pages",
+    "cached extent parts",
     "window",
     "stage change",
     "connection phase",
@@ -5151,7 +5420,8 @@ fn ephemeral_cells_fork_from_versions_and_retire_their_references() {
     let references = || {
         let listing =
             bucket_cell::lifecycle::ephemeral_references(&*bucket, ephemeral.incarnation());
-        let mut children: Vec<_> = control(listing).into_iter().map(|(_, child)| child).collect();
+        let mut children: Vec<_> =
+            control(listing).unwrap().into_iter().map(|(_, child)| child).collect();
         children.sort();
         children
     };
@@ -5196,7 +5466,7 @@ fn ephemeral_cells_fork_from_versions_and_retire_their_references() {
     assert_eq!(references(), vec![kept]);
     assert!(ephemeral.entry(gone).is_none());
     let retired = control(bucket_cell::lifecycle::decommission(&*bucket, ephemeral.incarnation()));
-    assert_eq!(retired, 1);
+    assert_eq!(retired, Ok(1));
     assert_eq!(references(), vec![]);
 }
 
@@ -5232,7 +5502,7 @@ fn targets_take_a_cells_migrations_by_its_epoch() {
     let references = || {
         let listing =
             bucket_cell::lifecycle::ephemeral_references(&*bucket, ephemeral.incarnation());
-        control(listing).into_iter().map(|(_, child)| child).collect::<Vec<_>>()
+        control(listing).unwrap().into_iter().map(|(_, child)| child).collect::<Vec<_>>()
     };
 
     let (incarnation, token) = control(target::prepare(prepare(0x11, 2))).unwrap();

@@ -181,7 +181,7 @@ fn files_longer_than_a_chunk_are_written_whole() {
 fn unless_memory_fails<T>(future: impl Future<Output = T>) -> T {
     let mut future = pin!(future);
     block_on(poll_fn(|cx| {
-        let failed = physmem::has_alloc_failed_no_mem();
+        let failed = cladefs::slabs::has_alloc_failed_no_mem();
         assert!(!failed, "the kernel failed an allocation for want of memory");
         future.as_mut().poll(cx)
     }))

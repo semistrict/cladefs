@@ -952,7 +952,7 @@ pub(crate) struct Opened {
     /// cladefs: a follower's view's commit number; 0 of a cell opened to write.
     pub commit: u64,
     /// cladefs: how many mappings the host lets a process make, if it limits them
-    /// (`physmem::max_map_count`), which the VM process's window budgets its own by: the daemon
+    /// (`pages::max_map_count`), which the VM process's window budgets its own by: the daemon
     /// reads it for the VM process, which can't in a jail without /proc (TASK-172). 0 if it
     /// doesn't limit them.
     pub max_map_count: Option<u64>,

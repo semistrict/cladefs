@@ -113,7 +113,7 @@ impl<K: Kms> World<K> {
             let mut objects = Vec::new();
             for meta in listed {
                 let key = meta.location.to_string();
-                let object = bucket_cell::bucket::get(&*self.bucket, &key).await.unwrap();
+                let object = bucket_cell::bucket::get(&*self.bucket, &key).await.unwrap().unwrap();
                 objects.push((key, object.bytes.to_vec()));
             }
             objects.sort();
@@ -124,7 +124,7 @@ impl<K: Kms> World<K> {
 
     /// The bytes of the object at `key`.
     async fn object(&self, key: &str) -> Vec<u8> {
-        let got = bucket_cell::bucket::get(&*self.bucket, key).await;
+        let got = bucket_cell::bucket::get(&*self.bucket, key).await.unwrap();
         got.unwrap_or_else(|| panic!("no object at {key}")).bytes.to_vec()
     }
 
@@ -1623,7 +1623,7 @@ async fn encrypted_cells_open_through_the_bucket_kms_on_two_hosts() {
     assert_eq!(swept.visited, 1);
     assert_eq!(world.object(&kek_key).await, kek_object);
 
-    assert_eq!(first_kms.destroy(TENANT).await, Destroyed::Now);
+    assert_eq!(first_kms.destroy(TENANT).await, Ok(Destroyed::Now));
     let tombstone = extent_keys::kms::bucket::KekObject::tombstone(TENANT);
     assert_eq!(world.object(&kek_key).await, tombstone);
     let destroyed =

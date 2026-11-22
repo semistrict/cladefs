@@ -1,0 +1,91 @@
+# TASK-560 (board 2516) put back: an eviction reaps every evicting part of its extent, another
+# eviction's too, freeing that one's slab before its unmaps were sent: a VM process that acknowledged
+# all it was sent keeps a freed slab mapped (spec rule ownTokens).
+# Kind: concurrency
+# Features: shuttle
+# Killer: cache::shuttle_tests::evictions_race_page_ins_and_maps_in_any_order
+--- a/crates/cladefs/src/cache.rs
++++ b/crates/cladefs/src/cache.rs
+@@ -826,7 +826,7 @@
+     Present(PartSlab),
+     /// Being evicted, by the eviction holding the token, which holds the slab: unmapped from the
+     /// windows that map it, then freed.
+-    Evicting(EvictionToken),
++    Evicting(PartSlab),
+     /// Its read in failed, as the next waiting for it are told; asked for again, it is read in
+     /// anew.
+     Failed(Errno),
+@@ -1142,50 +1142,48 @@
+     /// window set; their slots then absent, and their slabs freed, by this call alone. A part
+     /// another eviction is evicting is that one's: this one leaves it.
+     fn evict_pages(&self, pages: Range<u64>) -> u64 {
+-        let (evictions, windows) = {
++        let (runs, windows) = {
+             let mut parts = self.parts.with(Mutex::lock);
+-            let mut evictions = Vec::new();
++            let mut runs = std::collections::BTreeMap::new();
+             for part in self.parts_of(pages) {
+                 let slot = &mut parts.slots[part];
+                 if !matches!(slot, PartSlot::Present(_)) {
+                     continue;
+                 }
+-                let token = EvictionToken::new();
+-                let PartSlot::Present(slab) = std::mem::replace(slot, PartSlot::Evicting(token))
+-                else {
++                let PartSlot::Present(slab) = std::mem::replace(slot, PartSlot::Absent) else {
+                     unreachable!("a part present")
+                 };
++                let at = slab.location().offset;
++                runs.insert(at, at + slab.len());
++                *slot = PartSlot::Evicting(slab);
+                 self.present.fetch_sub(1, Ordering::Relaxed);
+-                evictions.push(Eviction { part, slab, token });
+             }
+             parts.windows.retain(|_, window| window.strong_count() > 0);
+-            (evictions, parts.windows.values().filter_map(Weak::upgrade).collect::<Vec<_>>())
++            (runs, parts.windows.values().filter_map(Weak::upgrade).collect::<Vec<_>>())
+         };
+-        if evictions.is_empty() {
++        if runs.is_empty() {
+             return 0;
+         }
+-        let evicted = Evicted::new(self.arena, &evictions);
++        let evicted = Evicted { arena: self.arena, runs };
+         let identity = self as *const Self as *const () as usize;
+         for window in windows {
+             window.unmap_pages_of(identity, &|at| evicted.contains(at));
+-        }
+-        {
+-            let mut parts = self.parts.with(Mutex::lock);
+-            for eviction in &evictions {
+-                let slot = &mut parts.slots[eviction.part];
+-                assert!(
+-                    matches!(slot, PartSlot::Evicting(token) if *token == eviction.token),
+-                    "part {} of {:?} changed under its eviction",
+-                    eviction.part,
+-                    self.extent
+-                );
+-                *slot = PartSlot::Absent;
+-            }
+         }
++        let reaped: Vec<PartSlab> = {
++            let mut parts = self.parts.with(Mutex::lock);
++            (parts.slots.iter_mut())
++                .filter_map(|slot| match std::mem::replace(slot, PartSlot::Absent) {
++                    PartSlot::Evicting(slab) => Some(slab),
++                    other => {
++                        *slot = other;
++                        None
++                    }
++                })
++                .collect()
++        };
+         self.changed.notify(usize::MAX);
+-        let bytes = evictions.iter().map(|eviction| eviction.slab.len()).sum();
+-        // Freed past the extent's lock, each into quarantine if it was staged.
+-        drop(evictions);
++        let bytes = reaped.iter().map(PartSlab::len).sum();
++        drop(reaped);
+         bytes
+     }
+ 

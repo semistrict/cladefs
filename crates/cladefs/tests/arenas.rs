@@ -33,10 +33,11 @@ async fn cells_hold_their_arenas() {
     let window = open.create_dax_window(ps, None).unwrap();
     open.map(extent, 0, ps, 0).await.unwrap();
     block_on(window.fault(0, Access::Read)).expect("the extent paged in");
-    assert!(physmem::arena_bytes(arena) > 0, "the page is another arena's");
-    let page = physmem::alloc(arena, physmem::Wait::No).expect("a page of the cell's arena");
-    drop(page);
+    assert!(cladefs::slabs::arena_bytes(arena) > 0, "the page is another arena's");
+    let page = cladefs::slabs::alloc(arena, 1, cladefs::slabs::Wait::No);
+    drop(page.expect("a page of the cell's arena"));
 
     drop((window, open));
-    assert_eq!(physmem::alloc(arena, physmem::Wait::No).err(), Some(physmem::NoMemory));
+    let page = cladefs::slabs::alloc(arena, 1, cladefs::slabs::Wait::No);
+    assert_eq!(page.err(), Some(cladefs::slabs::NoMemory));
 }

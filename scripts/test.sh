@@ -59,15 +59,15 @@ if part clippy; then
     (cd "$root" && cargo fmt --check)
     UCD_ZIP="$zip" cargo clippy --manifest-path "$root/Cargo.toml" --workspace --tests -- \
         -A clippy::all -D clippy::disallowed_methods -D warnings
-    cargo clippy --manifest-path "$root/Cargo.toml" -p local_cell -p physmem -p cladefs \
+    cargo clippy --manifest-path "$root/Cargo.toml" -p local_cell -p cladefs \
         -p follower -p follower_sim --features shuttle --tests -- -A clippy::all -D warnings
-    cargo clippy --manifest-path "$root/Cargo.toml" -p physmem -p cladefs -p virtio_extent \
+    cargo clippy --manifest-path "$root/Cargo.toml" -p cladefs -p virtio_extent \
         --features loom --tests -- -A clippy::all -D warnings
     # The madsim build's (doc-24): the simulated crates and their tests under madsim, built as the
     # madsim part builds them, whose code no other build compiles either: its warnings, 13 on
     # Linux, went unseen there behind a `cargo check` (board 5652).
     env RUSTFLAGS="--cfg madsim" CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}/madsim" \
-        cargo clippy --manifest-path "$root/Cargo.toml" -p node_local -p host_fs -p physmem \
+        cargo clippy --manifest-path "$root/Cargo.toml" -p node_local -p host_fs \
         -p bucket_cell -p local_cell -p cladefs --lib --test madsim -- -A clippy::all -D warnings
 fi
 # The simulation of bucket_cell's protocol over local_cell's extent stores (TASK-88): its profiles'
@@ -95,7 +95,7 @@ fi
 if part madsim; then
     madsim=(env RUSTFLAGS="--cfg madsim" CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}/madsim")
     "${madsim[@]}" cargo check --manifest-path "$root/Cargo.toml" -p node_local -p host_fs \
-        -p physmem -p bucket_cell -p local_cell -p cladefs
+        -p bucket_cell -p local_cell -p cladefs
     # Each test over CLADEFS_MADSIM_SEEDS seeds, 20 unless said, from MADSIM_TEST_SEED's, 1 unless
     # said, after the regression seeds, those that once failed (crates/cladefs/tests/madsim-seeds,
     # TASK-685.8): each seed a process of its own, as what a simulation's hosts held in memory,
@@ -107,7 +107,7 @@ if part madsim; then
         --count "${CLADEFS_MADSIM_SEEDS:-20}" "$@"
     # A rule search, `*_needs_*`, runs its own seeds, once.
     "${madsim[@]}" cargo nextest run --manifest-path "$root/Cargo.toml" -p node_local -p host_fs \
-        -p physmem -p bucket_cell -p local_cell -p cladefs --test madsim -E 'test(/_needs_/)' \
+        -p bucket_cell -p local_cell -p cladefs --test madsim -E 'test(/_needs_/)' \
         --no-tests=pass "$@"
 fi
 # The concurrency tests under Shuttle, built with each crate's `shuttle` feature, which only they
@@ -117,8 +117,6 @@ if part shuttle; then
         --test shuttle
     cargo nextest run --manifest-path "$root/Cargo.toml" -p local_cell --features shuttle --lib \
         shuttle_tests::
-    cargo nextest run --manifest-path "$root/Cargo.toml" -p physmem --features shuttle --lib \
-        shuttle::
     cargo nextest run --manifest-path "$root/Cargo.toml" -p cladefs --features shuttle --lib \
         shuttle_tests::
     # The followers' concurrency protocol, under Shuttle (TASK-42.5).
@@ -128,7 +126,7 @@ if part shuttle; then
     # The protocols of atomics under loom, each crate's `loom` feature, whose every interleaving
     # and weak ordering Shuttle, seeing every atomic as SeqCst, can't run (docs/memory-ordering.md,
     # TASK-444.2).
-    for crate in cladefs virtio_extent physmem; do
+    for crate in cladefs virtio_extent; do
         cargo nextest run --manifest-path "$root/Cargo.toml" -p "$crate" --features loom --lib loom::
     done
 fi

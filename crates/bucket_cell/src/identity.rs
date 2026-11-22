@@ -175,6 +175,33 @@ impl Registry {
     pub fn bucket(&self, number: u16) -> Option<&Entry> {
         self.buckets.iter().find(|entry| entry.number == number)
     }
+
+    /// The number an addition gives the next bucket: one past the last's, if one is left.
+    fn next(&self) -> Result<u16, Error> {
+        let last = self.buckets.iter().map(|entry| entry.number).max().unwrap_or(ROOT);
+        last.checked_add(1).filter(|number| given(*number)).ok_or(Error::NoNumbers)
+    }
+
+    /// The entry an addition of the bucket at `url` made, if one did: by its URL, never the root's.
+    fn added(&self, url: Option<&str>) -> Option<&Entry> {
+        let url = url?;
+        let added =
+            |entry: &&Entry| entry.number != ROOT && entry.details.url.as_deref() == Some(url);
+        self.buckets.iter().find(added)
+    }
+}
+
+/// cladefs: the number [`add`] gives the bucket at `url`, the root's registry `registry`, if it
+/// has one, as it is now: the number an addition of it gave it, if one did, else the next one
+/// (board 5550). Its caller opens the bucket with that number's options, its own credentials,
+/// before [`add`] reads it; another addition coming first takes that number, and [`add`] gives it
+/// the next one.
+pub fn number_for(registry: Option<&Registry>, url: &str) -> Result<u16, Error> {
+    let Some(registry) = registry else { return Ok(ROOT + 1) };
+    match registry.added(Some(url)) {
+        Some(entry) => Ok(entry.number),
+        None => registry.next(),
+    }
 }
 
 /// Decodes an identity or a registry, refusing another format than this one's.
@@ -198,10 +225,8 @@ pub fn given(number: u16) -> bool {
 
 /// The bucket's identity, if it was formatted or added.
 pub async fn get(bucket: &impl Bucket) -> Result<Option<Identity>, Error> {
-    match bucket::get(bucket, layout::IDENTITY).await {
-        Some(object) => decode(&object.bytes).map(Some),
-        None => Ok(None),
-    }
+    let found = bucket::get(bucket, layout::IDENTITY).await?;
+    found.map(|object| decode(&object.bytes)).transpose()
 }
 
 /// The registry in `bucket`'s root: the root bucket's own, or a copy, if it has one.
@@ -209,11 +234,35 @@ pub async fn registry(bucket: &impl Bucket) -> Result<Option<Registry>, Error> {
     Ok(registry_versioned(bucket).await?.map(|(registry, _)| registry))
 }
 
+/// cladefs: [`get`], asking once: the bucket failing, out of reach, fails it rather than being
+/// retried until it answers (board 5528). For what finds other buckets for a request
+/// ([`crate::object_bucket::Registered`]), whose request goes on without them, or tries again.
+pub async fn get_once(bucket: &impl Bucket) -> Result<Option<Identity>, Error> {
+    let found = once(bucket, layout::IDENTITY).await?;
+    found.map(|object| decode(&object.bytes)).transpose()
+}
+
+/// cladefs: [`registry`], asking once, as [`get_once`] asks (board 5528).
+pub async fn registry_once(bucket: &impl Bucket) -> Result<Option<Registry>, Error> {
+    let found = once(bucket, layout::BUCKETS).await?;
+    found.map(|object| decode(&object.bytes)).transpose()
+}
+
+/// The object at `key` in `bucket`, if any, asked for once.
+async fn once(bucket: &impl Bucket, key: &str) -> Result<Option<bucket::Object>, Error> {
+    match bucket.get(key).await {
+        Ok(object) => Ok(Some(object)),
+        Err(bucket::Error::NotFound) => Ok(None),
+        Err(bucket::Error::Refused(refusal)) => Err(bucket::Refused::of(key, refusal).into()),
+        Err(err) => Err(Error::Read(format!("{key}: {err}"))),
+    }
+}
+
 /// The registry in `bucket`'s root, and the version of its object.
 async fn registry_versioned(
     bucket: &impl Bucket,
 ) -> Result<Option<(Registry, bucket::Version)>, Error> {
-    match bucket::get(bucket, layout::BUCKETS).await {
+    match bucket::get(bucket, layout::BUCKETS).await? {
         Some(object) => Ok(Some((decode(&object.bytes)?, object.meta.version))),
         None => Ok(None),
     }
@@ -235,7 +284,7 @@ pub async fn format(
             let settings = Settings::formatted(asked)?;
             let made =
                 Identity { format: layout::FORMAT, number: ROOT, id: rand::random(), settings };
-            match bucket::create(bucket, layout::IDENTITY, layout::encode(&made)).await {
+            match bucket::create(bucket, layout::IDENTITY, layout::encode(&made)).await? {
                 Created::Created(_) => made,
                 // Another formatting's, or addition's, first.
                 Created::Exists(object) => decode(&object.bytes)?,
@@ -251,7 +300,7 @@ pub async fn format(
         };
         let registry = Registry { format: layout::FORMAT, version: 1, buckets: vec![entry] };
         // Another formatting's, first, if it exists: of the same identity.
-        bucket::create(bucket, layout::BUCKETS, layout::encode(&registry)).await;
+        bucket::create(bucket, layout::BUCKETS, layout::encode(&registry)).await?;
     }
     Ok(identity)
 }
@@ -282,20 +331,18 @@ pub async fn add(
             .await?
             .ok_or_else(|| Error::Lost(layout::BUCKETS.to_owned()))?;
         // Added before: by this identity, or by an addition of its URL that stopped short of it.
-        let added = (registry.buckets.iter()).find(|entry| match found {
-            Some(found) => (entry.number, entry.id) == (found.number, found.id),
-            None => {
-                entry.number != ROOT && details.url.is_some() && entry.details.url == details.url
-            }
-        });
+        let added = match found {
+            Some(found) => (registry.buckets.iter())
+                .find(|entry| (entry.number, entry.id) == (found.number, found.id)),
+            None => registry.added(details.url.as_deref()),
+        };
         if let Some(entry) = added {
             break (entry.clone(), registry);
         }
         if let Some(found) = found {
             return Err(Error::Formatted(found.number));
         }
-        let last = registry.buckets.iter().map(|entry| entry.number).max().unwrap_or(ROOT);
-        let number = last.checked_add(1).filter(|number| given(*number)).ok_or(Error::NoNumbers)?;
+        let number = registry.next()?;
         let entry = Entry { number, id: rand::random(), details: details.clone(), settings };
         let mut changed = registry.clone();
         changed.version += 1;
@@ -304,7 +351,7 @@ pub async fn add(
         }
         changed.buckets.push(entry.clone());
         let bytes = layout::encode(&changed);
-        match bucket::update(root, layout::BUCKETS, bytes, &version).await {
+        match bucket::update(root, layout::BUCKETS, bytes, &version).await? {
             Updated::Updated(_) => break (entry, changed),
             // Another's addition, first: the next number.
             Updated::Changed => {}
@@ -316,7 +363,7 @@ pub async fn add(
         id: entry.id,
         settings: entry.settings,
     };
-    match bucket::create(new, layout::IDENTITY, layout::encode(&identity)).await {
+    match bucket::create(new, layout::IDENTITY, layout::encode(&identity)).await? {
         Created::Created(_) => Ok((identity, registry)),
         Created::Exists(object) => match decode::<Identity>(&object.bytes)? {
             found if found == identity => Ok((identity, registry)),
@@ -342,12 +389,12 @@ pub async fn spread(registry: &Registry, bucket: &impl Bucket) -> Result<(), Err
         match registry_versioned(bucket).await? {
             Some((copy, _)) if copy.version >= registry.version => return Ok(()),
             Some((_, version)) => {
-                match bucket::update(bucket, layout::BUCKETS, bytes.clone(), &version).await {
+                match bucket::update(bucket, layout::BUCKETS, bytes.clone(), &version).await? {
                     Updated::Updated(_) => return Ok(()),
                     Updated::Changed => {}
                 }
             }
-            None => match bucket::create(bucket, layout::BUCKETS, bytes.clone()).await {
+            None => match bucket::create(bucket, layout::BUCKETS, bytes.clone()).await? {
                 Created::Created(_) => return Ok(()),
                 Created::Exists(_) => {}
             },
@@ -457,7 +504,7 @@ mod tests {
                 id: 0x51,
                 settings: Settings::default(),
             };
-            bucket::create(&bucket, layout::IDENTITY, layout::encode(&left)).await;
+            bucket::create(&bucket, layout::IDENTITY, layout::encode(&left)).await.unwrap();
             assert_eq!(registry(&bucket).await, Ok(None));
             assert_eq!(format(&bucket, &Details::default(), Asked::default()).await, Ok(left));
             let registry = registry(&bucket).await.unwrap().unwrap();
@@ -602,7 +649,7 @@ mod tests {
                 add(&root, &Details::default(), &new, details.clone(), Asked::default())
                     .await
                     .unwrap();
-            bucket::delete(&new, layout::IDENTITY).await;
+            bucket::delete(&new, layout::IDENTITY).await.unwrap();
             let (again, registry) =
                 add(&root, &Details::default(), &new, details.clone(), Asked::default())
                     .await
@@ -657,7 +704,9 @@ mod tests {
                 details: Details::default(),
                 settings: Settings::default(),
             });
-            bucket::update(&full, layout::BUCKETS, layout::encode(&registry), &version).await;
+            bucket::update(&full, layout::BUCKETS, layout::encode(&registry), &version)
+                .await
+                .unwrap();
             let refused = add(
                 &full,
                 &Details::default(),
@@ -700,7 +749,7 @@ mod tests {
                 id: 1,
                 settings: Settings::default(),
             };
-            bucket::create(&bucket, layout::IDENTITY, layout::encode(&other)).await;
+            bucket::create(&bucket, layout::IDENTITY, layout::encode(&other)).await.unwrap();
             let refused = Error::BucketFormat(layout::FORMAT - 1);
             assert_eq!(get(&bucket).await, Err(refused.clone()));
             assert_eq!(format(&bucket, &Details::default(), Asked::default()).await, Err(refused));

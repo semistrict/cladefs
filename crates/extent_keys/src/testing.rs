@@ -231,7 +231,8 @@ pub struct LocalAwsKms {
     child: std::process::Child,
     endpoint: String,
     admin: aws_sdk_kms::Client,
-    runtime: tokio::runtime::Runtime,
+    /// Its admin calls' runtime: None once dropped ([`LocalAwsKms::run`]).
+    runtime: Option<tokio::runtime::Runtime>,
     _dir: tempfile::TempDir,
 }
 
@@ -300,7 +301,7 @@ impl LocalAwsKms {
             .endpoint_url(&endpoint)
             .build();
         let admin = aws_sdk_kms::Client::from_conf(config);
-        Self { child, endpoint, admin, runtime, _dir: dir }
+        Self { child, endpoint, admin, runtime: Some(runtime), _dir: dir }
     }
 
     /// Its endpoint, `http://127.0.0.1:PORT`.
@@ -321,30 +322,42 @@ impl LocalAwsKms {
 
     /// A new symmetric key, for encrypting: its ID.
     pub fn create_key(&self) -> String {
-        let made = self.runtime.block_on(self.admin.create_key().send()).unwrap();
+        let made = self.run(self.admin.create_key().send()).unwrap();
         made.key_metadata.unwrap().key_id
     }
 
     /// Makes the alias `alias` (`alias/...`) name the key `key_id`.
     pub fn create_alias(&self, alias: &str, key_id: &str) {
         let call = self.admin.create_alias().alias_name(alias).target_key_id(key_id).send();
-        self.runtime.block_on(call).unwrap();
+        self.run(call).unwrap();
     }
 
     /// Disables the key `key_id`, as a tenant revoking it would.
     pub fn disable(&self, key_id: &str) {
-        self.runtime.block_on(self.admin.disable_key().key_id(key_id).send()).unwrap();
+        self.run(self.admin.disable_key().key_id(key_id).send()).unwrap();
     }
 
     /// Enables the key `key_id` again.
     pub fn enable(&self, key_id: &str) {
-        self.runtime.block_on(self.admin.enable_key().key_id(key_id).send()).unwrap();
+        self.run(self.admin.enable_key().key_id(key_id).send()).unwrap();
     }
 
     /// Schedules the key `key_id`'s deletion, in a week, as a tenant shredding itself would.
     pub fn schedule_deletion(&self, key_id: &str) {
         let call = self.admin.schedule_key_deletion().key_id(key_id).pending_window_in_days(7);
-        self.runtime.block_on(call.send()).unwrap();
+        self.run(call.send()).unwrap();
+    }
+
+    /// `call`, run to its end on its runtime, on a thread of its own, which a test on a tokio
+    /// runtime may ask too: block_on refuses a runtime's thread (board 6672). Its runtime is shut
+    /// down in the background as it is dropped, which such a test may do too.
+    fn run<F: std::future::Future + Send>(&self, call: F) -> F::Output
+    where
+        F::Output: Send,
+    {
+        std::thread::scope(|scope| {
+            scope.spawn(|| self.runtime.as_ref().expect("dropped").block_on(call)).join().unwrap()
+        })
     }
 }
 
@@ -352,5 +365,8 @@ impl Drop for LocalAwsKms {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
     }
 }

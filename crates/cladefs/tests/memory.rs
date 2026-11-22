@@ -13,13 +13,14 @@
 mod common;
 
 use cladefs::cladefsd::metrics::render;
+use cladefs::slabs::SLAB;
 use cladefs::{CellClient, Errno, ExtentId, VolatileSlice};
 use common::daemon::{CAPACITY, Daemon, failure};
 use common::{memory, pattern, read_window};
 use tonic::Code;
 
-/// The kernel's chunks of physical memory, which memory is held, and limited, in.
-const CHUNK: u64 = 2 << 20;
+/// What the limits are set in: two slabs, each a part's at most.
+const CHUNK: u64 = 2 * SLAB;
 
 /// The extents a VM writes, of [`EXTENT`] bytes each.
 const EXTENTS: u64 = 8;
@@ -94,7 +95,7 @@ fn metric(name: &str) -> u64 {
 
 /// Asserts that the memory the metric `name` shows is within `limit`, read past it. Within it, not
 /// at it: the pages relief evicted come back as the VM process unmaps them, which may be after the
-/// last page-in, and a chunk they empty then goes back, with nothing to take it again (TASK-161).
+/// last page-in, and a slab they empty then goes back, with nothing to take it again (TASK-161).
 fn assert_within(name: &str, limit: u64) {
     let held = metric(name);
     assert!(held <= limit, "{name}: {held} bytes, past the limit of {limit}");
@@ -146,6 +147,8 @@ fn the_daemon_past_its_limit_evicts_any_tenants_pages() {
     read_through(&ours);
     assert_within("cladefsd_memory_bytes", 4 * CHUNK);
 
-    assert_eq!(daemon.shrink_memory(None, CHUNK).unwrap(), CHUNK);
-    assert_eq!(metric("cladefsd_memory_bytes"), CHUNK);
+    // A part at a time, a slab's at most, until within it: less than a slab under it.
+    let held = daemon.shrink_memory(None, CHUNK).unwrap();
+    assert!((CHUNK - SLAB + 1..=CHUNK).contains(&held), "shrunk to {held} bytes");
+    assert_eq!(metric("cladefsd_memory_bytes"), held);
 }

@@ -285,7 +285,9 @@ impl Host {
     pub async fn retire(&self, entry: &Entry) -> Result<(), Error> {
         let bucket = crate::host_cell::bucket(&entry.bucket)?;
         let (origin, child) = (entry.origin, entry.child);
-        bucket_cell::lifecycle::unrefer_ephemeral(&*bucket, origin, self.incarnation, child).await;
+        let unreferred =
+            bucket_cell::lifecycle::unrefer_ephemeral(&*bucket, origin, self.incarnation, child);
+        unreferred.await.map_err(bucket_cell::Error::from)?;
         self.forget(child)
     }
 
