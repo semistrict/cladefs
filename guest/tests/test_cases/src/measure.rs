@@ -187,9 +187,11 @@ mod host {
             .with_context(|| format!("connecting to the daemon's metrics at {address}"))?;
         stream.set_read_timeout(Some(Duration::from_secs(10)))?;
         stream.write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
-        // It closes the connection once it has answered.
+        // It closes the connection once it has answered. Past the timeout, a read fails with
+        // `EAGAIN`, which alone says nothing of what timed out (board 7084).
         let mut response = String::new();
-        stream.read_to_string(&mut response)?;
+        (stream.read_to_string(&mut response))
+            .with_context(|| format!("the daemon's metrics at {address}, read within 10 s"))?;
         let (head, body) = response.split_once("\r\n\r\n").context("the metrics' response")?;
         anyhow::ensure!(head.starts_with("HTTP/1.1 200"), "the daemon's metrics: {head}");
         Ok((body.lines())
