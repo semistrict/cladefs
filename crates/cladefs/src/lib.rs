@@ -234,5 +234,4 @@ mod tests {
         assert_eq!(commit.len(), 40, "{BUILD_COMMIT}");
         assert!(commit.bytes().all(|byte| byte.is_ascii_hexdigit()), "{BUILD_COMMIT}");
     }
-
 }

@@ -708,8 +708,8 @@ mod tests {
     use super::*;
     use crate::Rules;
     use crate::batch::{Commit, SegmentBuilder};
-    use crate::layout::test_cell;
     use crate::layout::NewVersion;
+    use crate::layout::test_cell;
     use crate::lifecycle;
     use crate::object_bucket::{ObjectBucket, Request};
     use object_store::memory::InMemory;
@@ -1067,5 +1067,4 @@ mod tests {
         let taken = vec![format!("put {anew}")];
         assert_eq!(rounds[..4], [put, get, slots_read(test_cell(1)), taken]);
     }
-
 }

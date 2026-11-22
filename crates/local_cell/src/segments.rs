@@ -2658,5 +2658,4 @@ mod tests {
         assert!(prepare(&mut segments, again).is_none(), "segment 5's placed");
         assert_eq!(segments.placed(), Some(segment(5)));
     }
-
 }
