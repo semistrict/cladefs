@@ -200,7 +200,7 @@ pub fn objects(
         }
         Ok(Segment { data, footer: framed.clone() }.encode((&dek, id)))
     });
-    Objects { footer, segment, own }
+    Objects { footer, segment, own, data_len: len }
 }
 
 /// Commits for one segment, in order: what they make ([`Plan`]), its data, and that of the
@@ -296,8 +296,14 @@ impl Data {
                 (location.key.clone(), layout::own_extent(extent, data, encrypting).into())
             })
             .collect();
+        let data_len = self.segment.len() as u64;
         let segment = Segment { data: self.segment.clone(), footer: footer.clone() };
-        Objects { footer: footer.clone(), segment: segment.encode(encrypting).into(), own }
+        Objects {
+            footer: footer.clone(),
+            segment: segment.encode(encrypting).into(),
+            own,
+            data_len,
+        }
     }
 }
 

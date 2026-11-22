@@ -81,11 +81,13 @@ impl From<Vec<u8>> for Body {
 
 /// A segment's objects, as a writer uploads them ([`Writer::add_segment`]): its footer, which its
 /// bytes end with; the segment's; and those of the extents its footer says are stored on their
-/// own, by their keys, which go first.
+/// own, by their keys, which go first. cladefs: and the length of the segment's data, framed
+/// (`extent_frame::Frame::data_len`), which its checkpoints keep ([`State::lengths`]).
 pub struct Objects {
     pub footer: Footer,
     pub segment: Body,
     pub own: Vec<(String, Body)>,
+    pub data_len: u64,
 }
 
 /// What a writer tells of the extents its checkpoints record as moved, from where to where, as it
@@ -143,6 +145,8 @@ struct Naming {
 
 struct Pending {
     footer: Footer,
+    /// The length of its data ([`Objects::data_len`]).
+    data_len: u64,
     /// Its object, and those of its extents stored on their own, uploaded first, until they are
     /// uploaded.
     objects: Option<(Body, Vec<(String, Body)>)>,
@@ -317,7 +321,7 @@ impl<B: Bucket> Writer<B> {
     /// objects of the extents it says are stored on their own must come with it, by their keys.
     /// Returns its number.
     pub fn add_segment(&self, objects: Objects) -> Result<u64, Error> {
-        let Objects { footer, segment: framed, own } = objects;
+        let Objects { footer, segment: framed, own, data_len } = objects;
         let mut inner = self.inner();
         if let Some(error) = &inner.stopped {
             return Err(error.clone());
@@ -331,7 +335,8 @@ impl<B: Bucket> Writer<B> {
         }
         inner.chain = chain;
         let segment = footer.segment;
-        inner.pending.insert(segment, Pending { footer, objects: Some((framed, own)) });
+        let pending = Pending { footer, data_len, objects: Some((framed, own)) };
+        inner.pending.insert(segment, pending);
         Ok(segment)
     }
 
@@ -517,7 +522,8 @@ impl<B: Bucket> Writer<B> {
                 if *entry.key() > through {
                     break;
                 }
-                inner.state.apply(&entry.remove().footer);
+                let Pending { footer, data_len, .. } = entry.remove();
+                inner.state.apply(&footer, data_len);
             }
         }
         failpoint!("writer::acknowledged");
@@ -660,6 +666,9 @@ impl<B: Bucket> Writer<B> {
         let key = layout::checkpoint(self.cell, segment, self.epoch);
         // One this writer wrote before, of the same segment, holds the same extents, perhaps
         // elsewhere: it stands, at its key, written once.
+        // cladefs: the lengths of the segments it names alone (doc-27).
+        let applied = state.lengths.clone();
+        state.lengths = state.named_lengths();
         let checkpoint = crate::checkpoint::encode(&state, self.keys.encrypting());
         bucket::create(&*self.bucket, &key, checkpoint).await?;
         {
@@ -679,6 +688,11 @@ impl<B: Bucket> Writer<B> {
         }
         let mut inner = self.inner();
         inner.checkpoint = inner.checkpoint.max(Some(segment));
+        // cladefs: and lets go of those of segments it named none in as of it, which it names
+        // none in again: what it applied since, it keeps (doc-27).
+        for key in applied.keys().filter(|key| !state.lengths.contains_key(*key)) {
+            inner.state.lengths.remove(key);
+        }
         Ok(inner.checkpoint)
     }
 

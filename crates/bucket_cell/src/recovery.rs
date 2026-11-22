@@ -31,7 +31,7 @@ use extent_frame::spent::Spent;
 use futures::future::{BoxFuture, FutureExt as _, Shared};
 use futures::{StreamExt as _, TryStreamExt as _};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
 use storage_device::ExtentId;
 
@@ -60,7 +60,15 @@ pub struct State<P = Extents> {
     /// segment ends, if they did ([`Begun`], TASK-92.41): none in a state a head names, nor in any
     /// checkpoint, as writers acknowledge only segments ending their commits.
     pub begun: Option<Begun>,
+    /// cladefs: the length of the data of each of the cell's own segments, by key, of those applied
+    /// and those a checkpoint it started from kept ([`State::named_lengths`]): what its writer
+    /// measures their density against, the bytes it holds in each, to choose what to relocate
+    /// (doc-27), with no request to learn it.
+    pub lengths: Lengths,
 }
+
+/// cladefs: the length of the data of each of a cell's own segments, by key ([`State::lengths`]).
+pub type Lengths = imbl::OrdMap<String, u64>;
 
 /// cladefs: the runs a commit sealed in segments applied that a later segment ends
 /// (`extent_frame::segment::Continued`, TASK-92.41): sealed with it, where they are, once it does;
@@ -120,6 +128,7 @@ impl<P> State<P> {
             spent: Spent::default(),
             capacity: None,
             begun: None,
+            lengths: Lengths::new(),
         }
     }
 
@@ -146,17 +155,40 @@ impl<P> State<P> {
             spent,
             capacity,
             begun,
+            lengths,
         } = self;
         let extents = place(extents);
-        State { cell, extents, next_sequence, root, last_commit, through, spent, capacity, begun }
+        State {
+            cell,
+            extents,
+            next_sequence,
+            root,
+            last_commit,
+            through,
+            spent,
+            capacity,
+            begun,
+            lengths,
+        }
+    }
+}
+
+impl State {
+    /// cladefs: its lengths, but those of segments it holds no extent in: those a checkpoint of it
+    /// keeps ([`State::lengths`]).
+    pub fn named_lengths(&self) -> Lengths {
+        let named: HashSet<&str> = self.extents.values().map(|at| at.key.as_str()).collect();
+        let lengths = self.lengths.iter().filter(|(key, _)| named.contains(key.as_str()));
+        lengths.map(|(key, len)| (key.clone(), *len)).collect()
     }
 }
 
 impl<P: Places> State<P> {
-    /// Applies `footer`'s segment, the next its head names.
-    pub fn apply(&mut self, footer: &Footer) {
+    /// Applies `footer`'s segment, the next its head names, its data `len` bytes long.
+    pub fn apply(&mut self, footer: &Footer, len: u64) {
         self.through = Some(footer.segment);
         self.apply_contents(footer.segment, footer.epoch, &footer.contents);
+        self.lengths.insert(layout::segment(self.cell, footer.segment, footer.epoch), len);
     }
 
     /// Applies `contents`, those of the cell's segment `segment`, of the writer of epoch `epoch`:
@@ -1026,11 +1058,11 @@ async fn follow<B: Bucket>(
         })
         .buffered(AT_ONCE);
     while let Some((key, footer)) = footers.try_next().await? {
-        let Some(footer) = footer else {
+        let Some((footer, len)) = footer else {
             drop(footers);
             return Err(moved(bucket, cell, head.as_ref()).await);
         };
-        state.apply(&footer);
+        state.apply(&footer, len);
         touched.insert(key);
     }
     Ok(())
@@ -1046,22 +1078,23 @@ async fn moved(bucket: &impl Bucket, cell: CellId, head: Option<&Head>) -> Attem
     }
 }
 
-/// The footer of segment `seq` of `cell` by the writer of `epoch`, if it is there: read by its
-/// object's tail, a ranged read of its last bytes, which hold it ([`object::tail`]), not by the
-/// segment whole. cladefs: checked against its MAC if `keys` hold its key (TASK-411.3); in the
-/// clear, corrupt (TASK-411.28).
+/// The footer of segment `seq` of `cell` by the writer of `epoch`, if it is there, and the length
+/// of its data, as its trailer says: read by its object's tail, a ranged read of its last bytes,
+/// which hold them ([`object::tail`]), not by the segment whole. cladefs: checked against its MAC
+/// if `keys` hold its key (TASK-411.3); in the clear, corrupt (TASK-411.28).
 async fn segment_footer(
     (bucket, keys): (&impl Bucket, &Ring),
     cell: CellId,
     segment: u64,
     epoch: u64,
-) -> Result<Option<Footer>, Error> {
+) -> Result<Option<(Footer, u64)>, Error> {
     let key = layout::segment(cell, segment, epoch);
     let Some(tail) = object::tail(bucket, &key).await? else { return Ok(None) };
     if !keys.is_empty() {
         tail.open(&keys.of(cell.id))?;
     }
-    Ok(Some(placed(&key, layout::decode(tail.footer())?, cell, segment, epoch)?))
+    let footer = placed(&key, layout::decode(tail.footer())?, cell, segment, epoch)?;
+    Ok(Some((footer, tail.parts.frame.data_len)))
 }
 
 /// `footer`, that of the object at `key`, which holds segment `segment` of `cell` by the writer
@@ -1292,9 +1325,9 @@ async fn walk<B: Bucket>(
             .buffered(AT_ONCE);
     while let Some((key, footer)) = footers.try_next().await? {
         // A segment the head names goes only once a checkpoint covers it.
-        let Some(footer) = footer else { return Err(Attempt::Restart) };
+        let Some((footer, len)) = footer else { return Err(Attempt::Restart) };
         taking.note(&state, &footer.contents, cell);
-        state.apply(&footer);
+        state.apply(&footer, len);
         touched.insert(key);
         if ats.next_if_eq(&footer.segment).is_some() && ats.peek().is_some() {
             taking.take(&state, walked);
@@ -1637,7 +1670,12 @@ mod tests {
                     .encode(writer.keys().encrypting())
                     .into();
                 let segment = writer
-                    .add_segment(Objects { footer, segment: framed, own: Vec::new() })
+                    .add_segment(Objects {
+                        footer,
+                        segment: framed,
+                        own: Vec::new(),
+                        data_len: 8192,
+                    })
                     .unwrap();
                 writer.upload(segment).await.unwrap();
                 (segment, writer.acknowledge().await.unwrap())

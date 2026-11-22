@@ -2328,7 +2328,7 @@ async fn segments_upload_before_their_framed_files_are_durable() {
     let framed = Padded(segment.number).to_string();
     assert!(!names(&dir, "segments").contains(&framed), "its framed file named its own");
     let mut landed = bucket_cell::State::new(CELL);
-    landed.apply(&segment.footer);
+    landed.apply(&segment.footer, segment.data_len);
     let chain = WRITER.admit(&segment.footer).unwrap();
     // What a cell opened on what the bucket holds, crashed at `seed`, holds: both extents, here,
     // or in the bucket, once it landed there.

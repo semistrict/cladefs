@@ -2584,11 +2584,11 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 let own = closed.own.iter().map(|(key, file)| Ok((key.clone(), stored(file)?)));
                 own.collect::<Result<_, Failure>>()
             })?;
-            let footer = closed.footer.clone();
+            let (footer, data_len) = (closed.footer.clone(), closed.data_len);
             let size = closed.file.size().map_err(|err| Failure::local(err, "a segment"))?;
             let closed = Arc::new(closed);
             let body = Body::new(size, move || blocking(|| closed.bytes()));
-            let segment = writer.add_segment(Objects { footer, segment: body, own })?;
+            let segment = writer.add_segment(Objects { footer, segment: body, own, data_len })?;
             segments.push(Uploading { segment, number, tag });
         }
         let took = !segments.is_empty();
@@ -2787,7 +2787,7 @@ fn full(err: &anyhow::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Description, MemDir};
+    use crate::{Description, MemDir, Sparse};
     use bucket_cell::fetch::Limits;
     use storage_device::ExtentId;
 
@@ -2882,6 +2882,102 @@ mod tests {
         assert!(matches!(fenced, Err(Failure::Bucket(bucket_cell::Error::Fenced))), "{fenced:?}");
         let back = bucket_cell::testing::take(&*bucket, CELL, 0x55, 5).await;
         assert_eq!(back.map(|held| held.head), Err(bucket_cell::Error::Stale));
+    }
+
+    /// cladefs: doc-27 (board 6214): a cell opened again on what its bucket holds knows the length
+    /// of each of its segments' data, with no request of its own: those a checkpoint names, kept
+    /// in it, and those after it, from the trailers its recovery reads their footers by. So it
+    /// finds the segments sparse that the cell before it found, each its data's length as framed,
+    /// which its acknowledgements took from the write-ahead log's account of it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cells_opened_again_know_their_segments_lengths() {
+        const BLOCK: usize = 4096;
+        let host = Runtime {
+            handle: tokio::runtime::Handle::current(),
+            uploads: Budget::new(Limits::UNBOUNDED),
+            keys: bucket_cell::keys::testing::host(),
+        };
+        let bucket = Arc::new(
+            ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), "").unrouted(),
+        );
+        let dir = MemDir::new();
+        let description = Description { block_size: BLOCK as u32, capacity: 1 << 30, cell: CELL };
+        LocalCell::make(&dir, description, Some("memory:///lengths"), None).unwrap();
+        lifecycle::create(&*bucket, CELL, 1).await.unwrap();
+        let hour = Duration::from_secs(3600);
+        let options =
+            Options { interval: hour, checkpoint_every: 3, token: 5, ..Options::default() };
+        let recovering = LocalCell::recover_unmade(dir.clone()).unwrap();
+        let (cell, uploader) = open(
+            recovering,
+            crate::Options::default(),
+            bucket.clone(),
+            (1, options.clone()),
+            &host,
+        )
+        .await
+        .unwrap();
+        cell.made().unwrap();
+        let extent = |sequence| ExtentId::new(CELL.id, sequence);
+        // Each its own segment, uploaded.
+        let segment = async |write: std::ops::Range<u64>, free: &[u64]| {
+            for sequence in write {
+                cell.write(extent(sequence), 0, &[sequence as u8; BLOCK]).await.unwrap();
+            }
+            for &sequence in free {
+                cell.free(extent(sequence)).unwrap();
+            }
+            cell.commit(None).await.unwrap();
+            uploader.uploaded(cell.last_commit().unwrap()).await.unwrap();
+        };
+        segment(0..8, &[]).await;
+        segment(8..16, &[]).await;
+        // The second freed whole: its length goes.
+        segment(16..17, &(8..16).collect::<Vec<_>>()).await;
+        // The checkpoint of those three landed, before what comes after.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let head = bucket_cell::head::get(&*bucket, CELL).await.unwrap().unwrap();
+            if head.checkpoint.is_some() {
+                assert_eq!(head.checkpoint, Some((2, 1)), "the checkpoint of the first three");
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "no checkpoint written");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let block = BLOCK as u64;
+        let key = bucket_cell::layout::checkpoint(CELL, 2, 1);
+        let checkpoint = bucket_cell::bucket::get(&*bucket, &key).await.unwrap().unwrap();
+        let lengths = bucket_cell::checkpoint::decode(&checkpoint.bytes).unwrap().lengths;
+        let segment_key = |segment| bucket_cell::layout::segment(CELL, segment, 1);
+        let named = [(segment_key(0), 8 * block), (segment_key(2), block)];
+        assert_eq!(lengths, named.into_iter().collect(), "the checkpoint's lengths");
+        segment(17..21, &[]).await;
+        segment(21..21, &[0, 1, 2, 3, 4, 17, 18, 19]).await;
+        let sparse = [
+            Sparse {
+                key: bucket_cell::layout::segment(CELL, 0, 1),
+                live: 3 * block,
+                len: 8 * block,
+            },
+            Sparse { key: bucket_cell::layout::segment(CELL, 3, 1), live: block, len: 4 * block },
+        ];
+        assert_eq!(cell.sparse(|_| false).unwrap(), sparse, "as acknowledged");
+        // Gone with no checkpoint more: what follows the first is read by its trailers.
+        uploader.cut_short()();
+        uploader.close().await;
+        cell.close().await.unwrap();
+        drop(cell);
+        let head = bucket_cell::head::get(&*bucket, CELL).await.unwrap().unwrap();
+        assert_eq!((head.checkpoint, head.end), (Some((2, 1)), 5), "no checkpoint more");
+
+        let recovering = LocalCell::recover(dir).unwrap();
+        let options = Options { token: 6, ..options };
+        let (cell, _uploader) =
+            open(recovering, crate::Options::default(), bucket.clone(), (2, options), &host)
+                .await
+                .unwrap();
+        assert_eq!(cell.sparse(|_| false).unwrap(), sparse, "as recovered");
     }
 
     /// TASK-539.9: a cell's disk under pressure urges its uploader, which closes the open segment

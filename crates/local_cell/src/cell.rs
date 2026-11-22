@@ -1255,7 +1255,13 @@ impl<D: Dir> Recovering<D> {
         let epoch = head.map_or(0, epoch_of);
         let restate = replay.capacity.is_none() && found.is_some();
         let capacity = replay.capacity.unwrap_or(capacity);
-        let bucket_cell::State { extents: Local { extents, .. }, root, spent, .. } = replay;
+        let bucket_cell::State { extents: Local { mut extents, .. }, root, spent, lengths, .. } =
+            replay;
+        // cladefs: the lengths of its segments' data the bucket's state knows: what their density
+        // is measured against, with no request (doc-27).
+        for (key, len) in &lengths {
+            extents.sized(key, *len);
+        }
         // Past every extent of its own the cell holds: fxfs looks for what a crash left below
         // it (`Allocator::open`). Not the footers' next sequence, which their writers stamped
         // past their own floors (`Chain::close`), the next floor being the uploader's to say.
@@ -3403,12 +3409,15 @@ impl<D: Dir> LocalCell<D> {
         // cladefs: and framed: its framed file is what is uploaded.
         let segments = &state.segments;
         let writing = |number| segments.is_writing(SegmentId { cell: self.cell.id, number });
-        let taken: Vec<(u64, Footer, bool)> = (state.wal.take(self.uploadable(), writing, limit))
-            .into_iter()
-            .map(|queued| (queued.number, queued.footer.clone(), queued.restamped))
-            .collect();
+        let taken: Vec<(u64, Footer, bool, u64)> =
+            (state.wal.take(self.uploadable(), writing, limit))
+                .into_iter()
+                .map(|queued| {
+                    (queued.number, queued.footer.clone(), queued.restamped, queued.data_len())
+                })
+                .collect();
         let mut closed = Vec::with_capacity(taken.len());
-        for (number, footer, restamped) in taken {
+        for (number, footer, restamped, data_len) in taken {
             let segment = SegmentId { cell: self.cell.id, number };
             let file = state.segments.framed_file(&*self.dir, segment)?.file.clone();
             let mut own = Vec::with_capacity(footer.contents.own.len());
@@ -3417,7 +3426,7 @@ impl<D: Dir> LocalCell<D> {
                 own.push((location.key, file.file.clone()));
             }
             let keys = self.keys.clone();
-            closed.push(Closed { number, footer, file, own, restamped, keys });
+            closed.push(Closed { number, footer, file, own, restamped, keys, data_len });
         }
         Ok(closed)
     }

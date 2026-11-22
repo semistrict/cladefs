@@ -75,8 +75,12 @@ pub struct Child {
 /// about one write a second of an object, and a bucket's identity holds its settings
 /// ([`crate::identity::Settings`]); nothing reads 22's, whose head was one object. 24: a version's
 /// read evidence, what forks of it read of it as they opened, each tenant's under the version's
-/// cell's prefix ([`evidence`], [`crate::evidence`], TASK-702.2); nothing reads 23's.
-pub const FORMAT: u32 = 25;
+/// cell's prefix ([`evidence`], [`crate::evidence`], TASK-702.2); nothing reads 23's. 25: an origin
+/// and a version name the epoch of their segment, whose checkpoint is read by its key, with no read
+/// of its cell's head (board 6017); nothing reads 24's. 26: a checkpoint keeps the length of the
+/// data of each of its cell's own segments its extents are in ([`crate::State::lengths`], doc-27),
+/// which its writer measures their density against; nothing reads 25's.
+pub const FORMAT: u32 = 26;
 
 /// cladefs: the most slots a cell's head is kept in ([`crate::identity::Settings::head_slots`],
 /// TASK-691): keys past it are no head's.

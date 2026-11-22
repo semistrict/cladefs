@@ -24,6 +24,8 @@ pub struct Closed<F> {
     pub restamped: bool,
     /// cladefs: the cell's keys, which an encrypted segment is restamped under (TASK-411.3).
     pub keys: std::sync::Arc<bucket_cell::keys::Ring>,
+    /// cladefs: the length of its data, framed ([`bucket_cell::Objects::data_len`]).
+    pub data_len: u64,
 }
 
 impl<F: File> Closed<F> {
