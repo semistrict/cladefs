@@ -15,8 +15,7 @@
 # killer its header names within CLADEFS_GATE_MUTANT_REPEATS repeats (default 3). Before either run
 # starts, the simulator's mutants, in minutes (guest/sim/mutants.sh, through guest/sim/linux.sh, so
 # on Linux with KERNEL and BUILD set, or in a container elsewhere). A pass is recorded as a note on
-# HEAD (`git notes --ref=dax-gate`), which scripts/hooks/pre-push asks for of a push changing the
-# guest's DAX code: `git config core.hooksPath scripts/hooks` installs it.
+# HEAD (`git notes --ref=dax-gate`).
 #
 # Usage: dax-gate.sh
 # CLADEFS_GATE_REPEATS is the suites' repeats (default 5). Results go to /tmp/cladefs-gate-<commit>.
