@@ -10,7 +10,8 @@
 
 use crate::Error;
 use crate::layout::{self, Location};
-use crate::recovery::State;
+use crate::recovery::{Lengths, State};
+use bincode::Options as _;
 use extent_frame::table::{self, Block, Entry, TableFooter};
 use storage_device::ExtentId;
 
@@ -19,10 +20,38 @@ pub use extent_frame::table::TABLE_BLOCK;
 /// The checkpoint of `state`. cladefs: authenticated, not encrypted, under the DEK `encrypting`
 /// gives: metadata, which the collector reads holding no key (doc-16, TASK-411.3).
 pub fn encode(state: &State, encrypting: layout::EncryptionKey<'_>) -> Vec<u8> {
+    encode_kept(state, encrypting).0
+}
+
+/// The checkpoint of `state`, as [`encode`] makes it, and the lengths it keeps: cladefs: those of
+/// the segments its extents are in alone ([`State::named_lengths`], doc-27), whoever writes it, a
+/// writer or a fork's making, as no later checkpoint at its key replaces it. In its table's
+/// appendix, which a recovery reads with the rest and a lookup never does
+/// (`extent_frame::table::Appendix`): each by the segment's number and its writer's epoch, as its
+/// key names them, as varints, a few bytes each, not its key's tens.
+pub fn encode_kept(state: &State, encrypting: layout::EncryptionKey<'_>) -> (Vec<u8>, Lengths) {
+    let lengths = state.named_lengths();
+    let numbered: Vec<(u64, u64, u64)> = (lengths.iter())
+        .filter_map(|(key, len)| match layout::kind(key) {
+            layout::Kind::Segment { cell, segment, epoch } if cell == state.cell => {
+                Some((segment, epoch, *len))
+            }
+            _ => {
+                debug_assert!(false, "{key}'s length kept, no segment of {}", state.cell);
+                None
+            }
+        })
+        .collect();
+    let appendix = varint().serialize(&numbered).expect("objects serialize");
     let rest = State { extents: Default::default(), ..state.clone() };
     let entries = (state.extents.iter())
         .map(|(extent, location)| (*extent, location.key.as_str(), location.offset, location.len));
-    table::encode(entries, layout::encode(&rest), encrypting)
+    (table::encode(entries, layout::encode(&rest), &appendix, encrypting), lengths)
+}
+
+/// How a checkpoint's lengths are encoded in its table's appendix: their numbers as varints.
+fn varint() -> impl bincode::Options {
+    bincode::DefaultOptions::new()
 }
 
 fn located(entry: Entry) -> (ExtentId, Location) {
@@ -40,9 +69,14 @@ pub fn decode(bytes: &[u8]) -> Result<State, Error> {
 /// and MACs if they hold its key, and refused if they hold its cell encrypted and not its key
 /// (TASK-411.3).
 pub fn decode_under(bytes: &[u8], keys: &dyn extent_frame::Keys) -> Result<State, Error> {
-    let (footer, entries) = table::decode(bytes, keys)?;
+    let table::Decoded { footer, entries, appendix } = table::decode(bytes, keys)?;
     let mut state: State = layout::decode(&footer.rest)?;
     state.extents.extend(entries.into_iter().map(located));
+    let numbered: Vec<(u64, u64, u64)> =
+        varint().deserialize(&appendix).map_err(|err| Error::Corrupt(err.to_string()))?;
+    state.lengths = (numbered.into_iter())
+        .map(|(segment, epoch, len)| (layout::segment(state.cell, segment, epoch), len))
+        .collect();
     Ok(state)
 }
 
@@ -64,7 +98,8 @@ impl Table {
         Ok(Self { footer, state })
     }
 
-    /// The state, without its extents.
+    /// The state, without its extents, nor its lengths, which its appendix holds
+    /// ([`encode_kept`]).
     pub fn state(&self) -> &State {
         &self.state
     }
@@ -112,6 +147,9 @@ mod tests {
             let location = Location { key, offset: sequence * 4096, len: 4096 };
             state.extents.insert(ExtentId::new(3, sequence), location);
         }
+        for object in 0..extents.div_ceil(per_object) {
+            state.lengths.insert(layout::segment(test_cell(3), object, 1), per_object * 4096);
+        }
         state.root = Some(b"root".to_vec());
         state.through = Some(7);
         state.capacity = Some(1 << 30);
@@ -123,6 +161,10 @@ mod tests {
         for extents in [0, 1, 1819, 1820, 1821, 10_000] {
             let state = state(extents);
             assert_eq!(decode(&encode(&state, encrypting())).unwrap(), state);
+            // cladefs: and the length of a segment it holds nothing in, freed, goes (doc-27).
+            let mut freed = state.clone();
+            freed.lengths.insert(layout::segment(test_cell(3), 99, 1), 4096);
+            assert_eq!(decode(&encode(&freed, encrypting())).unwrap(), state);
         }
         let mut bytes = encode(&state(3000), encrypting());
         bytes[100] ^= 1;

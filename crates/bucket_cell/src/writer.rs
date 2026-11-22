@@ -666,10 +666,7 @@ impl<B: Bucket> Writer<B> {
         let key = layout::checkpoint(self.cell, segment, self.epoch);
         // One this writer wrote before, of the same segment, holds the same extents, perhaps
         // elsewhere: it stands, at its key, written once.
-        // cladefs: the lengths of the segments it names alone (doc-27).
-        let applied = state.lengths.clone();
-        state.lengths = state.named_lengths();
-        let checkpoint = crate::checkpoint::encode(&state, self.keys.encrypting());
+        let (checkpoint, kept) = crate::checkpoint::encode_kept(&state, self.keys.encrypting());
         bucket::create(&*self.bucket, &key, checkpoint).await?;
         {
             let mut held = self.held.lock().await;
@@ -690,7 +687,7 @@ impl<B: Bucket> Writer<B> {
         inner.checkpoint = inner.checkpoint.max(Some(segment));
         // cladefs: and lets go of those of segments it named none in as of it, which it names
         // none in again: what it applied since, it keeps (doc-27).
-        for key in applied.keys().filter(|key| !state.lengths.contains_key(*key)) {
+        for key in state.lengths.keys().filter(|key| !kept.contains_key(*key)) {
             inner.state.lengths.remove(key);
         }
         Ok(inner.checkpoint)

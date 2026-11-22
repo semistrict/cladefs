@@ -63,7 +63,9 @@ pub struct State<P = Extents> {
     /// cladefs: the length of the data of each of the cell's own segments, by key, of those applied
     /// and those a checkpoint it started from kept ([`State::named_lengths`]): what its writer
     /// measures their density against, the bytes it holds in each, to choose what to relocate
-    /// (doc-27), with no request to learn it.
+    /// (doc-27), with no request to learn it. Kept in a checkpoint by number, not by key
+    /// ([`crate::checkpoint`]).
+    #[serde(skip)]
     pub lengths: Lengths,
 }
 
