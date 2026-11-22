@@ -2031,100 +2031,135 @@ fn followers_pin_only_what_their_views_hold() {
     assert_eq!(follower.pin(made_up), Err(Errno::ENOENT));
 }
 
+/// A transfer area of `len` bytes, its first half written as the slots a VM process used, given
+/// to a daemon serving a connection of its cell: the area's memory and mapping, and the connection.
+struct ServedArea {
+    _dir: tempfile::TempDir,
+    file: std::fs::File,
+    addr: *mut u8,
+    len: usize,
+    sender: super::wire::Sender,
+    receiver: super::wire::Receiver,
+    _stream: UnixStream,
+    cell: u64,
+}
+
+impl ServedArea {
+    fn new(len: usize) -> Self {
+        use super::wire::*;
+        use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+        host();
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("cladefsd.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || serve(listener));
+        // SAFETY: The name is a C string.
+        let fd = unsafe { libc::memfd_create(c"area".as_ptr(), libc::MFD_ALLOW_SEALING) };
+        assert!(fd >= 0);
+        // SAFETY: Just made, owned here.
+        let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+        file.set_len(len as u64).unwrap();
+        let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW;
+        // SAFETY: Seals what this test made.
+        assert_eq!(unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) }, 0);
+        // SAFETY: Maps it, as large as it is, for the test's life.
+        let addr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        assert_ne!(addr, libc::MAP_FAILED);
+        let addr = addr.cast::<u8>();
+        // SAFETY: Within the mapping.
+        unsafe { addr.write_bytes(1, len / 2) };
+        let (sender, mut receiver, stream, cell) =
+            raw_connection(&socket, &dir.path().join("store"), 1 << 24);
+        let transfer = Header::new(TRANSFER, 2).with_args(&[len as u64]);
+        sender.send(transfer, &[], &[file.as_fd()]).unwrap();
+        assert_eq!(receiver.receive(|| 0).unwrap().unwrap().header.status, 0);
+        let mut served =
+            Self { _dir: dir, file, addr, len, sender, receiver, _stream: stream, cell };
+        let written = Header::new(WRITE, 3).with_args(&[cell, 1]);
+        assert_eq!(served.call(written, &pattern(2, BLOCK)), 0);
+        served
+    }
+
+    /// The status of `request`, of `payload`.
+    fn call(&mut self, request: super::wire::Header, payload: &[u8]) -> i32 {
+        call(&self.sender, &mut self.receiver, request, payload).header.status
+    }
+
+    /// The status of a read, request `id`, of the cell's first block into the area at `at`.
+    fn read_into(&mut self, id: u64, at: usize) -> i32 {
+        use super::wire::*;
+        let read = Header::new(READ, id)
+            .with_args(&[self.cell, 1, 0, BLOCK as u64, at as u64])
+            .with_flags(READ_TRANSFER);
+        self.call(read, &[])
+    }
+
+    /// The area's block at `at`.
+    fn block(&self, at: usize) -> &[u8] {
+        assert!(at + BLOCK <= self.len);
+        // SAFETY: Within the mapping, which the daemon wrote and replied of.
+        unsafe { std::slice::from_raw_parts(self.addr.add(at), BLOCK) }
+    }
+}
+
 /// TASK-547: what of a transfer area the daemon accesses is the VM process's memory, each page of
 /// it written by the VM process first, which the kernel charges to the VM process; and the daemon
 /// seals the area against writes once it has mapped it, so that no page of it is punched out to be
 /// faulted in again by the daemon, charged to the daemon for as long as the VM process keeps it.
 /// A read into bytes of it the VM process never wrote, which the daemon would fault in itself, is
-/// refused; one into bytes it wrote is served, and so is one into bytes it wrote that went to swap
-/// since, which a host short of memory refused before (board 6881).
+/// refused; one into bytes it wrote is served.
 #[test]
 fn transfer_areas_are_their_vm_processes_memory() {
-    use super::wire::*;
-    use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
-    host();
-    let dir = tempfile::tempdir().unwrap();
-    let socket = dir.path().join("cladefsd.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
-    std::thread::spawn(move || serve(listener));
+    use std::os::fd::AsRawFd;
     let len = 1 << 20;
-    // SAFETY: The name is a C string.
-    let fd = unsafe { libc::memfd_create(c"area".as_ptr(), libc::MFD_ALLOW_SEALING) };
-    assert!(fd >= 0);
-    // SAFETY: Just made, owned here.
-    let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
-    file.set_len(len as u64).unwrap();
-    let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW;
-    // SAFETY: Seals what this test made.
-    assert_eq!(unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) }, 0);
-    // SAFETY: Maps it, as large as it is, for the test's life.
-    let addr = unsafe {
-        libc::mmap(
-            std::ptr::null_mut(),
-            len,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_SHARED,
-            file.as_raw_fd(),
-            0,
-        )
-    };
-    assert_ne!(addr, libc::MAP_FAILED);
-    // Its first half written, as the slots a VM process used.
-    // SAFETY: Within the mapping.
-    unsafe { addr.cast::<u8>().write_bytes(1, len / 2) };
-    let (sender, mut receiver, _stream, cell) =
-        raw_connection(&socket, &dir.path().join("store"), 1 << 24);
-    let transfer = Header::new(TRANSFER, 2).with_args(&[len as u64]);
-    sender.send(transfer, &[], &[file.as_fd()]).unwrap();
-    assert_eq!(receiver.receive(|| 0).unwrap().unwrap().header.status, 0);
-    let written = Header::new(WRITE, 3).with_args(&[cell, 1]);
-    assert_eq!(call(&sender, &mut receiver, written, &pattern(2, BLOCK)).header.status, 0);
-    let read_at = |id: u64, at: u64| {
-        Header::new(READ, id).with_args(&[cell, 1, 0, BLOCK as u64, at]).with_flags(READ_TRANSFER)
-    };
-    let unwritten = call(&sender, &mut receiver, read_at(4, len as u64 / 2), &[]);
-    assert_eq!(unwritten.header.status, -Errno::EINVAL.raw());
-    assert_eq!(call(&sender, &mut receiver, read_at(5, 0), &[]).header.status, 0);
-    // SAFETY: Within the mapping, which the daemon wrote and replied of.
-    let read = unsafe { std::slice::from_raw_parts(addr.cast::<u8>(), BLOCK) };
-    assert_eq!(read, &pattern(2, BLOCK)[..]);
-    // A block of the written half the daemon never touched, so mapped by this mapping alone, which
-    // MADV_PAGEOUT takes out alone: swapped out, in no memory, but written.
-    let swapped = len / 4;
-    // SAFETY: Within the mapping.
-    let at = unsafe { addr.cast::<u8>().add(swapped) };
-    let span = BLOCK.max(crate::pages::page_size() as usize);
-    let mut resident = vec![1u8; span / crate::pages::page_size() as usize];
-    // Paged out to a swap file, a page stays in the swap cache, in memory, until it is written
-    // there, and unmapped then, so no second MADV_PAGEOUT reaches it: read, it is mapped again,
-    // and once written to swap, clean, the next takes it out at once (board 6881: CI's runners
-    // swap to a file; ubu1's to zram, at once).
-    for _ in 0..500 {
-        // SAFETY: Of the mapping, page-aligned, a page or more of it.
-        assert_eq!(unsafe { libc::madvise(at.cast(), span, libc::MADV_PAGEOUT) }, 0);
-        // SAFETY: As above, a byte a page.
-        assert_eq!(unsafe { libc::mincore(at.cast(), span, resident.as_mut_ptr().cast()) }, 0);
-        if resident.iter().all(|page| page & 1 == 0) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        for page in (0..span).step_by(crate::pages::page_size() as usize) {
-            // SAFETY: Within the mapping.
-            unsafe { at.add(page).read_volatile() };
-        }
-    }
-    assert!(resident.iter().all(|page| page & 1 == 0), "not paged out: the host has no swap");
-    let swapped_in = call(&sender, &mut receiver, read_at(6, swapped as u64), &[]);
-    assert_eq!(swapped_in.header.status, 0);
-    // SAFETY: Within the mapping, which the daemon wrote and replied of.
-    let read = unsafe { std::slice::from_raw_parts(at, BLOCK) };
-    assert_eq!(read, &pattern(2, BLOCK)[..]);
+    let mut area = ServedArea::new(len);
+    assert_eq!(area.read_into(4, len / 2), -Errno::EINVAL.raw());
+    assert_eq!(area.read_into(5, 0), 0);
+    assert_eq!(area.block(0), &pattern(2, BLOCK)[..]);
     // Sealed against writes: no page of it punched out.
     let mode = libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE;
     // SAFETY: Of what this test made.
-    let punched = unsafe { libc::fallocate(file.as_raw_fd(), mode, 0, 4096) };
+    let punched = unsafe { libc::fallocate(area.file.as_raw_fd(), mode, 0, 4096) };
     assert_eq!(punched, -1, "a page of the area punched out");
     assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));
+}
+
+/// Board 6881: a read into bytes of a transfer area its VM process wrote that went to swap since is
+/// served: they are written still, though in no memory, which the daemon took for never written
+/// once, refusing the reads of a host short of memory, its guests' failing with EIO. Ignored where
+/// shared memory may not be paged out: CI's runners page none out, though they have swap; ubu1's
+/// zram takes it (`--run-ignored all`).
+#[test]
+#[ignore = "needs a host that pages shared memory out to swap: ubu1's zram, not CI's runners"]
+fn transfer_areas_written_and_swapped_out_are_read_into() {
+    let len = 1 << 20;
+    let mut area = ServedArea::new(len);
+    // A block of the written half the daemon never touched, so mapped by this mapping alone, which
+    // MADV_PAGEOUT takes out alone.
+    let at = len / 4;
+    let page = crate::pages::page_size() as usize;
+    let span = BLOCK.max(page);
+    let mut resident = vec![1u8; span / page];
+    // SAFETY: Of the mapping, page-aligned, a page or more of it.
+    let paged = unsafe { area.addr.add(at) };
+    // SAFETY: As above.
+    assert_eq!(unsafe { libc::madvise(paged.cast(), span, libc::MADV_PAGEOUT) }, 0);
+    // SAFETY: As above, a byte a page.
+    assert_eq!(unsafe { libc::mincore(paged.cast(), span, resident.as_mut_ptr().cast()) }, 0);
+    let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    let swap = meminfo.lines().filter(|line| line.starts_with("Swap")).collect::<Vec<_>>();
+    assert!(resident.iter().all(|page| page & 1 == 0), "not paged out, the host's swap {swap:?}");
+    assert_eq!(area.read_into(6, at), 0);
+    assert_eq!(area.block(at), &pattern(2, BLOCK)[..]);
 }
 
 /// TASK-575: a VM process drops a version it made, as its VM snapshot failing after it does, and
