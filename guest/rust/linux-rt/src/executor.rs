@@ -8,28 +8,138 @@
 use crate::ffi;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
-use alloc::task::Wake;
 use async_task::Runnable;
 use core::ffi::c_void;
 use core::pin::Pin;
-use core::ptr::NonNull;
-use core::task::{Context, Poll, Waker};
+use core::ptr::{self, NonNull};
+use core::sync::atomic::{AtomicPtr, Ordering};
+use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+/// Futures up to this size are pinned on the caller's stack rather than boxed in `block_on`,
+/// avoiding per-VFS-call heap allocation while keeping large futures off 16 KiB kernel stacks
+/// (board 6014, TASK-26.9).
+const INLINE_FUTURE_MAX: usize = 512;
 
 /// Polls `future` to completion on the calling thread, which sleeps while the future waits.
 ///
-/// The future is polled from the heap, as it may be larger than the kernel's stacks can spare.
+/// Allocates neither a `Parker` nor a heap box when a small future resolves on its first poll
+/// without registering a waker (board 6014). Large futures are boxed off the 16 KiB kernel stack.
 pub fn block_on<F: Future>(future: F) -> F::Output {
-    let parker = Arc::new(Parker::new());
-    let waker = Waker::from(parker.clone());
+    if const { core::mem::size_of::<F>() <= INLINE_FUTURE_MAX } {
+        let mut future = core::pin::pin!(future);
+        poll_pinned(future.as_mut())
+    } else {
+        let mut future = Box::pin(future);
+        poll_pinned(future.as_mut())
+    }
+}
+
+#[inline(never)]
+fn poll_pinned<F: Future>(mut future: Pin<&mut F>) -> F::Output {
+    // Declared before `waker` so `waker` drops before `lazy` does.
+    let lazy = LazyParker::new();
+    // SAFETY: `waker` borrows `&lazy` for the duration of this stack frame only. Any `clone()`
+    // on `waker` promotes to an owned `Arc<Parker>` (`PARKER_VTABLE`), so no cloned waker holds a
+    // pointer to `lazy`.
+    let waker = unsafe {
+        Waker::from_raw(RawWaker::new((&lazy as *const LazyParker).cast(), &LAZY_VTABLE))
+    };
     let mut cx = Context::from_waker(&waker);
-    let mut future = Box::pin(future);
     loop {
         if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
             return output;
         }
-        parker.park();
+        lazy.park();
     }
 }
+
+/// Stack-resident slot that allocates an `Arc<Parker>` on demand only if a future clones or wakes
+/// its waker or yields `Poll::Pending` (board 6014).
+struct LazyParker(AtomicPtr<Parker>);
+
+impl LazyParker {
+    const fn new() -> Self {
+        Self(AtomicPtr::new(ptr::null_mut()))
+    }
+
+    fn get_or_init(&self) -> *const Parker {
+        let ptr = self.0.load(Ordering::Acquire);
+        if !ptr.is_null() {
+            return ptr;
+        }
+        let raw = Arc::into_raw(Arc::new(Parker::new())) as *mut Parker;
+        match self.0.compare_exchange(ptr::null_mut(), raw, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => raw,
+            Err(existing) => {
+                // SAFETY: `raw` was just created by `Arc::into_raw` and never published.
+                unsafe { drop(Arc::from_raw(raw)) };
+                existing
+            }
+        }
+    }
+
+    fn park(&self) {
+        let ptr = self.get_or_init();
+        // SAFETY: `self` owns a strong `Arc` reference to `ptr` until `LazyParker::drop`.
+        unsafe { (&*ptr).park() };
+    }
+}
+
+impl Drop for LazyParker {
+    fn drop(&mut self) {
+        let ptr = *self.0.get_mut();
+        if !ptr.is_null() {
+            // SAFETY: `ptr` was stored from `Arc::into_raw` and `self` holds that strong count.
+            unsafe { drop(Arc::from_raw(ptr)) };
+        }
+    }
+}
+
+static LAZY_VTABLE: RawWakerVTable = RawWakerVTable::new(
+    |data| {
+        // SAFETY: `data` points to the live `LazyParker` on `poll_pinned`'s stack while the
+        // borrowed `Waker` is in scope.
+        let ptr = unsafe { &*data.cast::<LazyParker>() }.get_or_init();
+        // SAFETY: `LazyParker` holds a live `Arc` reference to `ptr`; increment for the clone.
+        unsafe { Arc::increment_strong_count(ptr) };
+        RawWaker::new(ptr.cast(), &PARKER_VTABLE)
+    },
+    |data| {
+        // SAFETY: Same as clone; unreachable through `Context::waker(&self)` but sound if called.
+        let ptr = unsafe { &*data.cast::<LazyParker>() }.get_or_init();
+        // SAFETY: `LazyParker` holds a live `Arc` reference to `ptr`.
+        unsafe { (&*ptr).unpark() };
+    },
+    |data| {
+        // SAFETY: Same as clone.
+        let ptr = unsafe { &*data.cast::<LazyParker>() }.get_or_init();
+        // SAFETY: `LazyParker` holds a live `Arc` reference to `ptr`.
+        unsafe { (&*ptr).unpark() };
+    },
+    |_| {},
+);
+
+static PARKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
+    |data| {
+        let ptr = data.cast::<Parker>();
+        // SAFETY: `data` is a live `Arc::into_raw` pointer owned by this `Waker`.
+        unsafe { Arc::increment_strong_count(ptr) };
+        RawWaker::new(data, &PARKER_VTABLE)
+    },
+    |data| {
+        // SAFETY: `data` is an owned `Arc::into_raw` pointer; consume it after unparking.
+        let parker = unsafe { Arc::from_raw(data.cast::<Parker>()) };
+        parker.unpark();
+    },
+    |data| {
+        // SAFETY: `data` is a live `Arc::into_raw` pointer borrowed for `wake_by_ref`.
+        unsafe { (&*data.cast::<Parker>()).unpark() };
+    },
+    |data| {
+        // SAFETY: `data` is an owned `Arc::into_raw` pointer.
+        unsafe { drop(Arc::from_raw(data.cast::<Parker>())) };
+    },
+);
 
 /// Lets a thread wait until it is woken, spinning briefly before it sleeps (the kernel's side,
 /// `cladefs_rt_park`): a wake lets a `park` return, and wakes meanwhile are taken with it.
@@ -51,14 +161,8 @@ impl Parker {
         // SAFETY: The parker is live.
         unsafe { ffi::cladefs_rt_park(self.0.as_ptr()) }
     }
-}
 
-impl Wake for Parker {
-    fn wake(self: Arc<Self>) {
-        self.wake_by_ref();
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
+    fn unpark(&self) {
         // SAFETY: The parker is live; unparking does not sleep.
         unsafe { ffi::cladefs_rt_unpark(self.0.as_ptr()) }
     }
