@@ -85,11 +85,9 @@ u64 cladefs_rt_realtime_ns(void);
 void cladefs_rt_random_bytes(void *buf, size_t len);
 
 /*
- * The current task's slot for Rust's thread-local values (its `cladefs_tls`), or NULL outside a
- * task's context, such as in an interrupt.
+ * An identifier for the current task (its `struct task_struct *` address), or 0 outside a task's
+ * context, such as in an interrupt.
  */
-void **cladefs_rt_tls(void);
-/* Drops the thread-local values in `tls`, as their task exits: Rust's. */
-void cladefs_rust_tls_free(void *tls);
+u64 cladefs_rt_current_task(void);
 
 #endif

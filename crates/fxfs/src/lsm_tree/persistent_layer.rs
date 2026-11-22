@@ -1423,7 +1423,9 @@ impl<W: WriteBytes + Send, K: Key, V: LayerValue> PersistentLayerWriter<W, K, V>
         // (TASK-26.9).
         crate::boxed(|| writer.write_bytes(&buf[..])).await?;
 
-        let seed: u64 = rand::random();
+        // cladefs: use `getrandom` directly rather than `rand::random()` so the guest kernel needs
+        // no thread-local RNG state (board 6929).
+        let seed: u64 = getrandom::u64().expect("getrandom failed");
         Ok(Self {
             writer,
             version,

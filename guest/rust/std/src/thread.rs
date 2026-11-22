@@ -69,9 +69,9 @@ impl Thread {
 
 /// The current thread. Interrupts, which have no thread of their own, share one identity.
 pub fn current() -> Thread {
-    // SAFETY: Returns the current task's slot for thread-local values, which is the task's own.
-    let slot = unsafe { crate::sys::cladefs_rt_tls() } as u64;
-    Thread(ThreadId(core::num::NonZeroU64::new(slot).unwrap_or(core::num::NonZeroU64::MIN)))
+    // SAFETY: Returns the current task's pointer as an opaque identifier, or 0 in an interrupt.
+    let task = unsafe { crate::sys::cladefs_rt_current_task() };
+    Thread(ThreadId(core::num::NonZeroU64::new(task).unwrap_or(core::num::NonZeroU64::MIN)))
 }
 
 /// A thread's handle, which is never had.
@@ -123,27 +123,24 @@ impl Builder {
 }
 
 mod local {
-    //! Thread-local values: a thread's are in a block its kernel task points to (`cladefs_tls`, a
-    //! field cladefs's guest kernel adds to `task_struct`), made as the thread first uses one, and
-    //! dropped when the task exits. Interrupts have no thread of their own, so a value used there
-    //! panics.
+    //! Thread-local values are forbidden in the guest kernel (board 6929): `thread_local!` still
+    //! compiles in unused library code, but any reachable `LocalKey::with` call references the
+    //! undefined symbol `cladefs_error_thread_local_used_in_guest` so the guest kernel link fails
+    //! loudly rather than needing a `task_struct` patch.
 
-    use alloc_crate::boxed::Box;
-    use alloc_crate::vec::Vec;
-    use core::any::Any;
-    use core::ffi::c_void;
     use core::fmt;
+    use core::marker::PhantomData;
 
-    /// A thread's values, by their keys' addresses. Each value is boxed, so that its address stays
-    /// while others are added.
-    type Block = Vec<(usize, Box<dyn Any>)>;
+    unsafe extern "C" {
+        fn cladefs_error_thread_local_used_in_guest() -> !;
+    }
 
     /// A value `thread_local!` declares.
     pub struct LocalKey<T: 'static> {
-        init: fn() -> T,
+        _marker: PhantomData<fn() -> T>,
     }
 
-    /// An error accessing a value, which never happens: values outlive their threads' code.
+    /// An error accessing a value.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct AccessError;
 
@@ -153,57 +150,15 @@ mod local {
         }
     }
 
-    /// The calling thread's block.
-    fn block() -> *mut Block {
-        // SAFETY: Returns the current task's slot, which only it uses, or null in an interrupt.
-        let slot = unsafe { crate::sys::cladefs_rt_tls() };
-        assert!(!slot.is_null(), "thread-local values are not for interrupts");
-        // SAFETY: The slot holds null, or a block this module made.
-        unsafe {
-            if (*slot).is_null() {
-                *slot = Box::into_raw(Box::new(Block::new())).cast::<c_void>();
-            }
-            (*slot).cast::<Block>()
-        }
-    }
-
-    /// Drops a task's block, as the task exits.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn cladefs_rust_tls_free(block: *mut c_void) {
-        // SAFETY: The kernel passes the block `block` made, once, as its task exits.
-        drop(unsafe { Box::from_raw(block.cast::<Block>()) });
-    }
-
     impl<T: 'static> LocalKey<T> {
         #[doc(hidden)]
-        pub const fn new(init: fn() -> T) -> Self {
-            Self { init }
+        pub const fn new(_init: fn() -> T) -> Self {
+            Self { _marker: PhantomData }
         }
 
-        pub fn with<F: FnOnce(&T) -> R, R>(&'static self, f: F) -> R {
-            let key = self as *const Self as usize;
-            let block = block();
-            let find = |block: *mut Block| -> Option<*const T> {
-                // SAFETY: Only this thread uses its block, and no reference into it is held while
-                // others are added: values are found by pointer.
-                unsafe { &*block }
-                    .iter()
-                    .find(|(k, _)| *k == key)
-                    .map(|(_, value)| value.downcast_ref::<T>().unwrap() as *const T)
-            };
-            let value = match find(block) {
-                Some(value) => value,
-                None => {
-                    // Initializing may use other values, which adds them to the block.
-                    let value = Box::new((self.init)());
-                    // SAFETY: As above.
-                    let block = unsafe { &mut *block };
-                    block.push((key, value));
-                    block.last().unwrap().1.downcast_ref::<T>().unwrap() as *const T
-                }
-            };
-            // SAFETY: The value is boxed, and lives until the thread exits.
-            f(unsafe { &*value })
+        pub fn with<F: FnOnce(&T) -> R, R>(&'static self, _f: F) -> R {
+            // SAFETY: Intentionally undefined symbol; any reachable call fails the kernel link.
+            unsafe { cladefs_error_thread_local_used_in_guest() }
         }
 
         pub fn try_with<F: FnOnce(&T) -> R, R>(&'static self, f: F) -> Result<R, AccessError> {

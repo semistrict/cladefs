@@ -85,7 +85,6 @@ commit() {
     # The header, but for its license lines, up to the diff.
     series=$(sed -n '/^diff --git /q; /^# /d; p' "$patch" | kgit commit-tree "$tree" -p "$series")
 }
-commit 0001-sched-cladefs-tls.patch include/linux/cladefs_tls.h
 commit 0003-virtio-extent.patch drivers/virtio_extent include/linux/virtio_extent.h
 commit 0004-cladefs.patch fs/cladefs
 commit 0007-dax-say-why-a-fault-fails.patch

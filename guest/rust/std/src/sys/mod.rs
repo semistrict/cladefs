@@ -9,7 +9,7 @@
 pub mod cmath;
 pub mod sync;
 
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_char, c_int};
 
 unsafe extern "C" {
     pub fn cladefs_rt_log(level: c_int, msg: *const c_char, len: usize);
@@ -18,8 +18,8 @@ unsafe extern "C" {
     pub fn cladefs_rt_random_bytes(buf: *mut u8, len: usize);
     /// Lets other tasks run on this CPU, if the scheduler wants it to.
     pub fn cladefs_rt_yield();
-    /// The current task's slot for its thread-local values, or null in an interrupt.
-    pub fn cladefs_rt_tls() -> *mut *mut c_void;
+    /// An identifier for the current task (`current`), or 0 in an interrupt.
+    pub fn cladefs_rt_current_task() -> u64;
 }
 
 /// Random bytes, from the kernel's generator.

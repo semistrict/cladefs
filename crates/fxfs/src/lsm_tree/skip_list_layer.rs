@@ -120,7 +120,9 @@ pub struct SkipListLayer<K, V> {
     inner: Mutex<Inner<K, V>>,
 
     // Writes are locked using this lock.
-    write_lock: Mutex<()>,
+    // cladefs: carries a SplitMix64 PRNG state for skip-list node heights so `insert` needs no
+    // `rand::rng()` thread-local storage in the guest kernel (board 6929).
+    write_lock: Mutex<u64>,
 
     // The number of nodes that have been allocated.  This is only used for debugging purposes.
     allocated: AtomicU32,
@@ -195,7 +197,7 @@ impl<K, V> SkipListLayer<K, V> {
         Arc::new(SkipListLayer {
             head: (0..pointers).map(|_| AtomicPtr::new(std::ptr::null_mut())).collect(),
             inner: Mutex::new(Inner::new()),
-            write_lock: Mutex::new(()),
+            write_lock: Mutex::new(getrandom::u64().expect("getrandom")),
             allocated: AtomicU32::new(0),
             close_event: Mutex::new(Some(Arc::new(DropEvent::new()))),
         })
@@ -502,10 +504,9 @@ pub struct SkipListLayerIterMut<'a, K: Key, V: LayerValue> {
     // These are the nodes that we should point to when we commit.
     insertion_nodes: InsertionNodes<K, V>,
 
-    // Only one write can proceed at a time.  We only need a place to keep the mutex guard, which is
-    // why Rust thinks this is unused.
-    #[allow(dead_code)]
-    write_guard: MutexGuard<'a, ()>,
+    // Only one write can proceed at a time.
+    // cladefs: also guards the SplitMix64 state used to pick skip-list node heights (board 6929).
+    write_guard: MutexGuard<'a, u64>,
 
     // The change in item count as a result of this mutation.
     item_delta: isize,
@@ -602,12 +603,18 @@ impl<K: Key, V: LayerValue> LayerIteratorMut<K, V> for SkipListLayerIterMut<'_, 
     }
 
     fn insert(&mut self, item: Item<K, V>) {
-        use rand::RngExt as _;
-        let mut rng = rand::rng();
+        // cladefs: SplitMix64 under `write_guard` rather than `rand::rng()` so the guest kernel
+        // needs no per-task TLS (board 6929).
+        let state = &mut *self.write_guard;
+        *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        let rand_u32 = ((z ^ (z >> 31)) >> 32) as u32;
         let max_pointers = self.skip_list.levels();
         // This chooses a random number of pointers such that each level has half the number of
         // pointers of the previous one.
-        let pointer_count = min(1 + rng.random::<u32>().trailing_zeros() as usize, max_pointers);
+        let pointer_count = min(1 + rand_u32.trailing_zeros() as usize, max_pointers);
         let node_ptr = self.skip_list.alloc_node(item, pointer_count);
         let node_pointers = SkipListNode::pointers(node_ptr);
         if self.insertion_point.is_none() {

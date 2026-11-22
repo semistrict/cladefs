@@ -2639,8 +2639,8 @@ static int cladefs_vfs_sync_fs(struct super_block *sb, int wait)
 
 /*
  * cladefs: fault injection (TASK-200): the next thaw of a filesystem fails before its step this
- * names, 1 telling the device, 2 renewing the journal's tail, 3 recording it, which is 0 again
- * then (cladefs_set_fail_thaw_at): it stays frozen, for the next thaw to go on from that step.
+ * names, 1 telling the device, 2 rotating the journal's span, which is 0 again then
+ * (cladefs_set_fail_thaw_at): it stays frozen, for the next thaw to go on from that step.
  */
 static int cladefs_vfs_fail_thaw_at_set(const char *val, const struct kernel_param *kp)
 {
@@ -2663,7 +2663,7 @@ static const struct kernel_param_ops cladefs_vfs_fail_thaw_at_ops = {
 	.get = cladefs_vfs_fail_thaw_at_get,
 };
 module_param_cb(fail_thaw_at, &cladefs_vfs_fail_thaw_at_ops, NULL, 0644);
-MODULE_PARM_DESC(fail_thaw_at, "Fail the next thaw before this step: 1 telling the device, 2 renewing the journal's tail, 3 recording it (fault injection)");
+MODULE_PARM_DESC(fail_thaw_at, "Fail the next thaw before this step: 1 telling the device, 2 rotating the journal's span (fault injection)");
 
 /*
  * Freezing (fsfreeze, FIFREEZE): the VFS stops a volume's writers and syncs it, and once all the

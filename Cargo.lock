@@ -2178,6 +2178,7 @@ dependencies = [
  "fxfs_crypt_common",
  "fxfs_macros",
  "fxfs_trace",
+ "getrandom 0.4.3",
  "linked-hash-map",
  "log",
  "mundane",

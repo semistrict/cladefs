@@ -39,11 +39,11 @@ fxfs-crypto.workspace = true
 fxfs_macros.workspace = true
 fxfs_trace.workspace = true
 fxfs-unicode.workspace = true
+getrandom.workspace = true
 linked-hash-map.workspace = true
 log.workspace = true
 num-traits.workspace = true
 pin-project.workspace = true
-rand.workspace = true
 rapidhash.workspace = true
 rustc-hash.workspace = true
 scopeguard.workspace = true
@@ -63,6 +63,7 @@ fuchsia.workspace = true
 fxfs_crypt_common.workspace = true
 fxfs-insecure-crypto.workspace = true
 mundane.workspace = true
+rand.workspace = true
 test-case.workspace = true
 
 [lints]

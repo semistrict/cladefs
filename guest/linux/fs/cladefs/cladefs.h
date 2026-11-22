@@ -179,8 +179,8 @@ int cladefs_freeze(struct cladefs_filesystem *filesystem);
 /*
  * A thaw that fails leaves the filesystem frozen, and the next goes on from the step it stopped at
  * (TASK-200). cladefs_set_fail_thaw_at, fault injection: the next thaw fails before its step `step`,
- * 1 telling the device, 2 renewing the journal's tail, 3 recording it, and cladefs_fail_thaw_at is 0
- * again; 0, none.
+ * 1 telling the device, 2 rotating the journal's span, and cladefs_fail_thaw_at is 0 again; 0,
+ * none.
  */
 int cladefs_thaw(struct cladefs_filesystem *filesystem);
 void cladefs_set_fail_thaw_at(u32 step);

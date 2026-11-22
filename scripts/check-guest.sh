@@ -44,7 +44,7 @@ rustflags=$("$root/scripts/build-guest-sysroot.sh" "$target" "$work/rust-$arch")
 # guest/linux's files over the tree's, as the series adds them (build-guest-kernel.sh), and their
 # objects compiled.
 objects=()
-for path in include/linux/cladefs_tls.h include/linux/virtio_extent.h drivers/virtio_extent \
+for path in include/linux/virtio_extent.h drivers/virtio_extent \
     fs/cladefs; do
     while read -r file; do
         mkdir -p "$src/$(dirname "$file")"

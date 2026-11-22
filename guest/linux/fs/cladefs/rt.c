@@ -5,7 +5,6 @@
  */
 
 #include <linux/completion.h>
-#include <linux/cladefs_tls.h>
 #include <linux/hrtimer.h>
 #include <linux/kernel.h>
 #include <linux/ktime.h>
@@ -305,24 +304,9 @@ void cladefs_rt_random_bytes(void *buf, size_t len)
 	get_random_bytes(buf, len);
 }
 
-/* Rust's, once the filesystem's Rust uses guest/rust/std, which has thread-local values. */
-void __weak cladefs_rust_tls_free(void *tls)
-{
-}
-
-void **cladefs_rt_tls(void)
+u64 cladefs_rt_current_task(void)
 {
 	if (!in_task())
-		return NULL;
-	return &current->cladefs_tls;
-}
-
-void cladefs_rt_tls_exit(struct task_struct *tsk)
-{
-	void *tls = tsk->cladefs_tls;
-
-	if (tls) {
-		tsk->cladefs_tls = NULL;
-		cladefs_rust_tls_free(tls);
-	}
+		return 0;
+	return (u64)(unsigned long)current;
 }

@@ -12,7 +12,11 @@ macro_rules! debug_assert_not_too_long {
                 let future = $future.fuse();
                 futures::pin_mut!(future);
                 loop {
-                    futures::select! {
+                    // cladefs: `select_biased!` avoids `futures::select!`'s thread-local PRNG,
+                    // keeping the guest kernel free of `thread_local!` even with debug assertions
+                    // enabled (board 6929).
+                    futures::select_biased! {
+                        result = future => break result,
                         () = fuchsia_async::Timer::new(std::time::Duration::from_secs(60)).fuse() =>
                             {
                                 #[cfg(all(target_os = "fuchsia", not(doc)))]
@@ -20,7 +24,6 @@ macro_rules! debug_assert_not_too_long {
                                 #[cfg(not(target_os = "fuchsia"))]
                                 panic!($($arg),*);
                             }
-                        result = future => break result,
                     }
                 }
             }
