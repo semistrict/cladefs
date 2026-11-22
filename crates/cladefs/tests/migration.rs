@@ -365,13 +365,22 @@ fn hand_overs_naming_files_the_target_lacks_are_refused() {
     let staged = staging(&forked.host(1), migration);
     let kept = |dir: &Path| -> Vec<PathBuf> {
         let mut found = Vec::new();
-        let mut dirs = vec![dir.join("kept")];
+        let mut dirs = vec![dir.join("segments")];
         while let Some(at) = dirs.pop() {
             for entry in std::fs::read_dir(&at).into_iter().flatten() {
                 let path = entry.unwrap().path();
                 match path.is_dir() {
                     true => dirs.push(path),
-                    false => found.push(path),
+                    false
+                        if !path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .starts_with("framing-") =>
+                    {
+                        found.push(path)
+                    }
+                    false => {}
                 }
             }
         }
@@ -430,9 +439,7 @@ fn hand_overs_asked_again_send_and_name_every_file() {
             let entry = entry.unwrap();
             let relative = dir.join(entry.file_name());
             match entry.file_type().unwrap().is_dir() {
-                true if !["kept", "replica-spool"].map(Path::new).contains(&&*relative) => {
-                    dirs.push(relative)
-                }
+                true if relative != Path::new("segments") => dirs.push(relative),
                 true => {}
                 false if relative != Path::new("store.deleted") => files.push(relative),
                 false => {}

@@ -172,6 +172,29 @@ pub fn crc(bytes: &[u8]) -> u32 {
     crc_fast::checksum(crc_fast::CrcAlgorithm::Crc32Iscsi, bytes) as u32
 }
 
+/// Streaming CRC32C hasher, matching [`crc`] without buffering the whole input in memory.
+pub struct Crc(crc_fast::Digest);
+
+impl Crc {
+    pub fn new() -> Self {
+        Self(crc_fast::Digest::new(crc_fast::CrcAlgorithm::Crc32Iscsi))
+    }
+
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+
+    pub fn finish(self) -> u32 {
+        self.0.finalize() as u32
+    }
+}
+
+impl Default for Crc {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// An object that is not as its frame says: corrupt, or, encrypted, tampered with or opened under
 /// another key than it was encrypted under.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]

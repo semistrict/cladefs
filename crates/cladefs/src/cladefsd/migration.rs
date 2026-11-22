@@ -53,7 +53,6 @@ use bucket_cell::layout::Origin;
 use host_fs::FileExt as _;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -323,11 +322,18 @@ fn unanswered(status: &Status) -> bool {
     )
 }
 
-/// A round of `outgoing`: the kept segments of the cell at `path` not sent yet, each whole.
+/// Whether `relative` is a finalized segment file under `segments/` (immutable except for punched
+/// holes, pre-copied in migration rounds; board 6905).
+fn is_segment(relative: &str) -> bool {
+    relative.starts_with("segments/")
+        && !relative.rsplit('/').next().unwrap_or_default().starts_with("framing-")
+}
+
+/// A round of `outgoing`: the finalized segments of the cell at `path` not sent yet, each whole.
 async fn round(outgoing: &Outgoing, path: &Path) -> Result<(), Status> {
     let mut sent = outgoing.sent.lock().await;
     for (relative, len) in files(path).map_err(|err| status("listing", err))? {
-        if !relative.starts_with("kept/") || sent.contains_key(&relative) {
+        if !is_segment(&relative) || sent.contains_key(&relative) {
             continue;
         }
         if outgoing.stopped.load(std::sync::atomic::Ordering::Acquire) {
@@ -363,7 +369,7 @@ fn dirs(path: &Path) -> std::io::Result<Vec<String>> {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
             let relative = if dir.is_empty() { name } else { format!("{dir}/{name}") };
-            if entry.metadata()?.is_dir() && relative != "replica-spool" {
+            if entry.metadata()?.is_dir() {
                 found.push(relative.clone());
                 pending.push(relative);
             }
@@ -374,7 +380,7 @@ fn dirs(path: &Path) -> std::io::Result<Vec<String>> {
 }
 
 /// The files of the cell at `path`, by their paths in it, with their lengths: all but its marker,
-/// staged or not, and what deleting or replicating leaves.
+/// staged or not, and what deleting leaves.
 fn files(path: &Path) -> std::io::Result<Vec<(String, u64)>> {
     let mut found = Vec::new();
     let mut dirs = vec![String::new()];
@@ -383,9 +389,7 @@ fn files(path: &Path) -> std::io::Result<Vec<(String, u64)>> {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
             let relative = if dir.is_empty() { name } else { format!("{dir}/{name}") };
-            if [MARKER, MARKER_STAGED, "replica-spool", "store.deleted"]
-                .contains(&relative.as_str())
-            {
+            if [MARKER, MARKER_STAGED, "store.deleted"].contains(&relative.as_str()) {
                 continue;
             }
             let metadata = entry.metadata()?;
@@ -400,29 +404,50 @@ fn files(path: &Path) -> std::io::Result<Vec<(String, u64)>> {
 }
 
 /// Sends the file at `relative` in the cell at `path`, `len` bytes long, whole, its data and its
-/// holes, the last piece carrying the holes, so that it lands as it is here over any copy sent
-/// before: returns the bytes it takes of the disk.
+/// holes, streaming one [`PIECE`] at a time bypassing the host OS page cache (board 5997), the
+/// last piece carrying the holes, so that it lands as it is here over any copy sent before:
+/// returns the bytes it takes of the disk.
 async fn send(outgoing: &Outgoing, path: &Path, relative: &str, len: u64) -> Result<u64, Status> {
-    let file = host_fs::File::open(path.join(relative)).map_err(|err| status(relative, err))?;
-    let (data, allocated) = layout_of(&file, len).map_err(|err| status(relative, err))?;
+    let full = path.join(relative);
+    let label = relative.to_owned();
+    let (file, data, allocated) = super::run::off_the_runtime(move || {
+        let file = host_fs::File::open(&full)?;
+        bucket_cell::direct::bypass(&file, &full)?;
+        let (data, allocated) = layout_of(&file, len)?;
+        Ok::<_, std::io::Error>((Arc::new(file), data, allocated))
+    })
+    .await
+    .map_err(|err| status(&label, err))?
+    .map_err(|err| status(&label, err))?;
     let holes = gaps(&data, len);
-    let mut client = outgoing.client.clone();
-    let mut pieces = Vec::new();
+    let mut pieces: Vec<(u64, usize)> = Vec::new();
     for &(start, end) in &data {
         let mut at = start;
         while at < end {
             let take = (end - at).min(PIECE as u64) as usize;
-            let mut bytes = vec![0; take];
-            file.read_exact_at(&mut bytes, at).map_err(|err| status(relative, err))?;
-            pieces.push((at, bytes));
+            pieces.push((at, take));
             at += take as u64;
         }
     }
     if pieces.is_empty() {
-        pieces.push((0, Vec::new()));
+        pieces.push((0, 0));
     }
+    let mut client = outgoing.client.clone();
     let last = pieces.len() - 1;
-    for (piece, (offset, bytes)) in pieces.into_iter().enumerate() {
+    for (piece, (offset, take)) in pieces.into_iter().enumerate() {
+        let bytes = if take == 0 {
+            Vec::new()
+        } else {
+            let file = file.clone();
+            super::run::off_the_runtime(move || {
+                let mut buf = vec![0u8; take];
+                bucket_cell::direct::read_at(&file, &mut buf, offset)?;
+                Ok::<_, std::io::Error>(buf)
+            })
+            .await
+            .map_err(|err| status(relative, err))?
+            .map_err(|err| status(relative, err))?
+        };
         let request = MigrateFileRequest {
             migration: outgoing.migration,
             path: relative.to_owned(),
@@ -458,13 +483,26 @@ fn gaps(data: &[(u64, u64)], len: u64) -> Vec<Range> {
     holes
 }
 
-/// The CRC32C of the file at `path`.
+/// Fixed buffer size for streaming [`crc_of`] bypassing the host OS page cache (board 5997).
+const CRC_CHUNK: usize = 64 << 10;
+
+/// The CRC32C of the file at `path`, streamed in a fixed buffer bypassing the host OS page cache
+/// (board 5997).
 fn crc_of(path: &Path) -> std::io::Result<u32> {
-    let mut file = host_fs::File::open(path)?;
-    file.seek(SeekFrom::Start(0))?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    Ok(extent_frame::crc(&bytes))
+    let file = host_fs::File::open(path)?;
+    bucket_cell::direct::bypass(&file, path)?;
+    let len = file.metadata()?.len();
+    let mut buf = bucket_cell::direct::Buffer::new(CRC_CHUNK);
+    let mut crc = extent_frame::Crc::new();
+    let mut offset = 0u64;
+    while offset < len {
+        let take = (len - offset).min(CRC_CHUNK as u64) as usize;
+        let slice = &mut buf.bytes_mut()[..take];
+        bucket_cell::direct::read_at(&file, slice, offset)?;
+        crc.update(slice);
+        offset += take as u64;
+    }
+    Ok(crc.finish())
 }
 
 /// Hands the ephemeral cell at `path` over to the target of its migration
@@ -670,7 +708,7 @@ async fn finish(outgoing: &Outgoing, path: &Path) -> Result<(), Status> {
     }
     for (relative, len) in files(path).map_err(|err| status("listing", err))? {
         match sent.get(&relative) {
-            Some(&(was, allocated)) if relative.starts_with("kept/") && was == len => {
+            Some(&(was, allocated)) if is_segment(&relative) && was == len => {
                 let file =
                     host_fs::File::open(path.join(&relative)).map_err(|e| status(&relative, e))?;
                 let (data, now) = layout_of(&file, len).map_err(|err| status(&relative, err))?;
@@ -697,11 +735,11 @@ async fn finish(outgoing: &Outgoing, path: &Path) -> Result<(), Status> {
 }
 
 /// Every file of the cell at `path`, given up, as its hand-over names them: its length, and the
-/// CRC of each but the kept segments'.
+/// CRC of each but the finalized segments'.
 fn named(path: &Path) -> std::io::Result<Vec<FileDigest>> {
     let mut named = Vec::new();
     for (relative, len) in files(path)? {
-        let crc = match relative.starts_with("kept/") {
+        let crc = match is_segment(&relative) {
             true => None,
             false => Some(crc_of(&path.join(&relative))?),
         };
@@ -1046,6 +1084,17 @@ pub(super) mod target {
             return host_fs::create_dir_all(dir).map_err(|err| status(&path, err));
         }
         let file_path = within(staged, &path).ok_or_else(left)?;
+        // Validate untrusted peer offset and length before `direct::write_at` rounds end up to
+        // `DIRECT_BLOCK` (4096) and writes at `offset` (board 5997 / AGENTS.md trust boundary).
+        let valid_end = offset
+            .checked_add(bytes.len() as u64)
+            .and_then(|end| end.checked_next_multiple_of(bucket_cell::direct::DIRECT_BLOCK))
+            .is_some_and(|end| end <= i64::MAX as u64);
+        if !valid_end || len > i64::MAX as u64 {
+            return Err(Status::invalid_argument(format!(
+                "{path:?}: offset {offset} or len {len} out of range"
+            )));
+        }
         if let Some(dir) = file_path.parent() {
             host_fs::create_dir_all(dir).map_err(|err| status(&path, err))?;
         }
@@ -1056,7 +1105,10 @@ pub(super) mod target {
             .write(true)
             .open(&file_path)
             .map_err(|err| status(&path, err))?;
-        file.write_all_at(&bytes, offset).map_err(|err| status(&path, err))?;
+        bucket_cell::direct::bypass(&file, &file_path).map_err(|err| status(&path, err))?;
+        let mut tail = bucket_cell::direct::Tail::default();
+        bucket_cell::direct::write_at(&file, &mut tail, &bytes, offset)
+            .map_err(|err| status(&path, err))?;
         if file.metadata().map_err(|err| status(&path, err))?.len() != len {
             file.set_len(len).map_err(|err| status(&path, err))?;
         }
@@ -1322,6 +1374,66 @@ pub(super) mod target {
                 lacking(dir.path(), &[digest("kept", 1), digest("/dev/zero", 0)]),
                 Some("\"/dev/zero\" leaves the cell".to_owned())
             );
+        }
+
+        /// Board 5997: streaming `crc_of` matches full-buffer `extent_frame::crc` across empty,
+        /// unaligned, and multi-chunk files, and `target::write` writes bypassing the host OS page
+        /// cache (failing hard when `direct::bypass` is refused).
+        #[test]
+        fn streaming_crc_and_direct_target_write() {
+            let dir = tempfile::tempdir().unwrap();
+            for len in [0usize, 13, 4096, 4097, CRC_CHUNK, CRC_CHUNK * 2 + 123] {
+                let data: Vec<u8> = (0..len).map(|i| (i.wrapping_mul(31) ^ (i >> 5)) as u8).collect();
+                let name = format!("f-{len}");
+                let request = MigrateFileRequest {
+                    migration: 1,
+                    path: name.clone(),
+                    offset: 0,
+                    bytes: data.clone(),
+                    len: len as u64,
+                    holes: Vec::new(),
+                };
+                write(dir.path(), request).unwrap();
+                let path = dir.path().join(&name);
+                assert_eq!(std::fs::read(&path).unwrap(), data, "len {len}");
+                assert_eq!(crc_of(&path).unwrap(), extent_frame::crc(&data), "crc len {len}");
+            }
+            // Refused when the filesystem cannot bypass the host OS page cache.
+            fail::cfg("direct::bypass", "return").unwrap();
+            let err_crc = crc_of(&dir.path().join("f-13"));
+            let err_write = write(
+                dir.path(),
+                MigrateFileRequest {
+                    migration: 1,
+                    path: "refused".to_owned(),
+                    offset: 0,
+                    bytes: b"hello".to_vec(),
+                    len: 5,
+                    holes: Vec::new(),
+                },
+            );
+            fail::cfg("direct::bypass", "off").unwrap();
+            assert!(err_crc.is_err(), "crc_of must fail hard without page-cache bypass");
+            assert!(err_write.is_err(), "target::write must fail hard without page-cache bypass");
+            // Hostile peer offsets that would overflow `direct::write_at`'s block rounding are
+            // rejected cleanly with InvalidArgument rather than panicking.
+            for (bad_offset, bad_len) in
+                [(u64::MAX, 1), (u64::MAX - 10, 1), (i64::MAX as u64, 1), (0, u64::MAX)]
+            {
+                let status = write(
+                    dir.path(),
+                    MigrateFileRequest {
+                        migration: 1,
+                        path: "bad-offset".to_owned(),
+                        offset: bad_offset,
+                        bytes: vec![1],
+                        len: bad_len,
+                        holes: Vec::new(),
+                    },
+                )
+                .unwrap_err();
+                assert_eq!(status.code(), tonic::Code::InvalidArgument, "{bad_offset} {bad_len}");
+            }
         }
     }
 }
