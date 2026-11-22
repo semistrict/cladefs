@@ -148,6 +148,9 @@ mod buffer_source {
             vmar_root_self().op_range(zx::VmarOp::COMMIT, self.base as usize + start, len)
         }
 
+        /// cladefs: nothing: a VMO reads as zeros until written.
+        pub(crate) fn touch(&self, _range: &Range<usize>) {}
+
         /// Zeroes out the range so the kerne can reclaim the pages.
         ///
         /// # Safety
@@ -174,6 +177,7 @@ mod buffer_source {
 mod buffer_source {
     use std::ops::Range;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use storage_ptr_slice::MutPtrByteSlice;
 
     /// A buffer source in plain memory.
@@ -181,6 +185,9 @@ mod buffer_source {
     pub struct BufferSource {
         base: *mut u8,
         size: usize,
+        /// How much of it, from its start, reads as zeros or was handed out ([`Self::touch`]): past
+        /// it, the guest kernel's memory is as `memory::map` found it, untouched.
+        zeroed: AtomicUsize,
     }
 
     // SAFETY: The memory is the source's, which hands it out as buffers do on other targets.
@@ -190,7 +197,46 @@ mod buffer_source {
     impl BufferSource {
         pub fn new(size: usize) -> Self {
             assert!(size > 0, "a buffer source of no bytes");
-            Self { base: memory::map(size), size }
+            let zeroed = AtomicUsize::new(if memory::ZEROED { size } else { 0 });
+            Self { base: memory::map(size), size, zeroed }
+        }
+
+        /// A source of `size` bytes each 0xa5, as the guest kernel's memory may be, none zeroed: a
+        /// test's of [`Self::touch`] on a host, whose memory reads as zeros.
+        #[cfg(test)]
+        pub(crate) fn dirty(size: usize) -> Self {
+            let source = Self::new(size);
+            // SAFETY: The source's, of no buffer yet.
+            unsafe { std::ptr::write_bytes(source.base, 0xa5, size) };
+            source.zeroed.store(0, Ordering::Relaxed);
+            source
+        }
+
+        /// The source's byte at `at`, a test's, whether or not a buffer has it.
+        #[cfg(test)]
+        pub(crate) fn byte(&self, at: usize) -> u8 {
+            assert!(at < self.size);
+            // SAFETY: Within the source; a test's, which writes no buffer meanwhile.
+            unsafe { self.base.add(at).read_volatile() }
+        }
+
+        /// Zeroes what of `range` was never handed out, before it is, so that a buffer reads as
+        /// zeros at first, as a VMO's does, yet a page of the source is touched only once a buffer
+        /// first takes it. The allocator hands out the lowest free range first, so what it touches
+        /// is about its most in use at once, not the whole source: in the guest kernel, the host
+        /// gives a VM's RAM only as it touches it (board 5649), and the source is 16 MiB.
+        ///
+        /// The allocator calls it with its lock held, for each range it hands out, which are all
+        /// below `zeroed` once handed out: so none is past it, and no other buffer is zeroed.
+        pub(crate) fn touch(&self, range: &Range<usize>) {
+            assert!(range.end <= self.size);
+            let zeroed = self.zeroed.load(Ordering::Relaxed);
+            if range.end > zeroed {
+                // SAFETY: Within the source, and of no buffer: every one handed out ends below
+                // `zeroed`.
+                unsafe { std::ptr::write_bytes(self.base.add(zeroed), 0, range.end - zeroed) };
+                self.zeroed.store(range.end, Ordering::Relaxed);
+            }
         }
 
         pub fn new_trusted(size: usize) -> Self {
@@ -258,8 +304,12 @@ mod buffer_source {
         /// The range must not be allocated.
         pub(crate) unsafe fn clean_range(&self, range: Range<usize>) {
             assert!(range.end <= self.size);
-            // SAFETY: The range is within the source, and not allocated.
-            unsafe { std::ptr::write_bytes(self.base.add(range.start), 0, range.len()) };
+            // Past `zeroed`, the next buffer to reach it zeroes it ([`Self::touch`]).
+            let end = range.end.min(self.zeroed.load(Ordering::Relaxed));
+            if range.start < end {
+                // SAFETY: The range is within the source, and not allocated.
+                unsafe { std::ptr::write_bytes(self.base.add(range.start), 0, end - range.start) };
+            }
         }
     }
 
@@ -275,6 +325,9 @@ mod buffer_source {
     /// Linux, 64 MiB for each FakeDevice made, most of a block_device model test's time.
     #[cfg(unix)]
     mod memory {
+        /// Whether [`map`]'s memory reads as zeros.
+        pub const ZEROED: bool = true;
+
         pub fn map(size: usize) -> *mut u8 {
             // SAFETY: A new mapping of anonymous memory, which nothing else refers to.
             let base = unsafe {
@@ -305,10 +358,15 @@ mod buffer_source {
         }
     }
 
-    /// In the guest kernel, the kernel's memory, zeroed.
+    /// In the guest kernel, the kernel's memory, as it was: zeroed as buffers first take it
+    /// (`BufferSource::touch`), rather than all at once, which touched each of its pages for the
+    /// mount's life (board 5649).
     #[cfg(not(unix))]
     mod memory {
-        use std::alloc::{Layout, alloc_zeroed, dealloc};
+        use std::alloc::{Layout, alloc, dealloc};
+
+        /// Whether [`map`]'s memory reads as zeros.
+        pub const ZEROED: bool = false;
 
         fn layout(size: usize) -> Layout {
             Layout::from_size_align(size, 4096).unwrap()
@@ -316,7 +374,7 @@ mod buffer_source {
 
         pub fn map(size: usize) -> *mut u8 {
             // SAFETY: The layout is not empty.
-            let base = unsafe { alloc_zeroed(layout(size)) };
+            let base = unsafe { alloc(layout(size)) };
             assert!(!base.is_null(), "no memory for {size} bytes of buffers");
             base
         }
@@ -599,6 +657,8 @@ impl BufferAllocator {
         inner.allocation_map.insert(offset, self.size_for_order(order));
         let range = offset..offset + size;
         log::debug!(range:?, bytes_used = self.size_for_order(order); "Allocated");
+        // cladefs: under the lock, which every range handed out is (`BufferSource::touch`).
+        self.source.touch(&range);
 
         // SAFETY: The allocator guarantees that this range does not overlap with any other
         // active allocations. `self` guarantees `self.source` remains valid for `'a`.
@@ -1079,6 +1139,47 @@ mod tests {
         let mut data3 = vec![0u8; 2048];
         buf3.copy_to_slice(&mut data3);
         assert_eq!(data3, vec![0; 2048]);
+    }
+
+    /// cladefs: a source of memory that doesn't read as zeros, as the guest kernel's, hands out
+    /// buffers of zeros, each zeroed as it is first handed out, and touches no byte past the
+    /// furthest a buffer reached: the rest of the source stays as it was (board 5649).
+    #[cfg(not(target_os = "fuchsia"))]
+    #[fuchsia::test]
+    async fn test_dirty_source_is_zeroed_only_as_far_as_buffers_reach() {
+        let allocator = Arc::new(BufferAllocator::new(512, BufferSource::dirty(8192)));
+        let read = |buffer: &crate::buffer::Buffer<'_>| {
+            let mut data = vec![0x11; buffer.len()];
+            buffer.copy_to_slice(&mut data);
+            data
+        };
+
+        let mut first = allocator.allocate_buffer(1024).await;
+        assert_eq!(first.range(), 0..1024);
+        assert_eq!(read(&first), vec![0; 1024]);
+        assert_eq!(allocator.buffer_source().byte(1024), 0xa5);
+        assert_eq!(allocator.buffer_source().byte(8191), 0xa5);
+
+        // Asked for less than its block, a buffer zeroes what it asked for alone.
+        let second = allocator.allocate_buffer(700).await;
+        assert_eq!(second.range(), 1024..1724);
+        assert_eq!(read(&second), vec![0; 700]);
+        assert_eq!(allocator.buffer_source().byte(1724), 0xa5);
+
+        // One given back and taken again keeps what it was written, as a VMO's buffers do: only
+        // what no buffer had yet is zeroed.
+        first.fill(0xbb);
+        std::mem::drop(first);
+        let again = allocator.allocate_buffer(1024).await;
+        assert_eq!(again.range(), 0..1024);
+        assert_eq!(read(&again), vec![0xbb; 1024]);
+
+        // Past the furthest, from it: the tail of the block before, which no buffer has, too.
+        let third = allocator.allocate_buffer(2048).await;
+        assert_eq!(third.range(), 2048..4096);
+        assert_eq!(read(&third), vec![0; 2048]);
+        assert_eq!(allocator.buffer_source().byte(2000), 0);
+        assert_eq!(allocator.buffer_source().byte(4096), 0xa5);
     }
 
     #[fuchsia::test]
