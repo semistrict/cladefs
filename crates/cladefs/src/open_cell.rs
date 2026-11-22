@@ -3145,7 +3145,7 @@ mod tests {
         let from = in_bucket();
         let relocating =
             local_cell::Relocating { extent, from: from.clone(), data: pattern(6, BLOCK) };
-        assert_eq!(cell.local.relocate(vec![relocating]).await.unwrap(), BLOCK as u64);
+        assert_eq!(cell.local.relocate(vec![relocating]).await.unwrap().bytes, BLOCK as u64);
         cell.commit(None).await.unwrap();
         let to = in_bucket();
         assert_ne!(to.key, from.key);

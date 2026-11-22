@@ -48,7 +48,7 @@ use bucket_cell::recovery::{Places, Seal};
 use bucket_cell::trace;
 use bucket_cell::wal::{Rebased, Wal};
 use extent_frame::segment::{CellId, Chain, Contents, Footer, Location, NewVersion, epoch_of};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1522,6 +1522,15 @@ impl Places for Local {
     }
 }
 
+/// cladefs: what a relocation did ([`LocalCell::relocate`]): the bytes it relocated, and the
+/// commit that names them where they went, if it relocated any: one that changes nothing the
+/// guest reads, its state the commit's before it but where they are (doc-27).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Relocated {
+    pub bytes: u64,
+    pub commit: Option<u64>,
+}
+
 /// cladefs: an extent of a cell's own segments in the bucket, read by its writer to relocate it
 /// ([`LocalCell::relocate`], doc-27): where it was read, and its bytes, as the guest reads them.
 #[derive(Clone, Debug)]
@@ -2614,7 +2623,7 @@ impl<D: Dir> LocalCell<D> {
     /// write to it goes on with, it relocates nothing. A copy that fails is dead space, as a write dropped is; what it
     /// copied before is committed, and it fails, saying so.
     /// Refused, the cell unchanged, unless each one's bytes are as many as where it was read holds.
-    pub async fn relocate(&self, relocating: Vec<Relocating>) -> Result<u64, Error> {
+    pub async fn relocate(&self, relocating: Vec<Relocating>) -> Result<Relocated, Error> {
         for Relocating { extent, from, data } in &relocating {
             let read = data.len() as u64;
             ensure!(read == from.len, "{extent:?} relocated with {read} bytes of {}", from.len);
@@ -2627,11 +2636,13 @@ impl<D: Dir> LocalCell<D> {
             relocated.context("relocating the extent store's extents")?
         };
         // Durable, as the uploader takes only what is.
-        if relocated > 0 {
+        if relocated.commit.is_some() {
             self.flush().await?;
         }
         match failed {
-            Some(failed) => Err(failed.context(format!("relocating, {relocated} bytes relocated"))),
+            Some(failed) => {
+                Err(failed.context(format!("relocating, {} bytes relocated", relocated.bytes)))
+            }
             None => Ok(relocated),
         }
     }
@@ -2643,9 +2654,9 @@ impl<D: Dir> LocalCell<D> {
         &self,
         state: &mut State<D::File>,
         relocating: Vec<Relocating>,
-    ) -> Result<(u64, Option<Error>), Error> {
+    ) -> Result<(Relocated, Option<Error>), Error> {
         if state.segments.has_full() || self.run_goes_on(state) {
-            return Ok((0, None));
+            return Ok((Relocated::default(), None));
         }
         let (mut changes, mut relocated, mut failed) = (Vec::new(), 0, None);
         for Relocating { extent, from, data } in relocating {
@@ -2675,7 +2686,7 @@ impl<D: Dir> LocalCell<D> {
             relocated += from.len;
         }
         if changes.is_empty() {
-            return Ok((0, failed));
+            return Ok((Relocated::default(), failed));
         }
         let epoch = state.epoch + 1;
         self.publish(state, epoch, None, &[]);
@@ -2688,7 +2699,7 @@ impl<D: Dir> LocalCell<D> {
             relocated,
         )?;
         self.queue_flush(state, epoch, records, Vec::new());
-        Ok((relocated, failed))
+        Ok((Relocated { bytes: relocated, commit: Some(epoch) }, failed))
     }
 
     /// cladefs: whether an extent the guest has open ends its run at the open segment's end, where
@@ -4124,6 +4135,15 @@ impl<D: Dir> LocalCell<D> {
     /// Their live bytes counted the first time it is asked, walking every extent the cell holds.
     pub fn sparse(&self, pinned: impl Fn(&str) -> bool) -> Result<Vec<Sparse>, Error> {
         Ok(self.state()?.extents.sparse(pinned))
+    }
+
+    /// cladefs: the extents the cell holds in each of its segments in the bucket `keys` names,
+    /// where they are, by offset: what its writer reads to relocate out of them (doc-27).
+    pub fn held_in(
+        &self,
+        keys: &HashSet<String>,
+    ) -> Result<HashMap<String, Vec<(ExtentId, Location)>>, Error> {
+        Ok(self.state()?.extents.held_in(keys))
     }
 
     pub fn usage(&self) -> Result<Usage, Error> {

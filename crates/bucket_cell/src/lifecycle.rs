@@ -21,6 +21,7 @@ use crate::recovery;
 use crate::{Error, rules};
 use futures::StreamExt as _;
 use serde::Serialize;
+use std::collections::BTreeSet;
 
 /// What a [`transition`] makes of the object it found.
 pub(crate) enum Step<T, R> {
@@ -351,6 +352,23 @@ pub async fn ephemeral_references(
         .collect())
 }
 
+/// cladefs: the segments of `cell` that forks of it were made at, as their references under its
+/// prefix say ([`layout::references`]): each the origin of a cell that may read the cell's state
+/// there, which its writer relocates nothing of (doc-27, Choosing what to relocate). One LIST.
+/// cladefs: refused, [`bucket::Refused`] (board 5861).
+pub async fn referenced_at(
+    bucket: &impl Bucket,
+    cell: CellId,
+) -> Result<BTreeSet<u64>, bucket::Refused> {
+    let listed = bucket::list(bucket, &layout::references(cell)).await?;
+    Ok((listed.iter())
+        .filter_map(|meta| match layout::kind(&meta.key) {
+            layout::Kind::Reference { parent, at, .. } if parent == cell => Some(at),
+            _ => None,
+        })
+        .collect())
+}
+
 /// cladefs: decommissions the host of incarnation `incarnation`, gone for good, its disk lost
 /// (doc-25, TASK-698.3; specs/ephemeral): the references of its ephemeral cells, which no host
 /// holds any more, deleted, each with its index entry. Returns how many. Its operator's to call,
@@ -494,7 +512,21 @@ async fn finish_fork(
         leave_parents(bucket, origin, version, child, referred).await?;
     }
     if cell != child {
-        recovery::checkpoint_at(bucket, cell, origin.at, keys).await?;
+        match recovery::checkpoint_at(bucket, cell, origin.at, keys).await {
+            Ok(()) => {}
+            // cladefs: given up on meanwhile ([`abandon`]), its maker slow, and its version
+            // dropped: nothing keeps what it would read, which the collector may have deleted
+            // since, its cell's writer relocating out of it (doc-27). Failed as the fork given up
+            // on is, not as the version's state lost.
+            Err(lost @ Error::Lost(_)) => {
+                let head = head::get(bucket, child).await?;
+                return Err(match head.is_none_or(|head| head.deleted()) {
+                    true => Error::Deleted,
+                    false => lost,
+                });
+            }
+            Err(error) => return Err(error),
+        }
     }
     failpoint!("version::checked");
     // Conditional, against its being deleted, or given up on ([`abandon`]). A head's bytes

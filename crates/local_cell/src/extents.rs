@@ -359,6 +359,26 @@ impl Extents {
         self.density.sparse(pinned)
     }
 
+    /// cladefs: the extents it holds in the bucket in each of the objects `keys` names, where they
+    /// are, by offset: what a relocation round reads to relocate out of them (doc-27). One walk of
+    /// every extent it holds, for all of them.
+    pub fn held_in(&self, keys: &HashSet<String>) -> HashMap<String, Vec<(ExtentId, Location)>> {
+        let mut held: HashMap<String, Vec<(ExtentId, Location)>> = HashMap::new();
+        for (extent, entry) in self.iter() {
+            let at = match entry {
+                Entry::Own(Extent { data: Data::Bucket(at), .. }) | Entry::Bucket(at) => at,
+                Entry::Own(_) => continue,
+            };
+            if keys.contains(&at.key) {
+                held.entry(at.key.clone()).or_default().push((extent, at.clone()));
+            }
+        }
+        for extents in held.values_mut() {
+            extents.sort_unstable_by_key(|(extent, at)| (at.offset, *extent));
+        }
+        held
+    }
+
     /// `extent`'s entry, which a write to it changes: its own, or `make`'s, entered, if it holds
     /// none. An extent written is open, or new, the cell's: never in the bucket's layer.
     pub fn written(&mut self, extent: ExtentId, make: impl FnOnce() -> Extent) -> &mut Extent {

@@ -25,8 +25,9 @@ pub(crate) struct Pace {
     pub options: Options,
 }
 
-/// A pass a minute, collecting as `cladefs-gc` does by default.
-const PACE: Pace = Pace { every: EVERY, options: Options { compact_below: 0.5, grace: 60_000 } };
+/// A pass a minute, collecting as `cladefs-gc` does by default: compacting nothing, as writers
+/// relocate out of their sparse segments (doc-27 step 1, board 6214).
+const PACE: Pace = Pace { every: EVERY, options: Options { compact_below: 0.0, grace: 60_000 } };
 
 /// How long at least goes from one pass's start to the next's.
 const EVERY: Duration = Duration::from_secs(60);

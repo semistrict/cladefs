@@ -30,7 +30,8 @@
 //! holds the cells its passes held until their leases expire, and the next sweep after that
 //! collects them. A pass that fails says so and stops none of the others; the next pass tries it
 //! again. A compacted object goes, and moves no state names, a grace period after (60 s by
-//! default); objects whose live extents take less than FRACTION of them (0.5) are compacted. Every
+//! default); objects whose live extents take less than FRACTION of them are compacted: by default
+//! none (0), as writers relocate out of their cells' sparse segments (doc-27 step 1). Every
 //! cell's objects are encrypted (TASK-411.28), and compacted under its keys (TASK-411.6): its KEK
 //! unwrapped once a pass, by the host's KMS, as every cladefs process chooses it
 //! (`bucket_cell::bucket_kms::from_env`: the one `CLADEFS_KMS` names; else, given
@@ -236,7 +237,7 @@ fn parse_cells(flags: &[&str]) -> Result<Command, String> {
 
 /// A pass's `flags`: a dry run's run once.
 fn parse_collect(flags: &[&str]) -> Result<Command, String> {
-    let (mut every, mut grace, mut compact_below) = (None, 60.0, 0.5);
+    let (mut every, mut grace, mut compact_below) = (None, 60.0, 0.0);
     let mut mode = Mode::Delete;
     let mut cell = None;
     let mut run = Run::default();

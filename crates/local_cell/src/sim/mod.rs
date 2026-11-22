@@ -264,6 +264,7 @@ fn one() {
         "mirrors" => mirrors(),
         "replicated" => replicated(),
         "retakes" => retakes(),
+        "relocations" => relocations(),
         other => panic!("no profile {other}"),
     };
     let count = std::env::var("SIM_SEEDS").map_or(1, |count| count.parse().unwrap());
@@ -410,6 +411,33 @@ fn forks() -> Profile {
 }
 
 test_holds!(forks_and_frees, forks());
+
+/// cladefs: doc-27 (board 6214): writers relocate out of their cells' sparse segments, the
+/// collector compacting nothing, as guests free and write, versions are cut, restored and dropped,
+/// checkpoints land, and cells are taken over and crash: what recoveries need stays
+/// (`NothingNeededGone`), and every commit reads as committed.
+fn relocations() -> Profile {
+    let mut profile = weights(|weights| {
+        weights.relocate = 4;
+        weights.version = 2;
+        weights.drop_version = 1;
+        weights.restore_version = 2;
+        weights.checkpoint = 4;
+        weights.collect = 3;
+        weights.open = 4;
+    });
+    profile.options.compact_below = 0.0;
+    profile
+}
+
+/// cladefs: [`relocations`] holds, its seeds relocating: not a property of rounds that never
+/// copied anything.
+#[test]
+fn relocations_keep_what_recoveries_need() {
+    let before = crate::written::written().relocated;
+    holds(relocations(), 0..200);
+    assert!(crate::written::written().relocated > before, "no seed relocated anything");
+}
 
 /// Bases deleted while the cells restored from their versions live (TASK-39.4): those write, cut
 /// versions, are restored and taken over, and collectors run, keeping what they need of the bases.

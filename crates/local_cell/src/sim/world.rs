@@ -97,6 +97,9 @@ pub struct Weights {
     pub late: u32,
     /// cladefs: the network between two hosts breaks, one way or both, or mends.
     pub partition: u32,
+    /// cladefs: a cell's writer runs a relocation round, as its uploader does at its checkpoint
+    /// rounds, of an allowance of its own (doc-27, board 6214).
+    pub relocate: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -175,7 +178,8 @@ impl Weights {
             tick,
             deliver,
             late,
-            partition
+            partition,
+            relocate
         );
     }
 }
@@ -228,6 +232,7 @@ impl Default for Profile {
                 deliver: 0,
                 late: 0,
                 partition: 0,
+                relocate: 0,
             },
             options: Options { compact_below: 0.5, grace: 4 },
         }
@@ -761,7 +766,7 @@ struct Session {
     running: AbortHandle,
     guest: Guest,
     /// cladefs: the tasks its uploader runs beside it, its keeper ([`Spawn`]), until the world
-    /// spawns them; and once it did, each one's.
+    /// spawns them; and once it did, each one's; and its relocation rounds' ([`World::relocate`]).
     kept: Arc<Mutex<Vec<BoxFuture<'static, ()>>>>,
     keepers: Vec<AbortHandle>,
     /// cladefs: whether its take restored its members' logs into its cell directory, which
@@ -785,6 +790,14 @@ enum Event {
         cell: u64,
         session: u64,
         error: Error,
+    },
+    /// cladefs: a writer's relocation round committed, at `epoch` of its session's cell
+    /// (doc-27): a commit of the cell's state as of its commit before, its extents elsewhere.
+    Relocated {
+        host: usize,
+        cell: u64,
+        session: u64,
+        epoch: u64,
     },
     Deleted {
         cell: u64,
@@ -1104,6 +1117,7 @@ impl World {
             w.deliver,
             w.late,
             w.partition,
+            w.relocate,
         ];
         let mut roll = self.rng.random_range(0..choices.iter().sum::<u32>());
         let choice = choices.iter().position(|&weight| {
@@ -1138,7 +1152,8 @@ impl World {
             }
             21 => self.deliver(),
             22 => self.land_late(),
-            _ => self.partition(),
+            23 => self.partition(),
+            _ => self.relocate(),
         }
         self.settle_tasks();
     }
@@ -1180,6 +1195,20 @@ impl World {
                     self.violation(format!("cell {cell}'s writer: {error}", cell = Short(cell)));
                 }
                 self.end(host, cell, session);
+            }
+            Event::Relocated { host, cell, session, epoch } => {
+                let Some(found) = self.hosts[host].sessions.get(&cell) else { return };
+                if found.id != session {
+                    return;
+                }
+                let history = self.lineages.get_mut(&found.lineage).unwrap();
+                match history.range(..epoch).next_back() {
+                    Some((_, &before)) => drop(history.insert(epoch, before)),
+                    None => self.violation(format!(
+                        "cell {cell} relocated at {epoch}, its guest having committed nothing",
+                        cell = Short(cell)
+                    )),
+                }
             }
             Event::Deleted { cell, stale: false, result } => match result {
                 Ok(()) => {}
@@ -1535,6 +1564,9 @@ impl World {
             // commits, its commits uploading, is what the world's clock can't wait for
             // (TASK-92.41).
             filling_wait: Duration::ZERO,
+            // cladefs: writers relocate where the world's collector compacts nothing: the two
+            // together are what no spec checks (doc-27 step 1).
+            relocate: self.profile.options.compact_below == 0.0,
         };
         let (uploads, keys) = (self.hosts[host].uploads.clone(), self.hosts[host].keys.clone());
         let kept = Arc::<Mutex<Vec<BoxFuture<'static, ()>>>>::default();
@@ -2067,6 +2099,32 @@ impl World {
                 events.borrow_mut().push(Event::Failed { host, cell, session: id, error });
             }
         });
+    }
+
+    /// cladefs: a cell's writer relocates out of its sparse segments, as its uploader's rounds do
+    /// (`relocations::round`), of an allowance of a few blocks to many segments: what a round of
+    /// its own would copy at once, its cell's frees and commits going on beside it (doc-27).
+    fn relocate(&mut self) {
+        let Some((host, cell)) = self.ready() else { return };
+        let session = &self.hosts[host].sessions[&cell];
+        let (open_cell, writer) =
+            (session.cell.clone().unwrap(), session.uploader.writer().unwrap());
+        let bucket = self.host_bucket(host);
+        let allowance = self.rng.random_range(1..=64) << 14;
+        let (id, events) = (session.id, self.events.clone());
+        let round = self.spawn(async move {
+            let pins = crate::relocations::Pins::default();
+            // A round failing fails nothing (doc-27): it says so in the trace alone.
+            let relocated =
+                crate::relocations::round(&open_cell, &writer, &bucket, &pins, allowance).await;
+            trace!("cell {cell} relocated {relocated:?}", cell = Short(cell));
+            if let Ok(crate::Relocated { commit: Some(epoch), .. }) = relocated {
+                events.borrow_mut().push(Event::Relocated { host, cell, session: id, epoch });
+            }
+        });
+        // Its uploader's, as its own rounds are, which its stopping waits for: ended with the
+        // session, holding its cell no more.
+        self.hosts[host].sessions.get_mut(&cell).unwrap().keepers.push(round);
     }
 
     /// A writer takes a cell on a host: one with no writer, or, `takeover`, one with. Only a
@@ -3091,8 +3149,17 @@ impl World {
             };
             applied.push(commits.clone());
         }
-        let tags = applied.concat().into_iter();
-        tags.map(|tag| Ok(self.truth_of(cell.id, Some(tag))?.unwrap())).collect()
+        // cladefs: a relocation's commit holds the state of the commit before it, under a tag of
+        // its own (doc-27, [`Event::Relocated`]): one commit of the guest's, applied once.
+        let mut truths: Vec<(u64, u64)> = Vec::new();
+        for tag in applied.concat() {
+            let truth = self.truth_of(cell.id, Some(tag))?.unwrap();
+            match truths.last() {
+                Some(&(before, held)) if held == truth && before != tag => {}
+                _ => truths.push((tag, truth)),
+            }
+        }
+        Ok(truths.into_iter().map(|(_, truth)| truth).collect())
     }
 
     /// Checks that every live cell holds what its commits made, up to one of its own, past
