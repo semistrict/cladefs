@@ -523,16 +523,22 @@ pub fn test_cases() -> Vec<TestCase> {
                     .with_database(PgbenchDatabase::Density),
             ),
         ),
-        // cladefs: how many cells a host holds, without DAX and with it (board 5583).
+        // cladefs: how many cells a host holds, without DAX and with it (board 5583); and with
+        // each VM restoring a zygote, its memory shared (board 7084).
         TestCase::new(
             "cells-per-host",
             &[Tag::CellsPerHost],
-            Box::new(TestCellsPerHost { dax: false }),
+            Box::new(TestCellsPerHost { dax: false, zygote: false }),
         ),
         TestCase::new(
             "cells-per-host-dax",
             &[Tag::CellsPerHost],
-            Box::new(TestCellsPerHost { dax: true }),
+            Box::new(TestCellsPerHost { dax: true, zygote: false }),
+        ),
+        TestCase::new(
+            "cells-per-host-dax-zygote",
+            &[Tag::CellsPerHost],
+            Box::new(TestCellsPerHost { dax: true, zygote: true }),
         ),
         TestCase::new(
             "fxfs-guest-bigmap",

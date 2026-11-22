@@ -63,7 +63,7 @@ class CellsPerHost(unittest.TestCase):
 
     def test_a_run_fails_on_a_case_below_its_floor_or_without_an_end(self):
         results = results_with({"cells-per-host": LOG, "cells-per-host-dax": LOG.replace(
-            "held=17 limit=latency:fsync", "held=33 limit=memory")})
+            "held=17 limit=latency:fsync", "held=33 limit=memory"), "cells-per-host-dax-zygote": LOG})
         out = results / "cells.json"
         ran = subprocess.run(
             [sys.executable, script.SCRIPTS / "cells-per-host.py", "--json", out,
@@ -84,7 +84,7 @@ class CellsPerHost(unittest.TestCase):
         self.assertEqual(written["floors"], {"cells-per-host": 20, "cells-per-host-dax": 30})
         self.assertEqual(written["cases"]["cells-per-host"]["summary"]["held"], 17)
 
-        lost = results_with({"cells-per-host": LOG})
+        lost = results_with({"cells-per-host": LOG, "cells-per-host-dax-zygote": LOG})
         ran = subprocess.run([sys.executable, script.SCRIPTS / "cells-per-host.py", lost],
                              capture_output=True, text=True)
         self.assertEqual(ran.returncode, 1)
@@ -95,8 +95,8 @@ class CellsPerHost(unittest.TestCase):
         ran = subprocess.run([sys.executable, script.SCRIPTS / "cells-per-host.py", "--floor",
                               "nope=3", tempfile.mkdtemp()], capture_output=True, text=True)
         self.assertEqual(ran.returncode, 2)
-        self.assertIn("--floor is CASE=N, CASE one of cells-per-host, cells-per-host-dax: not nope=3",
-                      ran.stderr)
+        self.assertIn("--floor is CASE=N, CASE one of cells-per-host, cells-per-host-dax, "
+                      "cells-per-host-dax-zygote: not nope=3", ran.stderr)
 
 
 if __name__ == "__main__":

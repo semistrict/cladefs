@@ -27,6 +27,7 @@
 use macros::{guest, host};
 
 pub struct TestFxfsGuestSharedDisk {
+    #[cfg_attr(feature = "guest", allow(dead_code))]
     pub dax: bool,
 }
 

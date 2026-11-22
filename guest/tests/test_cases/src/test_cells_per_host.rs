@@ -56,6 +56,15 @@
 //! - KVM's page tables for it, the host's grown since the first VM (`kvm_pt_mib`, SecPageTables);
 //! - the daemon's, its anonymous memory, its bookkeeping (`daemon_anon_mib`), and its extents'
 //!   pages (`daemon_cache_mib`, `cladefsd_memory_bytes`), each over the VMs.
+//!
+//! cells-per-host-dax-zygote (board 7084): no VM boots but the zygote, a VM booted so on a fork
+//! of the base, its probes run once, its root frozen, of which a version is made, its memory
+//! imported into a memory cell and a version made of that ([`Zygote`]). Each VM of the ramp
+//! restores it: its root a fork of the zygote's version, its memory a fork of the memory cell's
+//! version, a copy-on-write window the daemon serves, its pages shared with every other VM's but
+//! those it writes (TASK-456.3). Its guest, finding its connection to the zygote's host reset by
+//! the restore, thaws and goes on as a booted one's does. A step's `boot_p99_ms` is then its
+//! restores': a restore's start to its guest's word that it is ready, as the host hears it.
 
 use macros::{guest, host};
 
@@ -63,6 +72,8 @@ pub struct TestCellsPerHost {
     /// Whether each VM's root is mapped through a DAX window.
     #[cfg_attr(feature = "guest", allow(dead_code))]
     pub dax: bool,
+    /// Whether each VM restores the zygote rather than boot (the module's docs).
+    pub zygote: bool,
 }
 
 /// The vsock port a guest tells the host on (`crate::measure`'s is 5056).
@@ -128,6 +139,7 @@ mod host {
     use anyhow::{Context, ensure};
     use cladefs::cladefsd::governor;
     use cladefs::import::testing::oci_layout;
+    use cladefs::memory_cell::MemoryCell;
     use std::collections::BTreeMap;
     use std::ffi::OsStr;
     use std::io::{BufRead, BufReader, Write};
@@ -407,6 +419,8 @@ mod host {
     struct Guest {
         /// Its kernel's start to its first round done, in ms, once it said so.
         ready_ms: Option<u64>,
+        /// When the host heard it was ready.
+        ready_at: Option<Instant>,
         /// When it last said anything.
         last: Option<Instant>,
         /// Why its reader stopped hearing it: it hung up, or said what is no line of its.
@@ -425,7 +439,8 @@ mod host {
                     heard.samples.push(micros);
                 } else if let Some(ms) = line.strip_prefix("ready uptime_ms=") {
                     let ms = ms.parse().map_err(|_| format!("it said {line:?}"))?;
-                    heard.vms.entry(vm).or_default().ready_ms = Some(ms);
+                    let guest = heard.vms.entry(vm).or_default();
+                    (guest.ready_ms, guest.ready_at) = (Some(ms), Some(Instant::now()));
                 } else if let Some(memory) = memory_of(&line) {
                     heard.vms.entry(vm).or_default().memory = Some(memory);
                 } else {
@@ -503,6 +518,24 @@ mod host {
         memory: HostMemory,
         settings: Settings,
         window: u64,
+        /// What each VM restores, in cells-per-host-dax-zygote.
+        zygote: Option<Zygote>,
+    }
+
+    /// The zygote, as its VMs restore it (the module's docs): its snapshot, and its memory
+    /// cell's version.
+    struct Zygote {
+        snapshot: PathBuf,
+        memory: cladefs::CellVersion,
+    }
+
+    /// A VM of the ramp, started: its name, its process, the socket its guest connects to, and,
+    /// restored, when its restore started, which its readiness is timed from.
+    struct Started {
+        name: String,
+        firecracker: Firecracker,
+        listening: Listening,
+        restored: Option<Instant>,
     }
 
     impl Host<'_> {
@@ -517,10 +550,24 @@ mod host {
             Ok(room(host.available, cached, headroom, kept))
         }
 
-        /// Boots VM `vm` on a fork of the base of its own, and returns it with the socket its
-        /// guest connects to: none if the daemon refused the fork, the host's memory full.
-        fn boot(&self, vm: usize) -> anyhow::Result<Option<(String, Firecracker, Listening)>> {
+        /// The directory the VMs' files are in: their consoles, logs and configurations.
+        fn vm_dir(&self) -> anyhow::Result<&Path> {
+            self.root.parent().context("the root has no parent")
+        }
+
+        /// Starts VM `vm`: restores the zygote, if the case has one, or boots: none if the daemon
+        /// refused its fork, the host's memory full.
+        fn start(&self, vm: usize) -> anyhow::Result<Option<Started>> {
             let name = format!("cell-{vm}");
+            match &self.zygote {
+                Some(zygote) => self.restore(name, zygote).map(Some),
+                None => self.boot(name),
+            }
+        }
+
+        /// Boots the VM `name` on a fork of the base of its own: none if the daemon refused the
+        /// fork, the host's memory full.
+        fn boot(&self, name: String) -> anyhow::Result<Option<Started>> {
             let fork = self.test_setup.tmp_dir.join(format!("{name}.root"));
             match control(&self.socket)?.fork_cell(&self.base, &fork) {
                 Err(err) if err.errno() == Some(cladefs::Errno::ENOMEM) => {
@@ -538,7 +585,78 @@ mod host {
             let firecracker = machine
                 .spawn_api(&self.root, &self.test_setup.test_case, &name, &Vm::api_socket(&name))
                 .with_context(|| format!("booting {name}"))?;
-            Ok(Some((name, firecracker, listening)))
+            Ok(Some(Started { name, firecracker, listening, restored: None }))
+        }
+
+        /// Restores `zygote` as the VM `name`: its root a fork of the zygote's version, its
+        /// memory a fork of the zygote's memory cell's, each at a path of its own.
+        fn restore(&self, name: String, zygote: &Zygote) -> anyhow::Result<Started> {
+            let dir = &self.test_setup.tmp_dir;
+            let listening = Listening::new(&name)?;
+            let api = Vm::api_socket(&name);
+            let firecracker = Firecracker::spawn(self.vm_dir()?, &name, &api, None, &[])?;
+            let version = zygote.memory;
+            let load = serde_json::json!({
+                "snapshot_path": zygote.snapshot,
+                "mem_backend": {
+                    "backend_type": "CellId",
+                    "backend_path": dir.join(format!("{name}-memory.root")),
+                },
+                "memory_cell": {
+                    "tenant": version.tenant,
+                    "cell": version.cell,
+                    "version": version.version,
+                    "cladefsd_socket": self.socket,
+                },
+                "resume_vm": true,
+                "vsock_override": { "uds_path": listening.uds },
+                "cladefs_overrides": [
+                    { "id": "root", "path_on_host": dir.join(format!("{name}.root")) },
+                ],
+            });
+            let restored = Instant::now();
+            (firecracker.request("PUT", "/snapshot/load", &load))
+                .with_context(|| format!("restoring the zygote as {name}"))?;
+            Ok(Started { name, firecracker, listening, restored: Some(restored) })
+        }
+
+        /// Makes the zygote (the module's docs): boots it, and once its guest says it is frozen,
+        /// makes its snapshot and its memory cell's version, and lets it go.
+        fn make_zygote(&self) -> anyhow::Result<Zygote> {
+            let made = Instant::now();
+            let started = self.boot("zygote".to_owned())?.context("the zygote's fork refused")?;
+            let Started { name, mut firecracker, listening, .. } = started;
+            let within = Duration::from_secs(self.settings.ready_secs);
+            let stream = (firecracker.accept_within(&listening.listener, Some(within)))
+                .context("the zygote's guest")?;
+            let mut said = String::new();
+            BufReader::new(&stream).read_line(&mut said)?;
+            ensure!(said == "frozen\n", "the zygote's guest said {said:?}");
+            let dir = &self.test_setup.tmp_dir;
+            let (snapshot, memory) = (dir.join("zygote.snapshot"), dir.join("zygote.memory"));
+            firecracker.request("PATCH", "/vm", &serde_json::json!({ "state": "Paused" }))?;
+            firecracker.request(
+                "PUT",
+                "/snapshot/create",
+                &serde_json::json!({
+                    "snapshot_type": "Full",
+                    "snapshot_path": snapshot,
+                    "mem_file_path": memory,
+                }),
+            )?;
+            // Its guest waits on `stream` until it goes: it never reads it reset, as the VMs
+            // restored from it do.
+            firecracker.kill()?;
+            drop(stream);
+            std::fs::remove_file(Vm::api_socket(&name))?;
+            let size = std::fs::metadata(&memory)?.len();
+            let cell = MemoryCell::open(&self.socket, &dir.join("zygote-memory.root"), size)?;
+            cell.import(&memory)?;
+            let version = cell.make_version()?;
+            cell.close()?;
+            std::fs::remove_file(&memory)?;
+            eprintln!("cells-per-host: made the zygote in {:.1?}", made.elapsed());
+            Ok(Zygote { snapshot, memory: version })
         }
 
         /// Whether the daemon let a VM process go, as its log says.
@@ -659,7 +777,7 @@ mod host {
         /// Ramps, saying each step and what it measured in `measured`.
         fn run(&self, test_setup: &TestSetup, measured: &mut Measured) -> anyhow::Result<()> {
             let settings = Settings::from_env()?;
-            eprintln!("cells-per-host: {settings:?}, dax {}", self.dax);
+            eprintln!("cells-per-host: {settings:?}, dax {}, zygote {}", self.dax, self.zygote);
             // Each VM takes a few of this process's files: its vsock's, its process's.
             cladefs::cladefsd::raise_open_files_limit().context("raising the open files' limit")?;
             let dir = &test_setup.tmp_dir;
@@ -680,8 +798,22 @@ mod host {
             eprintln!("cells-per-host: imported the base in {:.1?}", imported.elapsed());
             let memory = HostMemory::new(daemon.id(), metrics);
             let window = if self.dax { settings.window } else { 0 };
-            let host = Host { test_setup, root, socket, base, daemon, memory, settings, window };
-            let ramped = self.ramp(&host, measured);
+            let mut host = Host {
+                test_setup,
+                root,
+                socket,
+                base,
+                daemon,
+                memory,
+                settings,
+                window,
+                zygote: None,
+            };
+            let ramped = match self.zygote {
+                true => host.make_zygote().map(|zygote| host.zygote = Some(zygote)),
+                false => Ok(()),
+            }
+            .and_then(|()| self.ramp(&host, measured));
             let mut daemon = host.daemon;
             daemon.kill()?;
             daemon.wait()?;
@@ -728,8 +860,8 @@ mod host {
                     // after its first where spawning is slow (the jail's, board 5588), and were
                     // failed for it, by none of their own.
                     let began = Instant::now();
-                    match host.boot(vm)? {
-                        Some(booted) => booting.push((began, booted)),
+                    match host.start(vm)? {
+                        Some(started) => booting.push((began, started)),
                         // The VMs booted are judged, then the ramp stops.
                         None => {
                             full = true;
@@ -740,9 +872,10 @@ mod host {
                 let spawn_secs = spawned.elapsed().as_secs_f64();
                 let within = Duration::from_secs(settings.ready_secs);
                 let began: Vec<Instant> = booting.iter().map(|(began, _)| *began).collect();
-                for (at, (began, (name, mut firecracker, listening))) in
-                    booting.into_iter().enumerate()
-                {
+                let restored: Vec<Option<Instant>> =
+                    booting.iter().map(|(_, started)| started.restored).collect();
+                for (at, (began, started)) in booting.into_iter().enumerate() {
+                    let Started { name, mut firecracker, listening, .. } = started;
                     let left = within.saturating_sub(began.elapsed());
                     let stream = (firecracker.accept_within(&listening.listener, Some(left)))
                         .with_context(|| format!("{name}'s guest"))?;
@@ -752,10 +885,21 @@ mod host {
                     cells.0.push(Cell { name, firecracker, to_guest });
                 }
                 let boots = loop {
+                    // A booted VM's kernel's start to its guest's word, as it says; a restored
+                    // one's restore's start to its guest's word, as the host heard it.
                     let ready: Vec<Option<u64>> = {
                         let heard = heard.lock().unwrap();
                         (first..cells.0.len())
-                            .map(|vm| heard.vms.get(&vm).and_then(|guest| guest.ready_ms))
+                            .zip(&restored)
+                            .map(|(vm, restored)| {
+                                let guest = heard.vms.get(&vm)?;
+                                match restored {
+                                    Some(restored) => guest.ready_at.map(|at| {
+                                        at.saturating_duration_since(*restored).as_millis() as u64
+                                    }),
+                                    None => guest.ready_ms,
+                                }
+                            })
                             .collect()
                     };
                     if let Some(ready) = ready.iter().copied().collect::<Option<Vec<u64>>>() {
@@ -1150,6 +1294,32 @@ mod guest {
         (secs * 1000.0) as u64
     }
 
+    /// `FIFREEZE` and `FITHAW`: `_IOWR('X', 119, int)` and `_IOWR('X', 120, int)`.
+    const FIFREEZE: nix::libc::c_ulong = 0xc004_5877;
+    const FITHAW: nix::libc::c_ulong = 0xc004_5878;
+
+    /// Freezes, or thaws, the root filesystem.
+    fn freeze(request: nix::libc::c_ulong) {
+        use std::os::fd::AsRawFd as _;
+        let root = fs::File::open("/").expect("opening the root");
+        // SAFETY: an ioctl of the root's descriptor, which outlives it, that takes no argument.
+        let ret = unsafe { nix::libc::ioctl(root.as_raw_fd(), request as _, 0) };
+        assert_eq!(ret, 0, "ioctl {request:#x}: {}", std::io::Error::last_os_error());
+    }
+
+    /// As the zygote (the module's docs): freezes the root, tells the host, and waits on the
+    /// connection, which the zygote goes with; restored, a VM finds it reset, and thaws. Before a
+    /// restore's reset no other connection is made: one made before it would be reset with it.
+    fn be_the_zygote() {
+        use std::io::Read as _;
+        freeze(FIFREEZE);
+        let mut host = connect();
+        host.write_all(b"frozen\n").expect("telling the host");
+        let mut rest = Vec::new();
+        let _ = host.read_to_end(&mut rest);
+        freeze(FITHAW);
+    }
+
     /// The connection to the host, on [`PORT`].
     fn connect() -> fs::File {
         use nix::sys::socket::{AddressFamily, SockFlag, SockType, VsockAddr, connect, socket};
@@ -1165,6 +1335,9 @@ mod guest {
             let mut probes = Probes::new();
             // The boot's working set: what the probes read, read once.
             probes.round(Duration::ZERO);
+            if self.zygote {
+                be_the_zygote();
+            }
             let mut to_host = connect();
             writeln!(to_host, "ready uptime_ms={}", uptime_ms()).expect("telling the host");
             let memory = |to_host: &mut fs::File| {

@@ -25,7 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from guest_results import case_lines, case_logs  # noqa: E402
 
-CASES = ("cells-per-host", "cells-per-host-dax")
+CASES = ("cells-per-host", "cells-per-host-dax", "cells-per-host-dax-zygote")
 
 # The fewest VMs each case may hold, by case: a run on the test host recorded (docs/measurements),
 # with a margin. cells-per-host-dax held 181 VMs in 16 GiB on ubu1 (r5649d, 2026-11-22,
