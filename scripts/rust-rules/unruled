@@ -77,4 +77,5 @@ mirrors-keep-their-pins: a release replaced by a drop: which pins a done mirror 
 mirrors-mark-short-copies: an extent left out of the copy before its marker: an order of the protocol's (markerAfterCopy)
 mirrors-move-no-references: a step replaced by its result's value (no references moved): the protocol's (mirrorListsAfterMark)
 evictions-reap-every-evicting-part: a check taken out whole (an eviction's token matched before it reaps a part): which parts an eviction owns is the cache's (TASK-560)
+quarantines-wait-for-every-vm-process: a filter taken out whole (the peers a run was staged to): whom a run waits for is the quarantine's (board 6208)
 windows-listed-once-a-map: a set replaced by a list, a window entered a map: the window set's own choice (TASK-602)

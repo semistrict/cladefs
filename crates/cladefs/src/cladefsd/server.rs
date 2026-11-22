@@ -2797,17 +2797,22 @@ mod refusal_tests {
     }
 }
 
-/// cladefs: quarantines `freed`, a run freed, which a VM process may still reach, as a stage
-/// operation taking it away may be unacknowledged (`slabs::quarantine_with`, TASK-79.9): until
-/// every VM process connected has made those it was sent so far, or gone. The run is freed as the
-/// last of them lets go: at once, if none waits.
+/// cladefs: quarantines `freed`, a run freed, which the VM processes it was staged to may still
+/// reach, as a stage operation taking it away may be unacknowledged (`slabs::quarantine_with`,
+/// TASK-79.9): until each of them still connected has made those it was sent so far, or gone
+/// (doc-26, spec rules waitsForStaged and scopedWaits). No other VM process holds it back: a
+/// tenant's runs are staged to that tenant's VM processes alone, so another tenant's frozen VM
+/// never holds them; a public base's, to those that mapped it. One staged that is gone has exited,
+/// its mappings with it ([`Peer::gone`]). The run is freed as the last of them lets go: at once, if
+/// none waits.
 fn quarantine(freed: crate::slabs::Quarantined) {
     let waiting = PARKING.with_borrow(Clone::clone);
     if let Some(waiting) = &waiting {
         waiting.parked.fetch_add(1, Ordering::SeqCst);
     }
+    let staged = freed.staged().to_vec();
     let freed: Arc<dyn Send + Sync> = Arc::new(Parked { freed: Some(freed), waiting });
-    for peer in PEERS.get().lock().unwrap().iter() {
+    for peer in PEERS.get().lock().unwrap().iter().filter(|peer| staged.contains(&peer.id)) {
         peer.acks.park(&freed);
     }
 }

@@ -4038,6 +4038,212 @@ async fn shrinks_return_once_the_pages_they_evict_are_free() {
     assert_eq!((shrinking.await.unwrap(), unmapped), (Ok(CHUNK), vec![vec![0, CHUNK]]));
 }
 
+/// A VM process made by hand ([`raw_connection`]), of its cell open: it acknowledges the stage
+/// operations it is sent only when told, so that it may stay frozen with an unmap unacknowledged.
+struct HandVm {
+    sender: super::wire::Sender,
+    receiver: super::wire::Receiver,
+    stream: UnixStream,
+    cell: u64,
+    /// Its next request's ID.
+    next: u64,
+}
+
+impl HandVm {
+    /// A VM process of the daemon at `socket`, its cell at `path` created.
+    fn open(socket: &Path, path: &Path) -> Self {
+        let (sender, receiver, stream, cell) = raw_connection(socket, path, 1 << 26);
+        Self { sender, receiver, stream, cell, next: 2 }
+    }
+
+    /// Sends the request `kind`, of `args` and `payload`, and returns its reply, which must
+    /// succeed, and the stage operations sent before it, acknowledged if `ack`.
+    fn call(
+        &mut self,
+        kind: u32,
+        args: &[u64],
+        payload: &[u8],
+        ack: bool,
+    ) -> (super::wire::Message, Vec<super::wire::Header>) {
+        use super::wire::*;
+        let header = Header::new(kind, self.next).with_args(args);
+        self.next += 1;
+        self.sender.send(header, payload, &[]).unwrap();
+        let mut staged = Vec::new();
+        loop {
+            let message = self.receiver.receive(|| 0).unwrap().expect("the daemon let it go");
+            match message.header.kind {
+                REPLY => {
+                    assert_eq!(message.header.status, 0, "request {kind}");
+                    return (message, staged);
+                }
+                _ if message.header.flags & STAGE_ACK != 0 => {
+                    if ack {
+                        self.ack(message.header.id);
+                    }
+                    staged.push(message.header);
+                }
+                _ => staged.push(message.header),
+            }
+        }
+    }
+
+    /// Acknowledges the stage operations up to `id`.
+    fn ack(&self, id: u64) {
+        let ack = super::wire::Header::new(super::wire::ACK, id);
+        self.sender.send(ack, &[], &[]).unwrap();
+    }
+
+    /// Writes its cell's extent 1, `len` bytes, and commits it: the extent.
+    fn write_an_extent(&mut self, len: u64) -> ExtentId {
+        use super::wire::*;
+        let cell = self.cell;
+        self.call(WRITE, &[cell, 1, 0], &pattern(1, len as usize), true);
+        self.call(COMMIT, &[], &[], true);
+        ExtentId { cell, sequence: 1 }
+    }
+
+    /// Reads `extent`'s `len` bytes, which pages them in, and maps them into a window of its own,
+    /// acknowledging what it is sent: where its pages are, as its STAGE_MAPs said.
+    fn map_an_extent(&mut self, extent: ExtentId, len: u64) -> Vec<crate::pages::PhysLocation> {
+        use super::wire::*;
+        let (cell, sequence) = (extent.cell, extent.sequence);
+        self.call(READ, &[cell, sequence, 0, len], &[], true);
+        self.call(WINDOW, &[len, 1], &[], true);
+        let (_, staged) = self.call(MAP, &[cell, sequence, 0, len, 0], &[], true);
+        (staged.into_iter())
+            .filter(|header| header.kind == STAGE_MAP)
+            .map(|header| crate::pages::PhysLocation {
+                arena: crate::pages::ArenaId(header.args[4] as u32),
+                offset: header.args[1],
+            })
+            .collect()
+    }
+
+    /// Maps `extent` again over its window's first `len` bytes, as its guest rebinding it does,
+    /// acknowledging nothing it is sent: then frozen, an unmap unacknowledged.
+    fn freeze_with_an_unmap(&mut self, extent: ExtentId, len: u64) {
+        use super::wire::*;
+        let (cell, sequence) = (extent.cell, extent.sequence);
+        let (_, staged) = self.call(MAP, &[cell, sequence, 0, len, 0], &[], false);
+        assert!(staged.iter().any(|header| header.kind == STAGE_UNMAP), "{staged:?}");
+    }
+}
+
+/// The socket of a daemon serving tenant `id`, whose cells are in `dir`'s directory `id`.
+fn serve_tenant_at(dir: &Path, id: u64) -> std::path::PathBuf {
+    let cells = dir.join(id.to_string());
+    std::fs::create_dir_all(&cells).unwrap();
+    let tenant = super::server::Tenant::new(id, &cells).unwrap();
+    let socket = dir.join(format!("{id}.sock"));
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || super::server::serve_tenant(listener, tenant));
+    socket
+}
+
+/// Board 6208 (doc-26, spec rule scopedWaits): a VM process of tenant 1's, frozen with an unmap
+/// unacknowledged, holds none of tenant 2's memory: a shrink of tenant 2's, whose VM process
+/// acknowledges what it is sent, frees what it evicts and returns at once, the frozen VM process
+/// served still, long before the daemon would let it go ([`super::server::UNRESPONSIVE`]). Every
+/// VM process connected held every slab freed, a tenant's frozen VM every other tenant's memory.
+#[tokio::test(flavor = "multi_thread")]
+async fn frozen_vm_processes_hold_no_other_tenants_memory() {
+    const EXTENT: u64 = 2 << 20;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let (one, two) = (serve_tenant_at(dir.path(), 1), serve_tenant_at(dir.path(), 2));
+    let mut frozen = HandVm::open(&one, &dir.path().join("1").join("store"));
+    let its = frozen.write_an_extent(EXTENT);
+    frozen.map_an_extent(its, EXTENT);
+    frozen.freeze_with_an_unmap(its, EXTENT);
+    let mut live = HandVm::open(&two, &dir.path().join("2").join("store"));
+    let its = live.write_an_extent(EXTENT);
+    live.map_an_extent(its, EXTENT);
+
+    let started = std::time::Instant::now();
+    let shrinking = tokio::spawn(super::memory::shrink(Some(2), 0));
+    // It acknowledges the unmaps it is sent, as it makes them, until the test is done with it.
+    let stream = live.stream.try_clone().unwrap();
+    let acking = std::thread::spawn(move || {
+        while let Ok(Some(message)) = live.receiver.receive(|| 0) {
+            if message.header.flags & super::wire::STAGE_ACK != 0 {
+                live.ack(message.header.id);
+            }
+        }
+    });
+    assert_eq!(shrinking.await.unwrap(), Ok(0));
+    let took = started.elapsed();
+    assert!(took < super::server::UNRESPONSIVE, "tenant 2's shrink took {took:?}");
+    // Served still: not let go.
+    frozen.call(super::wire::INFO, &[], &[], false);
+    stream.shutdown(std::net::Shutdown::Both).unwrap();
+    acking.join().unwrap();
+}
+
+/// Board 6208 (doc-26, spec rules waitsForStaged, scopedWaits): a public base's slab, of the
+/// default arena, which two tenants' VM processes map, evicted, waits for both to acknowledge what
+/// took it away, one after the other, and for no third, frozen with an unmap unacknowledged: free
+/// once the second has. A wait for the arena's tenant alone, the default tenant's, waited for
+/// neither.
+#[tokio::test(flavor = "multi_thread")]
+async fn public_slabs_wait_for_the_vm_processes_they_were_staged_to_alone() {
+    const EXTENT: u64 = 1 << 20;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("base");
+    let open_cell = OpenCell::create(&base, 1 << 26).await.unwrap();
+    let extent = ExtentId { cell: open_cell.cell().id, sequence: 1 };
+    let bytes = pattern(1, EXTENT as usize);
+    open_cell.write(extent, 0, &[VolatileSlice::from(&bytes[..])]).await.unwrap();
+    open_cell.commit(None).await.unwrap();
+    open_cell.make_public().unwrap();
+    let base_cell = open_cell.cell();
+    drop(open_cell);
+    let opened = OpenCell::open(&base).await.unwrap();
+    let forks: Vec<_> = (1..=2u64)
+        .map(|tenant| (tenant, dir.path().join(tenant.to_string()).join("fork")))
+        .collect();
+    for (tenant, fork) in &forks {
+        std::fs::create_dir_all(fork.parent().unwrap()).unwrap();
+        // A fork of the base, a cell of the tenant's.
+        opened.fork_to(fork, crate::host_cell::named(*tenant)).await.unwrap();
+    }
+    drop((opened, base_cell));
+    let forks: Vec<_> = forks.into_iter().map(|(_, fork)| fork).collect();
+    let sockets = [serve_tenant_at(dir.path(), 1), serve_tenant_at(dir.path(), 2)];
+    let mut vms: Vec<HandVm> =
+        (sockets.iter().zip(&forks)).map(|(socket, fork)| HandVm::open(socket, fork)).collect();
+    let mapped: Vec<_> = vms.iter_mut().map(|vm| vm.map_an_extent(extent, EXTENT)).collect();
+    let at = mapped[0][0];
+    assert_eq!(at.arena, crate::pages::ArenaId::DEFAULT, "a public base's extent");
+    assert_eq!(mapped[1], [at], "the same slab mapped");
+    // A third, of the default tenant's, frozen with an unmap of its own unacknowledged.
+    let default = dir.path().join("default.sock");
+    let listener = UnixListener::bind(&default).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let mut frozen = HandVm::open(&default, &dir.path().join("frozen"));
+    let its = frozen.write_an_extent(EXTENT);
+    frozen.map_an_extent(its, EXTENT);
+    frozen.freeze_with_an_unmap(its, EXTENT);
+
+    let evicted = crate::cache::evict_least_used(Some(crate::pages::ArenaId::DEFAULT), |evicted| {
+        evicted >= EXTENT
+    });
+    assert_eq!(evicted, EXTENT);
+    assert!(page_is_held(at.arena, at.offset), "freed with its unmaps unacknowledged");
+    for (n, vm) in vms.iter_mut().enumerate() {
+        // Its unmap, sent as the slab was evicted, acknowledged; and a request after it
+        // answered, which the daemon reads after the acknowledgement.
+        let unmap = vm.receiver.receive(|| 0).unwrap().unwrap().header;
+        assert_eq!(unmap.kind, super::wire::STAGE_UNMAP, "{unmap:?}");
+        vm.ack(unmap.id);
+        vm.call(super::wire::INFO, &[], &[], true);
+        let free = page_is_free(at.arena, at.offset);
+        assert_eq!(free, n == 1, "free once both acknowledged, after VM process {n}");
+    }
+    frozen.call(super::wire::INFO, &[], &[], false);
+}
+
 /// TASK-79.35: the daemon's metrics are served on through a failure to accept a scrape's
 /// connection, as with as many files open as it may (EMFILE): once files close.
 #[test]
