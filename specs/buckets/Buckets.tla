@@ -133,8 +133,9 @@
 (* P's own collection beyond its versions and its writer's state (which    *)
 (* specs/bucket checks: a pass of A here deletes only parts there at its   *)
 (* head's read that neither its versions nor the writer's state named);    *)
-(* P's cell's removal and its origin's objects (mirrorHolds); compaction   *)
-(* and moves (a copy takes moves objects too, as more parts); a stale pin  *)
+(* P's cell's removal and its origin's objects (mirrorHolds); writers'     *)
+(* relocations (doc-27: a version's state is immutable, a copy takes the   *)
+(* segments it reads, wherever its writer relocated since); a stale pin    *)
 (* taken over (a lease, doc-23); the children's own data.                  *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets, TLC
