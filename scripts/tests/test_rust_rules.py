@@ -265,6 +265,22 @@ class SilentFallback(unittest.TestCase):
             fn g() { let n = count().ok(); }
             """), [(14, "silent-fallback")])
 
+    def test_an_item_of_tests_ends_where_its_brackets_close(self):
+        """Board 6908: local_cell's `compile_error!(..)` under `all(feature = "testing", ..)` hid
+        every module declared after it until a closing brace at the file's top."""
+        self.assertEqual(self.matches("""\
+            #[cfg(all(feature = "testing", not(debug_assertions)))]
+            compile_error!(
+                "testing in a release build"
+            );
+            fn f() { let n = count().ok(); }
+            #[cfg(test)]
+            fn g() {
+                let n = count().ok();
+            }
+            fn h() { let n = count().ok(); }
+            """), [(5, "silent-fallback"), (10, "silent-fallback")])
+
     def test_a_file_declared_only_in_tests_passes(self):
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)

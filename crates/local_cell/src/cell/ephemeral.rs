@@ -480,9 +480,8 @@ impl<D: Dir> Recovering<D> {
         let queue = Queue::new(recovered.start, queued.collect::<Vec<_>>());
         // What its last checkpoint gave back, again: a crash may have cut it short.
         for &(number, offset, len) in &checkpoint.punch {
-            if let Some(file) = segments.closed_file(&*dir, segment(number)) {
-                punch(&*file, segment(number), offset, len);
-            }
+            let file = segments.closed_file(&*dir, segment(number));
+            punch(file, segment(number), offset, len);
         }
         let assembled = Assembled {
             options,
@@ -515,9 +514,15 @@ impl<D: Dir> Recovering<D> {
 
 /// Gives back the `len` bytes at `offset` of `file`, segment `segment`'s: logged, not failed, if
 /// the host can't, as the space alone is lost.
-fn punch<F: File>(file: &F, segment: SegmentId, offset: u64, len: u64) {
-    if let Err(err) = file.punch(offset, len) {
-        log::warn!("extent store: giving back {len} bytes at {offset} of {segment:?}: {err}");
+/// Gives back `len` bytes at `offset` of `segment`, `file` its file if it is closed: a failure,
+/// opening it or punching it, said, the bytes staying taken (the punch a disk's room alone).
+fn punch<F: File>(file: Result<Option<Arc<F>>, Error>, segment: SegmentId, offset: u64, len: u64) {
+    let punched = file.and_then(|file| match file {
+        Some(file) => Ok(file.punch(offset, len)?),
+        None => Ok(()),
+    });
+    if let Err(err) = punched {
+        log::warn!("extent store: giving back {len} bytes at {offset} of {segment:?}: {err:#}");
     }
 }
 
@@ -678,9 +683,7 @@ impl<D: Dir> LocalCell<D> {
     pub(crate) fn give_back(&self, punches: Vec<(SegmentId, u64, u64)>) {
         for (number, offset, len) in punches {
             let file = self.lock().segments.closed_file(&*self.dir, number);
-            if let Some(file) = file {
-                punch(&*file, number, offset, len);
-            }
+            punch(file, number, offset, len);
         }
     }
 }

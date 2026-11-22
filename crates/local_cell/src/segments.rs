@@ -1292,18 +1292,24 @@ impl<F: File> Segments<F> {
     }
 
     /// cladefs: the underlying file of closed segment `number`, if it is tracked and closed: what
-    /// an ephemeral cell punches freed runs out of (board 6905).
-    pub fn closed_file<D: Dir<File = F>>(&mut self, dir: &D, number: SegmentId) -> Option<Arc<F>> {
+    /// an ephemeral cell punches freed runs out of (board 6905). Failing if it can't be opened,
+    /// never taken for one there is none of (board 6908).
+    pub fn closed_file<D: Dir<File = F>>(
+        &mut self,
+        dir: &D,
+        number: SegmentId,
+    ) -> Result<Option<Arc<F>>, Error> {
         if !matches!(self.tracked.get(&number).map(|s| &s.phase), Some(Phase::Closed)) {
-            return None;
+            return Ok(None);
         }
         if let Some(framed) = self.files.get(number) {
-            return Some(framed.file.clone());
+            return Ok(Some(framed.file.clone()));
         }
         let path = segment_path(number);
         let keys = self.keys.of(number.cell);
-        let framed = Arc::new(Framed::open(dir.open(&path, true).ok()?, &path, &keys).ok()?);
-        Some(self.files.insert(number, framed).file.clone())
+        let file = dir.open(&path, true).with_context(|| format!("opening {path}"))?;
+        let framed = Arc::new(Framed::open(file, &path, &keys)?);
+        Ok(Some(self.files.insert(number, framed).file.clone()))
     }
 
     /// Adds to `syncs` what the next commit's flush syncs of the segments': the open segment's

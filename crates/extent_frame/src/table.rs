@@ -214,6 +214,7 @@ pub fn decode(bytes: &[u8], keys: &dyn Keys) -> Result<Decoded, Error> {
         entries.extend(footer.entries(block, index)?);
     }
     let Appendix { offset, len, crc: expected } = footer.appendix;
+    // Past what this host addresses: no range, refused below as corrupt.
     let range = usize::try_from(offset).ok().zip(usize::try_from(len).ok());
     let range = range.and_then(|(offset, len)| Some(offset..offset.checked_add(len)?));
     let appendix = range.and_then(|range| data.get(range)).ok_or_else(|| corrupt("appendix"))?;

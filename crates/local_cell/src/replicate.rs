@@ -162,6 +162,7 @@ pub fn own_frame(sequence: u64, file: &[u8]) -> Vec<u8> {
 pub fn own_frames(bytes: &[u8]) -> Vec<(u64, Vec<u8>)> {
     let mut cursor = Cursor::new(bytes);
     let mut frames = Vec::new();
+    // A length past what this host addresses: past what is left, which ends the frames too.
     while let Some(sequence) = cursor.u64()
         && let Some(len) = cursor.u64().and_then(|len| usize::try_from(len).ok())
         && let Some(expected) = cursor.u64()
@@ -180,6 +181,7 @@ pub fn own_frames(bytes: &[u8]) -> Vec<(u64, Vec<u8>)> {
 pub(crate) fn own_frames_end(bytes: &[u8]) -> usize {
     let mut cursor = Cursor::new(bytes);
     let mut end = 0usize;
+    // A length past what this host addresses: past what is left, which ends the frames too.
     while let Some(sequence) = cursor.u64()
         && let Some(len) = cursor.u64().and_then(|len| usize::try_from(len).ok())
         && let Some(expected) = cursor.u64()

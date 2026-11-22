@@ -188,25 +188,31 @@ def built_only_in_tests(lines, number, tests=("test",)):
     return cfg is not None and only_in_tests(cfg_tree(cfg.group(1)), tests)
 
 
+def brackets(code):
+    """How far `code`, a line's, opens brackets of any kind, less how far it closes them."""
+    return sum(code.count(opening) for opening in "([{") - sum(code.count(c) for c in ")]}")
+
+
 def outside_tests(lines, tests=("test",)):
     """Each of `lines`, numbered from 1, but those the rules leave to tests: a file's test module
     and what follows it; a test module within another module (board 6105: migration.rs's), to its
-    closing brace, at its own indent; and any other item or statement built only in `tests`, its
-    line, or to its closing brace. A test module is one built only in `tests`."""
+    closing brace, at its own indent; and any other item or statement built only in `tests`, to
+    where its brackets close (board 6908: a function of tests', a statement of theirs, a
+    `compile_error!(..)`). A test module is one built only in `tests`."""
     closing = None
-    attributed = None
+    attributed = False
+    depth = 0
     for number, line in enumerate(lines, 1):
         if closing is not None:
             if line.startswith(closing + "}"):
                 closing = None
             continue
-        if attributed is not None:
+        if attributed:
             if line.lstrip().startswith("#["):
                 continue
-            code = line.split("//", 1)[0].rstrip()
-            if not code.endswith((";", "}", ",")):
-                closing = attributed
-            attributed = None
+            depth += brackets(line.split("//", 1)[0])
+            if depth <= 0:
+                attributed, depth = False, 0
             continue
         if starts_tests(lines, number, tests):
             indent = line[:len(line) - len(line.lstrip())]
@@ -217,7 +223,7 @@ def outside_tests(lines, tests=("test",)):
             closing = indent
             continue
         if built_only_in_tests(lines, number, tests):
-            attributed = line[:len(line) - len(line.lstrip())]
+            attributed = True
             continue
         yield number, line
 
