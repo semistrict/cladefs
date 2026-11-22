@@ -734,8 +734,8 @@ impl Pages {
         Ok(self.dirty.get_mut(&index).unwrap())
     }
 
-    /// Makes `chunks` holes, which read as zeros, those within the contents: a commit stores them as
-    /// nothing, leaving what they held. What it notes is what the last commit holds data in, as
+    /// Makes `chunks` holes, which read as zeros, those within the contents: a commit stores them
+    /// as nothing, leaving what they held. What it notes is what the last commit holds data in, as
     /// ranges: chunks holes already cost nothing (TASK-584). It reads the nodes naming data
     /// among them.
     pub async fn discard(&mut self, device: &dyn Device, chunks: Range<u64>) -> Result<(), Error> {
@@ -782,8 +782,8 @@ impl Pages {
         Ok(())
     }
 
-    /// Makes the contents `size` bytes: what was past it, if it was longer, is gone, and reads as zeros
-    /// if it grows again.
+    /// Makes the contents `size` bytes: what was past it, if they were longer, is gone, and reads
+    /// as zeros if they grow again.
     pub async fn resize(&mut self, device: &dyn Device, size: u64) -> Result<(), Error> {
         if size < self.size {
             let kept = chunks(size, self.block_size());
@@ -1492,10 +1492,10 @@ mod tests {
         }
     }
 
-    /// TASK-552: a device whose window maps a chunk that each commit rewrites, as a database's first
-    /// page, and that grows a chunk a commit, never read back, keeps no more of what its commits
-    /// wrote than a remap batch, however many commits pass with nothing mapped again: it kept a
-    /// copy of every chunk written, past the region's end too.
+    /// TASK-552: a device whose window maps a chunk that each commit rewrites, as a database's
+    /// first page, and that grows a chunk a commit, never read back, keeps no more of what its
+    /// commits wrote than a remap batch, however many commits pass with nothing mapped again: it
+    /// kept a copy of every chunk written, past the region's end too.
     #[test]
     fn what_a_mapped_device_keeps_of_its_commits_stays_within_a_remap_batch() {
         let mut model = Model::new(4);

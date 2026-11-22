@@ -6,9 +6,9 @@
 //! by the name SQLite first opens it by, and its journals and temporary files are memory (see
 //! `database`). A second database (`ATTACH`) is refused: a cell holds one.
 //!
-//! With `PRAGMA mmap_size`, SQLite reads pages in place, in the block device's window, if it has one,
-//! with nothing copied (`xFetch`); otherwise, or for pages changed since the last commit, it reads
-//! them as it would without.
+//! With `PRAGMA mmap_size`, SQLite reads pages in place, in the block device's window, if it has
+//! one, with nothing copied (`xFetch`); otherwise, or for pages changed since the last commit, it
+//! reads them as it would without.
 //!
 //! A transaction is committed as SQLite syncs the database's file at its end, or, if told not to
 //! sync (`synchronous=OFF`), as it unlocks it. WAL mode is refused: its log would be memory, which

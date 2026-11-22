@@ -102,7 +102,8 @@ pub fn page_size() -> u64 {
 /// on a host of `host_page`-byte pages ([`page_size`]): one whose pages are no larger, as mmap maps
 /// whole host pages alone, at offsets of whole ones in an extent. A host of larger pages (an arm64
 /// kernel of 16 KiB, a cell's blocks 4 KiB) maps no extent's blocks into a window: a memory cell
-/// restores none there, and a SQLite cell's block device reads from its device instead (board 5230, board 5232).
+/// restores none there, and a SQLite cell's block device reads from its device instead (board 5230,
+/// board 5232).
 pub fn window_fits_host(block: u64, host_page: u64) -> Result<(), Error> {
     match host_page <= block {
         true => Ok(()),

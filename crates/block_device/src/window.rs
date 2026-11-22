@@ -35,8 +35,8 @@ pub struct Run {
     pub contents: Contents,
 }
 
-/// A block device's window. Offsets and lengths are multiples of the device's block size, which is the
-/// window's page size.
+/// A block device's window. Offsets and lengths are multiples of the device's block size, which is
+/// the window's page size.
 pub trait Window: Send + Sync {
     /// The memory: its first byte, and how many it holds.
     fn memory(&self) -> (NonNull<u8>, u64);

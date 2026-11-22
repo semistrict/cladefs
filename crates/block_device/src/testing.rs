@@ -32,8 +32,8 @@ unsafe impl Send for CopyingWindow {}
 unsafe impl Sync for CopyingWindow {}
 
 impl CopyingWindow {
-    /// A window of `size` bytes, aligned to `block_size`: no more than a test's block device maps, as
-    /// each is filled when made, and a test may make one each time it opens its block device.
+    /// A window of `size` bytes, aligned to `block_size`: no more than a test's block device maps,
+    /// as each is filled when made, and a test may make one each time it opens its block device.
     pub fn new(size: u64, block_size: u32) -> Self {
         let layout = Layout::from_size_align(size as usize, block_size as usize);
         let layout = layout.expect("a layout");
