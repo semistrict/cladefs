@@ -477,3 +477,64 @@ fn takes_of_cells_whose_members_are_lost_go_on_by_force() {
     write(&client, 5..=6);
     check(&client, 5..=6);
 }
+
+/// board 7409: `WRITE_BARRIER` (`barriers.before`) orders prior writes ahead of the write it
+/// precedes without waiting for `replicated.fsync` durability: while both peers and the bucket are
+/// unreachable, a pre-barrier write completes immediately and seals prior extents, while a
+/// post-barrier commit still waits for replication.
+#[test]
+fn pre_barrier_does_not_wait_for_replication() {
+    use cladefs::{Commit, WriteBarriers};
+    let root = tempfile::tempdir().unwrap();
+    let bucket = root.path().join("bucket");
+    std::fs::create_dir(&bucket).unwrap();
+    let (_addresses, mut daemons) = hosts(root.path(), &bucket, 3);
+    let cell_dir = daemons[0].dir.join("store");
+    let cell = create_replicated(&daemons[0], &cell_dir);
+    let client = connect(&daemons[0], &cell_dir);
+    write(&client, 1..=1);
+    until("replicated with f = 1", || configuration(&bucket, cell).1 == 1);
+
+    // Cut off both peers and the bucket: any commit waiting for replication blocks until the
+    // bucket returns.
+    daemons[1].kill();
+    daemons[2].kill();
+    reachable(&bucket, false);
+
+    // Write extent 2 without a barrier, then write extent 3 with PRE_BARRIER only.
+    let ext2 = ExtentId { cell: client.cell(), sequence: 2 };
+    let ext3 = ExtentId { cell: client.cell(), sequence: 3 };
+    let ext4 = ExtentId { cell: client.cell(), sequence: 4 };
+    client.write(ext2, 0, &[VolatileSlice::from(&data(2)[..])]).unwrap();
+
+    let before_only = WriteBarriers { before: true, after: None, root: None };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let res =
+            client.write_with_barriers(ext3, 0, &[VolatileSlice::from(&data(3)[..])], before_only);
+        // Test thread passes the client back; receiver panics on timeout if disconnected.
+        let _ = tx.send((client, res));
+    });
+    let (client, res) = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("pre-barrier write blocked waiting for replication");
+    res.unwrap();
+    handle.join().unwrap();
+
+    // Extent 2 was sealed by the pre-barrier, so writing it again is refused with EPERM.
+    let sealed = client.write(ext2, 0, &[VolatileSlice::from(&data(2)[..])]);
+    assert_eq!(sealed.unwrap_err(), cladefs::Errno::EPERM);
+
+    // A write with both PRE_BARRIER and POST_BARRIER (Commit::Ordered, upgraded to Replicated by
+    // Fsync::Replicated) still waits for replication after writing extent 4.
+    let both = WriteBarriers { before: true, after: Some(Commit::Ordered), root: None };
+    let waiting = std::thread::spawn(move || {
+        client.write_with_barriers(ext4, 0, &[VolatileSlice::from(&data(4)[..])], both).unwrap();
+        client
+    });
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(!waiting.is_finished(), "post-barrier commit returned without replication");
+    reachable(&bucket, true);
+    let client = waiting.join().unwrap();
+    check(&client, 1..=4);
+}

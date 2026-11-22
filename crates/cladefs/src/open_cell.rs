@@ -449,6 +449,25 @@ pub struct WriteBarriers<'a> {
     pub root: Option<&'a [u8]>,
 }
 
+/// What a commit asks to wait for (board 7409): a guest's commit, which a replicated cell upgrades
+/// to its `replicated.fsync` / `Replicated` level (doc-21), or an ordering-only pre-barrier
+/// (`WRITE_BARRIER`), which orders prior writes ahead of the write it precedes without waiting for
+/// durability.
+#[derive(Clone, Copy)]
+enum CommitRequest {
+    Commit(Commit),
+    Barrier,
+}
+
+impl CommitRequest {
+    fn level(self) -> &'static str {
+        match self {
+            Self::Commit(commit) => commit.level(),
+            Self::Barrier => Commit::Ordered.level(),
+        }
+    }
+}
+
 /// When a commit completes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Commit {
@@ -1637,7 +1656,7 @@ impl OpenCell {
             return Err(Errno::EINVAL);
         }
         if barriers.before {
-            self.commit_ordered(None).await?;
+            self.commit_request(None, CommitRequest::Barrier).await?;
         }
         self.write(extent, offset, buffers).await?;
         match barriers.after {
@@ -1827,22 +1846,27 @@ impl OpenCell {
     /// children are its phases: `commit.seal` and `commit.write`, the open cell's; then, local or
     /// uploaded, `store.flush`, and `commit.upload_wait` as it waits for object storage.
     async fn commit_with(&self, root: Option<&[u8]>, commit: Commit) -> Result<()> {
+        self.commit_request(root, CommitRequest::Commit(commit)).await
+    }
+
+    /// Commits for `request`, tracing and counting the commit (board 7409).
+    async fn commit_request(&self, root: Option<&[u8]>, request: CommitRequest) -> Result<()> {
         let span = trace::Span::start("store.commit");
         span.set_cell(self.cell());
-        span.set(trace::LEVEL, commit.level());
+        span.set(trace::LEVEL, request.level());
         span.run_async(async {
             self.admit(Changing::Contents)?;
             let started = std::time::Instant::now();
-            let committed = self.commit_and_wait(root, commit).await;
+            let committed = self.commit_and_wait(root, request).await;
             stats::count_since(Counter::Commits, Counter::CommitNs, started);
             committed
         })
         .await
     }
 
-    /// Commits, and waits as `commit` says: for the uploader's lag, the host's disk, or object
+    /// Commits, and waits as `request` says: for the uploader's lag, the host's disk, or object
     /// storage; the commit's phases, each counted ([`stats::Stats::commits`]).
-    async fn commit_and_wait(&self, root: Option<&[u8]>, commit: Commit) -> Result<()> {
+    async fn commit_and_wait(&self, root: Option<&[u8]>, request: CommitRequest) -> Result<()> {
         /// What a commit waits for: a level of [`Commit`]'s, or replicated (doc-21).
         enum Waiting {
             Commit(Commit),
@@ -1855,16 +1879,21 @@ impl OpenCell {
         let waiting = std::time::Instant::now();
         // cladefs: in a replicated cell (doc-21, TASK-537.3.3), the guest's fsync waits for the
         // level its head asks for, and its sync family for its commits replicated, rather than
-        // uploaded: on f+1 hosts' disks, or in the bucket.
+        // uploaded: on f+1 hosts' disks, or in the bucket. An ordering-only pre-barrier
+        // (`WRITE_BARRIER`, board 7409) orders prior writes ahead of the write it precedes and
+        // never upgrades to `replicated.fsync`.
         let replication = self.uploader.as_ref().and_then(|uploader| uploader.replication());
-        let commit = match (commit, replication) {
-            (Commit::Uploaded, Some(replicated)) if replicated.f >= 1 => Waiting::Replicated,
-            (Commit::Ordered, Some(replicated)) => match replicated.fsync {
+        let commit = match (request, replication) {
+            (CommitRequest::Barrier, _) => Waiting::Commit(Commit::Ordered),
+            (CommitRequest::Commit(Commit::Uploaded), Some(replicated)) if replicated.f >= 1 => {
+                Waiting::Replicated
+            }
+            (CommitRequest::Commit(Commit::Ordered), Some(replicated)) => match replicated.fsync {
                 bucket_cell::layout::Fsync::Ordered => Waiting::Commit(Commit::Ordered),
                 bucket_cell::layout::Fsync::Local => Waiting::Commit(Commit::Local),
                 bucket_cell::layout::Fsync::Replicated => Waiting::Replicated,
             },
-            (commit, _) => Waiting::Commit(commit),
+            (CommitRequest::Commit(commit), _) => Waiting::Commit(commit),
         };
         let waited = match commit {
             Waiting::Replicated => self.make_replicated().await,
@@ -4667,5 +4696,44 @@ mod tests {
         let follower = Arc::new(cell).follow();
         let following = follower.create_copying_dax_window(ps, stage());
         assert_eq!(following.err().and_then(|error| error.errno()), Some(Errno::EROFS));
+    }
+
+    /// board 7409: on a replicated cell configured with `Fsync::Local`, `WRITE_BARRIER`
+    /// (`barriers.before`) orders and seals prior extents without flushing to disk (leaving
+    /// `flush_pending() == true`), while `barriers.after: Some(Commit::Ordered)` still honors
+    /// `Fsync::Local` and flushes once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pre_barrier_does_not_flush_local_replicated_cell() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("memory:///pre-barrier-local-{:016x}", rand::random::<u64>());
+        let mut keeping = Opening::here().unwrap().keeping;
+        keeping.replication = bucket_cell::layout::Wish::new(0, bucket_cell::layout::Fsync::Local);
+        let cell_id = CellId { tenant: 0, id: 1 };
+        let cell =
+            OpenCell::create_kept_with(dir.path().join("cell"), 1 << 20, cell_id, &url, keeping)
+                .await
+                .unwrap();
+        cell.flush().await.unwrap();
+        assert!(!cell.flush_pending());
+
+        let (ext1, ext2, ext3) = (id(&cell, 1), id(&cell, 2), id(&cell, 3));
+        write(&cell, ext1, 0, &pattern(1, BLOCK)).await.unwrap();
+        let before_only = WriteBarriers { before: true, after: None, root: None };
+        let data2 = pattern(2, BLOCK);
+        cell.write_with_barriers(ext2, 0, &[VolatileSlice::from(&data2[..])], before_only)
+            .await
+            .unwrap();
+        // Pre-barrier ordered & sealed ext1, but did NOT upgrade to Fsync::Local flush.
+        assert!(cell.flush_pending(), "pre-barrier flushed disk under Fsync::Local");
+        assert_eq!(write(&cell, ext1, 0, &pattern(1, BLOCK)).await, Err(Errno::EPERM));
+
+        // A post-barrier Commit::Ordered DOES upgrade to Fsync::Local and flushes once.
+        let both = WriteBarriers { before: true, after: Some(Commit::Ordered), root: None };
+        let data3 = pattern(3, BLOCK);
+        cell.write_with_barriers(ext3, 0, &[VolatileSlice::from(&data3[..])], both).await.unwrap();
+        assert!(
+            !cell.flush_pending(),
+            "post-barrier Commit::Ordered did not flush under Fsync::Local"
+        );
     }
 }
