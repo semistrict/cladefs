@@ -219,7 +219,8 @@ async fn bucket(
 ) -> anyhow::Result<()> {
     let object_bucket =
         bucket_cell::object_bucket::ObjectBucket::from_url(url).map_err(anyhow::Error::msg)?;
-    let listed = object_bucket.list(prefix).await.with_context(|| format!("listing {url}{prefix}"))?;
+    let listed =
+        object_bucket.list(prefix).await.with_context(|| format!("listing {url}{prefix}"))?;
     let written: BTreeSet<_> = listed
         .iter()
         .filter_map(|meta| match layout::kind(&meta.key) {
@@ -232,7 +233,8 @@ async fn bucket(
     for meta in &listed {
         let key = meta.key.as_str();
         let at = || format!("{url} {key}");
-        let Some(object) = bucket_cell::bucket::get(&object_bucket, key).await else {
+        let got = bucket_cell::bucket::get(&object_bucket, key).await;
+        let Some(object) = got.with_context(|| format!("reading {}", at()))? else {
             continue; // Deleted since it was listed.
         };
         let framed = match layout::kind(key) {
