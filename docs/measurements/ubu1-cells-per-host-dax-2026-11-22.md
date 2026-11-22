@@ -19,12 +19,17 @@ had no more to guarantee beside others' work. The case logs are in
 | r5649c | r5649b's build, `CLADEFS_GUEST_BALLOON=0` | 151, then failed | (a VM's ready budget, below) | 72.2 MiB | 490 ms |
 | r5649d | 9557bf9f5: r5649b and the ready budget per VM | **181** | memory | 72.2 MiB | 410 ms |
 | r5649e | r5649d's build, `CLADEFS_GUEST_BALLOON=0` | **180** | memory | 72.0 MiB | 400 ms |
+| r5649f | e0768d209: r5649d merged with main's cladefs::slabs (3e377099c) and copy on write in the VM process (7fb67264e) | **184** | memory | 71.4 MiB | 400 ms |
 
 Every probe's p99 was 0 ms (rounded) in every window of every run, fsync's at most 31 ms; the
 budgets (100 ms, 250 ms for fsync) were never near. No VM exited or went silent, the daemon
 logged no ENOMEM, no page-in waiting for memory, and let no VM process go.
 
 ## A full host keeps its DAX VMs (board 5662)
+
+r5649f ran board 5662's page-ins waiting on main's slabs instead of physmem: 184 VMs, no ENOMEM,
+no page-in waiting, no VM lost; its governor never said the host full, the slabs' quarantine
+giving back what windows unmapped sooner.
 
 Before board 5662 a DAX ramp on ubu1 died at 159 VMs, its guests' faults failing ENOMEM as the
 governor squeezed the daemon's memory to one chunk under the VMs' working set. In r5649a the
