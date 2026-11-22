@@ -276,6 +276,27 @@ impl PhysMemory {
         self.size
     }
 
+    /// cladefs: lets go of what this memory holds outside the process's: its mapping, and its arenas'
+    /// shared memory objects, as far as it holds them. Under madsim, for a simulated host's memory
+    /// once its simulation ended, which nothing uses again (board 2890): each host's memory leaked
+    /// with its node-local values, a process running simulation after simulation ran out of
+    /// descriptors.
+    ///
+    /// # Safety
+    ///
+    /// Nothing reads, writes or maps this memory, or asks for its objects, from then on.
+    #[cfg(madsim)]
+    pub(crate) unsafe fn release(&self) {
+        use std::os::fd::AsRawFd as _;
+        // SAFETY: the mapping `new` made, which the caller says nothing uses any more.
+        unsafe { libc::munmap(self.base.as_ptr().cast(), self.size) };
+        self.objects.write().clear();
+        // SAFETY: the default arena's object, the last holder of which `default_fd` is now, as
+        // nothing asks for it any more (the caller's word): never dropped, as this memory is a
+        // node-local value leaked, so never closed again.
+        unsafe { libc::close(self.default_fd.as_raw_fd()) };
+    }
+
     /// The default arena's shared memory object, for mapping its pages elsewhere.
     pub fn fd(&self) -> BorrowedFd<'_> {
         self.default_fd.as_fd()

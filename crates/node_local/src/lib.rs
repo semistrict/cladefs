@@ -15,7 +15,10 @@
 //!
 //! A node's value is leaked, as a static's is: a value let go of at its node's kill stays where
 //! its holders, the node's tasks, which the kill dropped, left it. A simulation leaks a value of
-//! each static its killed nodes used, no more.
+//! each static its killed nodes used, no more. What such a value holds outside the process's memory
+//! (mappings, descriptors) a static made [`NodeLocal::releasing`] lets go of once the simulation
+//! ends, as its thread exits, no task of its left to use it: else a process running simulation
+//! after simulation runs out of descriptors (board 2890).
 //!
 //! A process's environment is its state too, which a daemon's configuration is read from: [`env`]
 //! reads it, the process's normally, and, in a simulated node given one, the node's.
@@ -35,6 +38,10 @@ pub struct NodeLocal<T: 'static> {
     nodes: std::sync::Mutex<Vec<(Node, &'static T)>>,
     #[cfg(madsim)]
     registered: std::sync::Once,
+    /// What lets a node's value go of what it holds outside the process's memory, once its
+    /// simulation ended ([`NodeLocal::releasing`]).
+    #[cfg(madsim)]
+    release: Option<fn(&'static T)>,
 }
 
 impl<T: Send + Sync + 'static> NodeLocal<T> {
@@ -47,6 +54,28 @@ impl<T: Send + Sync + 'static> NodeLocal<T> {
             nodes: std::sync::Mutex::new(Vec::new()),
             #[cfg(madsim)]
             registered: std::sync::Once::new(),
+            #[cfg(madsim)]
+            release: None,
+        }
+    }
+
+    /// A static as [`NodeLocal::new`] makes, each of whose node values `release` lets go of what it
+    /// holds outside the process's memory, its mappings and descriptors, once the simulation it was
+    /// made in ended: as the simulation's thread exits, its runtime and every task of its gone,
+    /// whatever node it was of, killed or not (board 2890). The process's value it never is: built
+    /// normally, as `new`.
+    pub const fn releasing(init: fn() -> T, release: fn(&'static T)) -> Self {
+        #[cfg(not(madsim))]
+        let _ = release;
+        Self {
+            init,
+            value: OnceLock::new(),
+            #[cfg(madsim)]
+            nodes: std::sync::Mutex::new(Vec::new()),
+            #[cfg(madsim)]
+            registered: std::sync::Once::new(),
+            #[cfg(madsim)]
+            release: Some(release),
         }
     }
 
@@ -74,8 +103,30 @@ impl<T: Send + Sync + 'static> NodeLocal<T> {
         }
         let value: &'static T = Box::leak(Box::new((self.init)()));
         self.nodes.lock().unwrap().push((node, value));
+        if let Some(release) = self.release {
+            ENDING.with(|ending| ending.0.borrow_mut().push(Box::new(move || release(value))));
+        }
         value
     }
+}
+
+/// cladefs: what lets the values a simulation's thread made go of what they hold outside the
+/// process's memory, as the thread exits ([`NodeLocal::releasing`]): the last made first.
+#[cfg(madsim)]
+struct Ending(std::cell::RefCell<Vec<Box<dyn FnOnce()>>>);
+
+#[cfg(madsim)]
+impl Drop for Ending {
+    fn drop(&mut self) {
+        for release in self.0.get_mut().drain(..).rev() {
+            release();
+        }
+    }
+}
+
+#[cfg(madsim)]
+thread_local! {
+    static ENDING: Ending = const { Ending(std::cell::RefCell::new(Vec::new())) };
 }
 
 /// Declares a static of a daemon's, one value per process, or per simulated node ([`NodeLocal`]),

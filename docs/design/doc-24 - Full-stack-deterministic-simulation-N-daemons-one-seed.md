@@ -100,6 +100,14 @@ when the node is killed. A mechanical conversion of each static (`X.lock()` beco
 (the panic hook, the logger, constant tables) stay. Metrics and z-pages become per node too, so
 that a simulated host's `/z/` pages are its own.
 
+As built, a node's values are leaked, not dropped: a killed node's tasks may leave references to
+them anywhere. What a value holds outside the process's memory, a static made
+`NodeLocal::releasing` lets go of once its simulation ends, as the simulation's thread exits:
+physmem's memory, its mapping and its arenas' shared memory objects (board 2890), which a process
+running simulation after simulation (madsim's `MADSIM_TEST_NUM`) otherwise kept, about six
+descriptors a simulation, until it ran out. The leaked values' memory stays: a megabyte or so a
+simulation, which is why scripts/test.sh still runs each seed in a process of its own.
+
 ## The guest and the checker
 
 A simulated guest per open cell: writes extents, commits at each level (Ordered, Local, and its

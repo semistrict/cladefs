@@ -155,3 +155,49 @@ fn a_value_being_made_holds_up_no_other_simulations_start() {
     making.join().unwrap();
     starting.join().unwrap();
 }
+
+/// What [`HELD`]'s values let go of, once their simulations ended: each value's node, as it said.
+static RELEASED: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+/// A static whose node values hold something outside the process's memory: their node's number.
+static HELD: node_local::NodeLocal<AtomicU64> = node_local::NodeLocal::releasing(
+    || AtomicU64::new(0),
+    |held| {
+        RELEASED.lock().unwrap().push(held.load(Ordering::Relaxed));
+    },
+);
+
+/// Board 2890: a releasing static's node values let go of what they hold once their simulation
+/// ended, as its thread exits: every node's, a killed one's too; none while it runs.
+#[test]
+fn values_let_go_once_their_simulation_ends() {
+    let ran = std::thread::spawn(|| {
+        let runtime = madsim::runtime::Runtime::new();
+        runtime.add_simulator::<node_local::Plugin>();
+        runtime.block_on(async {
+            let handle = madsim::runtime::Handle::current();
+            let mut nodes = Vec::new();
+            for host in 1..=2u8 {
+                let node = handle
+                    .create_node()
+                    .name(format!("host{host}"))
+                    .ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, host)))
+                    .init(move || async move {
+                        HELD.get().store(u64::from(host), Ordering::Relaxed);
+                        std::future::pending::<()>().await;
+                    })
+                    .build();
+                nodes.push(node);
+            }
+            madsim::time::sleep(Duration::from_secs(1)).await;
+            // host 1 killed: its value let go of nothing yet, its simulation running on.
+            handle.kill(nodes[0].id());
+            madsim::time::sleep(Duration::from_secs(1)).await;
+            assert_eq!(*RELEASED.lock().unwrap(), Vec::<u64>::new());
+        });
+    });
+    ran.join().unwrap();
+    let mut released = RELEASED.lock().unwrap().clone();
+    released.sort();
+    assert_eq!(released, [1, 2]);
+}
