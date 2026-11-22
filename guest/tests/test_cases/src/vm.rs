@@ -370,7 +370,7 @@ impl Vm {
         let mut args = vec!["--no-api".into(), "--config-file".into(), config_path.into()];
         args.extend(log_args(&dir.join("firecracker.log")));
         let console_path = dir.join("console.txt");
-        let mut child = spawn(&args, &console_path, &cpus)?;
+        let mut child = spawn(&args, &console_path, &cpus, &written_by(&config))?;
         let code = match kill_on {
             Some(line) => {
                 kill_on_line(&mut child, &console_path, &line, kill_instead)?.map_or(0, exit_code)
@@ -523,12 +523,16 @@ impl Firecracker {
         cpus: &[usize],
     ) -> anyhow::Result<Self> {
         let mut args: Vec<std::ffi::OsString> = vec!["--api-sock".into(), api.into()];
+        let mut written = Vec::new();
         if let Some(config) = config {
             args.extend(["--config-file".into(), config.into()]);
+            let read =
+                std::fs::read(config).with_context(|| format!("reading {}", config.display()))?;
+            written = written_by(&serde_json::from_slice(&read)?);
         }
         args.extend(log_args(&dir.join(format!("{name}.log"))));
         let console = dir.join(format!("{name}.console.txt"));
-        let child = spawn(&args, &console, cpus)?;
+        let child = spawn(&args, &console, cpus, &written)?;
         let this = Self { child, api: api.to_owned(), console, loops: Vec::new() };
         // Once it listens.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -638,18 +642,15 @@ impl Firecracker {
         let ready = |fd: libc::c_int| libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
         let mut polled = [ready(listener.as_raw_fd()), ready(pidfd.as_raw_fd())];
         loop {
-            let timeout = match deadline {
-                None => -1,
+            // The time left, rounded up, so as not to spin on a last part of a millisecond; none
+            // once the deadline passed, the connection taken still if its guest made it by then, as
+            // a VM's started long before its turn to be accepted came (board 7084).
+            let (timeout, passed) = match deadline {
+                None => (-1, false),
                 Some(deadline) => {
                     let left = deadline.saturating_duration_since(std::time::Instant::now());
-                    ensure!(
-                        !left.is_zero(),
-                        "the guest didn't connect within {:?}: see {}",
-                        within.unwrap_or_default(),
-                        self.console.display()
-                    );
-                    // Rounded up, so as not to spin on a last part of a millisecond.
-                    left.as_millis().saturating_add(1).min(libc::c_int::MAX as u128) as libc::c_int
+                    let ms = left.as_millis().saturating_add(1).min(libc::c_int::MAX as u128);
+                    if left.is_zero() { (0, true) } else { (ms as libc::c_int, false) }
                 }
             };
             // SAFETY: Polls the two descriptors, which outlive the call.
@@ -660,7 +661,12 @@ impl Firecracker {
                 continue;
             }
             if ready == 0 {
-                // Timed out: the deadline's check above says so.
+                ensure!(
+                    !passed,
+                    "the guest didn't connect within {:?}: see {}",
+                    within.unwrap_or_default(),
+                    self.console.display()
+                );
                 continue;
             }
             // A guest that connected, then its VM exited, is told of with the exit: it is first.
@@ -700,9 +706,6 @@ fn log_args(log: &Path) -> Vec<std::ffi::OsString> {
     vec!["--log-path".into(), log.into(), "--level".into(), level.into()]
 }
 
-/// Starts cladefs's Firecracker with `args`, its console, its serial port, going to `console`, on
-/// the host's CPUs `cpus`, or any if none; in a jail, as production runs it, with
-/// CLADEFS_FIRECRACKER_JAILER set ([`Jail`]).
 /// The exit code a VM process's exit `status` is said with.
 fn exit_code(status: std::process::ExitStatus) -> i32 {
     status.code().unwrap_or(1)
@@ -747,10 +750,26 @@ fn kill_on_line(
     }
 }
 
+/// cladefs: what a VM's Firecracker writes of what its configuration, `config`, names: its drives'
+/// and its pmem devices' images. Its cells it opens through the extent daemon, which writes them.
+fn written_by(config: &serde_json::Value) -> Vec<PathBuf> {
+    (["drives", "pmem"].iter())
+        .filter_map(|kind| config[kind].as_array())
+        .flatten()
+        .filter_map(|device| device["path_on_host"].as_str())
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// Starts cladefs's Firecracker with `args`, its console, its serial port, going to `console`, on
+/// the host's CPUs `cpus`, or any if none; in a jail, as production runs it, with
+/// CLADEFS_FIRECRACKER_JAILER set ([`Jail`]), which gives its user the files of the test's it
+/// writes, `written` ([`written_by`]).
 fn spawn(
     args: &[std::ffi::OsString],
     console: &Path,
     cpus: &[usize],
+    written: &[PathBuf],
 ) -> anyhow::Result<std::process::Child> {
     use std::os::unix::process::CommandExt;
 
@@ -758,7 +777,7 @@ fn spawn(
         std::env::var_os("CLADEFS_FIRECRACKER").context("CLADEFS_FIRECRACKER not set")?;
     let mut jail = Jail::from_env()?;
     let mut command = match &mut jail {
-        Some(jail) => jail.command(&firecracker, console)?,
+        Some(jail) => jail.command(&firecracker, console, written)?,
         None => std::process::Command::new(&firecracker),
     };
     // A seccomp filter of its own, compiled (scripts/test-e2e.sh's
@@ -813,7 +832,8 @@ fn spawn(
 /// drops every privilege. The directories Firecracker's paths are in, the test's, the guest
 /// kernel's, the extent daemon's socket's and the temporary one, are bound into the jail at their
 /// own paths, in a mount namespace of its own, so that its configuration's paths, and those its API
-/// is told, are the same in it, and go with it; the test's files are given to its user.
+/// is told, are the same in it, and go with it; the test's directory, and the images Firecracker
+/// writes, are given to its user (board 5588).
 struct Jail {
     jailer: std::ffi::OsString,
     uid: u32,
@@ -834,11 +854,12 @@ impl Jail {
     }
 
     /// The jailer's command running `firecracker`, whose console is `console`, in the test's
-    /// directory, `console`'s.
+    /// directory, `console`'s, which writes the files `written`.
     fn command(
         &mut self,
         firecracker: &std::ffi::OsStr,
         console: &Path,
+        written: &[PathBuf],
     ) -> anyhow::Result<std::process::Command> {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static JAILED: AtomicUsize = AtomicUsize::new(0);
@@ -867,8 +888,15 @@ impl Jail {
             self.binds.push((path(&dir)?, path(&at)?));
             bound.push(dir);
         }
-        // Firecracker writes the test's files, and its log, as the jail's user.
-        own(dir, self.uid, self.gid)?;
+        // Firecracker makes its files in the test's directory as the jail's user, its log and its
+        // snapshots', and writes the images it is given: those alone are the jail user's, not
+        // what else is there, the cells, the daemon's bucket and cache, the root's tree, which
+        // every spawn walked, ever more of them, a step of 16 VMs' spawns taking 48 s at 145 VMs
+        // (board 5588).
+        own_one(dir, self.uid, self.gid)?;
+        for path in written {
+            own(path, self.uid, self.gid)?;
+        }
         let mut command = std::process::Command::new(&self.jailer);
         command
             .args(["--id", &id, "--uid", &self.uid.to_string(), "--gid", &self.gid.to_string()])
@@ -897,14 +925,19 @@ impl Jail {
     }
 }
 
-/// Gives `path`, and what is under it, to `uid` and `gid`: but what goes meanwhile, as the test's
-/// other VMs and daemons remove their files.
+/// Gives `path` alone to `uid` and `gid`: but if it went meanwhile, as the test's other VMs and
+/// daemons remove their files.
+fn own_one(path: &Path, uid: u32, gid: u32) -> anyhow::Result<()> {
+    match std::os::unix::fs::lchown(path, Some(uid), Some(gid)) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        given => given.with_context(|| format!("giving {} to the jail's user", path.display())),
+    }
+}
+
+/// Gives `path`, and what is under it, to `uid` and `gid`, as [`own_one`] does.
 fn own(path: &Path, uid: u32, gid: u32) -> anyhow::Result<()> {
     let gone = |err: &std::io::Error| err.kind() == std::io::ErrorKind::NotFound;
-    match std::os::unix::fs::lchown(path, Some(uid), Some(gid)) {
-        Err(err) if gone(&err) => return Ok(()),
-        given => given.with_context(|| format!("giving {} to the jail's user", path.display()))?,
-    }
+    own_one(path, uid, gid)?;
     let entries = match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() => std::fs::read_dir(path),
         Err(err) if !gone(&err) => return Err(err.into()),
