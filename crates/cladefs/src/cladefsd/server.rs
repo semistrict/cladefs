@@ -239,7 +239,9 @@ impl Policy {
 /// bases'. The default tenant's is as any other's ([`default_tenant`], TASK-79.17).
 struct Memory {
     arena: Arc<crate::pages::Arena>,
-    memory: Arc<std::os::fd::OwnedFd>,
+    /// Its arena's memory, reopened read-only: its VM processes copy their guests' writes into
+    /// memory of their own (doc-26), and write no page of it.
+    memory: std::os::fd::OwnedFd,
     /// The default arena's memory, reopened read-only.
     public: std::os::fd::OwnedFd,
     /// cladefs: how many connections the tenant's VM processes have ([`MAX_CONNECTIONS`]).
@@ -250,11 +252,13 @@ struct Memory {
 }
 
 impl Memory {
-    /// An arena of its own, and the default one, read-only.
+    /// An arena of its own, and the default one, each read-only.
     fn new() -> std::io::Result<Self> {
-        let public = reopen_read_only(std::os::fd::AsFd::as_fd(&*crate::pages::physical_memory()))?;
+        use std::os::fd::AsFd;
+        let public = reopen_read_only(crate::pages::physical_memory().as_fd())?;
         let arena = crate::pages::Arena::new();
-        let memory = crate::pages::arena_memory(arena.id()).expect("a new arena");
+        let memory =
+            reopen_read_only(crate::pages::arena_memory(arena.id()).expect("a new arena").as_fd())?;
         let (connections, in_flight) = Default::default();
         Ok(Self { arena, memory, public, connections, in_flight })
     }
@@ -1736,8 +1740,8 @@ impl Connection {
     }
 
     /// The VM process's physical memory, which the reply to its `OPEN` hands it, of the arena
-    /// it says ([`Opened`]): its tenant's arena, and the default one, read-only (TASK-43); the
-    /// default tenant's as any other's (TASK-79.17).
+    /// it says ([`Opened`]): its tenant's arena, and the default one, each read-only (TASK-43,
+    /// doc-26); the default tenant's as any other's (TASK-79.17).
     fn memories(&self) -> [std::os::fd::BorrowedFd<'_>; 2] {
         let memory = &self.tenant.memory;
         [memory.memory.as_fd(), memory.public.as_fd()]

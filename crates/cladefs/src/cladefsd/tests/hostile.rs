@@ -2139,11 +2139,11 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
 }
 
 /// TASK-149.17: a VM process that shrinks the memory it is given as its cell opens crashes
-/// nothing: not its tenant's arena, which it may write, whose pages past a new end would fault the
-/// daemon's own accesses (`SIGBUS`), and every tenant's VMs with it; nor the public one, which it
-/// may only read. It may grow its arena, as the daemon goes on growing it. The memory it reads
-/// alone is its owner's alone to open anew: a VM process, of another user, can't reopen it to
-/// write through `/proc/self/fd`.
+/// nothing: not its tenant's arena, whose pages past a new end would fault the daemon's own
+/// accesses (`SIGBUS`), and every tenant's VMs with it; nor the public one. It may only read
+/// both (doc-26: it copies its guest's writes into memory of its own), and so neither shrinks nor
+/// grows either. The memory it reads is its owner's alone to open anew: a VM process, of another
+/// user, can't reopen it to write through `/proc/self/fd`.
 #[test]
 fn vm_processes_shrinking_their_memory_crash_nothing() {
     host();
@@ -2173,13 +2173,13 @@ fn vm_processes_shrinking_their_memory_crash_nothing() {
     // What the daemon reads of the arena's pages, which it would fault on, had the VM process
     // shrunk it.
     assert_eq!(read(&client, extent(1), 0, BLOCK), Ok(super::pattern(1, BLOCK)));
-    assert_eq!(shrunk, (Err(Some(libc::EPERM)), Err(Some(libc::EINVAL))));
-    // Grown, by a tebibyte, as the daemon grows it further, as its extents take more slabs.
+    assert_eq!(shrunk, (Err(Some(libc::EINVAL)), Err(Some(libc::EINVAL))));
+    // Nor grown, by a tebibyte, as the daemon grows it further, as its extents take more slabs.
     // SAFETY: A stat buffer the call fills, of a descriptor the test holds.
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: a descriptor the test holds open, and the buffer above.
     assert_eq!(unsafe { libc::fstat(own, &mut stat) }, 0);
-    assert_eq!(truncated(own, stat.st_size + (1 << 40)), Ok(()));
+    assert_eq!(truncated(own, stat.st_size + (1 << 40)), Err(Some(libc::EINVAL)));
     let extents = (4 << 20) / (8 * BLOCK);
     for sequence in 2..2 + extents as u64 {
         write(&client, extent(sequence), 0, &super::pattern(sequence as u8, 8 * BLOCK)).unwrap();

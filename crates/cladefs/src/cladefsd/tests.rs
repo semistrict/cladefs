@@ -2326,6 +2326,32 @@ async fn requests_attach_nothing() {
     assert_eq!(read, Err(Errno::ENOENT));
 }
 
+/// doc-26: a VM process is handed its tenant's arena and the default one read-only: it copies its
+/// guest's writes into memory of its own, and writes no page the daemon's cache holds.
+#[test]
+fn vm_processes_are_handed_their_memory_read_only() {
+    use super::wire::*;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let stream = UnixStream::connect(&socket).unwrap();
+    let (sender, mut receiver) =
+        (Sender::new(stream.try_clone().unwrap()), Receiver::new(stream.try_clone().unwrap()));
+    let open = Header::new(OPEN, 1).with_args(&[1 << 24, 0, 0, 0, VERSION]).with_flags(OPEN_CREATE);
+    let path = dir.path().join("store");
+    sender.send(open, std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()), &[]).unwrap();
+    let opened = receiver.receive(|| 0).unwrap().unwrap();
+    assert_eq!((opened.header.status, opened.fds.len()), (0, 2));
+    for fd in &opened.fds {
+        use std::os::fd::AsRawFd;
+        // SAFETY: Plain system call on a descriptor the message holds.
+        let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+        assert_eq!(flags & libc::O_ACCMODE, libc::O_RDONLY, "handed writable");
+    }
+}
+
 /// TASK-702.1: with `CLADEFSD_READ_TRACES` naming a directory, a VM's reads are traced, and the
 /// trace written as its connection goes: its `MAP`, its `READ`, then its window's fault, a load's,
 /// each naming the extent, its length, and the range read, in the order made. cladefs: its write,
