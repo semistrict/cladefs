@@ -1469,15 +1469,8 @@ async fn attrition(profile: Profile) -> Result<(), String> {
         eprintln!("forks of bases deleted, each read: {}", inherited.len());
     }
     for Inherited { host, path, base, block } in inherited {
-        let reading = path.clone();
-        let read = node(host).spawn(async move {
-            let guest = guest().await;
-            guest.open(&reading, 64 << 20).await?;
-            let read = guest.read(cladefs::ExtentId { cell: base, sequence: 1 }, 0, 4096).await;
-            guest.close();
-            read
-        });
-        let read = read.await.unwrap();
+        let read =
+            read_on(node(host), path.clone(), cladefs::ExtentId { cell: base, sequence: 1 }).await;
         if read.as_ref().ok() != Some(&block) {
             return Err(format!(
                 "the fork at {path:?} of base {base}, deleted, read its block otherwise: {:?}",
@@ -1510,6 +1503,35 @@ async fn ephemeral_cells_survive_disk_faults() {
     if let Err(lost) = ephemeral_attrition(true).await {
         panic!("{lost}");
     }
+}
+
+/// The first block of `extent` of the cell at `path`, read by a guest on `host`, as a guest started
+/// again does if its host is: a host whose daemon's boot fails, its disk failing as the seed says,
+/// is started again, and a guest of it ends with it (board 7050).
+async fn read_on(
+    host: madsim::runtime::NodeHandle,
+    path: PathBuf,
+    extent: cladefs::ExtentId,
+) -> Result<Vec<u8>, cladefs::Errno> {
+    for _ in 0..100 {
+        let reading = path.clone();
+        let read = host.spawn(async move {
+            let guest = guest().await;
+            guest.open(&reading, 64 << 20).await?;
+            let read = guest.read(extent, 0, 4096).await;
+            guest.close();
+            read
+        });
+        match read.await {
+            Ok(read) => return read,
+            Err(ended) if ended.is_cancelled() => {
+                log::info!("{:?}: started again, its guest's read with it", host.id());
+                madsim::time::sleep(Duration::from_millis(200)).await;
+            }
+            Err(ended) => panic!("{:?}'s guest's read: {ended}", host.id()),
+        }
+    }
+    panic!("{:?} never read {extent:?}", host.id())
 }
 
 /// Calls `call` on host `host`'s control API until it answers otherwise than the bucket or a peer
