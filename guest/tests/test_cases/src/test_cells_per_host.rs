@@ -37,8 +37,8 @@
 //!
 //! What a host does past its limit is a bug, not a limit: the case fails if a VM exits, its guest
 //! hangs up, says nothing for [`SILENT_SECS`], or isn't ready within CLADEFS_CELLS_READY_SECS
-//! (120); if the daemon lets a VM process go; if a fork or a boot is refused; or if a console
-//! complains (the runner's check). And if it held fewer than CLADEFS_CELLS_FLOOR VMs (1).
+//! (120) of its spawn; if the daemon lets a VM process go; if a fork or a boot is refused; or if a
+//! console complains (the runner's check). And if it held fewer than CLADEFS_CELLS_FLOOR VMs (1).
 //!
 //! It says each step on its standard error (`cells-per-host: step=...`, with a `memory:` line of
 //! `crate::measure`'s), and how it ended (`cells-per-host: held=N limit=LIMIT`); and records what
@@ -724,8 +724,12 @@ mod host {
                 let mut booting = Vec::new();
                 let spawned = Instant::now();
                 for vm in first..first + added {
+                    // Each VM's budget runs from its own spawn: a step's later VMs spawn long
+                    // after its first where spawning is slow (the jail's, board 5588), and were
+                    // failed for it, by none of their own.
+                    let began = Instant::now();
                     match host.boot(vm)? {
-                        Some(booted) => booting.push(booted),
+                        Some(booted) => booting.push((began, booted)),
                         // The VMs booted are judged, then the ramp stops.
                         None => {
                             full = true;
@@ -735,8 +739,11 @@ mod host {
                 }
                 let spawn_secs = spawned.elapsed().as_secs_f64();
                 let within = Duration::from_secs(settings.ready_secs);
-                for (at, (name, mut firecracker, listening)) in booting.into_iter().enumerate() {
-                    let left = within.saturating_sub(spawned.elapsed());
+                let began: Vec<Instant> = booting.iter().map(|(began, _)| *began).collect();
+                for (at, (began, (name, mut firecracker, listening))) in
+                    booting.into_iter().enumerate()
+                {
+                    let left = within.saturating_sub(began.elapsed());
                     let stream = (firecracker.accept_within(&listening.listener, Some(left)))
                         .with_context(|| format!("{name}'s guest"))?;
                     let to_guest = stream.try_clone()?;
@@ -745,20 +752,24 @@ mod host {
                     cells.0.push(Cell { name, firecracker, to_guest });
                 }
                 let boots = loop {
-                    let ready: Option<Vec<u64>> = {
+                    let ready: Vec<Option<u64>> = {
                         let heard = heard.lock().unwrap();
                         (first..cells.0.len())
                             .map(|vm| heard.vms.get(&vm).and_then(|guest| guest.ready_ms))
                             .collect()
                     };
-                    if let Some(ready) = ready {
+                    if let Some(ready) = ready.iter().copied().collect::<Option<Vec<u64>>>() {
                         break ready;
                     }
                     check(step, &mut cells, &heard, host, measured)?;
-                    ensure!(
-                        spawned.elapsed() < within,
-                        "step {step}: a VM wasn't ready within {within:?}"
-                    );
+                    let late = (ready.iter().zip(&began))
+                        .position(|(ready, began)| ready.is_none() && began.elapsed() >= within);
+                    if let Some(late) = late {
+                        anyhow::bail!(
+                            "step {step}: {} wasn't ready within {within:?} of its spawn",
+                            cells.0[first + late].name
+                        );
+                    }
                     std::thread::sleep(Duration::from_millis(50));
                 };
                 let readied_secs = spawned.elapsed().as_secs_f64();
