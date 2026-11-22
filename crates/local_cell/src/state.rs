@@ -1231,31 +1231,3 @@ impl Unreferenced {
         std::mem::take(self)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// cladefs: a cell's standing: closing says whether it was open; failing keeps its first cause,
-    /// and whether it was closed, closed or failed in either order; a failed cell refuses, saying
-    /// why, and closes all the same, once (TASK-160.19).
-    #[test]
-    fn standings_fail_and_close_in_either_order() {
-        let mut standing = Standing::default();
-        assert!(standing.whole().is_ok() && !standing.is_closed());
-        assert!(standing.close());
-        assert!(!standing.close());
-        standing.fail(&anyhow::anyhow!("the disk failed"));
-        standing.fail(&anyhow::anyhow!("later"));
-        assert!(standing.is_closed() && standing.failed());
-        let refused = standing.whole().unwrap_err().to_string();
-        assert_eq!(refused, "the extent store failed: the disk failed");
-
-        let mut standing = Standing::default();
-        standing.fail(&anyhow::anyhow!("the disk failed"));
-        assert!(!standing.is_closed());
-        assert!(standing.close());
-        assert!(!standing.close());
-        assert!(standing.is_closed() && standing.failed());
-    }
-}

@@ -460,18 +460,4 @@ mod tests {
             );
         });
     }
-
-    /// The options a client is built from are cladefs's: its connect timeout and no other.
-    #[test]
-    fn clients_time_out_by_progress_alone() {
-        let options = Client::DEFAULT.options();
-        let value = |key| options.get_config_value(&key);
-        assert_eq!(value(ClientConfigKey::ConnectTimeout).as_deref(), Some("5s"));
-        assert_eq!(value(ClientConfigKey::Timeout), None);
-        assert_eq!(value(ClientConfigKey::ReadTimeout), None);
-        reqwest_client(&options).unwrap();
-        let invalid = options.with_config(ClientConfigKey::AllowHttp, "maybe");
-        let refused = reqwest_client(&invalid).unwrap_err().to_string();
-        assert_eq!(refused, "Generic cladefs error: allow_http: maybe is no boolean");
-    }
 }

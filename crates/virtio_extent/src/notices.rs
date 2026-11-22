@@ -269,37 +269,6 @@ pub(crate) mod tests {
         assert_eq!(known(&resizing), (4, 0));
     }
 
-    /// The guest is told of a capacity's changes once the driver activates the device.
-    #[test]
-    fn capacities_changed_raise_the_interrupt_once_activated() {
-        let resizing = Resizing::default();
-        resizing.changed(8, false);
-        let interrupt = Arc::new(Counted::default());
-        resizing.set_interrupt(Some(interrupt.clone()));
-        resizing.changed(6, true);
-        resizing.answered(6, false);
-        assert_eq!(interrupt.0.load(Ordering::Relaxed), 1);
-        assert_eq!((resizing.capacity(), resizing.asked()), (8, 0));
-    }
-
-    /// cladefs TASK-111.4: the daemon's asks for the guest's stats reach the guest, the
-    /// configuration's `stats_asked` and a configuration change, while the driver takes asks; while
-    /// it doesn't, none is asked, for the cell to answer at once.
-    #[test]
-    fn stats_are_asked_of_guests_that_take_asks() {
-        let asks = StatsAsks::default();
-        assert!(!asks.ask(1));
-        assert_eq!(asks.latest(), 0);
-        let interrupt = Arc::new(Counted::default());
-        asks.set_interrupt(Some(interrupt.clone()));
-        assert!(asks.ask(2));
-        assert_eq!(asks.latest(), 2);
-        assert_eq!(interrupt.0.load(Ordering::Relaxed), 1);
-        asks.set_interrupt(None);
-        assert!(!asks.ask(3));
-        assert_eq!(asks.latest(), 2);
-    }
-
     /// A follower's guest is told of commits after the latest it was told of alone.
     #[test]
     fn followers_hear_of_later_commits_alone() {

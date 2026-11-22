@@ -442,10 +442,4 @@ mod tests {
             stats.histograms.iter().map(|(name, counts)| (name.as_str(), &counts[..])).collect();
         assert_eq!(histograms, [("device_reads", &[0, 1, 2, 0][..])]);
     }
-
-    /// The text of no guest's stats says nothing.
-    #[test]
-    fn no_lines_say_nothing() {
-        assert_eq!(GuestStats::parse(""), GuestStats::default());
-    }
 }

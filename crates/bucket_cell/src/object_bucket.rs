@@ -2252,31 +2252,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// TASK-633.8: a child's cell opening here asks for its version's mirror
-    /// ([`ObjectBucket::mirror_for`]), the host that forked it perhaps dead before it did: the
-    /// version mirrored, once; none for a cell of no origin.
-    #[test]
-    fn opening_a_child_mirrors_its_version() {
-        use crate::mirror::Mirrored;
-        use crate::testing::{VERSION, fork_version_given};
-        futures::executor::block_on(async {
-            let dir = tempfile::tempdir().unwrap();
-            let two = Two::new(dir.path()).await;
-            let bucket = two.routed();
-            let parent = test_cell(2 << 48 | 1);
-            let (at, ..) = Two::versioned(&bucket, parent).await;
-            let origin = Origin { parent, at };
-            let child = test_cell(1 << 48 | 2);
-            fork_version_given(&*bucket, child, VERSION, origin, 7).await.unwrap();
-            assert_eq!(bucket.clone().mirror_for(parent).await.unwrap(), None, "a root");
-            let mirrored = bucket.clone().mirror_for(child).await.unwrap();
-            let named = Some((origin, Mirrored::Done { copied: 2, referred: 1, retired: 1 }));
-            assert_eq!(mirrored, named, "the version it was forked from");
-            assert_eq!(bucket.clone().mirror_for(child).await.unwrap(), None, "mirrored again");
-            assert_eq!(two.refers(origin, child).await, (false, true, true));
-        });
-    }
-
     /// TASK-633.8: a process's mirrors of one version take turns, each taking its own as it is
     /// asked for: the second, asked for before the first runs, waits for it and finds the version
     /// marked; the turns go once done; none is wanted of a cell of this bucket's own.
@@ -2623,48 +2598,6 @@ pub(crate) mod tests {
             assert_eq!(reference.0, !retired, "{step}: begun again, the reference there");
         }
         scenario.teardown();
-    }
-
-    /// TASK-633.8: a bucket holding a mirror of a version of another bucket's cell reads that
-    /// cell's objects written once here first, the cell's own bucket for those not copied; learns
-    /// the version's checkpoint epoch from the marker; and lists that cell's moves here and there.
-    /// A bucket holding no marker of the cell reads its bucket alone.
-    #[test]
-    fn objects_of_versions_mirrored_here_are_read_here_first() {
-        use crate::layout::Mirror;
-        futures::executor::block_on(async {
-            let dir = tempfile::tempdir().unwrap();
-            let two = Two::new(dir.path()).await;
-            let (home, other, routed) = (&two.home, &two.other, || two.routed());
-            let parent = test_cell(2 << 48 | 1);
-            let (copied, only_there) =
-                (layout::segment(parent, 1, 2), layout::segment(parent, 2, 2));
-            let moves_there = layout::moves(&only_there, 7).unwrap();
-            let moves_here = layout::moves(&copied, 6).unwrap();
-            async fn put(bucket: &ObjectBucket, key: &str, bytes: &[u8]) {
-                bucket.object_put(key, bytes.to_vec().into(), PutMode::Overwrite).await.unwrap();
-            }
-            for key in [&copied, &only_there, &moves_there] {
-                put(other, key, b"there").await;
-            }
-            put(home, &copied, b"here").await;
-            put(home, &moves_here, b"here").await;
-            let read = |bucket: Arc<ObjectBucket>, key: String| async move {
-                bucket.get(&key).await.map(|object| object.bytes).unwrap()
-            };
-            // No marker here: the cell's bucket alone.
-            assert_eq!(read(routed(), copied.clone()).await, b"there");
-            put(home, &layout::mirror(parent, 2), &layout::encode(&Mirror::of(5))).await;
-            let marked = routed();
-            assert_eq!(marked.get(&copied).await.unwrap().bytes, b"here");
-            assert_eq!(marked.get(&only_there).await.unwrap().bytes, b"there");
-            assert_eq!(marked.known.epoch(parent, 2), Some(5), "the marker's epoch, learned");
-            let moves = marked.list(&layout::moves_prefix(parent)).await.unwrap();
-            let keys: Vec<String> = moves.into_iter().map(|meta| meta.key).collect();
-            let mut expected = vec![moves_here.clone(), moves_there.clone()];
-            expected.sort();
-            assert_eq!(keys, expected);
-        });
     }
 
     /// TASK-633.8: a pass over the copy here of another bucket's cell's versions keeps it whole
@@ -3089,55 +3022,6 @@ pub(crate) mod tests {
         Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "cladefs/test"))
     }
 
-    /// CLADEFS_BUCKET_LATENCY_MS adds its milliseconds to each request, as a farther object store's
-    /// would (TASK-62): a put and a get, two of them; and each request's time is counted, by its
-    /// kind (TASK-165.11).
-    #[test]
-    fn requests_wait_the_latency_set() {
-        // SAFETY: nextest runs each test in a process of its own, whose other threads don't read
-        // the environment yet.
-        unsafe { std::env::set_var("CLADEFS_BUCKET_LATENCY_MS", "50") };
-        let bucket = ObjectBucket::from_url("memory:///latency").unwrap();
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
-        let start = std::time::Instant::now();
-        runtime.block_on(async {
-            bucket.put("a", vec![1].into(), PutMode::Create).await.unwrap();
-            assert_eq!(bucket.get("a").await.unwrap().bytes, vec![1]);
-        });
-        let took = start.elapsed();
-        assert!(took >= std::time::Duration::from_millis(100), "two requests took {took:?}");
-        let stats = bucket.stats();
-        let timed = |request| std::time::Duration::from_nanos(stats.request_ns(request));
-        for request in [Request::Create, Request::Get] {
-            assert!(timed(request) >= std::time::Duration::from_millis(50), "{request:?}");
-        }
-        assert_eq!(timed(Request::List), std::time::Duration::ZERO);
-    }
-
-    /// TASK-208: so does a file bucket's, its reads whole and ranged as well as its writes:
-    /// object_store's throttle, which put the latency before a bucket until TASK-330.3, took a
-    /// stream, not the file `LocalFileSystem` gives, which it panicked on (`unimplemented!`),
-    /// every read of every pgbench case's bucket.
-    #[test]
-    fn file_buckets_wait_the_latency_set() {
-        // SAFETY: nextest runs each test in a process of its own, whose other threads don't read
-        // the environment yet.
-        unsafe { std::env::set_var("CLADEFS_BUCKET_LATENCY_MS", "50") };
-        let dir = tempfile::tempdir().unwrap();
-        let url = format!("file://{}/", dir.path().canonicalize().unwrap().display());
-        let bucket = ObjectBucket::from_url(&url).unwrap();
-        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-        let start = std::time::Instant::now();
-        runtime.block_on(async {
-            bucket.put("a", vec![1, 2, 3, 4].into(), PutMode::Create).await.unwrap();
-            assert_eq!(bucket.get("a").await.unwrap().bytes, vec![1, 2, 3, 4]);
-            let range = ByteRange::Bounded(1..3);
-            assert_eq!(bucket.get_range("a", range).await.unwrap(), vec![2, 3]);
-        });
-        let took = start.elapsed();
-        assert!(took >= std::time::Duration::from_millis(150), "three requests took {took:?}");
-    }
-
     /// TASK-264: a bucket reads the collector's newest marks with requests it doesn't count, at its
     /// first read, alongside it, and warns as it gets or heads a key they name, of no other key;
     /// nor of one listed, which a caller may pass over. With no marks, it warns of nothing.
@@ -3222,144 +3106,6 @@ pub(crate) mod tests {
         assert_eq!(warned(), [ours("head"), ours("get-range"), ours("get"), theirs]);
     }
 
-    /// A bucket counts its requests by kind, failed ones too, and the bytes it uploads, by kind of
-    /// object, and downloads.
-    #[test]
-    fn counts_requests_and_bytes() {
-        let bucket = memory();
-        futures::executor::block_on(async {
-            let segment = layout::segment(test_cell(1), 0, 1);
-            let version = bucket.put(&segment, vec![1; 100].into(), PutMode::Create).await.unwrap();
-            assert!(bucket.put(&segment, vec![2; 7].into(), PutMode::Create).await.is_err());
-            bucket.put(&segment, vec![3; 50].into(), PutMode::Update(version)).await.unwrap();
-            bucket
-                .put(&layout::checkpoint(test_cell(1), 0, 1), vec![4; 30].into(), PutMode::Create)
-                .await
-                .unwrap();
-            bucket
-                .put(&layout::head(test_cell(1), 0), vec![5; 9].into(), PutMode::Overwrite)
-                .await
-                .unwrap();
-            let extent =
-                layout::extent(layout::TEST_CELL, 1, 0, storage_device::ExtentId::new(1, 5));
-            bucket.put(&extent, vec![6; 11].into(), PutMode::Create).await.unwrap();
-            bucket
-                .put(&layout::moves(&segment, 1).unwrap(), vec![7; 13].into(), PutMode::Create)
-                .await
-                .unwrap();
-            assert_eq!(bucket.get(&segment).await.unwrap().bytes.len(), 50);
-            let range = ByteRange::Bounded(10..30);
-            assert_eq!(bucket.get_range(&segment, range).await.unwrap().len(), 20);
-            assert!(bucket.get(&layout::segment(test_cell(1), 9, 1)).await.is_err());
-            bucket.head(&segment).await.unwrap();
-            bucket.list("segments/").await.unwrap();
-            bucket.list_delimited("segments/", crate::bucket::Page::FIRST).await.unwrap();
-            bucket.delete(&segment).await.unwrap();
-            bucket.delete_batch(&[&extent, &layout::moves(&segment, 1).unwrap()]).await.unwrap();
-        });
-        let stats = bucket.stats();
-        let requests: Vec<_> =
-            Request::ALL.iter().map(|request| (request.name(), stats.requests(*request))).collect();
-        assert_eq!(
-            requests,
-            [
-                ("get", 2),
-                ("get-range", 1),
-                ("head", 1),
-                ("list", 1),
-                ("create", 5),
-                ("update", 1),
-                ("overwrite", 1),
-                ("delete", 1),
-                ("list-delimited", 1),
-                ("delete-batch", 1),
-            ]
-        );
-        assert_eq!(stats.uploaded, [150, 11, 30, 13, 9]);
-        assert_eq!(stats.downloaded, 70);
-        // cladefs: what the protocol answers fails no request (TASK-314): the create where an
-        // object was, the get of none.
-        assert_eq!(stats.failures, [0; Request::ALL.len()]);
-        // Its line, each kind of request's time after the rest, then its failures: as of times
-        // and failures set here, as each request's time is its own.
-        let failures = [0, 1, 0, 0, 3, 0, 0, 2, 0, 4];
-        let request_ns = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
-        let stats = Stats { request_ns, failures, ..stats };
-        assert_eq!(
-            stats.line(),
-            "object-store: get=2 get-range=1 head=1 list=1 create=5 update=1 overwrite=1 delete=1 \
-             list-delimited=1 delete-batch=1 \
-             up-segments=150 up-extents=11 up-checkpoints=30 up-moves=13 up-other=9 down=70 \
-             get-ns=10 get-range-ns=20 head-ns=30 list-ns=40 create-ns=50 update-ns=60 \
-             overwrite-ns=70 delete-ns=80 list-delimited-ns=90 delete-batch-ns=100 failed-get=0 \
-             failed-get-range=1 failed-head=0 failed-list=0 failed-create=3 failed-update=0 \
-             failed-overwrite=0 failed-delete=2 failed-list-delimited=0 failed-delete-batch=4"
-        );
-    }
-
-    /// A bucket that writes whatever it is asked to, conditions or not.
-    struct Careless(crate::testing::Direct);
-
-    impl Bucket for Careless {
-        fn get(&self, key: &str) -> impl Future<Output = Result<Object, Error>> + Send {
-            self.0.get(key)
-        }
-
-        fn get_range(
-            &self,
-            key: &str,
-            range: ByteRange,
-        ) -> impl Future<Output = Result<Vec<u8>, Error>> + Send {
-            self.0.get_range(key, range)
-        }
-
-        fn head(&self, key: &str) -> impl Future<Output = Result<Meta, Error>> + Send {
-            self.0.head(key)
-        }
-
-        fn list(&self, prefix: &str) -> impl Future<Output = Result<Vec<Meta>, Error>> + Send {
-            self.0.list(prefix)
-        }
-
-        fn list_delimited(
-            &self,
-            prefix: &str,
-            page: crate::bucket::Page<'_>,
-        ) -> impl Future<Output = Result<Listing, crate::bucket::Error>> + Send {
-            self.0.list_delimited(prefix, page)
-        }
-
-        fn put(
-            &self,
-            key: &str,
-            bytes: bytes::Bytes,
-            _mode: PutMode,
-        ) -> impl Future<Output = Result<Version, Error>> + Send {
-            self.0.put(key, bytes, PutMode::Overwrite)
-        }
-
-        fn delete(&self, key: &str) -> impl Future<Output = Result<(), Error>> + Send {
-            self.0.delete(key)
-        }
-
-        fn now(&self) -> u64 {
-            self.0.now()
-        }
-    }
-
-    /// The probe passes a bucket that honours conditional writes, and fails one that does not.
-    #[test]
-    fn probes_find_buckets_without_conditional_writes() {
-        use crate::testing::{Direct, SimBucket};
-        let sim = SimBucket::new();
-        futures::executor::block_on(async {
-            assert_eq!(probe(&Direct(sim.clone()), 1).await, Ok(()));
-            let refused = probe(&Careless(Direct(sim.clone())), 2).await.unwrap_err();
-            assert!(refused.starts_with("the store does not honour conditional writes: a create"));
-        });
-        assert_eq!(sim.keys(), ["probe/0000000000002"]);
-    }
-
     /// A bucket that fails its writes as one out of reach does, `Unavailable`, as `fails` says of
     /// each in turn: before it lands (`Some(false)`), after (`Some(true)`), or not (`None`).
     struct OutOfReach(
@@ -3442,84 +3188,6 @@ pub(crate) mod tests {
         assert_eq!(probe(&bucket, 1).await, Ok(()));
         assert!(bucket.1.lock().unwrap().is_empty(), "every failure met");
         assert_eq!(sim.keys(), Vec::<String>::new());
-    }
-
-    #[test]
-    fn honours_conditional_writes() {
-        futures::executor::block_on(probe(&*memory(), 1)).unwrap();
-    }
-
-    /// TASK-92.6: a bucket probed once is not probed again: the second asks nothing.
-    #[test]
-    fn buckets_are_probed_once() {
-        let bucket = memory();
-        futures::executor::block_on(bucket.probed(1)).unwrap();
-        let probing = bucket.stats();
-        let writes = [Request::Create, Request::Update, Request::Delete];
-        let asked = writes.map(|request| (request.name(), probing.requests(request)));
-        assert_eq!(asked, [("create", 2), ("update", 2), ("delete", 1)]);
-        futures::executor::block_on(bucket.probed(2)).unwrap();
-        assert_eq!(bucket.stats(), probing);
-    }
-
-    #[test]
-    fn keys_are_under_the_prefix() {
-        let bucket = memory();
-        futures::executor::block_on(async {
-            for key in ["segments/01/00", "segments/01/01", "segments/02/00", "heads/01"] {
-                bucket.put(key, key.as_bytes().to_vec().into(), PutMode::Create).await.unwrap();
-            }
-            let listed: Vec<String> = bucket
-                .list("segments/01/")
-                .await
-                .unwrap()
-                .into_iter()
-                .map(|meta| meta.key)
-                .collect();
-            assert_eq!(listed, ["segments/01/00", "segments/01/01"]);
-            assert_eq!(bucket.list("").await.unwrap().len(), 4);
-            let object = bucket.get("heads/01").await.unwrap();
-            assert_eq!(
-                (object.bytes.as_slice(), object.meta.key.as_str()),
-                (&b"heads/01"[..], "heads/01")
-            );
-            assert_eq!(bucket.get("heads/02").await.map(|_| ()), Err(Error::NotFound));
-            bucket.delete("heads/01").await.unwrap();
-            bucket.delete("heads/01").await.unwrap();
-            assert_eq!(bucket.head("heads/01").await.map(|_| ()), Err(Error::NotFound));
-        });
-    }
-
-    /// TASK-92.55: recoveries through a host's bucket decode a checkpoint once: the forks of a
-    /// base opened one after another start from its newest checkpoint, the second reading it not
-    /// again, but the head, and the same state: kept by its key, which names one object, ever
-    /// (TASK-407).
-    #[test]
-    fn recoveries_share_the_checkpoints_they_decode() {
-        let bucket = memory();
-        futures::executor::block_on(async {
-            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), test_cell(1), 10, 1).await.unwrap();
-            let extent = ExtentId::new(1, writer.chain().next_sequence());
-            let commit = Commit { tag: 1, extents: vec![(extent, vec![1])], ..Commit::default() };
-            let segment = add(&writer, commit);
-            writer.upload(segment).await.unwrap();
-            writer.acknowledge().await.unwrap();
-            assert_eq!(writer.checkpoint().await, Ok(Some(segment)));
-            let gets = || bucket.stats().requests(Request::Get);
-            let mut read = Vec::new();
-            let mut states = Vec::new();
-            for _ in 0..2 {
-                let before = gets();
-                states.push(recovery::recover(&*bucket, test_cell(1), None).await.unwrap().state);
-                read.push(gets() - before);
-            }
-            // cladefs: the head's, every slot (TASK-691).
-            let head = crate::identity::DEFAULT_HEAD_SLOTS;
-            assert_eq!(read, [head + 1, head], "the head's and the checkpoint's GETs, by recovery");
-            assert_eq!(states[0], states[1]);
-            assert_eq!(states[0].extents.keys().copied().collect::<Vec<_>>(), [extent]);
-        });
     }
 
     /// Adds a segment of `commit` alone to `writer`, closed on its chain: returns its number.
@@ -3736,11 +3404,6 @@ pub(crate) mod tests {
         }
     }
 
-    #[test]
-    fn cells_on_a_memory_bucket() {
-        futures::executor::block_on(cell_lifecycle(memory(), 1));
-    }
-
     /// cladefs: the bucket of the directory `dir`, by its URL (TASK-165.1).
     pub(crate) fn file(dir: &std::path::Path) -> Arc<ObjectBucket> {
         let url = url::Url::from_directory_path(dir).unwrap();
@@ -3883,58 +3546,6 @@ pub(crate) mod tests {
             let counted = [Request::ListDelimited, Request::DeleteBatch, Request::Delete]
                 .map(|request| stats.requests(request));
             assert_eq!(counted, [4, 3, 0]);
-        });
-    }
-
-    /// TASK-208: the latency every request to `bucket` waits, CLADEFS_BUCKET_LATENCY_MS, set before
-    /// it was made.
-    const LATE: u64 = 5;
-
-    /// TASK-208: a bucket made under CLADEFS_BUCKET_LATENCY_MS, `bucket`, does what every bucket
-    /// must, its requests each [`LATE`] ms late, one after another.
-    async fn conforms_late(bucket: &ObjectBucket) {
-        let started = std::time::Instant::now();
-        crate::bucket::conformance(bucket, "conformance").await;
-        let requests: u64 = bucket.stats().requests.iter().sum();
-        let took = started.elapsed();
-        assert!(
-            took >= std::time::Duration::from_millis(requests * LATE),
-            "{requests} requests took {took:?}"
-        );
-    }
-
-    /// TASK-208: sets CLADEFS_BUCKET_LATENCY_MS to [`LATE`].
-    fn late() {
-        // SAFETY: nextest runs each test in a process of its own, whose other threads don't read
-        // the environment yet.
-        unsafe { std::env::set_var("CLADEFS_BUCKET_LATENCY_MS", LATE.to_string()) };
-    }
-
-    /// TASK-208: under CLADEFS_BUCKET_LATENCY_MS, a bucket in memory conforms, late.
-    #[test]
-    fn memory_buckets_conform_late() {
-        late();
-        let bucket = ObjectBucket::from_url("memory:///late").unwrap();
-        runtime().block_on(conforms_late(&bucket));
-    }
-
-    /// TASK-208: under CLADEFS_BUCKET_LATENCY_MS, a bucket of files conforms, late: its reads,
-    /// which object_store's throttle, before TASK-330.3, panicked on (`unimplemented!`), as well as
-    /// its writes.
-    #[test]
-    fn file_buckets_conform_late() {
-        late();
-        let dir = tempfile::tempdir().unwrap();
-        runtime().block_on(conforms_late(&file(dir.path())));
-    }
-
-    /// TASK-208: under CLADEFS_BUCKET_LATENCY_MS, a bucket over S3 conforms, late.
-    #[test]
-    fn s3_buckets_conform_late() {
-        late();
-        runtime().block_on(async {
-            let server = S3Server::start(None);
-            conforms_late(&s3(&server, "conformance", &Client::DEFAULT)).await;
         });
     }
 

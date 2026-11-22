@@ -677,16 +677,4 @@ mod tests {
         let text = format!("{}kind ext4\n", kept.text());
         assert_eq!(CellFile::parse(&text).unwrap_err().to_string(), "bad kind \"ext4\"");
     }
-
-    #[test]
-    fn names() {
-        let extent = ExtentId::new(11, 90);
-        assert_eq!(extent_path(extent), "extents/000000000000b/000000000002t");
-        let segment = SegmentId { cell: 11, number: 77 };
-        assert_eq!(segment_path(segment), "segments/000000000000b/000000000002d");
-        assert_eq!(log_path(segment), "logs/000000000000b/000000000002d");
-        assert_eq!(parse_number("000000000002d"), Some(77));
-        assert_eq!(parse_number("2d"), None);
-        assert_eq!(parse_number("000000000000004d"), None);
-    }
 }

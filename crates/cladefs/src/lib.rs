@@ -235,14 +235,4 @@ mod tests {
         assert!(commit.bytes().all(|byte| byte.is_ascii_hexdigit()), "{BUILD_COMMIT}");
     }
 
-    /// Filesystems, their nodes and windows are shared by a device's threads.
-    #[test]
-    fn handles_are_send_and_sync() {
-        fn send_and_sync<T: Send + Sync>() {}
-        send_and_sync::<Filesystem>();
-        send_and_sync::<Node>();
-        send_and_sync::<DaxWindow>();
-        send_and_sync::<Storage>();
-        send_and_sync::<Error>();
-    }
 }

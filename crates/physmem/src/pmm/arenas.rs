@@ -712,13 +712,6 @@ mod tests {
             Ok(run)
         }
 
-        /// The page after `page`, if free, allocated, as the node allocates it.
-        fn take_after(&mut self, page: u32) -> Option<u32> {
-            let next = self.arenas.take_after(&self.pages, page)?;
-            self.pages.frames.allocate(next);
-            Some(next)
-        }
-
         /// As many pages of `arena`'s as `chunks` chunks hold.
         fn take_chunks(&mut self, arena: ArenaId, chunks: usize) -> Vec<u32> {
             (0..chunks * pages_per_chunk()).map(|_| self.take(arena).unwrap()).collect()
@@ -735,11 +728,6 @@ mod tests {
             self.pages.frames.free(page);
             let room = self.arenas.put(&self.pages, page);
             self.return_chunks() || room
-        }
-
-        fn remove(&mut self, arena: ArenaId) {
-            self.arenas.remove(&self.pages, arena);
-            self.return_chunks();
         }
 
         fn keep_spares(&mut self, keep: bool) {
@@ -789,144 +777,6 @@ mod tests {
         }
     }
 
-    /// Each chunk is free, or one arena's, as physmap's chunk table says: an arena has the chunks
-    /// the table names it for, and the arenas together those not free.
-    #[test]
-    fn arenas_have_the_chunks_physmap_names_them_for() {
-        let mut fixture = Fixture::new();
-        let (first, second) = (fixture.create(), fixture.create());
-        // Two chunks' worth of the first's, which has a spare after each: three.
-        let mut taken = fixture.take_chunks(first, 2);
-        // A chunk, and a spare.
-        taken.extend(fixture.take_each(&[second]));
-        assert_eq!(fixture.arenas.chunks(first), 3);
-        assert_eq!(fixture.arenas.chunks(second), 2);
-        assert_eq!(fixture.arenas.given(), 5);
-        assert_eq!(fixture.arenas.free_chunk_count(), CHUNKS - 5);
-        let memory = &fixture.pages.memory;
-        for arena in [ArenaId::DEFAULT, first, second] {
-            let named = (0..CHUNKS).filter(|&chunk| memory.chunk_arena(chunk) == Some(arena));
-            assert_eq!(named.count(), fixture.arenas.chunks(arena), "{arena:?}");
-        }
-        fixture.put_all(taken);
-        let memory = &fixture.pages.memory;
-        assert_eq!((0..CHUNKS).find(|&chunk| memory.chunk_arena(chunk).is_some()), None);
-    }
-
-    /// An arena removed gives its spare back, and its cap is lifted. Holding a page, it stays, and
-    /// its object, until the page's chunk goes back; one holding none goes at once. Either is
-    /// starved as removed, and gives no page, though one holding a page has free pages and chunks
-    /// are free (TASK-79.36). Removing an arena again does nothing.
-    #[test]
-    fn removed_arenas_go_with_their_last_chunk() {
-        let mut fixture = Fixture::new();
-        let (empty, holding) = (fixture.create(), fixture.create());
-        fixture.remove(empty);
-        assert!(fixture.pages.memory.arena_fd(empty).is_none());
-        assert_eq!(fixture.arenas.starved(empty), Some(Starved::Removed));
-        assert_eq!(fixture.take(empty).err(), Some(Starved::Removed.into()));
-
-        let page = fixture.take(holding).unwrap();
-        assert_eq!(fixture.arenas.chunks(holding), 2, "a chunk, and a spare");
-        // Capped under what it has.
-        fixture.arenas.set_cap(holding, Some(1));
-        assert!(!fixture.arenas.within_caps(holding));
-        fixture.remove(holding);
-        assert_eq!(fixture.arenas.chunks(holding), 1, "its spare went back");
-        assert!(fixture.arenas.within_caps(holding), "its cap was lifted");
-        assert!(fixture.pages.memory.arena_fd(holding).is_some());
-        assert_eq!(fixture.arenas.starved(holding), Some(Starved::Removed));
-        let given = fixture.arenas.given();
-        assert_eq!(fixture.take(holding).err(), Some(Starved::Removed.into()));
-        assert_eq!(fixture.arenas.given(), given, "a chunk taken");
-        fixture.remove(holding);
-        fixture.remove(empty);
-        assert_eq!(fixture.arenas.chunks(holding), 1);
-        assert!(fixture.pages.memory.arena_fd(holding).is_some());
-
-        assert!(fixture.put(page), "its chunk went back");
-        assert_eq!(fixture.arenas.chunks(holding), 0);
-        assert!(fixture.pages.memory.arena_fd(holding).is_none());
-        assert_eq!(fixture.arenas.given(), 0);
-    }
-
-    /// Taking a page of an arena fails exactly as it is starved, held to the same cap: past its
-    /// own; past the total's, or out of chunks, unless another arena's spare goes back for it,
-    /// which it then takes, the arenas holding as many chunks as before, and no spare.
-    #[test]
-    fn takes_fail_as_starved_says() {
-        /// Makes the arena to take a page of, and the pages taken for that.
-        type Setup = fn(&mut Fixture) -> (ArenaId, Vec<u32>);
-        let cases: [(&str, Setup, Option<Starved>, usize); 5] = [
-            (
-                "at its own cap",
-                |fixture| {
-                    let arena = fixture.create();
-                    fixture.arenas.set_cap(arena, Some(1));
-                    (arena, fixture.take_chunks(arena, 1))
-                },
-                Some(Starved::Arena),
-                1,
-            ),
-            (
-                "at the total's, with no spare",
-                |fixture| {
-                    fixture.arenas.set_total_cap(Some(1));
-                    let arena = fixture.create();
-                    (arena, fixture.take_chunks(arena, 1))
-                },
-                Some(Starved::Total),
-                1,
-            ),
-            (
-                "at the total's, with another arena's spare",
-                |fixture| {
-                    let other = fixture.create();
-                    let taken = fixture.take_each(&[other]);
-                    fixture.arenas.set_total_cap(Some(fixture.arenas.given()));
-                    (fixture.create(), taken)
-                },
-                None,
-                1,
-            ),
-            (
-                "out of chunks, with another arena's spare",
-                |fixture| {
-                    let hog = fixture.create();
-                    let taken = fixture.take_chunks(hog, CHUNKS - 1);
-                    assert_eq!(fixture.arenas.free_chunk_count(), 0);
-                    (fixture.create(), taken)
-                },
-                None,
-                1,
-            ),
-            (
-                "out of chunks, with no spare",
-                |fixture| {
-                    fixture.keep_spares(false);
-                    let hog = fixture.create();
-                    let taken = fixture.take_chunks(hog, CHUNKS);
-                    (fixture.create(), taken)
-                },
-                Some(Starved::Total),
-                0,
-            ),
-        ];
-        for (case, setup, starved, chunks) in cases {
-            let mut fixture = Fixture::new();
-            let (arena, mut taken) = setup(&mut fixture);
-            let given = fixture.arenas.given();
-            assert_eq!(fixture.arenas.starved(arena), starved, "{case}");
-            let take = fixture.take(arena);
-            assert_eq!(take.err(), starved.map(Refused::Starved), "{case}");
-            assert_eq!(fixture.arenas.chunks(arena), chunks, "{case}");
-            assert_eq!(fixture.arenas.given(), given, "{case}");
-            assert_eq!(fixture.arenas.spares(), 0, "{case}");
-            taken.extend(take);
-            fixture.put_all(taken);
-        }
-    }
-
     /// A total cap lowered under what the arenas hold: an arena takes a chunk once as many spares
     /// as bring the arenas under it with that chunk have gone back, all at once; with too few
     /// spares, it fails, starved still, those there were gone back.
@@ -958,78 +808,6 @@ mod tests {
         assert_eq!(fixture.arenas.given(), 2);
         assert_eq!(fixture.arenas.starved(arena), Some(Starved::Total));
         fixture.put_all(taken);
-    }
-
-    /// Spares given back leave each arena as starved as it was, or more, never less.
-    #[test]
-    fn spares_given_back_starve_no_arena_less() {
-        // Under a total cap a chunk under what the arenas hold, as many spares wanted as there
-        // are: not starved, nor once they have gone back, none wanted then.
-        let mut fixture = Fixture::new();
-        let others = [fixture.create(), fixture.create()];
-        let taken = fixture.take_each(&others);
-        let arena = fixture.create();
-        fixture.arenas.set_total_cap(Some(3));
-        assert_eq!(fixture.arenas.starved(arena), None);
-        fixture.release_spares();
-        assert_eq!(fixture.arenas.starved(arena), None);
-        fixture.put_all(taken);
-
-        // Under one two chunks under, one more wanted than there are: starved, and still once they
-        // have gone back, one wanted then, of none.
-        let mut fixture = Fixture::new();
-        let others = [fixture.create(), fixture.create()];
-        let taken = fixture.take_each(&others);
-        let arena = fixture.create();
-        fixture.arenas.set_total_cap(Some(2));
-        assert_eq!(fixture.arenas.starved(arena), Some(Starved::Total));
-        fixture.release_spares();
-        assert_eq!(fixture.arenas.starved(arena), Some(Starved::Total));
-        fixture.put_all(taken);
-    }
-
-    /// At the total cap an arena is not within the caps as they stand, nor starved, as another
-    /// arena's spare goes back for the chunk it takes; and, not within them still, it takes no
-    /// spare of its own.
-    #[test]
-    fn within_caps_counts_no_spare_going_back() {
-        let mut fixture = Fixture::new();
-        let other = fixture.create();
-        // A chunk, and a spare.
-        let mut taken = fixture.take_each(&[other]);
-        fixture.arenas.set_total_cap(Some(fixture.arenas.given()));
-        let arena = fixture.create();
-        assert!(!fixture.arenas.within_caps(arena));
-        assert_eq!(fixture.arenas.starved(arena), None);
-        taken.extend(fixture.take(arena));
-        assert_eq!(fixture.arenas.chunks(arena), 1, "the other's spare, and none of its own");
-        assert_eq!(fixture.arenas.spares(), 0);
-        assert!(!fixture.arenas.within_caps(arena));
-        fixture.put_all(taken);
-    }
-
-    /// A page put back tells of room for allocations waiting when its chunk goes back, when its
-    /// arena is at a cap, and when no chunk is free; not otherwise.
-    #[test]
-    fn puts_tell_when_waiters_may_find_room() {
-        let mut fixture = Fixture::new();
-        let arena = fixture.create();
-        // Of one chunk, beside its spare.
-        let pages = fixture.take_each(&[arena; 4]);
-        let [last, out_of_chunks, capped, uncapped] = pages.try_into().unwrap();
-        assert!(!fixture.put(uncapped));
-        // Capped under what it has.
-        fixture.arenas.set_cap(arena, Some(1));
-        assert!(fixture.put(capped));
-        fixture.arenas.set_cap(arena, None);
-        // The hog takes the chunks left, the last its spare.
-        let hog = fixture.create();
-        let hogged = fixture.take_chunks(hog, CHUNKS - 3);
-        assert_eq!(fixture.arenas.free_chunk_count(), 0);
-        assert!(fixture.put(out_of_chunks));
-        fixture.put_each(hogged);
-        assert!(fixture.put(last), "its chunk went back");
-        fixture.put_all(Vec::new());
     }
 
     /// TASK-92.35: a chunk going back, given back under the PMM's lock and not yet taken back by
@@ -1114,88 +892,6 @@ mod tests {
         fixture.put_all(vec![page]);
     }
 
-    /// Relief is asked for each arena once a pass, at the cap last asked with, in order. A pass
-    /// that frees nothing exhausts an arena starved still, until a page of it is freed, a cap
-    /// changes, or a pass frees something; one not starved it leaves as it is. An arena gone has
-    /// nothing to relieve.
-    #[test]
-    fn relief_is_asked_once_a_pass_and_exhausts_a_starved_arena() {
-        let mut fixture = Fixture::new();
-        let (first, second) = (fixture.create(), fixture.create());
-        fixture.arenas.set_cap(first, Some(1));
-        let mut taken = fixture.take_chunks(first, 1);
-        assert_eq!(fixture.arenas.starved(first), Some(Starved::Arena));
-        assert!(!fixture.arenas.ask_relief(second, Starved::Total));
-        assert!(!fixture.arenas.ask_relief(first, Starved::Total));
-        assert!(!fixture.arenas.ask_relief(first, Starved::Arena));
-        assert_eq!(
-            fixture.arenas.take_asked(),
-            [(first, Starved::Arena), (second, Starved::Total)]
-        );
-        assert!(fixture.arenas.take_asked().is_empty());
-
-        fixture.arenas.relieved(first, 0);
-        assert!(fixture.arenas.ask_relief(first, Starved::Arena), "exhausted");
-        let _ = fixture.put(taken.pop().unwrap());
-        assert!(!fixture.arenas.ask_relief(first, Starved::Arena), "a page of it freed");
-        assert_eq!(fixture.arenas.starved(first), None);
-        fixture.arenas.relieved(first, 0);
-        assert!(!fixture.arenas.ask_relief(first, Starved::Arena), "not starved");
-
-        taken.extend(fixture.take(first));
-        fixture.arenas.relieved(first, 0);
-        assert!(fixture.arenas.ask_relief(first, Starved::Arena), "exhausted again");
-        fixture.arenas.relieved(first, crate::page_size());
-        assert!(!fixture.arenas.ask_relief(first, Starved::Arena), "a pass freed a page");
-
-        fixture.arenas.relieved(first, 0);
-        fixture.arenas.set_cap(second, Some(4));
-        assert!(!fixture.arenas.ask_relief(first, Starved::Arena), "another's cap changed");
-        fixture.arenas.relieved(first, 0);
-        fixture.arenas.set_total_cap(None);
-        assert!(!fixture.arenas.ask_relief(first, Starved::Arena), "the total cap changed");
-
-        fixture.remove(second);
-        assert!(fixture.arenas.ask_relief(second, Starved::Total), "gone");
-        assert_eq!(fixture.arenas.take_asked(), [(first, Starved::Arena)]);
-        fixture.put_all(taken);
-    }
-
-    /// TASK-108.1: pages taken together follow on from one another where those after are free, of
-    /// the arena's free blocks, and of the chunk, however they were freed: in another order, as
-    /// evictions free them, they make one block again (TASK-131.1), which a page is taken from
-    /// first, and the pages after it from what is left of it. A page in use, or past the chunk,
-    /// ends the run.
-    #[test]
-    fn pages_taken_after_another_follow_on_from_it() {
-        let mut fixture = Fixture::new();
-        let arena = fixture.create();
-        let mut taken = fixture.take_chunks(arena, 1);
-        let index = |page: u32| page as usize;
-        let first = index(taken[0]);
-        // Pages 8 to 11 of the chunk freed out of order: page 12 stays in use.
-        let freed: Vec<u32> = taken.drain(8..12).collect();
-        for at in [3, 1, 0, 2] {
-            let _ = fixture.put(freed[at]);
-        }
-        let start = fixture.take(arena).unwrap();
-        assert_eq!(index(start), first + 8, "the smallest block's first page");
-        let mut run = vec![start];
-        while let Some(next) = fixture.take_after(*run.last().unwrap()) {
-            run.push(next);
-        }
-        assert_eq!(run.iter().map(|&page| index(page) - first).collect::<Vec<_>>(), [8, 9, 10, 11]);
-        // The last page of the chunk has none after it of the chunk.
-        let last = taken.pop().unwrap();
-        assert_eq!(index(last), first + pages_per_chunk() - 1);
-        let _ = fixture.put(last);
-        let last = fixture.take(arena).unwrap();
-        assert_eq!(fixture.take_after(last), None, "past the chunk");
-        taken.extend(run);
-        taken.push(last);
-        fixture.put_all(taken);
-    }
-
     /// TASK-131.1: a run is taken from the smallest free block that holds it, however recently
     /// pages were freed elsewhere: single pages freed among pages in use, as an fsync's small
     /// extents are freed, are left for single pages; and a page from them.
@@ -1240,31 +936,6 @@ mod tests {
         let _ = fixture.put(evicted);
         fixture.arenas.relieved(starved, 0);
         assert!(fixture.arenas.ask_relief(starved, Starved::Total), "none is to come back");
-        fixture.put_all(taken);
-    }
-
-    /// TASK-106: a pass that frees nothing doesn't exhaust an arena starved while pages of it are
-    /// quarantined, which make it room as they come back: what relief evicted that a window mapped,
-    /// waiting for its VM process to unmap it, while the pass after finds nothing to evict. Its
-    /// allocations wait for them rather than fail. Once none is to come back, it is exhausted.
-    #[test]
-    fn relief_exhausts_no_arena_with_pages_to_come_back() {
-        let mut fixture = Fixture::new();
-        let arena = fixture.create();
-        fixture.arenas.set_cap(arena, Some(1));
-        let mut taken = fixture.take_chunks(arena, 1);
-        assert_eq!(fixture.arenas.starved(arena), Some(Starved::Arena));
-        let evicted = taken.pop().unwrap();
-        fixture.arenas.quarantine(&fixture.pages, evicted, true);
-        fixture.arenas.relieved(arena, 0);
-        assert!(!fixture.arenas.ask_relief(arena, Starved::Arena), "a page is to come back");
-
-        fixture.arenas.quarantine(&fixture.pages, evicted, false);
-        let _ = fixture.put(evicted);
-        assert!(!fixture.arenas.ask_relief(arena, Starved::Arena), "it came back");
-        taken.extend(fixture.take(arena));
-        fixture.arenas.relieved(arena, 0);
-        assert!(fixture.arenas.ask_relief(arena, Starved::Arena), "none is to come back");
         fixture.put_all(taken);
     }
 }

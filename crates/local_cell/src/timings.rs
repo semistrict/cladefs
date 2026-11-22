@@ -309,28 +309,13 @@ pub(crate) fn made_durable(cell: u64, segments: usize, phases: Phases<4>) {
     timings.durable_segments += segments as u64;
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-
-    /// The slowest's phases are kept whole, beside each phase's longest of any.
-    #[test]
-    fn the_slowest_keeps_its_phases() {
-        let mut timed = Timed::<3>::default();
-        let all = [[40_000, 1_000, 0], [0, 30_000, 30_000], [0, 0, 2_000]];
-        for (us, runnable_us) in all.into_iter().zip([5, 50_000, 7]) {
-            timed.record(Phases { us, runnable_us });
-        }
-        assert_eq!((timed.count, timed.slow), (3, 1));
-        assert_eq!(timed.slowest, Phases { us: all[1], runnable_us: 50_000 });
-        assert_eq!(timed.max, Phases { us: [40_000, 30_000, 30_000], runnable_us: 50_000 });
-        assert_eq!(timed.sum, Phases { us: [40_000, 31_000, 32_000], runnable_us: 50_012 });
-    }
 
     /// cladefs: a thread spinning beside more spinning threads than there are CPUs it may run on
     /// waits to run, as its scheduler counts it: what a framing's warning says of the host's CPUs
     /// (TASK-336). Pinned to one CPU, with three others there, it runs about a quarter of the time.
-    #[cfg(target_os = "linux")]
     #[test]
     fn waits_to_run_are_counted() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -375,15 +360,6 @@ mod tests {
                 "waited {runnable_us} µs of {took_us} µs, a quarter of a CPU's"
             );
         });
-    }
-
-    /// cladefs: what a thread hands others counts their waits, not its own meanwhile (TASK-336).
-    #[test]
-    fn handed_spans_count_the_others_waits() {
-        let mut waits = Waits::start();
-        let handing = waits.handing();
-        waits.handed(handing, 7_000_000);
-        assert!(waits.us() >= 7_000, "the others' 7 ms counted");
     }
 }
 

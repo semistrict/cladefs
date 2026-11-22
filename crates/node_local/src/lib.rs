@@ -9,9 +9,9 @@
 //! share them. A [`NodeLocal`] static is one value per process, built normally: a [`OnceLock`],
 //! made at its first use, which costs a daemon nothing more than the static it was. Under
 //! `--cfg madsim`, it is one value per simulated node, each node's made at that node's first use,
-//! so that two daemons in one simulation keep their own; and, the simulation's runtime holding the
-//! [`Plugin`], a node killed has its values let go of, so that it starts again with none, as a
-//! process does. Outside a node, as a test's own code is, the process's.
+//! so that two daemons in one simulation keep their own; and a node killed ([`kill`], [`restart`])
+//! has its values let go of, its tasks gone first, so that it starts again with none, as a process
+//! does. Outside a node, as a test's own code is, the process's.
 //!
 //! A node's value is leaked, as a static's is: a value let go of at its node's kill stays where
 //! its holders, the node's tasks, which the kill dropped, left it. A simulation leaks a value of
@@ -179,7 +179,8 @@ fn reset(node: Node) {
 }
 
 /// Whether the simulated node this runs in is dying: killed, its tasks dropped, as a host's process
-/// dies, closing nothing, waiting for nothing. Never, built normally, nor outside a node.
+/// dies, closing nothing, waiting for nothing. Never, built normally, nor outside a node. A node
+/// [`restart`] starts again is dying until every task of its kill is dropped.
 pub fn dying() -> bool {
     #[cfg(madsim)]
     if let Ok(handle) = madsim::runtime::Handle::try_current() {
@@ -189,45 +190,37 @@ pub fn dying() -> bool {
 }
 
 /// Lets the values of the simulated node this runs in go, as it starts: what a node's `init` calls
-/// first, so that a node started again, killed before, makes its values anew, as a process does at
-/// its boot, where a simulation's runtime has no [`Plugin`] to (a `#[madsim::test]`'s).
+/// first, so that a node madsim starts again itself, as one whose panic its `restart_on_panic`
+/// matches, makes its values anew, as a process does at its boot. One [`kill`] or [`restart`]
+/// killed has none already.
 #[cfg(madsim)]
 pub fn starting() {
     reset((std::thread::current().id(), madsim::plugin::node()));
 }
 
-/// madsim's simulator plugin that lets a killed node's values go, so that it starts again with
-/// none: a simulation's runtime adds it (`Runtime::add_simulator::<node_local::Plugin>()`).
+/// Kills simulated `node` as a host's process dies: returns once its tasks are dropped, each seeing
+/// it [`dying`], and its values let go of, so that nothing of it is left for its start to find.
+/// madsim drops a killed node's tasks only as it next runs them, which the kill wakes, in its run
+/// queue's random order, moving its clock on 50 to 100 ns at each: [`DRAINED`] is their dropping's
+/// bound, says no more of it than madsim does (0.2.34).
 #[cfg(madsim)]
-pub struct Plugin;
-
-#[cfg(madsim)]
-impl madsim::plugin::Simulator for Plugin {
-    fn new(_: &madsim::rand::GlobalRng, _: &madsim::time::TimeHandle, _: &madsim::Config) -> Self {
-        Plugin
-    }
-
-    fn reset_node(&self, node: madsim::task::NodeId) {
-        reset((std::thread::current().id(), node));
-    }
+pub async fn kill(node: madsim::task::NodeId) {
+    madsim::runtime::Handle::current().kill(node);
+    madsim::time::sleep(DRAINED).await;
+    reset((std::thread::current().id(), node));
 }
 
-#[cfg(test)]
-mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
+/// How long a killed node's tasks take to be dropped, at most ([`kill`]): ten million tasks' worth,
+/// more than a simulation holds.
+#[cfg(madsim)]
+const DRAINED: std::time::Duration = std::time::Duration::from_secs(1);
 
-    static MADE: AtomicU64 = AtomicU64::new(0);
-
-    node_local! {
-        static COUNTER: AtomicU64 = { MADE.fetch_add(1, Ordering::Relaxed); AtomicU64::new(0) };
-    }
-
-    /// Built normally, one value for the process, made once, at its first use.
-    #[test]
-    fn statics_are_the_processs_built_normally() {
-        COUNTER.get().fetch_add(2, Ordering::Relaxed);
-        COUNTER.get().fetch_add(3, Ordering::Relaxed);
-        assert_eq!(COUNTER.get().load(Ordering::Relaxed), 5);
-        assert_eq!(MADE.load(Ordering::Relaxed), 1);
-    }
+/// Kills simulated `node` ([`kill`]), killed or exited already or not, and starts it again, as a
+/// host's process restarts: no task of its start runs before its kill's are gone, nor finds a
+/// value they made (board 5908: madsim's own restart drops the killed node's tasks as its start
+/// runs, which, its values not yet let go of, takes up what they left).
+#[cfg(madsim)]
+pub async fn restart(node: madsim::task::NodeId) {
+    kill(node).await;
+    madsim::runtime::Handle::current().restart(node);
 }

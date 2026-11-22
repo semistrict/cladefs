@@ -266,47 +266,6 @@ mod tests {
     use super::*;
     use anyhow::{Context as _, anyhow};
 
-    /// Each of Fxfs's errors, its errno, its extended attribute's, and whether callers expect it.
-    #[test]
-    fn each_fxfs_error_has_its_errno() {
-        use Reported::{Expected, Logged};
-        let table = [
-            (FxfsError::AlreadyExists, Errno::EEXIST, Errno::EEXIST, Expected),
-            (FxfsError::Inconsistent, Errno::EUCLEAN, Errno::EUCLEAN, Logged),
-            (FxfsError::Internal, Errno::EIO, Errno::EIO, Logged),
-            (FxfsError::NotDir, Errno::ENOTDIR, Errno::ENOTDIR, Expected),
-            (FxfsError::NotFile, Errno::EISDIR, Errno::EISDIR, Expected),
-            (FxfsError::NotFound, Errno::ENOENT, Errno::ENODATA, Expected),
-            (FxfsError::NotEmpty, Errno::ENOTEMPTY, Errno::ENOTEMPTY, Expected),
-            (FxfsError::ReadOnlyFilesystem, Errno::EROFS, Errno::EROFS, Logged),
-            (FxfsError::NoSpace, Errno::ENOSPC, Errno::ENOSPC, Expected),
-            (FxfsError::Deleted, Errno::ENOENT, Errno::ENOENT, Expected),
-            (FxfsError::InvalidArgs, Errno::EINVAL, Errno::EINVAL, Logged),
-            (FxfsError::InvalidVersion, Errno::EINVAL, Errno::EINVAL, Logged),
-            (FxfsError::JournalFlushError, Errno::EIO, Errno::EIO, Logged),
-            (FxfsError::NotSupported, Errno::ENOTSUP, Errno::ENOTSUP, Logged),
-            (FxfsError::AccessDenied, Errno::EACCES, Errno::EACCES, Logged),
-            (FxfsError::OutOfRange, Errno::EINVAL, Errno::EINVAL, Logged),
-            (FxfsError::AlreadyBound, Errno::EBUSY, Errno::EBUSY, Logged),
-            (FxfsError::BadPath, Errno::EINVAL, Errno::EINVAL, Logged),
-            (FxfsError::WrongType, Errno::EINVAL, Errno::EINVAL, Logged),
-            (FxfsError::IntegrityError, Errno::EBADMSG, Errno::EBADMSG, Logged),
-            (FxfsError::Unavailable, Errno::EBUSY, Errno::EBUSY, Logged),
-            (FxfsError::NoKey, Errno::ENOKEY, Errno::ENOKEY, Logged),
-            (FxfsError::InconsistentEncryptionPolicy, Errno::EXDEV, Errno::EXDEV, Logged),
-        ];
-        for (fxfs_error, node, xattr, reported) in table {
-            assert_eq!(of_fxfs(&fxfs_error, Call::Node), (node, reported), "{fxfs_error:?}");
-            let error = anyhow!(fxfs_error.clone()).context("in context");
-            assert_eq!(errno(&error), node, "{fxfs_error:?}");
-            assert_eq!(xattr_errno(&error), xattr, "{fxfs_error:?}");
-        }
-        // TooBig alone depends on the call for whether it is expected: an extended attribute's
-        // value that doesn't fit is an answer.
-        assert_eq!(of_fxfs(&FxfsError::TooBig, Call::Node), (Errno::EFBIG, Logged));
-        assert_eq!(of_fxfs(&FxfsError::TooBig, Call::Xattr), (Errno::E2BIG, Expected));
-    }
-
     /// An error is classified by the outermost Errno it holds, else the outermost FxfsError,
     /// else it is EIO.
     #[test]

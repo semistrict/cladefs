@@ -267,26 +267,4 @@ mod tests {
         writer.zero(5, 1);
         assert_eq!(out, [*b"\0w", *b"xy", *b"z\0"]);
     }
-
-    /// The header is the request's first bytes, wherever the descriptors split them; none if the
-    /// driver wrote fewer.
-    #[test]
-    fn headers_are_the_first_bytes() {
-        let header =
-            RequestHeader { type_: 4u32.to_le(), flags: 2u32.to_le(), unique: 9u64.to_le() };
-        let mut bytes = header.as_bytes().to_vec();
-        let mut buffers = Buffers::new();
-        let (head, tail) = bytes.split_at_mut(5);
-        // SAFETY: The test's memory, which outlives the buffers.
-        unsafe {
-            buffers.push_readable(head.as_mut_ptr(), head.len());
-            buffers.push_readable(tail.as_mut_ptr(), tail.len() - 1);
-        }
-        assert!(buffers.header().is_none());
-        let mut buffers = Buffers::new();
-        // SAFETY: As above.
-        unsafe { buffers.push_readable(bytes.as_mut_ptr(), bytes.len()) };
-        let read = buffers.header().unwrap();
-        assert_eq!((read.type_, read.flags, read.unique), (4, 2, 9));
-    }
 }

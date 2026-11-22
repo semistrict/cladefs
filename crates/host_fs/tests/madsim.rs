@@ -55,7 +55,6 @@ async fn boot(host: u8, found: Found) {
 #[test]
 fn a_hosts_disk_keeps_what_was_durable_through_its_kill() {
     let runtime = madsim::runtime::Runtime::new();
-    runtime.add_simulator::<node_local::Plugin>();
     runtime.block_on(async {
         let handle = madsim::runtime::Handle::current();
         let found: Found = Arc::default();
@@ -66,16 +65,12 @@ fn a_hosts_disk_keeps_what_was_durable_through_its_kill() {
                 .create_node()
                 .name(format!("host{host}"))
                 .ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, host)))
-                .init(move || {
-                    node_local::starting();
-                    boot(host, found.clone())
-                })
+                .init(move || boot(host, found.clone()))
                 .build();
             nodes.push(node);
         }
         madsim::time::sleep(Duration::from_secs(1)).await;
-        handle.kill(nodes[0].id());
-        handle.restart(nodes[0].id());
+        node_local::restart(nodes[0].id()).await;
         madsim::time::sleep(Duration::from_secs(1)).await;
         let boot =
             |host| Boot { host, synced: Some(b"durable".to_vec()), dir: true, lock_refused: false };
@@ -91,7 +86,6 @@ fn what_a_crash_keeps_is_the_seeds() {
     let kept = |seed: u64| {
         std::thread::spawn(move || {
             let runtime = madsim::runtime::Runtime::with_seed_and_config(seed, Default::default());
-            runtime.add_simulator::<node_local::Plugin>();
             runtime.block_on(async {
                 let handle = madsim::runtime::Handle::current();
                 let found: Found = Arc::default();
@@ -102,7 +96,6 @@ fn what_a_crash_keeps_is_the_seeds() {
                     .name("host")
                     .ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
                     .init(move || {
-                        node_local::starting();
                         let (found, seen) = (found2.clone(), seen2.clone());
                         async move {
                             seen.lock().unwrap().push(host_fs::exists("/disk1/kept/unsynced"));
@@ -111,8 +104,7 @@ fn what_a_crash_keeps_is_the_seeds() {
                     })
                     .build();
                 madsim::time::sleep(Duration::from_secs(1)).await;
-                handle.kill(node.id());
-                handle.restart(node.id());
+                node_local::restart(node.id()).await;
                 madsim::time::sleep(Duration::from_secs(1)).await;
                 let seen = seen.lock().unwrap().clone();
                 seen[1]
@@ -131,7 +123,6 @@ fn what_a_crash_keeps_is_the_seeds() {
 #[test]
 fn calls_changing_a_disk_fail_as_its_faults_say() {
     let runtime = madsim::runtime::Runtime::new();
-    runtime.add_simulator::<node_local::Plugin>();
     let handle = runtime.create_node().name("host").ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
     let node = handle.build();
     runtime
@@ -172,7 +163,6 @@ fn which_calls_fail_is_the_seeds() {
     let failed = |seed: u64| {
         std::thread::spawn(move || {
             let runtime = madsim::runtime::Runtime::with_seed_and_config(seed, Default::default());
-            runtime.add_simulator::<node_local::Plugin>();
             let node =
                 runtime.create_node().name("host").ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
             let node = node.build();
@@ -205,7 +195,6 @@ fn a_crash_damages_no_byte_a_write_leaves_as_it_was() {
     let crashed = |seed: u64| {
         std::thread::spawn(move || {
             let runtime = madsim::runtime::Runtime::with_seed_and_config(seed, Default::default());
-            runtime.add_simulator::<node_local::Plugin>();
             runtime.block_on(async {
                 let handle = madsim::runtime::Handle::current();
                 let read = Arc::new(Mutex::new(Vec::new()));
@@ -215,7 +204,6 @@ fn a_crash_damages_no_byte_a_write_leaves_as_it_was() {
                     .name("host")
                     .ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
                     .init(move || {
-                        node_local::starting();
                         let read = read2.clone();
                         async move {
                             if host_fs::exists("/log") {
@@ -235,8 +223,7 @@ fn a_crash_damages_no_byte_a_write_leaves_as_it_was() {
                     })
                     .build();
                 madsim::time::sleep(Duration::from_secs(1)).await;
-                handle.kill(node.id());
-                handle.restart(node.id());
+                node_local::restart(node.id()).await;
                 madsim::time::sleep(Duration::from_secs(1)).await;
                 let read = read.lock().unwrap().clone();
                 read.into_iter().next().expect("the boot after the crash read the log")

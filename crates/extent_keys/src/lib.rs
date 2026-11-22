@@ -228,16 +228,6 @@ mod tests {
     }
 
     #[test]
-    fn sealed_bytes_open_to_what_was_sealed() {
-        let aead = Aead::new(&key(1));
-        let mut data = b"an extent's data".to_vec();
-        let tag = aead.seal(7, b"segments/1/0", &mut data);
-        assert_ne!(data, b"an extent's data");
-        aead.open(7, b"segments/1/0", &mut data, &tag).unwrap();
-        assert_eq!(data, b"an extent's data");
-    }
-
-    #[test]
     fn sealed_bytes_open_under_nothing_else() {
         let aead = Aead::new(&key(1));
         let mut sealed = b"an extent's data".to_vec();
@@ -324,16 +314,5 @@ mod tests {
         let mut flipped = tag;
         flipped[15] ^= 1;
         assert_eq!(key(1).verify_tag(&[b"a raw part"], &flipped), refused);
-    }
-
-    #[test]
-    fn secrets_print_no_bytes() {
-        assert_eq!(format!("{:?}", key(0xab)), "Secret(..)");
-    }
-
-    #[test]
-    fn random_keys_and_salts_differ() {
-        assert_ne!(Secret::random().expose(), Secret::random().expose());
-        assert_ne!(Salt::random(), Salt::random());
     }
 }

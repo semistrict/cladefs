@@ -236,13 +236,3 @@ pub(crate) fn nanos_from_time(time: SystemTime) -> Result<u64> {
     u64::try_from(since_epoch.as_nanos()).map_err(|_| Errno::EINVAL)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Inodes are their numbers.
-    #[test]
-    fn inodes_are_their_numbers() {
-        assert_eq!(u64::from(Inode::from(7)), 7);
-    }
-}

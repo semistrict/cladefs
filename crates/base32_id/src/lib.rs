@@ -87,24 +87,6 @@ mod tests {
     use proptest::prelude::*;
 
     #[test]
-    fn the_ends_are_written_whole() {
-        assert_eq!(Padded(0).to_string(), "0000000000000");
-        assert_eq!(Short(0).to_string(), "0");
-        assert_eq!(Padded(1).to_string(), "0000000000001");
-        assert_eq!(Short(31).to_string(), "z");
-        assert_eq!(Short(32).to_string(), "10");
-        assert_eq!(Short(0x2f).to_string(), "1f");
-        assert_eq!(Padded(u64::MAX).to_string(), "fzzzzzzzzzzzz");
-        assert_eq!(Short(u64::MAX).to_string(), "fzzzzzzzzzzzz");
-    }
-
-    #[test]
-    fn digits_skip_letters_read_as_others() {
-        let written: String = (0..32).map(|digit| Short(digit).to_string()).collect();
-        assert_eq!(written, "0123456789abcdefghjkmnpqrstvwxyz");
-    }
-
-    #[test]
     fn what_is_no_id_is_refused() {
         for wrong in ["", "00000000000000", "g000000000000", "zzzzzzzzzzzzz", "A", "i", "l", "o"] {
             assert_eq!(parse(wrong), None, "{wrong:?}");

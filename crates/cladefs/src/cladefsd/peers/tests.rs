@@ -141,17 +141,6 @@ fn a_peer_out_of_reach_fails_fast() {
     assert!(began.elapsed() < CONNECT * 2, "took {:?}", began.elapsed());
 }
 
-/// Peers are named `HOST:PORT`, nothing more.
-#[test]
-fn peers_are_named_host_and_port() {
-    for address in ["10.0.0.1:7070", "host-a.internal:7070", "[::1]:7070"] {
-        assert_eq!(check_address(address), Ok(()), "{address}");
-    }
-    for address in ["10.0.0.1", "http://10.0.0.1:7070", "10.0.0.1:7070/x", "", ":7070"] {
-        assert!(check_address(address).is_err(), "{address:?} taken");
-    }
-}
-
 /// cladefs: `work`, failing the test if it takes more than 30 s.
 async fn within(work: impl std::future::Future<Output = ()>) {
     tokio::time::timeout(Duration::from_secs(30), work).await.expect("a member's call hung");

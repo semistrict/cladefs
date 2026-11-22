@@ -42,7 +42,7 @@ fn simulation() {
                 });
                 let held = allocating.await.unwrap();
                 if host == 3 {
-                    handle.kill(node.id());
+                    node_local::kill(node.id()).await;
                     // Held past its node's kill, as a killed host's tasks leave what they held.
                     std::mem::forget(held);
                 }

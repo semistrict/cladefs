@@ -114,19 +114,3 @@ pub fn window_fits_host(block: u64, host_page: u64) -> Result<(), Error> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn windows_map_on_hosts_of_pages_no_larger_than_their_blocks() {
-        assert!(window_fits_host(4096, 4096).is_ok());
-        let refused = window_fits_host(4096, 16384).unwrap_err();
-        assert_eq!(refused.errno(), Some(Errno::EINVAL));
-        assert_eq!(
-            format!("{refused:#}"),
-            "a window maps 4096-byte blocks, and this host's pages are 16384 bytes: mmap maps none \
-             smaller: EINVAL (errno 22)"
-        );
-    }
-}

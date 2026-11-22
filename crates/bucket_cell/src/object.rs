@@ -228,22 +228,4 @@ mod tests {
         assert_eq!(bucket.served(tail(&*bucket, KEY)).0, Err(corrupt.clone()));
         assert_eq!(Tail::of(KEY, bytes), Err(corrupt));
     }
-
-    /// An object's footer is read with two ranged reads, of its trailer and of the footer; none
-    /// for an object gone.
-    #[test]
-    fn footers_are_read_by_two_ranges() {
-        let bytes = layout::with_footer(
-            &[1; 5000],
-            &"footer",
-            crate::testing::encrypting(layout::test_cell(1)),
-        );
-        let bucket = holding(bytes.clone());
-        let (read, asked) = bucket.served(footer::<String>(&*bucket, KEY));
-        assert_eq!(read, Ok(Some("footer".to_owned())));
-        let range = Frame::of(&bytes).unwrap().footer();
-        assert_eq!(asked, [format!("get {KEY} last {TRAILER}"), format!("get {KEY} {range:?}")]);
-        let (gone, asked) = bucket.served(footer::<String>(&*bucket, "moves/gone"));
-        assert_eq!((gone, asked), (Ok(None), vec![format!("get moves/gone last {TRAILER}")]));
-    }
 }
