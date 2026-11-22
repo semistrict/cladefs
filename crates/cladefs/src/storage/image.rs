@@ -196,18 +196,24 @@ impl Device for ImageDevice {
         mut buffer: MutableBufferRef<'_>,
         _read_opts: ReadOptions,
     ) -> Result<(), Error> {
-        let parts = match self.local.locate(extent, offset, buffer.len() as u64) {
-            // cladefs: in the image's bucket, as a fork holds what it inherited (TASK-165.7).
+        let len = buffer.len() as u64;
+        let parts = match self.local.locate(extent, offset, len) {
+            // cladefs: in the image's bucket, as a fork holds what it inherited (TASK-165.7); or
+            // where it is in the cell now, relocated meanwhile (doc-27).
             Err(ref error)
                 if let Some(in_bucket) = error.downcast_ref::<local_cell::BucketData>() =>
             {
-                let location = in_bucket.location.clone();
-                let fetcher = self.image.fetcher();
-                let fetched = fetcher.read(extent, location, offset, buffer.len() as u64).await?;
-                let (len, end) = (fetched.len(), buffer.len());
-                buffer.reborrow().subslice_mut(..len).copy_from_slice(&fetched);
-                buffer.reborrow().subslice_mut(len..end).fill(0);
-                return Ok(());
+                let (location, fetcher) = (in_bucket.location.clone(), self.image.fetcher());
+                let again = || self.local.locate(extent, offset, len);
+                match fetcher.read_following(extent, location, (offset, len), again).await? {
+                    crate::bucket::Followed::Fetched(fetched) => {
+                        let (len, end) = (fetched.len(), buffer.len());
+                        buffer.reborrow().subslice_mut(..len).copy_from_slice(&fetched);
+                        buffer.reborrow().subslice_mut(len..end).fill(0);
+                        return Ok(());
+                    }
+                    crate::bucket::Followed::Here(parts) => parts,
+                }
             }
             parts => parts?,
         };

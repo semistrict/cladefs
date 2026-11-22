@@ -213,8 +213,8 @@ pub use cached::{CachedDir, CachedFile};
 pub use cell::UNKEPT_DEK;
 pub use cell::{
     BucketData, DirHold, EphemeralOpening, Info, LastSequence, LocalCell, LocalCheckpoint, NoSpace,
-    NotQuiescent, Opening, Options, Parent, Recovering, SpentExtent, TooLong, TooSmall, Unaligned,
-    Unmade, Usage, Write,
+    NotQuiescent, Opening, Options, Parent, Recovering, Relocating, SpentExtent, TooLong, TooSmall,
+    Unaligned, Unmade, Usage, Write,
 };
 pub use dir::{Dir, DirFile, DiskDir, DiskFile, File, HostDir, HostFile, closed};
 /// cladefs: where a cell is: its tenant's cell, and its ID there (TASK-364).

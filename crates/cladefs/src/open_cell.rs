@@ -504,7 +504,10 @@ fn upload_wait(epoch: u64) -> trace::Span {
 /// and any other the open cell failing to read or write, `EIO`, logged. The one list of them, which
 /// a writer's requests and a follower's share.
 pub(crate) fn errno(error: anyhow::Error) -> Errno {
-    if error.is::<local_cell::CutOff>() {
+    if let Some(&errno) = error.downcast_ref::<Errno>() {
+        // cladefs: one said already, as a halt's (`crate::halt`), passed on as it was.
+        errno
+    } else if error.is::<local_cell::CutOff>() {
         // A follower too far behind its writer (doc-8, decision 7): it remounts.
         Errno::ESTALE
     } else if let Some(NotHeld(extent)) = error.downcast_ref::<NotHeld>() {
@@ -1564,38 +1567,57 @@ impl OpenCell {
     /// open cell holds it without its data.
     async fn read_stored(&self, extent: ExtentId, offset: u64, data: &mut [u8]) -> Result<()> {
         stats::add(Counter::ReadStoredBytes, data.len() as u64);
-        let read = match &self.following {
-            Some(following) => {
-                let view = following.view.lock(&self.halt)?;
-                self.local.read_view(&view, extent, offset, data)
-            }
-            None => self.local.read(extent, offset, data),
-        };
-        match read {
+        match self.read_held(extent, offset, data) {
             Err(ref error)
                 if let Some(in_bucket) = error.downcast_ref::<local_cell::BucketData>() =>
             {
                 let (location, len) = (in_bucket.location.clone(), data.len() as u64);
-                let fetched = self.fetcher().read(extent, location, offset, len).await;
-                let fetched = fetched.map_err(|failure| {
-                    match failure {
-                        // cladefs: a follower's of an extent its writer freed since its view's
-                        // commit, which the bucket's collector reclaimed: it is cut off, as one too
-                        // far behind its writer is (doc-8, decision 7; TASK-165.8).
-                        local_cell::upload::Failure::Bucket(bucket_cell::Error::Lost(ref lost))
-                            if self.following.is_some() =>
-                        {
-                            log::info!("cladefs: a follower's {extent:?} is gone: {lost}");
-                            Errno::ESTALE
-                        }
-                        failure => upload_errno(failure),
+                // cladefs: what the cell holds of it now, if a relocation moved it meanwhile
+                // (doc-27), read as first, into a buffer of its own.
+                let mut here = vec![0; data.len()];
+                let again = || self.read_held(extent, offset, &mut here);
+                let fetcher = self.fetcher();
+                let followed = fetcher.read_following(extent, location, (offset, len), again);
+                match followed.await.map_err(|error| self.fetch_errno(extent, error))? {
+                    crate::bucket::Followed::Fetched(fetched) => {
+                        data[..fetched.len()].copy_from_slice(&fetched);
+                        data[fetched.len()..].fill(0);
                     }
-                })?;
-                data[..fetched.len()].copy_from_slice(&fetched);
-                data[fetched.len()..].fill(0);
+                    crate::bucket::Followed::Here(()) => data.copy_from_slice(&here),
+                }
                 Ok(())
             }
             read => read.map_err(errno),
+        }
+    }
+
+    /// cladefs: reads `data.len()` bytes at `offset` in `extent` as the cell holds it: as its
+    /// follower's view does, if it follows; failing with [`local_cell::BucketData`] if in the
+    /// bucket.
+    fn read_held(&self, extent: ExtentId, offset: u64, data: &mut [u8]) -> anyhow::Result<()> {
+        match &self.following {
+            Some(following) => {
+                let view = following.view.lock(&self.halt).map_err(anyhow::Error::new)?;
+                self.local.read_view(&view, extent, offset, data)
+            }
+            None => self.local.read(extent, offset, data),
+        }
+    }
+
+    /// cladefs: the errno of a read of `extent` from the bucket that failed with `error`: a
+    /// follower's of an extent its writer freed since its view's commit, which the bucket's
+    /// collector reclaimed, is cut off, as one too far behind its writer is (doc-8, decision 7;
+    /// TASK-165.8).
+    fn fetch_errno(&self, extent: ExtentId, error: anyhow::Error) -> Errno {
+        match error.downcast::<local_cell::upload::Failure>() {
+            Ok(local_cell::upload::Failure::Bucket(bucket_cell::Error::Lost(ref lost)))
+                if self.following.is_some() =>
+            {
+                log::info!("cladefs: a follower's {extent:?} is gone: {lost}");
+                Errno::ESTALE
+            }
+            Ok(failure) => upload_errno(failure),
+            Err(error) => errno(error),
         }
     }
 
@@ -2663,7 +2685,9 @@ mod tests {
     #[test]
     fn each_open_cell_error_has_its_errno() {
         let extent = ExtentId { cell: 1, sequence: 2 };
-        let cases: [(anyhow::Error, Errno); 14] = [
+        let cases: [(anyhow::Error, Errno); 15] = [
+            // cladefs: one said already, a halt's, as it was (the review of 8cf431e95).
+            (anyhow::Error::new(Errno::EACCES), Errno::EACCES),
             (local_cell::CutOff.into(), Errno::ESTALE),
             (anyhow::Error::new(NoExtent(extent)).context(NotHeld(extent)), Errno::EIO),
             (NoExtent(extent).into(), Errno::ENOENT),
@@ -3102,6 +3126,44 @@ mod tests {
         let fork = OpenCell::open(dir.path().join("fork")).await.unwrap();
         assert!(!fork.local.keys().is_empty());
         assert_eq!(read(&fork, a, 0, 2 * BLOCK).await, Ok(data));
+    }
+
+    /// cladefs: doc-27 (board 6214): a page-in's fetch that read where its extent is before the
+    /// cell's writer relocated it, the relocation acknowledged since and the object it read from
+    /// deleted, as the collector deletes what no state it keeps reads, reads where the extent is
+    /// again, and fetches it there. One whose object is gone where the cell holds it still is lost.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fetches_of_extents_relocated_meanwhile_read_where_they_went() {
+        use bucket_cell::bucket::Bucket as _;
+        let (cell, _dir) = cell(1 << 20).await;
+        let extent = id(&cell, 1);
+        write(&cell, extent, 0, &pattern(6, BLOCK)).await.unwrap();
+        cell.commit(None).await.unwrap();
+        let in_bucket = || match cell.local.place(extent).unwrap() {
+            Some(local_cell::Place::Bucket(at)) => at,
+            place => panic!("{extent:?} at {place:?}"),
+        };
+        let from = in_bucket();
+        let relocating =
+            local_cell::Relocating { extent, from: from.clone(), data: pattern(6, BLOCK) };
+        assert_eq!(cell.local.relocate(vec![relocating]).await.unwrap(), BLOCK as u64);
+        cell.commit(None).await.unwrap();
+        let to = in_bucket();
+        assert_ne!(to.key, from.key);
+        cell.bucket().delete(&from.key).await.unwrap();
+
+        let fetch = async |at: &extent_frame::segment::Location| {
+            let local = Arc::downgrade(&cell.local);
+            cache::fetched(local, cell.fetcher(), extent, at.clone(), 0, BLOCK as u64).await
+        };
+        assert_eq!(fetch(&from).await.unwrap(), pattern(6, BLOCK));
+        cell.bucket().delete(&to.key).await.unwrap();
+        let lost = fetch(&to).await.unwrap_err();
+        let lost = lost.downcast_ref::<local_cell::upload::Failure>();
+        assert!(
+            matches!(lost, Some(local_cell::upload::Failure::Bucket(bucket_cell::Error::Lost(_)))),
+            "{lost:?}"
+        );
     }
 
     /// TASK-165.8: a follower reads what its view's commit holds that the writer freed after it in

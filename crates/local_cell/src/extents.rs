@@ -302,14 +302,21 @@ impl Extents {
         }
     }
 
-    /// cladefs: `extent`, held in its own layer, its data at `data` now, as a seal, or an
-    /// acknowledgement, places it: returns where it was. An extent of its own layer the cell
-    /// wrote, sealed, acknowledged or followed, which the bucket's layer never is.
+    /// cladefs: `extent`, held, its data at `data` now, as a seal, an acknowledgement or a
+    /// relocation places it: returns where it was. One of the bucket's layer is the cell's own
+    /// layer's from then on, over it.
     pub fn place(&mut self, extent: &ExtentId, data: Data) -> Data {
-        self.unlive(extent);
-        let entry = self.own.get_mut(extent).expect("an extent placed is held in its own layer");
+        let Some(entry) = self.own.get_mut(extent) else {
+            // Held in the bucket's layer still: its own over it, as a relocation places it.
+            let at = self.in_bucket(extent).expect("an extent placed is held").clone();
+            self.insert(*extent, Extent { len: at.len, data });
+            return Data::Bucket(at);
+        };
         let was = std::mem::replace(&mut entry.data, data);
-        if let Data::Bucket(at) = &entry.data {
+        if let Data::Bucket(at) = &was {
+            self.density.lost(at);
+        }
+        if let Data::Bucket(at) = &self.own[extent].data {
             self.density.gained(at);
         }
         was

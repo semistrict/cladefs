@@ -37,6 +37,7 @@ fn delta(before: Written, after: Written) -> Written {
         framed: after.framed - before.framed,
         own: after.own - before.own,
         log: after.log - before.log,
+        relocated: after.relocated - before.relocated,
         writes: after.writes - before.writes,
     }
 }

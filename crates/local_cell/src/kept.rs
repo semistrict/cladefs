@@ -20,11 +20,19 @@ use storage_device::ExtentId;
 /// free's is kept until the commit that frees it decides.
 pub(crate) struct Kept {
     pub entry: Extent,
-    /// The epoch of the commit that freed it.
+    /// The epoch of the commit that freed it: [`PENDING`] until one does.
     pub freed: u64,
     /// Whether the uploader still needs it.
     pub uploader: bool,
 }
+
+/// cladefs: the epoch a free is kept as freed by until the commit that makes it numbers it
+/// ([`KeptExtents::freed_by`]): one past every commit, so that every view keeps it, the commits
+/// before holding it; and so that no trim, which goes by the commits published, nor the uploader's
+/// release, which goes by those acknowledged, lets it go first. Not the next commit's number, as
+/// it was: a commit made between that makes no free, a relocation's (doc-27) or a resize's, took
+/// it, and views as of it lost what it held.
+pub(crate) const PENDING: u64 = u64::MAX;
 
 /// The extents kept, by ID, and by the commits that freed them.
 #[derive(Default)]
@@ -86,6 +94,25 @@ impl KeptExtents {
             self.after_bytes += kept.entry.len;
         }
         self.kept.insert(extent, kept);
+    }
+
+    /// cladefs: `extent`, if kept as freed by a commit to come ([`PENDING`]), is freed by commit
+    /// `epoch`, which makes its free.
+    pub fn freed_by(&mut self, extent: ExtentId, epoch: u64) {
+        let Some(kept) = self.kept.get_mut(&extent).filter(|kept| kept.freed == PENDING) else {
+            return;
+        };
+        kept.freed = epoch;
+        let uploader = kept.uploader;
+        self.by_freed.remove(&(PENDING, extent));
+        self.by_freed.insert((epoch, extent));
+        if !uploader {
+            self.released.remove(&(PENDING, extent));
+            self.released.insert((epoch, extent));
+        }
+        // What views keep after the count began counts it either way: the count began at a view's
+        // commit, published before this one.
+        debug_assert!(epoch > self.counted_after, "{extent:?} freed by {epoch}, counted after");
     }
 
     /// The uploader needs those the commits up to `epoch` freed no more.

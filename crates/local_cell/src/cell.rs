@@ -10,7 +10,7 @@ use crate::extents::{Entry, Extents, Sparse};
 use crate::framed::{Aligned, Framed, Located, Packed, Source, read_aligned};
 use crate::framing::{self, Look, Seen};
 use crate::held::{HeldParts, Hold};
-use crate::kept::{Kept, KeptExtents};
+use crate::kept::{self, Kept, KeptExtents};
 use crate::layout::{
     CellFile, Change, DESCRIPTION, Data, Description, EXTENTS, Extent, FileKey, KINDS, LOGS,
     OPEN_EXTENTS, OPEN_SEGMENTS, Piece, Place, SEGMENTS, SegmentId, add_piece, cell_dir,
@@ -1431,6 +1431,15 @@ impl Places for Local {
     }
 }
 
+/// cladefs: an extent of a cell's own segments in the bucket, read by its writer to relocate it
+/// ([`LocalCell::relocate`], doc-27): where it was read, and its bytes, as the guest reads them.
+#[derive(Clone, Debug)]
+pub struct Relocating {
+    pub extent: ExtentId,
+    pub from: Location,
+    pub data: Vec<u8>,
+}
+
 /// cladefs: the footer of `extent`'s own file, the object it is in the bucket: it names the extent,
 /// so that one copied to another's key is refused (`bucket_cell::layout::own_extent`,
 /// TASK-411.3).
@@ -2381,8 +2390,7 @@ impl<D: Dir> LocalCell<D> {
             // cladefs: for the bucket, until the commit that frees it is acknowledged there, as the
             // segment holding its seal is by then (TASK-165.9).
             let uploader = rules().keep_frees;
-            let freed = state.epoch + 1;
-            state.kept.insert(extent, Kept { entry, freed, uploader });
+            state.kept.insert(extent, Kept { entry, freed: kept::PENDING, uploader });
             return Ok(());
         }
         match &entry.data {
@@ -2421,15 +2429,28 @@ impl<D: Dir> LocalCell<D> {
         self.commit_locked(&committing, root).await
     }
 
-    /// Commits, as [`LocalCell::commit_ordered`] does, holding `_committing`.
+    /// Commits, as [`LocalCell::commit_ordered`] does, holding `committing`.
     async fn commit_locked(
         &self,
-        _committing: &AsyncMutexGuard<'_, ()>,
+        committing: &AsyncMutexGuard<'_, ()>,
         root: Option<&[u8]>,
     ) -> Result<(), Error> {
-        // It includes the writes in progress, which may be to extents it seals: what they write
-        // must be in them, not after. New ones wait for it, checked again after (TASK-83).
-        let mut state = match rules().commit_waits_for_writes {
+        let mut state = self.between_writes(committing).await?;
+        // From its first seal on, the state runs ahead of the files: a commit failing part way
+        // fails the cell.
+        let committed = state.failing(|state| self.commit_in(state, root));
+        committed.context("committing the extent store")
+    }
+
+    /// The state, to change, for a commit, holding `_committing`, once the writes in progress are
+    /// done: a commit includes them, which may be to extents it seals, what they write in them,
+    /// not after; and it closes the segments filled since the last commit, which they may write
+    /// to. New ones wait for it, checked again after (TASK-83).
+    async fn between_writes(
+        &self,
+        _committing: &AsyncMutexGuard<'_, ()>,
+    ) -> Result<Writable<'_, D::File>, Error> {
+        Ok(match rules().commit_waits_for_writes {
             true => {
                 // Held, then let go of before any await: a future holding the state is no task's
                 // to send. New writes wait on the gate meanwhile, and no other commit runs.
@@ -2447,11 +2468,144 @@ impl<D: Dir> LocalCell<D> {
                 Writable::rechecked(locked, self.cell)?
             }
             false => self.writable()?,
+        })
+    }
+
+    /// cladefs: relocates `relocating`, extents its writer read from the cell's own segments in
+    /// the bucket, sparse, into its open segment, in a commit of its own (doc-27, Writers
+    /// compact): a relocation, which the uploader uploads, and the bucket acknowledges, as any
+    /// commit. The guest asks for nothing and sees nothing: no root set, nothing freed, no
+    /// sequence number minted, and the extents it has open stay open, its frees since its last
+    /// commit for its next, which a relocation's commit neither seals nor makes (a seal would
+    /// refuse its next write to them). Those of `relocating` the cell holds no more where they
+    /// were read, freed or relocated since, are passed over. Durable once it returns, as a commit
+    /// ([`LocalCell::commit`]) is. Returns the bytes it relocated: none, and no commit, if it
+    /// relocated none.
+    ///
+    /// A relocation is optional (doc-27): it changes nothing of the guest's segments' life, and
+    /// nothing it fails at fails the cell. It fills no segment, relocating only what the open one
+    /// has room for, and closes none, so that the guest's next commit seals in place what the
+    /// guest wrote in one run (TASK-92.41): while the guest has filled one since its last commit,
+    /// or a run of an extent it has open ends where the copy would go, which the guest's next
+    /// write to it goes on with, it relocates nothing. A copy that fails is dead space, as a write dropped is; what it
+    /// copied before is committed, and it fails, saying so.
+    /// Refused, the cell unchanged, unless each one's bytes are as many as where it was read holds.
+    pub async fn relocate(&self, relocating: Vec<Relocating>) -> Result<u64, Error> {
+        for Relocating { extent, from, data } in &relocating {
+            let read = data.len() as u64;
+            ensure!(read == from.len, "{extent:?} relocated with {read} bytes of {}", from.len);
+        }
+        let (relocated, failed) = {
+            let committing = self.committing.lock().await;
+            let mut state = self.between_writes(&committing).await?;
+            // Its commit's record on, the state runs ahead of the files, as a commit's does.
+            let relocated = state.failing(|state| self.relocate_in(state, relocating));
+            relocated.context("relocating the extent store's extents")?
         };
-        // From its first seal on, the state runs ahead of the files: a commit failing part way
-        // fails the cell.
-        let committed = state.failing(|state| self.commit_in(state, root));
-        committed.context("committing the extent store")
+        // Durable, as the uploader takes only what is.
+        if relocated > 0 {
+            self.flush().await?;
+        }
+        match failed {
+            Some(failed) => Err(failed.context(format!("relocating, {relocated} bytes relocated"))),
+            None => Ok(relocated),
+        }
+    }
+
+    /// cladefs: the steps of a relocation's commit ([`LocalCell::relocate`]): each extent the cell
+    /// holds still where it was read, copied into one run of the open segment, then the commit,
+    /// which names them there, published to views as the cell's state, its root unchanged.
+    fn relocate_in(
+        &self,
+        state: &mut State<D::File>,
+        relocating: Vec<Relocating>,
+    ) -> Result<(u64, Option<Error>), Error> {
+        if state.segments.has_full() || self.run_goes_on(state) {
+            return Ok((0, None));
+        }
+        let (mut changes, mut relocated, mut failed) = (Vec::new(), 0, None);
+        for Relocating { extent, from, data } in relocating {
+            let held = match state.life(extent) {
+                Life::Held(entry) => entry.into_cow().data == Data::Bucket(from.clone()),
+                Life::Open(_) | Life::Kept(_) | Life::Spent | Life::Unknown => false,
+            };
+            if !held {
+                continue;
+            }
+            if !state.segments.fits(from.len, self.options.segment_limit()) {
+                break;
+            }
+            let mut aligned = Aligned::new(data.len());
+            aligned.as_mut_slice().copy_from_slice(&data);
+            let piece = match self.copy_relocated(state, &aligned) {
+                Ok(piece) => piece,
+                Err(error) => {
+                    failed = Some(error.context(format!("relocating {extent:?}")));
+                    break;
+                }
+            };
+            changes.push(Change::Move { extent, pieces: vec![piece] });
+            let data = Data::Pieces(vec![piece]);
+            state.segments.place(extent, &data);
+            state.extents.place(&extent, data);
+            relocated += from.len;
+        }
+        if changes.is_empty() {
+            return Ok((0, failed));
+        }
+        let epoch = state.epoch + 1;
+        self.publish(state, epoch, None, &[]);
+        let next_sequence = state.next_sequence;
+        let records = state.segments.record_moves(
+            epoch,
+            &changes,
+            &state.extents,
+            next_sequence,
+            relocated,
+        )?;
+        self.queue_flush(state, epoch, records, Vec::new());
+        Ok((relocated, failed))
+    }
+
+    /// cladefs: whether an extent the guest has open ends its run at the open segment's end, where
+    /// its next write goes on with it, joining it (`Piece::joined`, TASK-92.1): a relocation's
+    /// copy there would split it, and the guest's next commit copy the extent out (the verifying
+    /// review of 8cf431e95). A relocation yields to it, as it is optional.
+    fn run_goes_on(&self, state: &State<D::File>) -> bool {
+        let open = state.segments.open_segment();
+        let end = state.segments.len(open);
+        let ends_there = |extent: ExtentId| match state.extents.get(&extent).and_then(Entry::own) {
+            Some(Extent { data: Data::Pieces(pieces), .. }) => {
+                pieces.iter().any(|piece| piece.segment == open && piece.offset + piece.len == end)
+            }
+            _ => false,
+        };
+        state.uncommitted.open_extents().into_iter().any(ends_there)
+    }
+
+    /// cladefs: copies `data`, an extent's whole, a relocation's, into one run of the open
+    /// segment, which has room for it ([`LocalCell::relocate`]): returns the run. A write that
+    /// fails leaves dead space where it went, as a write dropped does, which the cell's writer
+    /// wasted until the next commit (TASK-79.2).
+    fn copy_relocated(&self, state: &mut State<D::File>, data: &Aligned) -> Result<Piece, Error> {
+        let len = data.as_slice().len() as u64;
+        let open = state.segments.open_segment();
+        let (file, at) = state.segments.append(len)?;
+        state.segments.appended(open, at, len);
+        let piece = Piece { segment: open, offset: at, extent_offset: 0, len };
+        // A test's: the copy's write failing, as a disk's would.
+        let write = || -> Result<(), Error> {
+            failpoint!("relocate::write");
+            Ok(file.write_at(data.as_slice(), at)?)
+        };
+        if let Err(error) = write() {
+            state.segments.let_go(&piece);
+            state.uncommitted.let_go(len);
+            return Err(error.into());
+        }
+        written::wrote(written::Kind::Relocated, data.as_slice().len());
+        self.see_ahead(state);
+        Ok(piece)
     }
 
     /// The steps of the next commit, which sets `root`, if any, in their order: each takes what
@@ -2477,6 +2631,12 @@ impl<D: Dir> LocalCell<D> {
         root: Option<&[u8]>,
         sealing: &[ExtentId],
     ) -> Result<(), Error> {
+        // cladefs: the frees it makes are its, by its number, from now on: kept as freed by a
+        // commit to come until one makes them, which views as of the commits before keep,
+        // whichever commits come between (a relocation's, doc-27).
+        for extent in state.uncommitted.frees().collect::<Vec<_>>() {
+            state.kept.freed_by(extent, epoch);
+        }
         self.publish(state, epoch, root, sealing);
         let (changes, capacity) = (state.uncommitted.take(), state.uncommitted.take_capacity());
         self.count_open(state);
@@ -2518,6 +2678,21 @@ impl<D: Dir> LocalCell<D> {
         let due = self.close_if_due(state, epoch).map(|due| closed.extend(due));
         self.frame_behind(state, closed);
         due?;
+        let Unreferenced { doomed } = state.unreferenced.take();
+        self.queue_flush(state, epoch, records, doomed);
+        Ok(())
+    }
+
+    /// cladefs: commit `epoch`, whose contents are `records`, by the segments it spans, is the
+    /// cell's from now on, its flush queued, which makes it durable, then removes `doomed`, the
+    /// files it makes unreferenced ([`LocalCell::committed`]).
+    fn queue_flush(
+        &self,
+        state: &mut State<D::File>,
+        epoch: u64,
+        records: Vec<(SegmentId, Contents)>,
+        doomed: Vec<String>,
+    ) {
         // What its flush syncs, after the closing, whose directories its flush must sync: the
         // next segment's raw file's and log's entries durable before a commit made in it.
         let mut syncs = Syncs::default();
@@ -2528,12 +2703,10 @@ impl<D: Dir> LocalCell<D> {
         let leaving = (state.segments.reap().into_iter())
             .map(|(number, key)| (segment_path(number), key))
             .collect();
-        let Unreferenced { doomed } = state.unreferenced.take();
         state.epoch = epoch;
         // Queued while the state is locked, so that commits queue in their order.
         let pending = Pending { syncs, records, doomed, leaving, entries };
         self.durability.with(Mutex::lock).push(epoch, pending);
-        Ok(())
     }
 
     /// Seals the extents open, as a commit does, each in one run, or a file of its own if large
@@ -2694,25 +2867,36 @@ impl<D: Dir> LocalCell<D> {
             state.uncommitted.push(Change::MoveOwn { extent });
             Data::Own
         } else {
-            // cladefs: in the next, the open one full, which the commit goes on with past it.
-            if !state.segments.fits(entry.len, self.options.segment_limit()) {
-                state.segments.fill(&*self.dir, state.epoch)?;
-                self.prepare_next(state);
-            }
-            let open = state.segments.open_segment();
-            let (file, at) = state.segments.append(entry.len)?;
-            file.write_at(data.as_slice(), at)?;
-            written::wrote(written::Kind::Copied, data.as_slice().len());
-            state.segments.appended(open, at, entry.len);
-            self.see_ahead(state);
-            let pieces =
-                vec![Piece { segment: open, offset: at, extent_offset: 0, len: entry.len }];
+            let pieces = vec![self.copy_to_segment(state, &data, written::Kind::Copied)?];
             state.uncommitted.push(Change::Move { extent, pieces: pieces.clone() });
             Data::Pieces(pieces)
         };
         state.segments.place(extent, &data_now);
         state.extents.place(&extent, data_now);
         Ok(entry.len)
+    }
+
+    /// Copies `data`, an extent's whole, into one run of the open segment, written as `kind`:
+    /// cladefs: in the next, the open one full, which the commit goes on with past it
+    /// (TASK-92.41). Returns the run.
+    fn copy_to_segment(
+        &self,
+        state: &mut State<D::File>,
+        data: &Aligned,
+        kind: written::Kind,
+    ) -> Result<Piece, Error> {
+        let len = data.as_slice().len() as u64;
+        if !state.segments.fits(len, self.options.segment_limit()) {
+            state.segments.fill(&*self.dir, state.epoch)?;
+            self.prepare_next(state);
+        }
+        let open = state.segments.open_segment();
+        let (file, at) = state.segments.append(len)?;
+        file.write_at(data.as_slice(), at)?;
+        written::wrote(kind, data.as_slice().len());
+        state.segments.appended(open, at, len);
+        self.see_ahead(state);
+        Ok(Piece { segment: open, offset: at, extent_offset: 0, len })
     }
 
     /// cladefs: seals `extent`, open in `raw`, a raw file of its own, of its `len` bytes, in its

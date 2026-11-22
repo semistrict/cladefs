@@ -326,8 +326,8 @@ fn keeps_object_storage_and_follower_stats() {
     }
     expected.extend(["durable_segments", "own_sync_max_us", "raw_sync_max_us"].map(str::to_owned));
     // And the bytes its cells wrote, by kind, and the process, as its kernel counts them
-    // (TASK-310).
-    let kinds = ["raw", "copied", "framed", "own", "log"];
+    // (TASK-310); cladefs: and relocated, its writers' compaction's (doc-27).
+    let kinds = ["raw", "copied", "framed", "own", "log", "relocated"];
     expected.extend(kinds.map(|kind| format!("written_{kind}_bytes")));
     // And the writes they took, and the stats file's own (TASK-330.2).
     expected.extend(["written_writes", "stats_written_bytes"].map(str::to_owned));

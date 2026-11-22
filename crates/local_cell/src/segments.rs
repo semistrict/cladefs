@@ -822,6 +822,30 @@ impl<F: File> Segments<F> {
         Ok(records)
     }
 
+    /// cladefs: records commit `epoch`, a relocation's, which moved `changes`, `moved` bytes of
+    /// extents into the open segment, and changed nothing else ([`Segments::record`], doc-27):
+    /// none filled since the last commit, its runs all in the open segment. What the guest wrote
+    /// in it since its last commit, which no commit sealed, it leaves as written since: the next
+    /// commit seals it in place, and the guest is filling it as before ([`Segments::filling`]).
+    pub fn record_moves(
+        &mut self,
+        epoch: u64,
+        changes: &[Change],
+        extents: &Extents,
+        next_sequence: u64,
+        moved: u64,
+    ) -> Result<Vec<(SegmentId, Contents)>, Error> {
+        ensure!(self.full.is_empty(), "a relocation's commit after a segment filled");
+        let commit = self.chain.tag(epoch);
+        let (mut contents, runs) = commit_contents((self.open, &self.full), changes, extents)?;
+        ensure!(runs.is_empty(), "a relocation's commit going on with a segment filled");
+        contents.commits = vec![commit];
+        contents.next_sequence = next_sequence;
+        self.window.fold(&contents);
+        self.committed_len += moved;
+        Ok(vec![(self.open, contents)])
+    }
+
     /// Whether the open segment is to close, as `options` say, once no write is in progress in
     /// it: full, old, wanted closed, or at a fork.
     pub fn due(&self, options: &Options) -> bool {

@@ -28,6 +28,7 @@
 //! copied from slab to slab in the kernel, rather than paged in again, and evicted from the
 //! tenant's (TASK-234).
 
+use crate::bucket::Followed;
 use crate::dax::{Origin, Present, Source, Window};
 use crate::error::{Errno, Result};
 use crate::open_cell::PublicReach;
@@ -668,15 +669,7 @@ impl StoredExtent {
         let id = self.extent;
         let mut failed = anyhow::Error::new(NoExtent(id));
         for (local, fetcher) in self.holders.open() {
-            // An extent freed since it was mapped, which a follower's view keeps, reads as kept
-            // (doc-8).
-            let read = match local.read(id, offset, buf) {
-                Err(error) if error.downcast_ref::<NoExtent>().is_some() => {
-                    local.read_kept(id, offset, buf)
-                }
-                read => read,
-            };
-            match read {
+            match read_local(&local, id, offset, buf) {
                 Ok(()) => {
                     stats::add(Counter::PageInBytes, buf.len() as u64);
                     return Ok(Found::Read);
@@ -685,12 +678,10 @@ impl StoredExtent {
                     if let Some(data) = error.downcast_ref::<local_cell::BucketData>()
                         && let Some(fetcher) = fetcher =>
                 {
-                    let fetched = fetcher.read(id, data.location.clone(), offset, buf.len() as u64);
-                    return Ok(Found::Fetch(Box::pin(async move {
-                        let data = fetched.await?;
-                        stats::add(Counter::FetchedBytes, data.len() as u64);
-                        Ok(data.to_vec())
-                    })));
+                    let (local, location) = (Arc::downgrade(&local), data.location.clone());
+                    let len = buf.len() as u64;
+                    let fetched = fetched(local, fetcher, id, location, offset, len);
+                    return Ok(Found::Fetch(Box::pin(fetched)));
                 }
                 Err(error) => failed = error,
             }
@@ -743,6 +734,55 @@ impl Contents for StoredExtent {
 
     fn phase(&self) -> u64 {
         self.phase
+    }
+}
+
+/// cladefs: reads `buf.len()` bytes at `offset` in `id`, as `local` holds it: an extent freed
+/// since it was mapped, which a follower's view keeps, reads as kept (doc-8). One `local` holds
+/// in the bucket fails with [`local_cell::BucketData`], saying where.
+fn read_local(
+    local: &LocalCell<HostDir>,
+    id: ExtentId,
+    offset: u64,
+    buf: &mut [u8],
+) -> anyhow::Result<()> {
+    match local.read(id, offset, buf) {
+        Err(error) if error.downcast_ref::<NoExtent>().is_some() => {
+            local.read_kept(id, offset, buf)
+        }
+        read => read,
+    }
+}
+
+/// cladefs: fetches `len` bytes at `offset` in `id`, which `local` held at `location` in the
+/// bucket, through `fetcher`: as many as it holds; or reads them where `local` holds it now,
+/// relocated meanwhile (`HostFetcher::read_following`, doc-27). The cell held weakly, as the cache
+/// holds its cells, and looked at only if the fetch finds its object gone: the cache keeps none
+/// open, nor its files, once it closes.
+pub(crate) async fn fetched(
+    local: Weak<LocalCell<HostDir>>,
+    fetcher: Arc<crate::bucket::HostFetcher>,
+    id: ExtentId,
+    location: extent_frame::segment::Location,
+    offset: u64,
+    len: u64,
+) -> anyhow::Result<Vec<u8>> {
+    let again = || {
+        let local = local.upgrade().ok_or_else(|| {
+            anyhow::Error::new(NoExtent(id)).context("its cell closed as it was fetched")
+        })?;
+        let mut here = vec![0; len as usize];
+        read_local(&local, id, offset, &mut here).map(|()| here)
+    };
+    match fetcher.read_following(id, location, (offset, len), again).await? {
+        Followed::Fetched(data) => {
+            stats::add(Counter::FetchedBytes, data.len() as u64);
+            Ok(data)
+        }
+        Followed::Here(here) => {
+            stats::add(Counter::PageInBytes, here.len() as u64);
+            Ok(here)
+        }
     }
 }
 

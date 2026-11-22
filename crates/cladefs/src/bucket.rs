@@ -614,6 +614,18 @@ pub fn upload_memory() -> UploadMemory {
     UploadMemory { held, max_held, budget: UPLOADS.get().limits().bytes }
 }
 
+/// cladefs: what [`HostFetcher::read_following`] read: fetched bytes, or what the cell holds, found
+/// again, the extent relocated into it.
+pub(crate) enum Followed<T> {
+    Fetched(Vec<u8>),
+    Here(T),
+}
+
+/// cladefs: the most times a fetch looks its extent up again, its object found gone: each one is
+/// another relocation acknowledged meanwhile ([`HostFetcher::read_following`]), which a fetch
+/// outlives seldom (doc-27).
+const RELOCATED_MOST: usize = 8;
+
 /// Reads the extents an open cell holds whose data is in object storage
 /// (`local_cell::LocalCell::adopt`), at their locations there, as the open cell names them: a
 /// fetcher (`bucket_cell::fetch::Fetcher`) that is the host's, its reads on the bucket runtime,
@@ -671,6 +683,43 @@ impl HostFetcher {
         });
         let read = self.runtime.spawn(crate::request::within(crate::request::current(), reading));
         async move { read.await.map_err(|err| Failure::local(err, "fetching"))? }
+    }
+
+    /// cladefs: `len` bytes at `offset` in `extent`, whose data was at `location` in the bucket,
+    /// as many as it holds; or, its object found gone ([`bucket_cell::Error::Lost`]), what
+    /// `again`, which looks the extent up where its cell holds it now, finds (doc-27, What happens
+    /// to the old segment). Moved in the bucket, as `again` fails saying
+    /// ([`local_cell::BucketData`]), it is fetched there; in the cell, a relocation not
+    /// acknowledged yet, it is what `again` gives ([`Followed::Here`]). Its writer relocated it,
+    /// and the bucket acknowledged that, before the collector could delete where it was, which no
+    /// state the collector keeps reads any more. Where it was, it is lost, as said: a fetch's
+    /// error is a [`Failure`], `again`'s its own.
+    pub(crate) async fn read_following<T>(
+        &self,
+        extent: ExtentId,
+        mut location: Location,
+        (offset, len): (u64, u64),
+        mut again: impl FnMut() -> anyhow::Result<T>,
+    ) -> anyhow::Result<Followed<T>> {
+        let mut lost = String::new();
+        for _ in 0..RELOCATED_MOST {
+            lost = match self.read(extent, location.clone(), offset, len).await {
+                Ok(bytes) => return Ok(Followed::Fetched(bytes)),
+                Err(Failure::Bucket(bucket_cell::Error::Lost(lost))) => lost,
+                Err(failure) => return Err(failure.into()),
+            };
+            let error = match again() {
+                Ok(here) => return Ok(Followed::Here(here)),
+                Err(error) => error,
+            };
+            match error.downcast_ref::<local_cell::BucketData>() {
+                Some(data) if data.location != location => location = data.location.clone(),
+                Some(_) => return Err(Failure::Bucket(bucket_cell::Error::Lost(lost)).into()),
+                None => return Err(error),
+            }
+        }
+        let moved = format!("{lost}: {extent:?} moved {RELOCATED_MOST} times as it was fetched");
+        Err(Failure::Bucket(bucket_cell::Error::Lost(moved)).into())
     }
 
     /// cladefs: whether it keeps the parts it fetches in the host's cache, which
