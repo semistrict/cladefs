@@ -820,7 +820,10 @@ needs!(attrition_needs_head_swaps, head_swap, Profile::PLAIN);
 needs!(collection_needs_epochs, collector_epochs, Profile::COLLECTED);
 // The collector lists objects after it read what cells need: what a writer made between, deleted.
 // Uses GCS multi-slot heads (board 6020): with 1-slot heads `head/0` is atomic so a single-cell
-// pass never reads a partial head before `passed::list`.
+// pass never reads a partial head before `passed::list`. Linux's alone, as the next: since
+// 975a7dc7e's crash models macOS's seeds reach it seldom, one in 2,900 on an M-series Mac (seed
+// 2883), none of CI's 2000, where Linux's find it within 1,000 (board 6866).
+#[cfg(not(target_os = "macos"))]
 needs!(
     collection_needs_candidates_first,
     candidates_first,
@@ -828,7 +831,9 @@ needs!(
 );
 // A fork of a version, its base deleted, without a reference its base's passes keep it by.
 needs!(forking_needs_references, references, Profile::BASES);
-// A pass lists its cell's references with its candidates, missing a fork's made since.
+// A pass lists its cell's references with its candidates, missing a fork's made since. Linux's
+// alone: none of CI's 2000 macOS seeds finds it since 975a7dc7e (board 6866).
+#[cfg(not(target_os = "macos"))]
 needs!(forking_needs_references_relisted, references_relisted, Profile::BASES);
 
 /// Makes a cell replicated at f 1 (doc-21) in the cell directory at `path` on host `host`, at
