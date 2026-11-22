@@ -1004,7 +1004,9 @@ mod host {
         }
 
         fn timeout_secs(&self) -> u64 {
-            5400
+            // Restored from a zygote, a host holds VMs past 500, its steps' forks slower as its
+            // disk fills with their commits: 54 minutes to 497 VMs on ubu1 (board 7084).
+            if self.zygote { 3 * 3600 } else { 5400 }
         }
 
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {

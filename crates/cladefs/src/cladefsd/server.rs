@@ -266,8 +266,10 @@ impl Memory {
 
 /// cladefs: the most connections a tenant's VM processes, the default tenant's too, have at once
 /// (TASK-79.16): a few times the VMs a host runs. Those past it are closed as they come, as each
-/// holds the daemon's memory, as much as the protocol bounds, files and tasks.
-pub(super) const MAX_CONNECTIONS: usize = 1024;
+/// holds the daemon's memory, as much as the protocol bounds, files and tasks. VMs restored from
+/// a zygote, two connections each, their root's and their memory's, took 1024 at 512 VMs, ubu1's
+/// 16 GiB holding 497 with 3.9 GiB to spare (board 7084).
+pub(super) const MAX_CONNECTIONS: usize = 4096;
 
 /// cladefs: a tenant's connection counted among its connections, until dropped.
 struct Counted(Arc<std::sync::atomic::AtomicUsize>);
