@@ -234,6 +234,21 @@ async fn closing_covers_every_closed_segment() {
 /// returned, and none torn.
 #[tokio::test(flavor = "multi_thread")]
 async fn crashes_at_every_step_keep_what_was_committed() {
+    stops_at_every_step(false).await;
+}
+
+/// Board 5744: killed at any step, its host up, its unsynced writes left in the host's caches,
+/// then opened again, which reads them, then the host losing power, it keeps every commit made
+/// local: a local checkpoint renamed into place, its directory not yet synced, among them.
+#[tokio::test(flavor = "multi_thread")]
+async fn kills_at_every_step_then_a_power_loss_keep_what_was_committed() {
+    stops_at_every_step(true).await;
+}
+
+/// The disk failing after `n` operations, for every `n` through a run of checkpoints, the cell
+/// stopping there: its host losing power, or, if `killed`, its process killed, opened again, then
+/// its host losing power; the cell opened again holds each extent whose commit returned.
+async fn stops_at_every_step(killed: bool) {
     for fail_after in 1..400 {
         let dir = MemDir::new();
         make(&dir);
@@ -260,7 +275,14 @@ async fn crashes_at_every_step_keep_what_was_committed() {
             committed.insert(sequence, sequence as u8 + 1);
         }
         drop(cell);
-        let crashed = dir.crash(fail_after);
+        let crashed = match killed {
+            false => dir.crash(fail_after),
+            true => {
+                let killed = dir.killed();
+                drop(open(&killed));
+                killed.crash(fail_after)
+            }
+        };
         crashed.fail_after(None);
         let cell = open(&crashed);
         for (&sequence, &byte) in &committed {

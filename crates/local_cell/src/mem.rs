@@ -53,7 +53,7 @@ pub struct MemDiskFile {
     inode: u64,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Fs {
     inodes: HashMap<u64, Inode>,
     next_inode: u64,
@@ -303,6 +303,15 @@ impl MemDisk {
         files
     }
 
+    /// cladefs: the directory as a process killed with its host up leaves it (board 5744): all it
+    /// wrote, durable or not, its writes since their syncs at a later power loss's mercy still,
+    /// which [`MemDisk::crash`] of what this returns models.
+    pub fn killed(&self) -> MemDisk {
+        let mut fs = self.fs.lock().unwrap().clone();
+        (fs.budget, fs.limited_on, fs.failed_on) = (None, None, None);
+        Self::over(fs, self.serial)
+    }
+
     /// The directory as a crash would leave it: what was durable, and any of what happened since,
     /// chosen at random by an RNG seeded with `seed`. See the module docs.
     pub fn crash(&self, seed: u64) -> MemDisk {
@@ -491,6 +500,12 @@ impl MemDir {
             log::warn!("extent store: writing back a directory in memory: {err}");
         }
         self.disk().files()
+    }
+
+    /// cladefs: the directory as a process killed with its host up leaves it ([`MemDisk::killed`]):
+    /// what its page cache held dirty lost, as a process's memory is.
+    pub fn killed(&self) -> MemDir {
+        Self::on(self.disk().killed(), page_cache())
     }
 
     /// The directory as a crash would leave it ([`MemDisk::crash`]): what its page cache held
