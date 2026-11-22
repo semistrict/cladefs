@@ -13,7 +13,7 @@ mod host_runtime;
 
 use bucket_cell::fetch::{Budget, Limits};
 use bucket_cell::layout::test_cell;
-use bucket_cell::object_bucket::ObjectBucket;
+use bucket_cell::object_bucket::{ObjectBucket, RoutedBucket};
 use local_cell::replicate::{self, LinkError, MemberLink, Replicator};
 use local_cell::upload::{self, Runtime, Uploader};
 use local_cell::{Description, LocalCell, MemDir, Options, Recovering};
@@ -99,7 +99,7 @@ impl MemberLink for Down {
 
 struct Host {
     runtime: host_runtime::HostRuntime,
-    bucket: Arc<ObjectBucket>,
+    bucket: Arc<RoutedBucket>,
 }
 
 impl Host {
@@ -161,7 +161,7 @@ impl Host {
 #[tokio::test(flavor = "multi_thread")]
 async fn what_a_member_holds_recovers_on_another_host() {
     let runtime = host_runtime::HostRuntime::new();
-    let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+    let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted());
     let host = Host { runtime, bucket: bucket.clone() };
     let cell = DESCRIPTION.cell;
     bucket_cell::lifecycle::create(&*host.bucket, cell, 1).await.unwrap();
@@ -430,7 +430,7 @@ impl Host {
 async fn takes_recover_what_a_lost_writers_members_hold() {
     let host = Host {
         runtime: host_runtime::HostRuntime::new(),
-        bucket: Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "")),
+        bucket: Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted()),
     };
     let cell = DESCRIPTION.cell;
     bucket_cell::lifecycle::create(&*host.bucket, cell, 1).await.unwrap();
@@ -514,7 +514,7 @@ async fn takes_recover_what_a_lost_writers_members_hold() {
 async fn takes_without_enough_members_to_fence_are_refused() {
     let host = Host {
         runtime: host_runtime::HostRuntime::new(),
-        bucket: Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "")),
+        bucket: Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted()),
     };
     let cell = DESCRIPTION.cell;
     bucket_cell::lifecycle::create(&*host.bucket, cell, 1).await.unwrap();
@@ -591,7 +591,7 @@ impl MemberLink for Gated {
 async fn replicated_waiters_are_woken_by_members_or_the_bucket() {
     let host = Host {
         runtime: host_runtime::HostRuntime::new(),
-        bucket: Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "")),
+        bucket: Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted()),
     };
     let cell = DESCRIPTION.cell;
     bucket_cell::lifecycle::create(&*host.bucket, cell, 1).await.unwrap();
@@ -652,7 +652,7 @@ async fn replicated_waiters_are_woken_by_members_or_the_bucket() {
 async fn replicated_host() -> Host {
     let host = Host {
         runtime: host_runtime::HostRuntime::new(),
-        bucket: Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "")),
+        bucket: Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "").unrouted()),
     };
     let cell = DESCRIPTION.cell;
     bucket_cell::lifecycle::create(&*host.bucket, cell, 1).await.unwrap();
@@ -1078,7 +1078,7 @@ async fn dropped_logs_are_no_writers_copy() {
 async fn faulty_host(faults: &Arc<bucket_cell::faults::Faults>) -> Host {
     let objects = Arc::new(InMemory::new());
     let faulty = bucket_cell::faults::Faulty::new(objects, faults.clone());
-    let bucket = Arc::new(ObjectBucket::new(Arc::new(faulty), ""));
+    let bucket = Arc::new(ObjectBucket::new(Arc::new(faulty), "").unrouted());
     let runtime = host_runtime::HostRuntime::new();
     bucket_cell::lifecycle::create(&*bucket, cell(), 1).await.unwrap();
     Host { runtime, bucket }

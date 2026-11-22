@@ -40,7 +40,7 @@ use crate::bucket::{self, Bucket, Created, Updated};
 use crate::identity::{self, NAMED};
 use crate::keys::{KmsKey, Kmses};
 use crate::layout;
-use crate::object_bucket::{ObjectBucket, Registered, numbered_options};
+use crate::object_bucket::{ObjectBucket, Registered, RoutedBucket, numbered_options};
 use extent_keys::kms::bucket::{self as formats, KekObject, TenantKek};
 use extent_keys::kms::master::{MASTER_KEY_FILE_VAR, MASTER_KEY_VAR, MasterKeys};
 use extent_keys::kms::{self, Error, Kms};
@@ -406,7 +406,7 @@ fn choose<B: Bucket>(
 /// refuses the tenant in all of them and no other ([`keys::CachingKms`]); a bucket KMS by its
 /// bucket.
 pub struct ByBucket {
-    home: Arc<ObjectBucket>,
+    home: Arc<RoutedBucket>,
     own: HostKms<ObjectBucket>,
     registered: Registered,
     vars: Vec<(String, String)>,
@@ -421,7 +421,7 @@ impl ByBucket {
     /// The KMSes of the buckets `home`, the host's routed bucket, reaches, its own `own`, the
     /// others' chosen from the registry and `vars`, the host's environment.
     pub fn new(
-        home: Arc<ObjectBucket>,
+        home: Arc<RoutedBucket>,
         own: HostKms<ObjectBucket>,
         vars: impl IntoIterator<Item = (String, String)>,
     ) -> Self {
@@ -528,7 +528,7 @@ impl ByBucket {
     /// The KMS of the bucket numbered `number`, another than the host's, chosen (see the type).
     /// Its bucket KMS too, if it is that.
     async fn other(&self, number: u16) -> Result<Chosen, String> {
-        let entry = self.registered.entry(&self.home, number).await;
+        let entry = self.registered.entry(&*self.home, number).await;
         let entry = entry.map_err(|err| format!("its entry in the registry: {err}"))?;
         let vars = kms_vars(&self.vars, number);
         let var = |name: &str| {
@@ -1084,7 +1084,7 @@ mod tests {
                     vec![("CLADEFSD_BUCKET_2_CLADEFS_MASTER_KEY".to_owned(), key.to_owned())];
                 let home = ObjectBucket::from_url(&urls[0]).unwrap();
                 let home = Arc::new(home.routed(Arc::new(Registered::new(vars.clone()))));
-                let own = HostKms::Bucket(Arc::new(BucketKms::new(home.clone(), parsed(&ours))));
+                let own = HostKms::Bucket(Arc::new(BucketKms::new(home.own(), parsed(&ours))));
                 Arc::new(ByBucket::new(home, own, vars))
             };
             let host = |key: &str| CachingKms::over(by_bucket(key), None);

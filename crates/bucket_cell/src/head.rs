@@ -194,7 +194,7 @@ impl Read {
     }
 
     /// What was found, its slots: what a host learns for an opening of the cell after
-    /// ([`crate::known::Learned`]).
+    /// ([`Read::found`]).
     pub fn slots(self) -> Slots {
         self.0
     }
@@ -531,7 +531,13 @@ mod tests {
     use std::sync::Arc;
 
     const CELL: CellId = test_cell(3);
-    const N: u64 = crate::identity::DEFAULT_HEAD_SLOTS;
+    const N: u64 = crate::identity::GCS_HEAD_SLOTS;
+
+    fn multi_slot() -> Direct {
+        let bucket = SimBucket::new();
+        bucket.keep_heads_in(N);
+        Direct(bucket)
+    }
 
     /// The keys of `cell`'s head's slots that hold something, and the swaps each holds.
     fn slots(bucket: &impl Bucket, cell: CellId) -> Vec<(u64, u64)> {
@@ -554,7 +560,7 @@ mod tests {
     /// head.
     #[test]
     fn heads_are_made_whole_and_swapped_in_turn() {
-        let bucket = Direct(SimBucket::new());
+        let bucket = multi_slot();
         assert_eq!(block_on(crate::lifecycle::create(&bucket, CELL, 7)), Ok(true));
         let made: Vec<_> = (0..N).map(|slot| (slot, slot)).collect();
         assert_eq!(slots(&bucket, CELL), made);
@@ -584,7 +590,7 @@ mod tests {
     /// The writer of a cell deleted and removed since, every slot deleted, swaps conditional on its
     /// slot, which no longer is: it fails, and creates nothing (specs/head-slots' DeletedStays).
     fn swap_after_removal() -> (Result<(), Error>, Option<Head>) {
-        let bucket = Direct(SimBucket::new());
+        let bucket = multi_slot();
         block_on(crate::lifecycle::create(&bucket, CELL, 7)).unwrap();
         let held =
             block_on(take(&bucket, CELL, block_on(read(&bucket, CELL)), &taking(1))).unwrap();
@@ -620,7 +626,7 @@ mod tests {
     /// maker makes ([`Error::Unmade`]); a taking finds no cell. Without the rule, the first slot's
     /// head is read, and taken, a head its maker is still making.
     fn unmade() -> (Result<Option<Head>, Error>, Result<u64, Error>) {
-        let bucket = Direct(SimBucket::new());
+        let bucket = multi_slot();
         let first = Head::of(Made::Root, 7);
         block_on(bucket::create(&bucket, &layout::head(CELL, 0), layout::encode(&first)));
         let found = block_on(get(&bucket, CELL));
@@ -631,7 +637,7 @@ mod tests {
     #[test]
     fn heads_being_made_are_none() {
         assert_eq!(unmade(), (Ok(None), Err(Error::NoCell)));
-        let bucket = Direct(SimBucket::new());
+        let bucket = multi_slot();
         let first = Head::of(Made::Root, 7);
         block_on(bucket::create(&bucket, &layout::head(CELL, 0), layout::encode(&first)));
         // Deleted, it is failed: a mark in each slot after the first.
@@ -659,8 +665,8 @@ mod tests {
     /// so).
     #[test]
     fn unmade_heads_are_failed_by_their_deletions() {
-        let bucket = Direct(SimBucket::new());
-        let origin = layout::Origin { parent: test_cell(1), at: 3 };
+        let bucket = multi_slot();
+        let origin = layout::Origin { parent: test_cell(1), at: 3, epoch: 1 };
         let forking = Head::of(Made::Forking { origin, version: 9 }, 0x33);
         block_on(bucket::create(&bucket, &layout::head(CELL, 0), layout::encode(&forking)));
         let unfork = |owner| block_on(crate::lifecycle::delete_fork(&bucket, CELL, owner, (2, 0)));
@@ -681,7 +687,7 @@ mod tests {
     /// every slot holding something (specs/head-slots' NoMarksFail).
     #[test]
     fn unmade_heads_are_failed_by_their_deletions_need_marks_fail() {
-        let bucket = Direct(SimBucket::new());
+        let bucket = multi_slot();
         let made = Head::of(Made::Root, 7);
         block_on(bucket::create(&bucket, &layout::head(CELL, 0), layout::encode(&made)));
         assert_eq!(block_on(fail(&bucket, CELL, |_| true)), Ok(Failing::Failed));
@@ -705,14 +711,14 @@ mod tests {
         assert_eq!(held.map(|held| held.next_key(CELL)), Ok(layout::head(CELL, 1)));
         assert_eq!(slots(&bucket, CELL), [(0, 3), (1, 1), (2, 2)]);
         let unformatted = Direct(SimBucket::new());
-        assert_eq!(block_on(unformatted.head_slots(CELL)), N);
+        assert_eq!(block_on(unformatted.head_slots(CELL)), crate::identity::DEFAULT_HEAD_SLOTS);
     }
 
     /// A deletion's head is found whatever slots are left, as the collector removes them; none once
     /// they all are.
     #[test]
     fn deleted_heads_are_found_as_their_slots_go() {
-        let bucket = Direct(SimBucket::new());
+        let bucket = multi_slot();
         block_on(crate::lifecycle::create(&bucket, CELL, 7)).unwrap();
         block_on(crate::lifecycle::delete(&bucket, CELL, 2, 0)).unwrap();
         // The deletion's, the slot after the maker's last.

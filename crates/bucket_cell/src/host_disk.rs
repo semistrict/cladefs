@@ -216,6 +216,9 @@ pub struct HostDisk {
     pub cache: Count,
     /// Of `cache`, its fills in flight, counted but not yet written.
     pub cache_writing: Count,
+    /// cladefs: of `cells`, the bytes of their data files' pages held dirty in the cell page cache,
+    /// counted as written but not yet written back to the filesystem (board 5995).
+    pub dirty: Count,
     /// What the governor allows the daemon to keep on it, cells and part cache together:
     /// `u64::MAX` while no governor looks at it.
     allowance: AtomicU64,
@@ -264,6 +267,7 @@ impl HostDisk {
             cells: Tally::default(),
             cache: Count::default(),
             cache_writing: Count::default(),
+            dirty: Count::default(),
             allowance: AtomicU64::new(u64::MAX),
             headroom: AtomicU64::new(0),
             pressure: AtomicBool::new(false),

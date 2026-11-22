@@ -1907,7 +1907,7 @@ mod tests {
         // A fork of the cell into another cell of the tenant's, never taken: no KEK, and a
         // writer's ring of it refused, keeping no DEK.
         let elsewhere = CellId { tenant: 1, id: 10 };
-        let forked = Head::of(Made::Clone(Origin { parent: TEST_CELL, at: 1 }), 4);
+        let forked = Head::of(Made::Clone(Origin { parent: TEST_CELL, at: 1, epoch: 1 }), 4);
         let keys = CellKeys::of(elsewhere, &forked, other);
         let refused = block_on(ring(&bucket, &keys, elsewhere, &forked, true));
         let no_dek = "cell 1/a's head keeps no DEK, which its writer encrypts under";
@@ -1960,7 +1960,7 @@ mod tests {
         let parents_ring = block_on(ring(&bucket, &parents, parent, &held.head, true)).unwrap();
         let dek = Secret::from_bytes(parents_ring.encrypting().0.expose());
         let child = CellId { tenant: 2, id: 10 };
-        let origin = Origin { parent, at: 3 };
+        let origin = Origin { parent, at: 3, epoch: 1 };
         // Its head as a fork that gave it no keys makes it.
         let forked = Head::of(Made::Clone(origin), 4);
         block_on(crate::testing::make_head(&bucket, child, forked)).unwrap();

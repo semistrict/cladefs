@@ -83,6 +83,30 @@ impl<T> Pool<T> {
 static BUFFERS: Pool<Vec<u8>> = Pool::new();
 static PACKERS: Pool<PartPacker> = Pool::new();
 
+/// cladefs: total capacity in bytes of pooled framing scratch buffers currently held (board 6026).
+pub fn buffers_bytes() -> u64 {
+    BUFFERS.kept.lock().unwrap().iter().map(|buf| buf.capacity() as u64).sum()
+}
+
+/// cladefs: drops pooled framing scratch buffers until at most `target` bytes remain, returning
+/// the bytes freed (board 6026).
+pub fn evict_buffers_to(target: u64) -> u64 {
+    let mut dropped = Vec::new();
+    let freed = {
+        let mut kept = BUFFERS.kept.lock().unwrap();
+        let mut total: u64 = kept.iter().map(|buf| buf.capacity() as u64).sum();
+        let before = total;
+        while total > target {
+            let Some(buf) = kept.pop() else { break };
+            total -= buf.capacity() as u64;
+            dropped.push(buf);
+        }
+        before - total
+    };
+    drop(dropped);
+    freed
+}
+
 /// cladefs: the bytes of a part of a segment's data, read, in a buffer of a part's bytes kept for
 /// the framings after it once it goes, if there is room ([`KEPT`]).
 pub(crate) struct Buffer(Vec<u8>);

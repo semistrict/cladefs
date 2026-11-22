@@ -11,7 +11,7 @@
 //! image and its forks, which reads again only the cells' records that changed (`Collector`).
 
 use bucket_cell::collector::{Collector, Options, Report};
-use bucket_cell::object_bucket::ObjectBucket;
+use bucket_cell::object_bucket::RoutedBucket;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
@@ -66,7 +66,7 @@ node_local::node_local! {
 }
 
 /// The collector of `bucket`, at `url`, an image's own, which this process's images of it share.
-pub(crate) fn of(url: &str, bucket: &Arc<ObjectBucket>) -> Arc<Collecting> {
+pub(crate) fn of(url: &str, bucket: &Arc<RoutedBucket>) -> Arc<Collecting> {
     let mut collecting = COLLECTING.get().lock().unwrap();
     collecting.retain(|_, collector| collector.strong_count() > 0);
     if let Some(collector) = collecting.get(url).and_then(Weak::upgrade) {
@@ -85,7 +85,7 @@ pub(crate) fn of(url: &str, bucket: &Arc<ObjectBucket>) -> Arc<Collecting> {
 /// An image's own bucket's collector in this process. Dropped, it waits for the pass it runs, if
 /// any.
 pub(crate) struct Collecting {
-    bucket: Arc<ObjectBucket>,
+    bucket: Arc<RoutedBucket>,
     pace: Pace,
     state: Mutex<State>,
 }
@@ -213,7 +213,7 @@ impl Drop for Collecting {
 /// A pass of `collector` over `bucket`, as a holder no other pass is: what it did, logged and
 /// returned, or why it failed, logged. Nothing it could not read it deleted: the next pass tries
 /// again.
-fn pass(collector: &mut Collector, bucket: &Arc<ObjectBucket>) -> Report {
+fn pass(collector: &mut Collector, bucket: &Arc<RoutedBucket>) -> Report {
     // Where a test holds a pass up, to drop the images it collects for meanwhile (TASK-291.3).
     fail::fail_point!("collect::pass", |_| Report::default());
     // cladefs: copies of other buckets' cells' versions here, by its own cell (TASK-633.8).

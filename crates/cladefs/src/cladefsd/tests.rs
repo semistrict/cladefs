@@ -5104,7 +5104,9 @@ fn cells_whose_vm_went_open_again_while_their_uploads_wait() {
     host();
     let ps = page_size() as usize;
     let gated = Arc::new(GatedReads::new());
-    super::cells::use_bucket(bucket_cell::object_bucket::ObjectBucket::new(gated.clone(), "cells"));
+    super::cells::use_bucket(
+        bucket_cell::object_bucket::ObjectBucket::new(gated.clone(), "cells").unrouted(),
+    );
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
@@ -5304,7 +5306,9 @@ async fn faults_waiting_for_object_storage_hold_up_no_request() {
     host();
     let ps = page_size() as usize;
     let gated = Arc::new(GatedReads::new());
-    super::cells::use_bucket(bucket_cell::object_bucket::ObjectBucket::new(gated.clone(), "cells"));
+    super::cells::use_bucket(
+        bucket_cell::object_bucket::ObjectBucket::new(gated.clone(), "cells").unrouted(),
+    );
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
@@ -5711,9 +5715,14 @@ async fn the_governor_lets_parts_held_go_before_tenants_pages() {
     assert_eq!(cached().await, 4 * CHUNK);
     let parts = super::memory::held_parts();
     let _held: Vec<_> = (0..4).map(|_| parts.hold_bytes(CHUNK as usize / 2)).collect();
-    assert_eq!(super::memory::governed_bytes(), 4 * CHUNK + 2 * CHUNK);
+    let other = local_cell::framing_buffers_bytes()
+        + crate::bucket::memory().recent_bytes()
+        + crate::bucket::memory().tails_bytes()
+        + local_cell::pages::shared().bytes();
+    assert_eq!(super::memory::governed_bytes(), 4 * CHUNK + 2 * CHUNK + other);
     super::memory::govern(4 * CHUNK + CHUNK).await;
     assert_eq!((cached().await, parts.bytes()), (4 * CHUNK, CHUNK), "the last two let go");
+    assert_eq!(local_cell::framing_buffers_bytes(), 0, "framing buffers evicted when room is 0");
     super::memory::govern(4 * CHUNK).await;
     assert_eq!((cached().await, parts.bytes()), (4 * CHUNK, 0), "every part let go, no page");
     super::memory::govern(3 * CHUNK).await;

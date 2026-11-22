@@ -95,8 +95,9 @@ async fn a_hosts_cell_writes_what_its_design_says() {
     // cladefs: at the shell's limit of open files, not the daemon's: a burst's extents spilled to
     // raw files of their own held two each till its commit, past 1,024 (TASK-332).
     let dir = tempfile::tempdir().unwrap();
-    let bucket =
-        Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), "cells"));
+    let bucket = Arc::new(
+        ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), "cells").unrouted(),
+    );
     let open_cell =
         kept_in(dir.path().join("store"), (4 << 30, None), &bucket, idle()).await.unwrap();
     let options = crate::host_cell::options();

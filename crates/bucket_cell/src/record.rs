@@ -8,8 +8,8 @@
 //!
 //! Every change of a head goes through [`crate::lifecycle`]'s one transition, or a writer's swap.
 
+use crate::Error;
 use crate::layout::{Head, Origin};
-use crate::{Error, rules};
 use serde::{Deserialize, Serialize};
 
 /// What made a cell, and so what it is.
@@ -86,11 +86,9 @@ impl Head {
 
     /// cladefs: whether the reference of its fork, its cell deleted, is retired unmarked: a
     /// clone's made by its host alone, its one writer, which wrote it before it made the clone
-    /// (TASK-455). A mark is for a writer of it that may write it after the retirement: a clone
-    /// resumed by another ([`Head::resumed`]), whose host, slow, may (rule `resumes_marked`), and
-    /// one never made, whose host may yet.
+    /// (TASK-455, board 6020). One never made stays marked, as its host may yet write its reference.
     pub fn retires_unmarked(&self) -> bool {
-        matches!(self.made, Made::Clone(_)) && !(self.resumed && rules().resumes_marked)
+        matches!(self.made, Made::Clone(_))
     }
 }
 
@@ -129,9 +127,12 @@ mod tests {
         // number, their cells' IDs unique in them alone (TASK-633.9); and 20's, whose heads say
         // nothing of replication (TASK-537.3.1); and 21's, whose versions mirrored in other
         // buckets have no pins nor markers there (TASK-633.8); and 22's, whose heads are one
-        // object (TASK-691); and 23's, whose versions have no read evidence (TASK-702.2).
-        assert_eq!(FORMAT, 24);
-        for format in [1u32, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23] {
+        // object (TASK-691); 23's, whose versions have no read evidence (TASK-702.2); and 24's,
+        // whose origins and versions carry no writer epoch and whose heads carry `resumed`
+        // (board 6017, board 6020).
+        assert_eq!(FORMAT, 25);
+        for format in [1u32, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
+        {
             let mut older = bytes.clone();
             older[..4].copy_from_slice(&format.to_le_bytes());
             assert_eq!(
@@ -142,17 +143,15 @@ mod tests {
         assert!(matches!(Head::decode(test_cell(3), &bytes[..3]), Err(Error::Corrupt(_))));
     }
 
-    /// Every kind of head, deleted or not, resumed or not, decodes back to itself.
+    /// Every kind of head, deleted or not, decodes back to itself.
     #[test]
     fn heads_decode_to_what_they_encode() {
-        let origin = Origin { parent: test_cell(1), at: 7 };
+        let origin = Origin { parent: test_cell(1), at: 7, epoch: 2 };
         let made =
             [Made::Root, Made::Own, Made::Forking { origin, version: 0xbe }, Made::Clone(origin)];
         for made in made {
-            for (epoch, resumed) in
-                [(0, false), (Head::FINAL, false), (3, true), (Head::FINAL, true)]
-            {
-                let head = Head { epoch, resumed, ..Head::of(made, 9) };
+            for epoch in [0, 3, Head::FINAL] {
+                let head = Head { epoch, ..Head::of(made, 9) };
                 assert_eq!(Head::decode(test_cell(2), &encode(&head)), Ok(head));
             }
         }

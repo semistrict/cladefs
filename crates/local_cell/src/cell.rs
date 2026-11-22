@@ -3387,8 +3387,9 @@ impl<D: Dir> LocalCell<D> {
                 }
             }
             if !own.is_empty() {
-                flushed.appends.push((own_of(segment.number), *own_end, own.clone()));
-                *own_end += own.len() as u64;
+                let len = own.len() as u64;
+                flushed.appends.push((own_of(segment.number), *own_end, own));
+                *own_end += len;
             }
         }
         // A spool failing breaks the replicator, which says so (Replicator::flushed).

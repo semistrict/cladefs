@@ -97,10 +97,6 @@ pub enum Fault {
 #[derive(Default)]
 pub struct SimBucket {
     inner: Arc<Mutex<Inner>>,
-    /// What the simulation's hosts know of it without asking it again ([`Bucket::known`]): one for
-    /// them all, kept through their crashes, so that what one learned another may use, stale, as
-    /// a read from earlier, which the protocol allows for (TASK-449).
-    known: Arc<crate::known::Known>,
     /// cladefs: the bucket of the host asking through it: where keys of no cell go.
     home: u16,
     /// cladefs: whether every request goes to `home`, whatever cell its key is of: the bucket's own
@@ -115,14 +111,13 @@ impl SimBucket {
 
     /// cladefs: the same buckets, as a host whose bucket is `home`'s asks them (TASK-633.10).
     pub fn at(&self, home: u16) -> Arc<Self> {
-        Arc::new(Self { inner: self.inner.clone(), known: self.known.clone(), home, pinned: false })
+        Arc::new(Self { inner: self.inner.clone(), home, pinned: false })
     }
 
     /// cladefs: its host's bucket's own twin, every request there whatever cell its key is of, as
-    /// `ObjectBucket::own` is (TASK-633.8).
+    /// `RoutedBucket::own` is (TASK-633.8).
     pub fn own(&self) -> Arc<Self> {
-        let (inner, known) = (self.inner.clone(), self.known.clone());
-        Arc::new(Self { inner, known, home: self.home, pinned: true })
+        Arc::new(Self { inner: self.inner.clone(), home: self.home, pinned: true })
     }
 
     /// cladefs: its host's bucket's number.
@@ -596,17 +591,13 @@ impl Bucket for SimBucket {
         self.inner.lock().unwrap().clock
     }
 
-    fn known(&self) -> Option<&crate::known::Known> {
-        Some(&self.known)
-    }
-
     fn mirrors(&self) -> Option<&dyn crate::mirror::Here> {
         (self.home != 0 && !self.pinned).then_some(self as &dyn crate::mirror::Here)
     }
 }
 
 /// cladefs: the mirrors in its host's bucket, in its own bucket (TASK-633.8), as
-/// `ObjectBucket`'s.
+/// `RoutedBucket`'s.
 impl crate::mirror::Here for SimBucket {
     fn marked(&self, parent: CellId, at: u64) -> futures::future::BoxFuture<'_, bool> {
         let own = self.own();
@@ -632,23 +623,6 @@ impl crate::mirror::Here for SimBucket {
                 crate::lifecycle::retire(&*own, &theirs).await;
             }
             theirs.len()
-        })
-    }
-
-    fn learn(&self, cell: CellId) -> futures::future::BoxFuture<'_, ()> {
-        let own = self.own();
-        let mine = self.region_of(&cell.prefix()) == self.home;
-        Box::pin(async move {
-            if mine {
-                return;
-            }
-            for meta in crate::bucket::list(&*own, &layout::mirrors(cell)).await {
-                let Kind::Mirror { at, .. } = layout::kind(&meta.key) else { continue };
-                let Some(found) = crate::bucket::get(&*own, &meta.key).await else { continue };
-                if let Ok(marker) = layout::decode::<layout::Mirror>(&found.bytes) {
-                    self.known.named(cell, at, marker.epoch);
-                }
-            }
         })
     }
 }
@@ -757,7 +731,8 @@ pub async fn versioned<B: Bucket + 'static>(
     crate::lifecycle::create(&**bucket, cell, 0).await.unwrap();
     let writer = crate::writer::Writer::open(bucket.clone(), cell, 10, 0).await.unwrap();
     let at = versioned_by(&writer, extents, VERSION).await;
-    (writer, layout::Origin { parent: cell, at })
+    let epoch = writer.epoch();
+    (writer, layout::Origin { parent: cell, at, epoch })
 }
 
 /// cladefs: commits `extents` by `writer` in a segment that ends in the version `id`, uploaded and
@@ -899,7 +874,7 @@ pub const SWEEPS: u64 = 32;
 /// root's or a clone's made, deleted, of an ID an allocator gave, which goes whole, head and lease
 /// (TASK-455); and the lease of a cell of no head once nothing else is left.
 pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String> {
-    use crate::layout::{Location, Origin};
+    use crate::layout::Location;
     use layout::Head;
     use storage_device::ExtentId;
     let keys: BTreeSet<String> =
@@ -918,7 +893,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
                 }
             }
             Kind::Reference { parent, at, child } => references.push((key, parent, at, child)),
-            Kind::Hold { parent, at, .. } => drop(holds.insert(Origin { parent, at })),
+            Kind::Hold { parent, at, .. } => drop(holds.insert((parent, at))),
             _ => {}
         }
     }
@@ -926,7 +901,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
     let dead = |cell: layout::CellId| {
         records.iter().filter(|(of, _)| **of == cell).all(|(_, record)| record.deleted())
             && !references.iter().any(|(_, parent, _, _)| *parent == cell)
-            && !holds.iter().any(|origin| origin.parent == cell)
+            && !holds.iter().any(|&(parent, _)| parent == cell)
     };
     // Whether a cell goes whole: dead, no mark under it, its head one it may go with.
     let marked_under = |cell: layout::CellId| {
@@ -955,7 +930,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
     let mut needed = BTreeSet::new();
     let mut touched = BTreeSet::new();
     let mut named: BTreeMap<String, BTreeMap<ExtentId, u64>> = BTreeMap::new();
-    let mut versions: BTreeSet<Origin> = BTreeSet::new();
+    let mut versions: BTreeSet<(CellId, u64)> = BTreeSet::new();
     let mut retirable = BTreeSet::new();
     for (&cell, record) in &records {
         // Every cell's head stays, a deleted one's final, which fences its writers (TASK-174,
@@ -977,7 +952,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         // cladefs: its versions, each its state at the segment its head names it at, kept whole as
         // an origin is (TASK-476).
         for version in recovered.head.iter().flat_map(|head| &head.versions) {
-            versions.insert(Origin { parent: cell, at: version.at });
+            versions.insert((cell, version.at));
         }
         touched.extend(recovered.touched.iter().cloned());
         needed.extend(recovered.touched);
@@ -1024,8 +999,9 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
     // no pass retires, kept for ever with its origin (TASK-395.10), and garbage.
     let mut unnamed = BTreeSet::new();
     for &(key, parent, at, child) in &references {
-        let origin = Origin { parent, at };
-        let named = records.get(&child).is_some_and(|record| record.origin() == Some(origin));
+        let named = records.get(&child).is_some_and(|record| {
+            record.origin().is_some_and(|o| (o.parent, o.at) == (parent, at))
+        });
         let retired = named && records[&child].deleted() && child != parent && dead(child);
         // Marked, retired or taken back before: a stale writer's, written after, garbage
         // (TASK-395.13, TASK-395.14).
@@ -1033,7 +1009,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         if retired {
             retirable.insert(key.clone());
         } else if !marked && named {
-            versions.insert(origin);
+            versions.insert((parent, at));
         } else {
             unnamed.insert(key.clone());
         }
@@ -1041,10 +1017,8 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
     versions.extend(holds.iter().copied());
     // Each origin kept whole, once (TASK-395.4).
     let checkpoints = crate::recovery::Checkpoints::new(bucket, 0);
-    for origin in versions {
-        let Ok((state, read)) =
-            crate::recovery::recover_at(&checkpoints, origin.parent, origin.at).await
-        else {
+    for (parent, at) in versions {
+        let Ok((state, read)) = crate::recovery::recover_at(&checkpoints, parent, at).await else {
             continue;
         };
         touched.extend(read.iter().cloned());
@@ -1185,9 +1159,9 @@ pub async fn uncollected_copies(
                 Kind::Reference { parent, at, child } => {
                     let marked = here.contains(&layout::retired(parent, at, child));
                     let head = crate::head::get(bucket, child).await.ok().flatten();
-                    let names = head
-                        .as_ref()
-                        .is_some_and(|head| head.origin() == Some(Origin { parent, at }));
+                    let names = head.as_ref().is_some_and(|head| {
+                        head.origin().is_some_and(|o| (o.parent, o.at) == (parent, at))
+                    });
                     // Its child deleted and dead, as [`uncollected`] has it of an original: its
                     // pass retires it here, as there (TASK-633.8).
                     let deleted = head.as_ref().is_some_and(|head| head.deleted());
@@ -1230,7 +1204,7 @@ pub async fn uncollected_copies(
     }
     for child in children {
         let Ok(Some(head)) = crate::head::get(bucket, child).await else { continue };
-        let Some(Origin { parent, at }) = head.origin().filter(|_| !head.deleted()) else {
+        let Some(Origin { parent, at, .. }) = head.origin().filter(|_| !head.deleted()) else {
             continue;
         };
         if here.contains(&layout::mirror(parent, at))
@@ -1274,18 +1248,22 @@ async fn copied_whole(
     }
     let marker = crate::bucket::get(own, &layout::mirror(cell, at)).await;
     let marker = marker.ok_or("gone")?;
-    let epoch =
-        layout::decode::<layout::Mirror>(&marker.bytes).map_err(|err| err.to_string())?.epoch;
+    layout::decode::<layout::Mirror>(&marker.bytes).map_err(|err| err.to_string())?;
     // The version, as its cell's bucket keeps it whole, its hold there.
     let checkpoints = crate::recovery::Checkpoints::new(bucket, 0);
     let (state, read) = crate::recovery::recover_at(&checkpoints, cell, at)
         .await
         .map_err(|err| format!("its version not to be recovered: {err}"))?;
     let ours = |key: &String| layout::owner(key) == Some(cell);
-    let mut needed: Vec<String> = read.into_iter().filter(ours).collect();
-    needed.push(layout::checkpoint(cell, at, epoch));
+    let needed: Vec<String> = read.into_iter().filter(ours).collect();
     if let Some(lacking) = needed.iter().find(|key| !here.contains(*key)) {
         return Err(format!("{lacking} not copied"));
+    }
+    let has_checkpoint = here.iter().any(|key| {
+        matches!(layout::kind(key), Kind::Checkpoint { cell: c, segment, .. } if c == cell && segment == at)
+    });
+    if !has_checkpoint {
+        return Err(format!("checkpoint for {cell} at {at} not copied"));
     }
     let mut maps = MovesMaps::default();
     for (&extent, location) in state.extents.iter().filter(|(_, location)| ours(&location.key)) {
@@ -1354,9 +1332,8 @@ pub async fn fork_version_given(
     let (given, parents) = (Some(inheriting.given()), crate::keys::Parents::Kms(&kms, None));
     let lifecycle =
         crate::lifecycle::fork_version_keyed(bucket, child, id, origin, (owner, given), parents);
-    if lifecycle.await?.is_some() {
-        inheriting.made();
-    }
+    lifecycle.await?;
+    inheriting.made();
     Ok(())
 }
 
@@ -1461,7 +1438,7 @@ mod tests {
         let sim = SimBucket::new();
         let cell = |id| CellId { tenant: 1, id };
         let (parent, child) = (cell(1 << 48 | 5), cell(2 << 48 | 6));
-        let origin = layout::Origin { parent, at: 3 };
+        let origin = layout::Origin { parent, at: 3, epoch: 1 };
         let wanted_by = |number: u16, child: CellId| {
             let bucket = sim.at(number);
             let (wanted, asked) =

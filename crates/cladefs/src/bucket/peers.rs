@@ -72,7 +72,7 @@ pub struct Region {
 /// cladefs: the region of the host whose bucket is `bucket` ([`Region`]): none until it has a number
 /// and a registry naming the root bucket.
 pub async fn region(
-    bucket: &bucket_cell::object_bucket::ObjectBucket,
+    bucket: &impl bucket_cell::Bucket,
 ) -> Result<Option<Region>, bucket_cell::Error> {
     use bucket_cell::identity::{self, ROOT};
     let Some(identity) = identity::get(bucket).await? else { return Ok(None) };

@@ -178,6 +178,7 @@ pub(super) async fn migrate(path: PathBuf, peer: String, to: String) -> Result<u
         parent_tenant: parent.cell.tenant,
         parent_cell: parent.cell.id,
         at: parent.at,
+        parent_epoch: parent.epoch,
         bucket: entry.bucket.clone(),
         to,
     };
@@ -597,11 +598,16 @@ pub(super) mod target {
             parent_tenant,
             parent_cell,
             at,
+            parent_epoch,
             bucket,
             to,
         } = request;
         let child = CellId { tenant, id: cell };
-        let origin = Origin { parent: CellId { tenant: parent_tenant, id: parent_cell }, at };
+        let origin = Origin {
+            parent: CellId { tenant: parent_tenant, id: parent_cell },
+            at,
+            epoch: parent_epoch,
+        };
         if host.accepted(migration) {
             return Ok(host.incarnation());
         }

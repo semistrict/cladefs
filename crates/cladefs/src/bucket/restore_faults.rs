@@ -17,7 +17,7 @@ use crate::faults::RESTORE_STEPS;
 use crate::{CellRole, Errno, ExtentId, OpenCell};
 use bucket_cell::layout::{self, Kind};
 use bucket_cell::lifecycle;
-use bucket_cell::object_bucket::ObjectBucket;
+use bucket_cell::object_bucket::{ObjectBucket, RoutedBucket};
 use fail::FailGuard;
 use futures::executor::block_on;
 use object_store::memory::InMemory;
@@ -49,7 +49,7 @@ enum Fault {
 /// A bucket, and the hosts of one version in it: its cell has freed what it held since.
 struct Hosts {
     temp: tempfile::TempDir,
-    bucket: Arc<ObjectBucket>,
+    bucket: Arc<RoutedBucket>,
     gated: Vec<Arc<Gated>>,
     /// Each host's disk: a dead host's, its copy, restarted.
     disks: Vec<PathBuf>,
@@ -76,7 +76,7 @@ fn copy_at(disk: &Path) -> PathBuf {
 }
 
 /// The keys of the segments of `cell` in `bucket`.
-fn segments_of(bucket: &Arc<ObjectBucket>, of: crate::CellId) -> Vec<String> {
+fn segments_of(bucket: &Arc<RoutedBucket>, of: crate::CellId) -> Vec<String> {
     let keys = block_on(bucket_cell::Bucket::list(&**bucket, "")).unwrap();
     let segments = keys.into_iter().map(|meta| meta.key);
     segments
@@ -88,7 +88,7 @@ fn segments_of(bucket: &Arc<ObjectBucket>, of: crate::CellId) -> Vec<String> {
 /// keys its record keeps, its cell's KEK unwrapped by the host's KMS, if it has one
 /// (TASK-411.4).
 fn in_bucket(
-    bucket: &Arc<ObjectBucket>,
+    bucket: &Arc<RoutedBucket>,
     child: crate::CellId,
 ) -> Result<Vec<(ExtentId, Vec<u8>)>, String> {
     block_on(async {
@@ -117,7 +117,7 @@ fn in_bucket(
 
 /// Deletes `cell` as an operator does, as `holder`, of no placement.
 async fn operator_delete(
-    bucket: &Arc<ObjectBucket>,
+    bucket: &Arc<RoutedBucket>,
     cell: crate::CellId,
     holder: u64,
 ) -> Result<(), bucket_cell::Error> {
@@ -128,9 +128,9 @@ impl Hosts {
     async fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(memory.clone(), "").unrouted());
         let gated: Vec<_> = (0..HOSTS).map(|_| Arc::new(Gated::over(memory.clone()))).collect();
-        let reached = |host: usize| Arc::new(ObjectBucket::new(gated[host].clone(), ""));
+        let reached = |host: usize| Arc::new(ObjectBucket::new(gated[host].clone(), "").unrouted());
         let disks: Vec<_> =
             (0..HOSTS).map(|host| temp.path().join(format!("host{host}"))).collect();
         for disk in &disks {
@@ -191,7 +191,7 @@ impl Hosts {
     /// Sweeps of the collector over every cell, deleting what is free at once, until two in a row
     /// delete nothing: a dead cell's pass retires the references the version's cell keeps its
     /// state for, which that cell's next pass reclaims (TASK-395.4).
-    fn collect(bucket: &Arc<ObjectBucket>, case: &str) {
+    fn collect(bucket: &Arc<RoutedBucket>, case: &str) {
         let options = bucket_cell::collector::Options { compact_below: 0.0, grace: 0 };
         let collected = bucket_cell::testing::collect_until_quiet(&**bucket, &options);
         block_on(collected).unwrap_or_else(|err| panic!("{case}: the collector: {err}"));

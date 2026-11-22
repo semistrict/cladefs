@@ -72,9 +72,8 @@
 (* names none. The only fork is a version's (a restore), into a new cell,  *)
 (* its ID an allocator's: the child's record first, saying the fork is     *)
 (* being made, then its reference, then the head naming the version read,  *)
-(* then the record made; a cell opening the child may resume a fork its    *)
-(* restore left. Cells' cuts, versions of several cells cut at one moment, *)
-(* are a host's work alone (doc-18): not modelled.                         *)
+(* then the record made. Cells' cuts, versions of several cells cut at one *)
+(* moment, are a host's work alone (doc-18): not modelled.                 *)
 (*                                                                         *)
 (* The collector runs passes per cell (TASK-395), each under its cell's    *)
 (* collector lease, at once with other cells' and with writers: the cell's *)
@@ -182,19 +181,6 @@
 (*   unmarked: its one writer wrote it before it made the fork, so that    *)
 (*   the parent's cell keeps no mark of a fork made and gone (TASK-455).   *)
 (*   Without the rule, none is marked.                                     *)
-(* - resumesRefer (NoResumesRefer): a fork of a version resumed by another *)
-(*   than the restore that began it, a cell opening its child, writes its  *)
-(*   reference before it makes it, as the restore does. Without it, a      *)
-(*   restore dying between its record and its reference leaves a fork made *)
-(*   of no reference, whose origin's state no pass keeps once the version  *)
-(*   is dropped (ReferencesStand).                                         *)
-(* - resumesMarked (NoResumesMarked): a fork of a version resumed says so  *)
-(*   in its record, with a condition, before its reference, and a fork     *)
-(*   made so retires its reference marked: the restore that began it,      *)
-(*   slow, may write it after, the fork made, deleted and its cell         *)
-(*   removed. A resume finding it made writes none. Without it, retired    *)
-(*   unmarked, it stands for good (ReferencesRetiredMarked; TASK-455's     *)
-(*   review).                                                              *)
 (* - versionsKept (NoVersionsKept): a pass keeps, for each version a live  *)
 (*   cell's head names, the cell's state at it whole, and what recovering  *)
 (*   it reads, as for an origin (TASK-476, doc-18). Without it, a          *)
@@ -286,12 +272,11 @@ AllRules == {"headSwap", "epochKeys", "collectorEpochs", "epochSequences", "cand
              "waysFromSeals", "movesTakenFirst", "walFollows", "acksBetweenCommits",
              "wholeCommitsKept", "references", "forksReferFirst", "referencesHeld",
              "referencesRelisted", "originsKept", "forksRecordFirst", "retirementsMarked",
-             "movesByPass", "resumesRefer", "resumesMarked", "versionsKept", "versionsCarried",
-             "versionsAcked"}
+             "movesByPass", "versionsKept", "versionsCarried", "versionsAcked"}
 
 AllCan == {"commit", "mint", "seg", "own", "free", "restore", "delete", "place", "checkpoint",
            "collect", "compact", "compactMoves", "crash", "disk", "overlap", "span",
-           "spanOn", "cut", "deleteRoot", "landInOrder", "resume", "version", "dropVersion"}
+           "spanOn", "cut", "deleteRoot", "landInOrder", "version", "dropVersion"}
 
 ASSUME Rules \subseteq AllRules
 ASSUME Can \subseteq AllCan
@@ -377,11 +362,10 @@ Drop(f, x) == [y \in DOMAIN f \ {x} |-> f[y]]
 Nothing == [x \in {} |-> None]
 
 \* A record: its kind ("root", "forking", "fork": a version's fork being made, or made), its origin
-\* <<parent, at>>, the version a fork is of, <<cell, id>> (<<>> if none), and, of
-\* a fork, whether another than the restore that began it resumed it (resumesMarked); and, not in
-\* the bucket's bytes, the commit its cell starts from and the making it is of.
+\* <<parent, at>>, the version a fork is of, <<cell, id>> (<<>> if none); and, not in the bucket's
+\* bytes, the commit its cell starts from and the making it is of.
 Record(kind, origin, o, base) ==
-    [kind |-> kind, origin |-> origin, ver |-> <<>>, resumed |-> FALSE, base |-> base, maker |-> o,
+    [kind |-> kind, origin |-> origin, ver |-> <<>>, base |-> base, maker |-> o,
      epoch |-> 0, token |-> 0, holder |-> 0, end |-> 0, chain |-> <<>>, ckpt |-> <<>>, vers |-> {}]
 
 \* Whether the head x is a deleted cell's: of the final epoch.
@@ -1054,23 +1038,6 @@ StartRestore(h, c, b) ==
          Restoring(h, [op |-> "restore", b |-> c, pc |-> "check", o |-> <<"restore", c, h>>,
                        tk |-> tok[h][c], og |-> <<b, v.at>>, bs |-> v.id, v |-> <<b, v.id>>])
 
-\* With "resume", the fork of a version to c, being made, resumed by another than the restore that
-\* began it: a cell opening c, its restore's host dead or slow (upload.rs's record). Its record
-\* said resumed first, with a condition, unless made or deleted (resumesMarked); then, as a
-\* restore goes on, its reference (resumesRefer), the head naming the version read, and the fork
-\* made. Without resumesRefer, no reference: the fork made as the version is read.
-ResumeRestore(h, c) ==
-    LET r == head[c]
-        q == [op |-> "restore", b |-> c, pc |-> "check", o |-> r.maker, tk |-> tok[h][c],
-              og |-> r.origin, bs |-> r.base, v |-> r.ver]
-        refers == R("resumesRefer") /\ R("forksReferFirst") /\ ForkRefs(q) # {}
-    IN /\ "resume" \in Can /\ proc[h] = None
-       /\ r # None /\ r.kind = "forking" /\ ~Deleted(r)
-       /\ head' = [head EXCEPT ![c].resumed = TRUE]
-       /\ proc' = [proc EXCEPT ![h] = [q EXCEPT !.pc = IF refers THEN "refer" ELSE "check"]]
-       /\ UNCHANGED <<seg, own, ckpt, moves, mflight, inflight, refs, marked, retired, written,
-                      gone, ses, wal, tok, gc, truthVars, countVars>>
-
 Done(h) == proc' = [proc EXCEPT ![h] = None]
 \* A deletion of the cell proc[h] names, after a failed restore.
 Deleting(h) == proc' = [proc EXCEPT ![h] = [@ EXCEPT !.op = "delete", !.pc = "end"]]
@@ -1131,7 +1098,7 @@ ProcStep(h) ==
 
 HostNext ==
     \/ \E h \in Hosts : Crash(h) \/ ProcStep(h)
-    \/ \E h \in Hosts, b \in Cells : Place(h, b) \/ StartDelete(h, b) \/ ResumeRestore(h, b)
+    \/ \E h \in Hosts, b \in Cells : Place(h, b) \/ StartDelete(h, b)
     \/ \E h \in Hosts, c, p \in Cells : StartRestore(h, c, p)
     \/ \E m \in inflight : Land(m)
 
@@ -1262,10 +1229,8 @@ GcRelist(i) ==
        /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, doomed, taken, placed>>
 
 \* Whether the reference of the fork whose record is r is retired unmarked (retirementsMarked): its
-\* fork made, by the restore that began it alone, the reference's one writer, having written it
-\* before it made it; not one another resumed (resumesMarked), which the restore that began it,
-\* slow, may write after. Without resumesMarked, a resumed one's too.
-Unmarked(r) == r.kind = "fork" /\ (R("resumesMarked") => ~r.resumed)
+\* fork made, by its one restore, having written it before it made it.
+Unmarked(r) == r.kind = "fork"
 
 \* Compaction, then deletion, unless a later pass of the cell took its lease: of what was listed,
 \* what the live cell and the origins and versions kept do not need, nor its head may yet name
@@ -1548,11 +1513,11 @@ DeletedUntaken ==
     \A h \in Hosts, b \in Cells :
         (Ready(h, b) /\ Taking(ses[h][b], b)) => head[b] # None /\ ~Deleted(head[b])
 
-\* A segment a head names keeps its epoch while the head stands (TASK-449): an acknowledgement
-\* names more, a takeover goes on from the head's end, a deletion keeps what it names, and nothing
-\* renames one; only a removal deletes a head, with its cell. So a host keeps the epoch of an
-\* origin's segment once it read it (bucket_cell::known), and reads the checkpoint there by its
-\* key, with no read of its origin's head, whenever after.
+\* A segment a head names keeps its epoch while the head stands (TASK-449, board 6017): an
+\* acknowledgement names more, a takeover goes on from the head's end, a deletion keeps what it
+\* names, and nothing renames one; only a removal deletes a head, with its cell. So an origin keeps
+\* the epoch of its parent's segment, and recovery reads the checkpoint there by its key, with no
+\* read of its parent's head, whenever after.
 NamedEpochsStay ==
     [][\A b \in Cells :
           head'[b] # None => \A s \in 0..(End(b) - 1) : s < End(b)' /\ Chain(b)'[s + 1] = Chain(b)[s + 1]

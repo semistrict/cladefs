@@ -86,7 +86,7 @@ pub async fn start(
             .to_owned()
     })?;
     // cladefs: its region, which peers of another never serve, nor it them (TASK-633.4).
-    let region = crate::bucket::peers::region(&bucket).await;
+    let region = crate::bucket::peers::region(&*bucket).await;
     let region = region.map_err(|err| failed(&err.to_string()))?;
     let linked = url.clone();
     let runtime = crate::bucket::bucket_runtime().map_err(|err| failed(&err.to_string()))?;
@@ -211,7 +211,7 @@ fn replicas(dir: &std::path::Path) -> Result<Arc<Replicas<HostDir>>, String> {
 /// [`SWEEP_EVERY`] after, a task on `runtime`, the bucket runtime (doc-24 step 12).
 fn sweeping(
     replicas: Arc<Replicas<HostDir>>,
-    bucket: Arc<bucket_cell::object_bucket::ObjectBucket>,
+    bucket: Arc<bucket_cell::object_bucket::RoutedBucket>,
     runtime: &tokio::runtime::Handle,
 ) {
     drop(runtime.spawn(async move {

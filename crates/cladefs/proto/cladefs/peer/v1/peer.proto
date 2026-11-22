@@ -91,6 +91,8 @@ message MigratePrepareRequest {
   string bucket = 7;
   // Where it goes on this host.
   string to = 8;
+  // The epoch of the parent's writer that wrote segment `at`.
+  uint64 parent_epoch = 9;
 }
 
 // A migration prepared.

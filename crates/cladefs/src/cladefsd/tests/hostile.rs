@@ -2312,10 +2312,9 @@ async fn page_ins_in_flight_are_bounded() {
     const MIB: u64 = 1 << 20;
     host();
     let gated = Arc::new(super::GatedReads::new());
-    super::super::cells::use_bucket(bucket_cell::object_bucket::ObjectBucket::new(
-        gated.clone(),
-        "cells",
-    ));
+    super::super::cells::use_bucket(
+        bucket_cell::object_bucket::ObjectBucket::new(gated.clone(), "cells").unrouted(),
+    );
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();

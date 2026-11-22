@@ -75,7 +75,7 @@ impl<D: Dir> CachedDir<D> {
         if !data {
             return Ok(CachedFile::Raw(file));
         }
-        let opened = Cached::new(file, &self.shared.cache)?;
+        let opened = Cached::on_disk(file, &self.shared.cache, self.shared.dir.disk().cloned())?;
         files.insert(path.to_owned(), opened.downgrade());
         Ok(CachedFile::Cached(opened))
     }

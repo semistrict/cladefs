@@ -281,7 +281,7 @@ mod tests {
         let host = open(dir.path()).unwrap();
         assert_eq!(host.incarnation(), incarnation);
         let child = CellId { tenant: 3, id: 9 };
-        let origin = Origin { parent: CellId { tenant: 3, id: 1 }, at: 4 };
+        let origin = Origin { parent: CellId { tenant: 3, id: 1 }, at: 4, epoch: 1 };
         let entry = Entry {
             child,
             origin,

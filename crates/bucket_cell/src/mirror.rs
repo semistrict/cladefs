@@ -108,13 +108,6 @@ pub trait Here: Send + Sync {
     /// wrote here, their cells dead. Others it leaves. How many it retired, whether there or not,
     /// as a pass counts its retirements ([`crate::collector::Report::retired`]).
     fn retire<'a>(&'a self, keys: &'a [&'a str]) -> BoxFuture<'a, usize>;
-
-    /// Learns the epochs of the checkpoints at the versions of `cell`, a cell of another bucket,
-    /// whose mirrors here are marked, from their markers ([`crate::known::Known::named`]): a
-    /// recovery through one of them then reads its checkpoint by key, here, `cell`'s head, in its
-    /// own bucket, unread, which may be out of reach (doc-23, What the parent's bucket being out
-    /// of reach costs). Nothing for a cell of this bucket's own.
-    fn learn(&self, cell: CellId) -> BoxFuture<'_, ()>;
 }
 
 /// A mirror's pin, held: its bytes, its own, and the version of its last write.
@@ -287,7 +280,7 @@ pub async fn wanted(
     child: CellId,
     origin: layout::Origin,
 ) -> Result<Option<Mirrored>, Error> {
-    let layout::Origin { parent, at } = origin;
+    let layout::Origin { parent, at, .. } = origin;
     let ours = layout::routed_to(&child.prefix()) == Some(number);
     let theirs = layout::routed_to(&parent.prefix()).is_some_and(|of| of != number);
     let Some(here) = bucket.mirrors().filter(|_| ours && theirs) else { return Ok(None) };
@@ -320,8 +313,8 @@ pub async fn mirror(
         Some(_) => 0,
         // Its hold in the parent's bucket, before it reads the head there (`mirrorHolds`).
         None => match hold_then_copy(bucket, own, &mut pin, (parent, at), &hold).await {
-            Ok(Copied::Whole { count, epoch }) if pin.refresh(own, true).await => {
-                bucket::create(own, &marker, layout::encode(&Mirror::of(epoch))).await;
+            Ok(Copied::Whole { count }) if pin.refresh(own, true).await => {
+                bucket::create(own, &marker, layout::encode(&Mirror::NOW)).await;
                 failpoint!("mirror::marked");
                 count
             }
@@ -376,8 +369,8 @@ const TAKEN: &str = "its pin, stale, taken over";
 
 /// What a mirror's copy came to.
 enum Copied {
-    /// Every object copied, this many, of the version whose checkpoint is of `epoch`.
-    Whole { count: usize, epoch: u64 },
+    /// Every object copied, this many.
+    Whole { count: usize },
     /// Its pin taken over, as it refreshed it.
     Taken,
     /// Short of the version, its cell's head naming it no more.
@@ -453,7 +446,7 @@ async fn copy(
         count += copied.iter().filter(|copied| **copied).count();
     }
     failpoint!("mirror::copied");
-    Ok(Copied::Whole { count, epoch })
+    Ok(Copied::Whole { count })
 }
 
 /// Copies the object at `key` into `own`, unless it is there: false if it is gone from where

@@ -11,7 +11,7 @@ use bucket_cell::bucket::{Bucket as _, PutMode};
 use bucket_cell::cache::Cache;
 use bucket_cell::fetch::{Budget, Fetcher, Limits, Memory, Priority};
 use bucket_cell::layout::{self, Contents, Location, test_cell};
-use bucket_cell::object_bucket::{ObjectBucket, Request};
+use bucket_cell::object_bucket::{ObjectBucket, Request, RoutedBucket};
 use bucket_cell::peer::Peers as _;
 use std::sync::atomic::AtomicBool;
 use storage_device::ExtentId;
@@ -34,8 +34,9 @@ pub(crate) fn noise(len: u64) -> Vec<u8> {
 }
 
 /// A bucket holding a segment of `data`, all of which is [`EXTENT`]: where it is.
-pub(crate) fn holding(data: &[u8]) -> (Arc<ObjectBucket>, Location) {
-    let bucket = Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
+pub(crate) fn holding(data: &[u8]) -> (Arc<RoutedBucket>, Location) {
+    let bucket =
+        Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), "").unrouted());
     let key = layout::segment(test_cell(1), 1, 1);
     let contents =
         Contents { extents: vec![(EXTENT, 0, data.len() as u64)], ..Contents::default() };
@@ -50,7 +51,7 @@ pub(crate) fn holding(data: &[u8]) -> (Arc<ObjectBucket>, Location) {
 /// A host of this process: the fetcher its open cells read by, asking its peers, and the one it
 /// serves them by, asking none, which share its memory, budget and cache, as a daemon's do.
 struct Host {
-    reads: Fetcher<ObjectBucket>,
+    reads: Fetcher<RoutedBucket>,
     peers: Arc<Peers>,
     _cache: tempfile::TempDir,
 }
@@ -58,7 +59,7 @@ struct Host {
 /// A link to a host of this process, by its serving fetcher: failing every request, if told to;
 /// or answering that it has no such part, as a host whose read of the object found none would.
 struct InProcess {
-    serving: Arc<Fetcher<ObjectBucket>>,
+    serving: Arc<Fetcher<RoutedBucket>>,
     calls: AtomicU64,
     failing: AtomicBool,
     missing: AtomicBool,
@@ -93,7 +94,7 @@ impl Link for InProcess {
 /// Hosts at `addresses`, sharing `bucket`, each with a cache of its own, each asking the others
 /// if `peered`; and the links to each, by address.
 fn hosts(
-    bucket: &Arc<ObjectBucket>,
+    bucket: &Arc<RoutedBucket>,
     addresses: &[&str],
     peered: bool,
 ) -> (Vec<Host>, HashMap<String, Arc<InProcess>>) {
@@ -146,7 +147,7 @@ fn read_all(host: &Host, location: &Location) -> Vec<u8> {
 }
 
 /// The GETs the bucket was sent, whole and of ranges.
-pub(crate) fn gets(bucket: &ObjectBucket) -> u64 {
+pub(crate) fn gets(bucket: &RoutedBucket) -> u64 {
     let stats = bucket.stats();
     stats.requests(Request::Get) + stats.requests(Request::GetRange)
 }

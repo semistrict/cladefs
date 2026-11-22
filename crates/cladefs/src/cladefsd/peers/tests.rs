@@ -10,19 +10,19 @@ use super::*;
 use crate::bucket::peers::tests::{gets, holding, noise};
 use bucket_cell::cache::Cache;
 use bucket_cell::layout::{self, Location};
-use bucket_cell::object_bucket::ObjectBucket;
+use bucket_cell::object_bucket::RoutedBucket;
 use std::time::Instant;
 
 const URL: &str = "memory:///peers";
 
 /// A daemon's peer server on the loopback, serving the parts of `bucket`, named [`URL`], kept in a
 /// cache in `dir`: its address. Of no region, as a bucket of no number yet is.
-fn serving(bucket: &Arc<ObjectBucket>, dir: &std::path::Path) -> String {
+fn serving(bucket: &Arc<RoutedBucket>, dir: &std::path::Path) -> String {
     serving_in(bucket, dir, None)
 }
 
 /// [`serving`], of `region` (TASK-633.4).
-fn serving_in(bucket: &Arc<ObjectBucket>, dir: &std::path::Path, region: Option<Region>) -> String {
+fn serving_in(bucket: &Arc<RoutedBucket>, dir: &std::path::Path, region: Option<Region>) -> String {
     let cache = Arc::new(Cache::open(dir, u64::MAX).unwrap());
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -52,7 +52,7 @@ fn ask_as(
 
 /// Part `part` of the object at `location`'s key in `bucket`, asked for by its key and number, and
 /// its stored bytes.
-fn asked(bucket: &ObjectBucket, location: &Location, part: u64) -> (Asked, Vec<u8>) {
+fn asked(bucket: &RoutedBucket, location: &Location, part: u64) -> (Asked, Vec<u8>) {
     let object = crate::bucket::bucket_runtime().unwrap().block_on(async {
         use bucket_cell::bucket::Bucket as _;
         bucket.get(&location.key).await.unwrap().bytes

@@ -230,8 +230,6 @@ fn one() {
             "references_held" => rules.references_held = false,
             "references_relisted" => rules.references_relisted = false,
             "origins_kept" => rules.origins_kept = false,
-            "resumes_refer" => rules.resumes_refer = false,
-            "resumes_marked" => rules.resumes_marked = false,
             "versions_kept" => rules.versions_kept = false,
             "versions_carried" => rules.versions_carried = false,
             "versions_acked" => rules.versions_acked = false,
@@ -799,18 +797,6 @@ test_leaks!(forgotten_restores_need_clones_record_first, clones_record_first, fo
 // A slow host's reference, written after its retirement, stays for ever unmarked: no pass of its
 // child's cell, skipping it, looks at it again (TASK-395.13, TASK-395.14).
 test_leaks!(restores_need_retirements_marked, retirements_marked, restores());
-
-// cladefs: a clone a cell resumed, its host having died after its record, made with no reference:
-// once its version goes, the base's passes reclaim what it recovers from (TASK-455's review). Its
-// direct test is bucket_cell's `clones_resumed_need_resumes_refer`; its model specs/bucket's
-// NoResumesRefer. cladefs: ignored until the simulation resumes a fork at all (TASK-497): its
-// restores profile resumes none in 20,000 seeds, and the seed that found the rule needed, 2655,
-// found TASK-462's lost origin, fixed since, with every rule on.
-#[test]
-#[ignore = "TASK-497: the simulation resumes no fork; the direct test is clones_resumed_need_resumes_refer"]
-fn restores_need_resumes_refer() {
-    needed(Rules { resumes_refer: false, ..Rules::ALL }, restores(), 0..20_000);
-}
 
 /// Restores as [`restores`] makes them, and pairs of them to one child, as guests may name any ID:
 /// whichever's record comes first takes it, the other refused (TASK-79.82, TASK-173).

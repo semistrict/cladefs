@@ -13,7 +13,7 @@
 
 #![cfg(madsim)]
 
-use bucket_cell::object_bucket::ObjectBucket;
+use bucket_cell::object_bucket::{ObjectBucket, RoutedBucket};
 use cladefs::cladefsd::control::proto::{
     CreateCellRequest, ForkCellRequest, StatCellRequest, SyncCellRequest,
 };
@@ -67,7 +67,7 @@ impl Kept {
 
 /// Boots host `host`'s daemon, its cell directories under `root`, its cells in `bucket`, at
 /// placement token `host`, keeping what `kept` says, and serves for as long as the host runs.
-async fn boot(host: u8, root: &Path, bucket: Arc<ObjectBucket>, kept: Kept) {
+async fn boot(host: u8, root: &Path, bucket: Arc<RoutedBucket>, kept: Kept) {
     // As a host's process boots: its statics anew, its node started again after a kill too.
     node_local::starting();
     // Its root on its own disk, in memory, which a kill crashes (host_fs, TASK-685.4): as a host's
@@ -143,7 +143,7 @@ const ROOTS: &str = "/hosts";
 
 /// What every test's hosts share: their logger, their KMS's master key, and a bucket in memory,
 /// its requests delayed and failed as the seed says, and what heals it.
-fn world() -> (Arc<ObjectBucket>, Arc<bucket_cell::faults::Seeded>) {
+fn world() -> (Arc<RoutedBucket>, Arc<bucket_cell::faults::Seeded>) {
     // Once a process: a determinism check runs the test twice in it.
     let _ = cladefs::cladefsd::logging::to_stderr();
     // SAFETY: the simulation's one thread, before any node reads the environment.
@@ -158,14 +158,14 @@ fn world() -> (Arc<ObjectBucket>, Arc<bucket_cell::faults::Seeded>) {
     let objects = Arc::new(object_store::memory::InMemory::new());
     let seeded = Arc::new(bucket_cell::faults::Seeded::new(objects, madsim::rand::random(), odds));
     let backend = bucket_cell::faults::SeededBackend(seeded.clone());
-    (Arc::new(ObjectBucket::new(Arc::new(backend), "")), seeded)
+    (Arc::new(ObjectBucket::new(Arc::new(backend), "").unrouted()), seeded)
 }
 
 /// Hosts 1 to `count`, booted, their cell directories under [`ROOTS`]' `hostN`, their cells in
 /// `bucket`: their nodes, and their roots.
 fn hosts(
     count: u8,
-    bucket: &Arc<ObjectBucket>,
+    bucket: &Arc<RoutedBucket>,
 ) -> (Vec<madsim::runtime::NodeHandle>, Vec<PathBuf>) {
     hosts_keeping(count, bucket, Kept::NONE)
 }
@@ -173,7 +173,7 @@ fn hosts(
 /// Hosts as [`hosts`] makes them, keeping what `kept` says.
 fn hosts_keeping(
     count: u8,
-    bucket: &Arc<ObjectBucket>,
+    bucket: &Arc<RoutedBucket>,
     kept: Kept,
 ) -> (Vec<madsim::runtime::NodeHandle>, Vec<PathBuf>) {
     let handle = madsim::runtime::Handle::current();
@@ -539,7 +539,7 @@ async fn replicated_commits_survive_disk_faults() {
 /// on a thread of its own, as madsim runs them, whose node-local values are its own.
 #[test]
 fn attrition_needs_head_swaps() {
-    let found = (1..=40u64).find_map(|seed| {
+    let found = (1..=200u64).find_map(|seed| {
         let ran = std::thread::spawn(move || {
             let rules = bucket_cell::Rules { head_swap: false, ..bucket_cell::Rules::ALL };
             bucket_cell::set_rules(rules);
@@ -551,7 +551,7 @@ fn attrition_needs_head_swaps() {
             Ok(Ok(())) | Err(_) => None,
         }
     });
-    let found = found.expect("no seed of 40 lost a block told uploaded, head swaps unconditional");
+    let found = found.expect("no seed of 200 lost a block told uploaded, head swaps unconditional");
     eprintln!("seed {} lost: {}", found.0, found.1);
 }
 

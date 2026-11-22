@@ -269,7 +269,7 @@ pub async fn fork_ephemeral(
         Err(error) => Some(error),
         Ok(head) => {
             let named = head.as_ref().and_then(|head| head.version(version));
-            match named.filter(|named| named.at == origin.at) {
+            match named.filter(|named| named.at == origin.at && named.epoch == origin.epoch) {
                 None => Some(Error::Deleted),
                 Some(named) if crosses && !named.shared => Some(Error::NotShared(cell)),
                 Some(_) => None,
@@ -327,7 +327,7 @@ pub async fn ephemeral_references(bucket: &impl Bucket, incarnation: u64) -> Vec
     (listed.iter())
         .filter_map(|meta| layout::ephemeral_indexed(&meta.key))
         .filter(|&(of, ..)| of == incarnation)
-        .map(|(_, parent, at, child)| (Origin { parent, at }, child))
+        .map(|(_, parent, at, child)| (Origin { parent, at, epoch: 0 }, child))
         .collect()
 }
 
@@ -367,8 +367,7 @@ pub async fn fork_version(
 
 /// cladefs: [`fork_version`], the child's head made with `given`, if any: a KEK for the child's
 /// cell, its first DEK and those it inherits, rewrapped under that KEK ([`crate::keys::giving`],
-/// TASK-411.4), so that its first taking gives it none. Returns the child's head as it left it, if
-/// this made the fork: what the child's cell's first opening here goes on from (TASK-449).
+/// TASK-411.4), so that its first taking gives it none.
 pub async fn fork_version_keyed(
     bucket: &impl Bucket,
     child: CellId,
@@ -376,7 +375,7 @@ pub async fn fork_version_keyed(
     origin: Origin,
     (owner, given): (u64, Option<head::Given>),
     keys: Parents<'_>,
-) -> Result<Option<Slots>, Error> {
+) -> Result<(), Error> {
     failpoint!("version::record");
     let refers = rules().references && rules().clones_refer_first;
     // Without the rule, as a test shows it needed: the reference before the head.
@@ -409,10 +408,6 @@ pub async fn fork_version_keyed(
             refused = Some(found);
             Err(Error::Deleted)
         }
-        // Ours, being made by another making of it, which it resumes.
-        Some(found) if found.forking().is_some() && !found.resumed => {
-            Ok(Step::Write(Head { resumed: true, ..found }, true))
-        }
         Some(found) => Ok(Step::Stop(found.forking().is_some())),
     })
     .await;
@@ -425,7 +420,6 @@ pub async fn fork_version_keyed(
         Error::Unmade(_) => Error::IdTaken(child),
         error => error,
     })?;
-    let mut made = None;
     if making {
         failpoint!("version::recorded");
         if refers && !refers_first {
@@ -433,61 +427,20 @@ pub async fn fork_version_keyed(
             failpoint!("version::referred");
         }
         let start = Start::Found(left);
-        made = finish_fork(bucket, child, version, origin, keys, start, referred).await?;
+        finish_fork(bucket, child, version, origin, keys, start, referred).await?;
     }
     // Without the rule, as a test shows it needed: once made.
     if rules().references && !rules().clones_refer_first {
         refer(bucket, origin, child, owner).await;
     }
-    Ok(made)
-}
-
-/// cladefs: resumes the fork of a version to `child` that another began ([`fork_version`]), its
-/// head saying it is being made: a cell opening `child`, its host dead or slow, makes it, so that
-/// it takes no state of a fork not made (TASK-455's review). The head is said resumed first
-/// ([`Head::resumed`]), with a condition, so that the clone made says so, whose reference's
-/// retirement is then marked: the host that began it, slow, may write the reference after the
-/// clone was made, deleted and its cell removed (rule `resumes_marked`). Then the reference, as
-/// that host writes it, before the fork is made (rule `resumes_refer`): it may have died first.
-/// Then the fork made, as [`fork_version`] makes it. A fork made already, it writes nothing: its
-/// host, or a resume, wrote the reference before. Fails as [`fork_version`] does, and with
-/// [`Error::Deleted`] for a fork given up on, [`Error::NoCell`] for no head. A restore into
-/// another cell writes the checkpoint at the version's segment, if none is there, sealed under
-/// `keys`. Returns the child's head as it left it.
-pub async fn resume_version_fork(
-    bucket: &impl Bucket,
-    child: CellId,
-    start: Start<Slots>,
-    keys: Parents<'_>,
-) -> Result<Option<Slots>, Error> {
-    let (forking, left) = change_leaving(bucket, child, start, |found| match found {
-        None => Err(Error::NoCell),
-        Some(found) if found.deleted() => Err(Error::Deleted),
-        Some(found) if found.forking().is_none() => Ok(Step::Stop(None)),
-        Some(found) if found.resumed => Ok(Step::Stop(Some(found))),
-        Some(found) => Ok(Step::Write(Head { resumed: true, ..found.clone() }, Some(found))),
-    })
-    .await
-    .map_err(given_up)?;
-    let Some(Head { made: Made::Forking { origin, version }, owner, .. }) = forking else {
-        return Ok(Some(left));
-    };
-    // Without the rule, as a test shows it needed: none written.
-    let mut referred = None;
-    if rules().references && rules().clones_refer_first && rules().resumes_refer {
-        referred = Some(refer(bucket, origin, child, owner).await);
-    }
-    let start = Start::Found(left);
-    let made = finish_fork(bucket, child, version, origin, keys, start, referred).await?;
-    Ok(made)
+    Ok(())
 }
 
 /// The fork being made of the version `version`, of `origin`, to `child`, made, the child's head's
-/// update starting from `start`: the head as its create left it, a read less (TASK-449), its
-/// update conditional on that version as on one a read found, so that its deletion, its giving up,
-/// or a resume since makes it read the head anew. The version's cell's head read first, and for a
-/// child of another cell, the cell's checkpoint at the version made, sealed under `keys`
-/// (TASK-476). Returns the child's head as it left it, if it made the fork.
+/// update starting from `start`: the head as its create left it, a read less, its update
+/// conditional on that version as on one a read found, so that its deletion or its giving up since
+/// makes it read the head anew. The version's cell's head read first, and for a child of another
+/// cell, the cell's checkpoint at the version made, sealed under `keys` (TASK-476).
 ///
 /// cladefs: having `referred`, what leaves the parent's bucket, after the head's read
 /// ([`leave_parents`]).
@@ -499,14 +452,14 @@ async fn finish_fork(
     keys: Parents<'_>,
     start: Start<Slots>,
     referred: Option<Referred>,
-) -> Result<Option<Slots>, Error> {
+) -> Result<(), Error> {
     let cell = origin.parent;
     // Into another tenant's cell, a version of the default tenant's, or one shared.
     let crosses = cell.tenant != child.tenant && cell.tenant != layout::DEFAULT_TENANT;
     if rules().forks_check_versions || crosses {
         let head = head::get(bucket, cell).await?;
         let named = head.as_ref().and_then(|head| head.version(version));
-        let named = named.filter(|named| named.at == origin.at);
+        let named = named.filter(|named| named.at == origin.at && named.epoch == origin.epoch);
         if rules().forks_check_versions && named.is_none() {
             return Err(Error::Deleted);
         }
@@ -523,7 +476,7 @@ async fn finish_fork(
     failpoint!("version::checked");
     // Conditional, against its being deleted, or given up on ([`abandon`]). A head's bytes
     // repeat only for the same change, which is then made.
-    let (made, left) = change_leaving(bucket, child, start, |found| match found {
+    let (made, _) = change_leaving(bucket, child, start, |found| match found {
         None => Err(Error::NoCell),
         Some(found) if found.deleted() => Err(Error::Deleted),
         Some(found @ Head { made: Made::Forking { origin, .. }, .. }) => {
@@ -536,7 +489,7 @@ async fn finish_fork(
     if made {
         failpoint!("version::made");
     }
-    Ok(made.then_some(left))
+    Ok(())
 }
 
 /// cladefs: `error`, a fork's step's, as the fork takes it: a head failed as it was made, by its
@@ -672,7 +625,7 @@ mod tests {
         let live = |cell| read(&bucket, cell).map(|head| !head.deleted());
         let unfork = |cell, owner| block_on(delete_fork(&bucket, cell, owner, (9, 0)));
         // A clone's, made.
-        let origin = Origin { parent: test_cell(1), at: 7 };
+        let origin = Origin { parent: test_cell(1), at: 7, epoch: 1 };
         let made = Head::of(Made::Clone(origin), 0x33);
         block_on(crate::testing::make_head(&bucket, test_cell(3), made)).unwrap();
         assert_eq!(unfork(test_cell(3), 0x33), Ok(true));
@@ -713,7 +666,7 @@ mod tests {
             .unwrap();
         block_on(writer.upload(at)).unwrap();
         block_on(writer.acknowledge()).unwrap();
-        let origin = Origin { parent: cell, at };
+        let origin = Origin { parent: cell, at, epoch: writer.epoch() };
         let celled = |tenant, id| CellId { tenant, id };
         let restore = |child: CellId, id| {
             let kms = crate::keys::testing::host_kms();

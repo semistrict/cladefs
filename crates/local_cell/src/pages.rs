@@ -262,19 +262,14 @@ impl PageCache {
     }
 
     /// cladefs: sizes the cache to `room`, the bytes the process's governor leaves it, as Linux
-    /// sizes its page cache to the memory free (TASK-433.8): it holds as much as `room`, the
-    /// flusher writes back past a tenth of it dirty, and writers wait past a fifth
-    /// (`vm.dirty_background_ratio` and `vm.dirty_ratio`'s defaults), none less than what it was
-    /// made with ([`Options`]). The governor evicts it to `room` as well ([`PageCache::evict_to`]),
-    /// so that what this allows past `room` under pressure is dirty pages alone, to be written.
-    /// With the fixed bounds alone, a burst of 256 MiB, as cell-bench's, was evicted as it was
-    /// written, and read back from the disk to be framed: the commit after it 2-4x slower on
-    /// the test host than through the host's page cache.
+    /// sizes its page cache to the memory free (TASK-433.8): clean page retention stays bounded by
+    /// `room` even below `Options::default().most` (board 6001), while dirty thresholds
+    /// (`background` and `hard`) keep their floors so write-back and throttling continue to work.
     pub fn size_to(&self, room: u64) {
         let floors = self.options;
         self.background.store((room / 10).max(floors.background), Ordering::Relaxed);
         self.hard.store((room / 5).max(floors.hard), Ordering::Relaxed);
-        self.most.store(room.max(floors.most), Ordering::Relaxed);
+        self.most.store(room, Ordering::Relaxed);
         self.drained();
     }
 
@@ -299,16 +294,21 @@ impl PageCache {
     /// or nothing clean is left; and wakes the flusher if what it holds is still more, so that
     /// what is dirty becomes clean, and evictable. Returns the bytes it holds then.
     pub fn evict_to(&self, target: u64) -> u64 {
-        if self.bytes() <= target {
-            return self.bytes();
+        let bytes = self.bytes();
+        if bytes <= target {
+            return bytes;
         }
-        for file in self.files_by(|file| file.used()) {
-            if self.bytes() <= target {
-                break;
+        // Only scan open files when clean pages exist to evict; under low `most` (< `background`)
+        // with only dirty pages resident, avoid scanning and waking the flusher on every write.
+        if bytes > self.dirty.load(Ordering::Relaxed) {
+            for file in self.files_by(|file| file.used()) {
+                if self.bytes() <= target {
+                    break;
+                }
+                file.evict_clean();
             }
-            file.evict_clean();
         }
-        if self.bytes() > target {
+        if self.bytes() > target && self.dirty.load(Ordering::Relaxed) > self.background() {
             self.wake();
         }
         self.bytes()
@@ -558,6 +558,9 @@ pub struct Cached<F: File> {
 pub(crate) struct Shared<F: File> {
     file: F,
     cache: Arc<PageCache>,
+    /// cladefs: the host disk this file lives on, whose dirty count tracks its dirty pages
+    /// (board 5995).
+    disk: Option<Arc<bucket_cell::host_disk::HostDisk>>,
     pages: Mutex<Pages>,
     /// Held by its write-back, one at a time (`I_SYNC`): what a sync, or a dropping of pages, waits
     /// on for the write-back in flight to end. A lock, not a condition variable, so that whatever
@@ -598,10 +601,20 @@ impl<F: File> Clone for Cached<F> {
 impl<F: File> Cached<F> {
     /// `file`, through `cache`.
     pub fn new(file: F, cache: &Arc<PageCache>) -> io::Result<Self> {
+        Self::on_disk(file, cache, None)
+    }
+
+    /// `file`, through `cache`, charging dirty pages to `disk` if given (board 5995).
+    pub fn on_disk(
+        file: F,
+        cache: &Arc<PageCache>,
+        disk: Option<Arc<bucket_cell::host_disk::HostDisk>>,
+    ) -> io::Result<Self> {
         let size = file.size()?;
         let shared = Arc::new(Shared {
             file,
             cache: cache.clone(),
+            disk,
             pages: Mutex::new(Pages {
                 dirty_pages: 0,
                 pages: BTreeMap::new(),
@@ -665,6 +678,27 @@ impl<F: File> Cached<F> {
 }
 
 impl<F: File> Shared<F> {
+    fn dirty_add(&self, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        let dirty = self.cache.dirty.fetch_add(bytes, Ordering::Relaxed) + bytes;
+        self.cache.peak_dirty.fetch_max(dirty, Ordering::Relaxed);
+        if let Some(disk) = &self.disk {
+            disk.dirty.add(bytes);
+        }
+    }
+
+    fn dirty_sub(&self, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        self.cache.dirty.fetch_sub(bytes, Ordering::Relaxed);
+        if let Some(disk) = &self.disk {
+            disk.dirty.sub(bytes);
+        }
+    }
+
     /// Its write-back, taken: none other of it in flight.
     fn writeback(&self) -> MutexGuard<'_, ()> {
         self.writeback.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -689,14 +723,16 @@ impl<F: File> Shared<F> {
         let first = range.start / PAGE;
         let last = range.end.div_ceil(PAGE);
         let doomed: Vec<u64> = pages.pages.range(first..last).map(|(&index, _)| index).collect();
+        let mut dropped_dirty = 0u64;
         for index in doomed {
             let page = pages.pages.remove(&index).unwrap();
             self.cache.held.fetch_sub(PAGE, Ordering::Relaxed);
             if page.dirty.is_some() {
                 pages.dirty_pages -= 1;
-                self.cache.dirty.fetch_sub(PAGE, Ordering::Relaxed);
+                dropped_dirty += 1;
             }
         }
+        self.dirty_sub(dropped_dirty * PAGE);
         if pages.dirty_pages == 0 {
             pages.dirtied = None;
         }
@@ -709,7 +745,13 @@ impl<F: File> Shared<F> {
     /// write-back in flight first, if any. Pages are written in the file's order, contiguous dirty
     /// ones at once, up to [`CHUNK`] a write.
     fn flush(&self, range: Range<u64>, through: Option<u64>) -> io::Result<()> {
-        self.write_runs(range, through, None)
+        let flushed = self.write_runs(range, through, None);
+        // Clean pages just written back stay capped at `most` (board 6001).
+        let most = self.cache.most();
+        if self.cache.bytes() > most {
+            self.cache.evict_to(most);
+        }
+        flushed
     }
 
     fn write_runs(
@@ -765,6 +807,7 @@ impl<F: File> Shared<F> {
             let in_flight = InFlight { shared: self, run: &written, len, ended: false };
             let wrote = self.file.write_at(bytes, start);
             pages = in_flight.end();
+            let mut cleaned = 0u64;
             for &(index, last) in &written {
                 let Some(page) = pages.pages.get_mut(&index) else { continue };
                 if wrote.is_err() {
@@ -773,13 +816,14 @@ impl<F: File> Shared<F> {
                 if page.last == last {
                     page.dirty = None;
                     pages.dirty_pages -= 1;
-                    self.cache.dirty.fetch_sub(PAGE, Ordering::Relaxed);
+                    cleaned += 1;
                 } else {
                     // Written again while it was written back: what it holds since is the next
                     // write-back's.
                     page.dirty = Some(last + 1);
                 }
             }
+            self.dirty_sub(cleaned * PAGE);
             if pages.dirty_pages == 0 {
                 pages.dirtied = None;
             }
@@ -852,7 +896,7 @@ impl<F: File> Drop for Shared<F> {
         let pages = self.pages.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dirty = pages.pages.values().filter(|page| page.dirty.is_some()).count() as u64;
         self.cache.held.fetch_sub(pages.pages.len() as u64 * PAGE, Ordering::Relaxed);
-        self.cache.dirty.fetch_sub(dirty * PAGE, Ordering::Relaxed);
+        self.dirty_sub(dirty * PAGE);
         self.cache.drained();
     }
 }
@@ -867,7 +911,12 @@ impl<F: File> Paged for Shared<F> {
     }
 
     fn write_back(&self, most: u64) -> io::Result<()> {
-        self.write_runs(0..u64::MAX, None, Some(most))
+        let wrote = self.write_runs(0..u64::MAX, None, Some(most));
+        let limit = self.cache.most();
+        if self.cache.bytes() > limit {
+            self.cache.evict_to(limit);
+        }
+        wrote
     }
 
     fn write_range(&self, range: Range<u64>) -> io::Result<()> {
@@ -985,9 +1034,7 @@ impl<F: File> File for Cached<F> {
         }
         let held = shared.cache.held.fetch_add(added * PAGE, Ordering::Relaxed) + added * PAGE;
         shared.cache.peak.fetch_max(held, Ordering::Relaxed);
-        let dirty =
-            shared.cache.dirty.fetch_add(dirtied * PAGE, Ordering::Relaxed) + dirtied * PAGE;
-        shared.cache.peak_dirty.fetch_max(dirty, Ordering::Relaxed);
+        shared.dirty_add(dirtied * PAGE);
         drop(pages);
         shared.cache.dirtied();
         failed.map_or(Ok(()), Err)
@@ -1244,8 +1291,8 @@ mod tests {
         assert_eq!(under, pattern(7, 2 * PAGE as usize));
     }
 
-    /// Sized to a governor's room, the cache's bounds are a tenth, a fifth and all of it, none
-    /// below what it was made with; sized down again, they go back to those (TASK-433.8).
+    /// Sized to a governor's room, dirty thresholds keep their floors while `most` tracks `room`
+    /// even below the default 256 MiB so clean pages stay bounded (TASK-433.8, board 6001).
     #[test]
     fn caches_size_to_the_room_a_governor_leaves() {
         let cache = PageCache::without_flusher(Options::default());
@@ -1260,7 +1307,49 @@ mod tests {
         let sized = cache.options();
         assert_eq!(
             (sized.background, sized.hard, sized.most),
-            (made.background, made.hard, made.most)
+            (made.background, made.hard, 64 << 20)
+        );
+    }
+
+    /// board 6001: when sized to a room smaller than `Options::default().most`, reads and writes
+    /// keep clean page retention bounded by `room` without waiting for a subsequent `evict_to()`.
+    #[test]
+    fn clean_pages_stay_bounded_below_default_most() {
+        let dir = MemDisk::new();
+        let cache = PageCache::without_flusher(Options::default());
+        let room = 4 * PAGE;
+        assert!(room < Options::default().most);
+        cache.size_to(room);
+
+        let f1 = Cached::new(dir.create("f1", true).unwrap(), &cache).unwrap();
+        let f2 = Cached::new(dir.create("f2", true).unwrap(), &cache).unwrap();
+        let f3 = Cached::new(dir.create("f3", true).unwrap(), &cache).unwrap();
+
+        f1.write_at(&pattern(1, (3 * PAGE) as usize), 0).unwrap();
+        f1.sync().unwrap();
+        assert_eq!(cache.usage().dirty, 0);
+        assert!(cache.usage().held <= room);
+
+        f2.write_at(&pattern(2, (3 * PAGE) as usize), 0).unwrap();
+        // Writing f2 took held past `room`, evicting f1's clean pages immediately.
+        assert_eq!(cache.usage().held - cache.usage().dirty, 0);
+        f2.sync().unwrap();
+        assert_eq!(cache.usage().dirty, 0);
+        assert!(cache.usage().held <= room);
+
+        // Reading back f1 still returns its synced bytes from disk without inflating clean pages.
+        let mut buf = vec![0u8; (3 * PAGE) as usize];
+        f1.read_at(&mut buf, 0).unwrap();
+        assert_eq!(buf, pattern(1, (3 * PAGE) as usize));
+
+        // Writing more than `room` to a single file and syncing evicts its clean pages at sync.
+        f3.write_at(&pattern(3, (6 * PAGE) as usize), 0).unwrap();
+        f3.sync().unwrap();
+        assert_eq!(cache.usage().dirty, 0);
+        assert!(
+            cache.usage().held <= room,
+            "clean pages {} exceeded room {room}",
+            cache.usage().held
         );
     }
 

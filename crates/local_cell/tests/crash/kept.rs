@@ -22,7 +22,7 @@ use super::rounds::{BLOCK, CELL, Model, OPTIONS, Uploading, workload_uploading};
 use bucket_cell::bucket::{ByteRange, Error as BucketError, Meta, Object, PutMode, Version};
 use bucket_cell::collector;
 use bucket_cell::fetch::{Budget, Limits};
-use bucket_cell::object_bucket::ObjectBucket;
+use bucket_cell::object_bucket::{ObjectBucket, RoutedBucket};
 use futures::FutureExt as _;
 use local_cell::upload::{self, Runtime, Uploader};
 use local_cell::{BucketData, Description, LocalCell, MemDir, Recovering};
@@ -49,7 +49,7 @@ const URL: &str = "memory:///kept";
 /// reaches it: since its last crash, a copy of what the bucket held then ([`Host::crash`]).
 struct Host {
     runtime: HostRuntime,
-    bucket: RefCell<Arc<ObjectBucket>>,
+    bucket: RefCell<Arc<RoutedBucket>>,
     memory: RefCell<Arc<InMemory>>,
 }
 
@@ -57,12 +57,12 @@ impl Host {
     fn new() -> Self {
         let runtime = HostRuntime::new();
         let memory = Arc::new(InMemory::new());
-        let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(memory.clone(), "").unrouted());
         Self { runtime, bucket: RefCell::new(bucket), memory: RefCell::new(memory) }
     }
 
     /// The bucket, as the host reaches it now.
-    fn bucket(&self) -> Arc<ObjectBucket> {
+    fn bucket(&self) -> Arc<RoutedBucket> {
         self.bucket.borrow().clone()
     }
 
@@ -74,7 +74,7 @@ impl Host {
     /// copy whose head named a segment it lacked (TASK-432).
     fn crash(&self) {
         let copy = Arc::new(self.memory.borrow().fork());
-        *self.bucket.borrow_mut() = Arc::new(ObjectBucket::new(copy.clone(), ""));
+        *self.bucket.borrow_mut() = Arc::new(ObjectBucket::new(copy.clone(), "").unrouted());
         *self.memory.borrow_mut() = copy;
     }
 
@@ -123,7 +123,7 @@ const COLLECTING: collector::Options = collector::Options { compact_below: 0.9, 
 /// which never complete, as a dead host's do not. A failing request would be no cut: a pass
 /// retries what fails for ever.
 struct Cut {
-    bucket: Arc<ObjectBucket>,
+    bucket: Arc<RoutedBucket>,
     left: AtomicU64,
 }
 

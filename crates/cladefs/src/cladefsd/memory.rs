@@ -149,12 +149,16 @@ pub fn held_parts() -> &'static Arc<local_cell::HeldParts> {
 }
 
 /// cladefs: the memory the governor governs ([`govern`]), in bytes: what every tenant's arena
-/// holds, and the parts held ([`held_parts`]).
+/// holds, held parts, unified recent/unpacked parts, bucket object tails, cell page cache, and
+/// pooled framing buffers (board 6026).
 pub fn governed_bytes() -> u64 {
+    let fetch_mem = crate::bucket::memory();
     physmem::arenas_bytes()
         + held_parts().bytes()
-        + local_cell::unpacked().bytes()
+        + fetch_mem.recent_bytes()
+        + fetch_mem.tails_bytes()
         + local_cell::pages::shared().bytes()
+        + local_cell::framing_buffers_bytes()
 }
 
 /// cladefs: the governor's look at the host's memory (TASK-358): every tenant's memory together,
@@ -176,19 +180,27 @@ pub async fn govern(allowance: u64) {
     if parts.bytes() > room {
         parts.evict_to(room);
     }
-    // cladefs: the parts of the cells' files unpacked lately, a cache as the pages are, which
-    // reads unpack again (TASK-603).
-    let unpacked = local_cell::unpacked();
+    // cladefs: unified recent/unpacked parts (local framed + bucket fetch) and object tails
+    // (TASK-603, board 6026).
+    let fetch_mem = crate::bucket::memory();
     let room = room.saturating_sub(parts.bytes());
-    if unpacked.bytes() > room {
-        unpacked.evict_to(room);
+    if fetch_mem.recent_bytes() > room {
+        fetch_mem.evict_recent_to(room);
     }
-    let room = room.saturating_sub(unpacked.bytes());
+    let room = room.saturating_sub(fetch_mem.recent_bytes());
+    if fetch_mem.tails_bytes() > room {
+        fetch_mem.evict_tails_to(room);
+    }
+    let room = room.saturating_sub(fetch_mem.tails_bytes());
     let pages = local_cell::pages::shared();
-    // Sized to what it may hold, as Linux's page cache to the memory free (TASK-433.8).
+    // Sized to what it may hold, as Linux's page cache to the memory free (TASK-433.8, board 6001).
     pages.size_to(room);
     if pages.bytes() > room {
         pages.evict_to(room);
+    }
+    let room = room.saturating_sub(pages.bytes());
+    if local_cell::framing_buffers_bytes() > room {
+        local_cell::evict_framing_buffers_to(room);
     }
     let weighted: Vec<(u64, u64)> = {
         let registry = REGISTRY.get().lock().unwrap();

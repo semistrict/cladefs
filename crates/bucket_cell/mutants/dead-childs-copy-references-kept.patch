@@ -4,8 +4,8 @@
 # Killer: sim::versions_mirrored_across_regions
 --- a/crates/bucket_cell/src/collector.rs
 +++ b/crates/bucket_cell/src/collector.rs
-@@ -779,7 +779,7 @@
-         // its original there.
+@@ -784,7 +784,7 @@
+         // apart from its original there.
          if let Some(here) = bucket.mirrors() {
              let all: Vec<&str> = marked.iter().chain(&unmarked).map(String::as_str).collect();
 -            report.retired += here.retire(&all).await;

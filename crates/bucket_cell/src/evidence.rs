@@ -245,7 +245,7 @@ mod tests {
     use crate::testing::{self, Direct, SimBucket};
     use futures::executor::block_on;
 
-    const VERSION: Of = Of { origin: Origin { parent: test_cell(3), at: 7 }, tenant: 5 };
+    const VERSION: Of = Of { origin: Origin { parent: test_cell(3), at: 7, epoch: 1 }, tenant: 5 };
 
     fn units(of: u64) -> Vec<Unit> {
         let extent = ExtentId { cell: 3, sequence: of };
