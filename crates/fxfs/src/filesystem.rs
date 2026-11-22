@@ -1921,16 +1921,22 @@ mod tests {
     /// every barrier (backlog doc-4: a crash keeps what preceded the last barrier, and any of what
     /// followed it, at random). Each crash leaves a filesystem that mounts and checks, holds the files
     /// synced before it, and goes on writing.
-    #[test_case(true; "with barriers")]
-    #[test_case(false; "with checksums")]
+    #[test_case(true, false; "with barriers")]
+    #[test_case(true, true; "with barriers on atomic commits")]
+    #[test_case(false, false; "with checksums")]
     #[fuchsia::test]
-    async fn test_crashes_at_random_barriers(barriers_enabled: bool) {
+    async fn test_crashes_at_random_barriers(barriers_enabled: bool, atomic_commits: bool) {
         use crate::object_store::AttributeId;
 
         const ROUNDS: u64 = 24;
         const VOLUME: &str = "test";
         let crashes = fake_device::Crashes::new(26_3, 1);
-        let device = DeviceHolder::new(FakeDevice::new(8192, 4096).record_crashes(crashes.clone()));
+        let mut fake = FakeDevice::new(8192, 4096).record_crashes(crashes.clone());
+        if atomic_commits {
+            fake = fake.with_atomic_commits();
+        }
+        let pre_barriers = fake.pre_barrier_counter();
+        let device = DeviceHolder::new(fake);
         let fs = FxFilesystemBuilder::new()
             .barriers_enabled(barriers_enabled)
             .format(true)
@@ -2064,7 +2070,9 @@ mod tests {
         let recorded: Vec<_> = crashes.take().collect();
         assert!(recorded.len() >= ROUNDS as usize, "{} crashes recorded", recorded.len());
         for (crash, (synced_rounds, device)) in recorded.into_iter().enumerate() {
-            let fs = FxFilesystem::open(DeviceHolder::new(device))
+            let fs = FxFilesystemBuilder::new()
+                .barriers_enabled(barriers_enabled)
+                .open(DeviceHolder::new(device))
                 .await
                 .unwrap_or_else(|e| panic!("crash {crash} doesn't mount: {e:?}"));
             fsck(fs.clone()).await.unwrap_or_else(|e| panic!("crash {crash}: fsck failed: {e:?}"));
@@ -2143,6 +2151,18 @@ mod tests {
                 "crash {crash}: the store holds extents Fxfs doesn't know"
             );
             fs.close().await.expect("close failed");
+        }
+
+        // Checked after every crash recovery and post-crash write/compaction so recovered devices
+        // are verified to preserve `atomic_commits()` too (board 7537, hotbed review 10).
+        let pre_barriers = pre_barriers.load(std::sync::atomic::Ordering::Relaxed);
+        if barriers_enabled && !atomic_commits {
+            assert!(pre_barriers > 0, "expected PRE_BARRIER writes on a non-atomic device");
+        } else {
+            assert_eq!(
+                pre_barriers, 0,
+                "unexpected PRE_BARRIER writes (barriers_enabled={barriers_enabled}, atomic_commits={atomic_commits})"
+            );
         }
     }
 

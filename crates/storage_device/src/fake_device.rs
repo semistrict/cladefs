@@ -98,6 +98,16 @@ impl Inner {
         discarded
     }
 
+    /// cladefs: undoes every write and free since the last barrier (board 7537): what a crash loses
+    /// on an atomic-commit device (`local_cell`), where uncommitted writes never survive a crash.
+    fn discard_all(&mut self, block_size: usize) -> Vec<String> {
+        let mut discarded = Vec::new();
+        for change in std::mem::take(&mut self.since_barrier) {
+            discarded.extend(self.undo(change, block_size));
+        }
+        discarded
+    }
+
     /// Undoes `change`, saying so if there was anything to undo.
     fn undo(&mut self, change: Change, block_size: usize) -> Option<String> {
         match change {
@@ -199,6 +209,10 @@ struct Crash {
     cell: u64,
     /// cladefs: the seed of the device that recovers, if it is awkward, and the floor before.
     awkward: Option<(u64, u64)>,
+    /// cladefs: whether the recovered device keeps atomic-commit semantics (board 7537).
+    atomic_commits: bool,
+    /// cladefs: shared PRE_BARRIER counter across original and recovered devices (board 7537).
+    pre_barriers: Arc<AtomicU64>,
 }
 
 impl Crash {
@@ -207,8 +221,10 @@ impl Crash {
         let mut inner = Arc::unwrap_or_clone(self.inner);
         inner.undo_lost(&self.lost, self.block_size as usize);
         inner.barrier();
-        let device =
+        let mut device =
             FakeDevice::with_inner(inner, self.capacity, self.block_size).with_cell(self.cell);
+        device.atomic_commits = self.atomic_commits;
+        device.pre_barriers = self.pre_barriers;
         let device = match self.awkward {
             Some((seed, floor)) => device.recovered_awkward(seed, floor),
             None => device,
@@ -307,11 +323,25 @@ impl Crashes {
                     return;
                 }
                 let mut crashed = inner.clone();
-                crashed.discard_random(&mut crashes.rng, device.allocator.block_size());
+                if device.atomic_commits {
+                    if crashes.rng.random::<bool>() {
+                        crashed.discard_all(device.allocator.block_size());
+                    }
+                } else {
+                    crashed.discard_random(&mut crashes.rng, device.allocator.block_size());
+                }
                 crashes.record_crash(device, mark, Arc::new(crashed), Vec::new());
             }
             Recording::Every { most } => {
-                let together = inner.lost_together();
+                let together = if device.atomic_commits {
+                    if inner.since_barrier.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![(0..inner.since_barrier.len()).collect()]
+                    }
+                } else {
+                    inner.lost_together()
+                };
                 if together.is_empty() {
                     return;
                 }
@@ -345,6 +375,8 @@ impl CrashesInner {
             block_size: device.block_size(),
             cell: device.cell,
             awkward,
+            atomic_commits: device.atomic_commits,
+            pre_barriers: device.pre_barriers.clone(),
         });
     }
 }
@@ -573,6 +605,12 @@ pub struct FakeDevice {
     /// cladefs: the devices reads of extents this one doesn't hold fall through to, which forks of it
     /// fall through to too (`FakeDevice::attach`), each with what counts the reads that reach it.
     attached: Vec<(Arc<DeviceHolder>, Arc<AtomicU64>)>,
+    /// cladefs: whether commits on this device are atomic across all prior writes (board 7537):
+    /// coupled with `Device::atomic_commits()` and all-or-nothing crash discard so the contract
+    /// and the crash model can never drift apart.
+    atomic_commits: bool,
+    /// cladefs: number of `WriteFlags::PRE_BARRIER` writes issued to this device (board 7537).
+    pre_barriers: Arc<AtomicU64>,
 }
 
 const TRANSFER_HEAP_SIZE: usize = 64 * 1024 * 1024;
@@ -609,7 +647,22 @@ impl FakeDevice {
             awkward: None,
             known_open: OpenExtents::default(),
             attached: Vec::new(),
+            atomic_commits: false,
+            pre_barriers: Arc::default(),
         }
+    }
+
+    /// cladefs: enables atomic-commit mode (board 7537): `Device::atomic_commits()` returns
+    /// `true`, and crash recording discards either all changes since the last barrier or none
+    /// (matching `local_cell`'s commit-prefix semantics).
+    pub fn with_atomic_commits(mut self) -> Self {
+        self.atomic_commits = true;
+        self
+    }
+
+    /// cladefs: shared counter of `WriteFlags::PRE_BARRIER` writes issued to this device.
+    pub fn pre_barrier_counter(&self) -> Arc<AtomicU64> {
+        self.pre_barriers.clone()
     }
 
     /// cladefs: makes the device, new, as awkward as a store (`Awkward`), as `seed` says.
@@ -736,7 +789,10 @@ impl FakeDevice {
             // The fork's cell has written nothing.
             inner.next_sequence = 0;
         }
-        Self::with_inner(inner, self.capacity, self.block_size()).with_cell(cell)
+        let mut copy = Self::with_inner(inner, self.capacity, self.block_size()).with_cell(cell);
+        copy.atomic_commits = self.atomic_commits;
+        copy.pre_barriers = self.pre_barriers.clone();
+        copy
     }
 
     /// cladefs: a copy of the device, as if it crashed losing nothing and recovered, awkward as
@@ -902,6 +958,7 @@ impl Device for FakeDevice {
         let mut inner = self.inner.lock();
 
         if write_opts.flags.contains(WriteFlags::PRE_BARRIER) {
+            self.pre_barriers.fetch_add(1, Ordering::Relaxed);
             if let Some(observer) = &self.observer {
                 observer.barrier();
             }
@@ -1057,6 +1114,10 @@ impl Device for FakeDevice {
         self.read_only.load(Ordering::Relaxed)
     }
 
+    fn atomic_commits(&self) -> bool {
+        self.atomic_commits
+    }
+
     fn extents(&self) -> Vec<ExtentId> {
         let mut extents: Vec<_> = self.inner.lock().extents.keys().copied().collect();
         extents.sort();
@@ -1089,12 +1150,17 @@ impl Device for FakeDevice {
         Ok(DeviceHolder::new(fork))
     }
 
-    /// Undoes each write of a block and each free since the last barrier, or not, at random: a
-    /// block undone holds garbage, and an extent whose free is undone holds what it did.
+    /// Undoes each write of a block and each free since the last barrier, or not, at random (or
+    /// all of them when `atomic_commits` is enabled, board 7537): a block undone holds garbage,
+    /// and an extent whose free is undone holds what it did.
     fn discard_random_since_last_flush(&self) -> Result<(), Error> {
         let mut inner = self.inner.lock();
         log::info!("Discarding from {} changes", inner.since_barrier.len());
-        let discarded = inner.discard_random(&mut rand::rng(), self.allocator.block_size());
+        let discarded = if self.atomic_commits {
+            inner.discard_all(self.allocator.block_size())
+        } else {
+            inner.discard_random(&mut rand::rng(), self.allocator.block_size())
+        };
         log::info!("Discarded {discarded:?}");
         Ok(())
     }

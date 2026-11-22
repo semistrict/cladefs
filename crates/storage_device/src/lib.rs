@@ -179,6 +179,16 @@ pub trait Device: Send + Sync {
     /// Returns whether the device is read-only.
     fn is_read_only(&self) -> bool;
 
+    /// cladefs: whether commits on this device are atomic across all writes completed before the
+    /// barrier — no uncommitted write can survive a crash without every earlier uncommitted write
+    /// (`local_cell`, doc-4, board 7537). When true, Fxfs with `barriers_enabled` does not need a
+    /// `PRE_BARRIER` before journal writes to prevent data/journal reordering; `POST_BARRIER`
+    /// alone orders and seals both data and journal atomically in one commit. Defaults to `false`
+    /// (safe for devices whose crash model can reorder writes between barriers).
+    fn atomic_commits(&self) -> bool {
+        false
+    }
+
     /// cladefs: the IDs of the extents the device holds, in order. (Only implemented for testing
     /// devices.)
     fn extents(&self) -> Vec<ExtentId> {

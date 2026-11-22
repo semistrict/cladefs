@@ -1407,13 +1407,16 @@ struct Setting {
     batched_graveyard: bool,
     /// Whether the platform is the guest's, whose VFS keeps directories' times (`Seeded`).
     keeps_directory_times: bool,
+    /// cladefs: whether `barriers_enabled` is on with an atomic-commit `FakeDevice` (board 7537):
+    /// one switch coupling `barriers_enabled(true)` and `FakeDevice::with_atomic_commits()`.
+    atomic_barriers: bool,
 }
 
 impl Setting {
     fn calm(seed: u64, blocks: u64) -> Self {
         let (awkward, fsck_each, every_cut, failing) = (false, false, false, false);
         let (cuts_one_in, workers, batched_graveyard) = (CUTS_ONE_IN, false, false);
-        let keeps_directory_times = false;
+        let (keeps_directory_times, atomic_barriers) = (false, false);
         Self {
             seed,
             blocks,
@@ -1425,7 +1428,12 @@ impl Setting {
             workers,
             batched_graveyard,
             keeps_directory_times,
+            atomic_barriers,
         }
+    }
+
+    fn with_atomic_barriers(self) -> Self {
+        Self { atomic_barriers: true, ..self }
     }
 
     fn awkward(seed: u64, blocks: u64) -> Self {
@@ -1507,14 +1515,16 @@ impl Setting {
             true => builder.graveyard_batch_delay(BATCHES_APART),
             false => builder,
         };
-        if !self.every_cut {
-            return (builder, hooks);
-        }
-        let builder = builder.journal_options(JournalOptions {
-            reclaim_size: SHORT_RECLAIM,
-            chunk_size: SHORT_RECLAIM,
-            ..Default::default()
-        });
+        let builder = if self.every_cut {
+            builder.journal_options(JournalOptions {
+                reclaim_size: SHORT_RECLAIM,
+                chunk_size: SHORT_RECLAIM,
+                ..Default::default()
+            })
+        } else {
+            builder
+        };
+        let builder = if self.atomic_barriers { builder.barriers_enabled(true) } else { builder };
         (builder, hooks)
     }
 
@@ -1529,6 +1539,7 @@ impl Setting {
     fn device(&self, crashes: &Arc<Crashes>, faults: &Arc<Faults>) -> FakeDevice {
         let device = FakeDevice::new(self.blocks, 4096);
         let device = if self.awkward { device.awkward(self.seed) } else { device.calm() };
+        let device = if self.atomic_barriers { device.with_atomic_commits() } else { device };
         let mut device = device.record_crashes(crashes.clone());
         let faults = faults.clone();
         device.set_op_callback(move |op| faults.check(op));
@@ -1905,8 +1916,10 @@ impl<const KEEPS: bool> World<KEEPS> {
         crashes: &Arc<Crashes>,
         faults: &Arc<Faults>,
         tally: Rc<Tally>,
-    ) -> Self {
-        let device = DeviceHolder::new(setting.device(crashes, faults));
+    ) -> (Self, Arc<std::sync::atomic::AtomicU64>) {
+        let fake = setting.device(crashes, faults);
+        let pre_barriers = fake.pre_barrier_counter();
+        let device = DeviceHolder::new(fake);
         let (builder, _hooks) = setting.builder();
         let filesystem = builder.format(true).open(device).await.expect("formatting");
         let made = clock();
@@ -1918,7 +1931,7 @@ impl<const KEEPS: bool> World<KEEPS> {
         let fs = Box::new(Fxfs::new((*filesystem).clone(), volume, false, platform));
         let model = Model::new(root, made);
         let (cut, cursors) = (false, Vec::new());
-        Self { setting, filesystem, _hooks, fs, root, model, tally, cut, cursors }
+        (Self { setting, filesystem, _hooks, fs, root, model, tally, cut, cursors }, pre_barriers)
     }
 
     /// Mounts what `device` holds, or replays it: what `model` should say.
@@ -3221,7 +3234,8 @@ async fn run<const KEEPS: bool>(
 ) -> Result<(), String> {
     let crashes = setting.crashes();
     let faults = Faults::new(setting.seed);
-    let world = World::<KEEPS>::new(setting, &crashes, &faults, tally.clone()).await;
+    let (world, pre_barriers) =
+        World::<KEEPS>::new(setting, &crashes, &faults, tally.clone()).await;
     let (root, device) = (world.root, world.filesystem.device());
     let states = vec![world.model.clone()];
     let mut past = Past { setting, states, durable: vec![0], failed: None };
@@ -3281,6 +3295,14 @@ async fn run<const KEEPS: bool>(
             past.check_cut::<KEEPS>((cut, mark as usize), &ops, device, root, tally.clone());
         let checked = checked.await;
         checked.map_err(|e| format!("cut {cut}, during op {mark}: {e}"))?;
+    }
+    if setting.atomic_barriers {
+        let pre = pre_barriers.load(std::sync::atomic::Ordering::Relaxed);
+        if pre != 0 {
+            return Err(format!(
+                "expected 0 PRE_BARRIER writes on atomic-commit device, saw {pre}"
+            ));
+        }
     }
     Ok(())
 }
@@ -3415,7 +3437,8 @@ fn a_failed_fsync_is_reported_and_keeps_what_was_synced() {
         let setting = Setting::awkward(0, ROOMY);
         let crashes = Crashes::new(0, u32::MAX);
         let faults = Faults::of_every_kind(0);
-        let mut world = World::<false>::new(setting, &crashes, &faults, Rc::default()).await;
+        let (mut world, _pre_barriers) =
+            World::<false>::new(setting, &crashes, &faults, Rc::default()).await;
         let device = world.filesystem.device();
         let write = |byte| Op::Write { file: 0, at: 0, len: 1, byte };
         world.act(&Op::Create(0)).await.unwrap();
@@ -3473,6 +3496,28 @@ fn every_cut_of_a_short_sequence() {
          {EVERY_SUBSET_OF}, {unlinked} of files open with no name"
     );
     assert!(cuts > 0, "no power cut");
+}
+
+/// board 7537: short sequences with `barriers_enabled = true` on an atomic-commit device (no
+/// `PRE_BARRIER` on `Journal::flush`, matching `ExtentDevice`/`local_cell`), cut at every barrier.
+#[test]
+fn every_cut_of_a_short_sequence_with_atomic_barriers() {
+    let cases = std::env::var("CLADEFS_MODEL_EVERY_CUT").map_or(6, |cases| cases.parse().unwrap());
+    let config = config(cases);
+    let sequences = (any::<u64>(), proptest::collection::vec(short_op(), 1..=SHORT));
+    let tally = Rc::new(Tally::default());
+    let watched = watch_sequences(30 * SEQUENCE_LIMIT);
+    TestRunner::new(config)
+        .run(&sequences, |(seed, ops)| {
+            watched.send(format!("{seed}, {ops:?}")).expect("the watchdog stopped");
+            let setting =
+                Setting::awkward(seed, ROOMY).with_graveyard_of_seed().with_atomic_barriers();
+            prop_assert_eq!(setting.cutting_everywhere().run(ops, tally.clone()), Ok(()));
+            Ok(())
+        })
+        .unwrap();
+    let (cuts, barriers) = (tally.cuts.get(), tally.barriers.get());
+    assert!(cuts > 0, "no power cut at {barriers} barriers");
 }
 
 /// A file unlinked while open reads and writes as it did until it closes, and a cut anywhere around

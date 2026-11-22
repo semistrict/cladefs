@@ -2232,15 +2232,22 @@ impl Journal {
 
     async fn flush(&self, mut amount: usize) -> Result<(), Error> {
         let handle = self.handle.get().unwrap();
-        // cladefs: with `barriers_enabled`, even a lazy flush issues `PRE_BARRIER`, which seals
-        // open shared extents; record any dropped shared-extent reaches and seal them in this
-        // flush so crash recovery never undercounts extent size (TASK-213, board 6011).
-        let needs_reaches = {
-            let inner = self.inner.lock();
-            inner.needs_barrier && inner.barriers_enabled
-        } && self.objects.allocator().has_unrecorded_reaches();
+        // cladefs: on a device whose commits are atomic across all prior writes (`local_cell`,
+        // board 7537), `POST_BARRIER` (or the next commit) seals data and journal blocks together,
+        // so `PRE_BARRIER` is unnecessary even with `barriers_enabled`. On a non-atomic device,
+        // compute one predicate before `record_reaches` and `allocate_buffer` so `record_reaches`
+        // and `barrier_on_first_write` never disagree across awaits (TASK-213, board 6011).
+        let needs_pre_barrier = !handle.device().atomic_commits();
+        let barrier_on_first_write = {
+            let mut inner = self.inner.lock();
+            let pre = inner.needs_barrier && inner.barriers_enabled && needs_pre_barrier;
+            if pre || !needs_pre_barrier {
+                inner.needs_barrier = false;
+            }
+            pre
+        };
         let mut recorded_reaches = false;
-        if needs_reaches {
+        if barrier_on_first_write && self.objects.allocator().has_unrecorded_reaches() {
             let allocator = self.objects.allocator();
             crate::boxed(|| allocator.record_reaches()).await?;
             {
@@ -2251,17 +2258,13 @@ impl Journal {
             recorded_reaches = true;
         }
         let mut buf = handle.allocate_buffer(amount).await;
-        let (range, barrier_on_first_write, mut barrier_after_last_write) = {
+        let (range, mut barrier_after_last_write) = {
             let mut inner = self.inner.lock();
             let offset = inner.writer.take_flushable(buf.as_mut());
-            let barrier_on_first_write = inner.needs_barrier && inner.barriers_enabled;
-            // Reset `needs_barrier` before instead of after the overwrite in case a txn commit
-            // that contains data happens during the overwrite.
-            inner.needs_barrier = false;
             // cladefs: as far as a sync flushing the device wants a barrier after.
             let range = offset..offset + buf.len() as u64;
             let barrier_after = inner.position.wants_barrier_after(&range) || recorded_reaches;
-            (range, barrier_on_first_write, barrier_after)
+            (range, barrier_after)
         };
         let handle = self.handle.get().unwrap();
         if barrier_after_last_write {

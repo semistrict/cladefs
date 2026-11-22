@@ -87,8 +87,11 @@ mod ffi {
     unsafe extern "C" {
         pub fn cladefs_device_find(tag: *const c_char, len: usize, info: *mut Info) -> *mut Device;
         pub fn cladefs_device_put(dev: *mut Device);
-        pub fn cladefs_device_capacity(dev: *mut Device, capacity: *mut u64, asked: *mut u64)
-        -> c_int;
+        pub fn cladefs_device_capacity(
+            dev: *mut Device,
+            capacity: *mut u64,
+            asked: *mut u64,
+        ) -> c_int;
         pub fn cladefs_device_committed(dev: *mut Device) -> u64;
         pub fn cladefs_device_seal_begin(dev: *mut Device);
         pub fn cladefs_device_seal_end(dev: *mut Device);
@@ -491,8 +494,9 @@ impl ExtentDevice {
     pub async fn find(tag: &[u8]) -> Result<Self, Error> {
         let mut info = ffi::Info::default();
         // SAFETY: `tag` and `info` are live for the call.
-        let device =
-            unsafe { ffi::cladefs_device_find(tag.as_ptr() as *const c_char, tag.len(), &mut info) };
+        let device = unsafe {
+            ffi::cladefs_device_find(tag.as_ptr() as *const c_char, tag.len(), &mut info)
+        };
         let device = NonNull::new(device).ok_or_else(|| {
             anyhow!(FxfsError::NotFound)
                 .context(format!("no extent store tagged {:?}", String::from_utf8_lossy(tag)))
@@ -769,8 +773,9 @@ impl Resizer {
     pub fn configured(&self) -> Option<(u64, u64)> {
         let (mut capacity, mut asked) = (0, 0);
         // SAFETY: The device is bound while the filesystem is mounted.
-        let ret =
-            unsafe { ffi::cladefs_device_capacity(self.device.as_ptr(), &mut capacity, &mut asked) };
+        let ret = unsafe {
+            ffi::cladefs_device_capacity(self.device.as_ptr(), &mut capacity, &mut asked)
+        };
         (ret == 0).then_some((capacity, asked))
     }
 
@@ -1196,6 +1201,12 @@ impl Device for ExtentDevice {
 
     fn is_read_only(&self) -> bool {
         self.writes_nothing
+    }
+
+    /// cladefs: the extent store commits all completed writes atomically at `COMMIT`
+    /// (`local_cell`, doc-4, board 7537), so Fxfs needs no `PRE_BARRIER` before journal writes.
+    fn atomic_commits(&self) -> bool {
+        true
     }
 
     async fn advance(&self) -> Result<Previous, Error> {

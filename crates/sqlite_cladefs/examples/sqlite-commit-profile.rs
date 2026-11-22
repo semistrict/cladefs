@@ -115,6 +115,9 @@ impl Device for Timing {
     fn is_read_only(&self) -> bool {
         self.0.is_read_only()
     }
+    fn atomic_commits(&self) -> bool {
+        self.0.atomic_commits()
+    }
 }
 
 /// A window whose requests are timed.
