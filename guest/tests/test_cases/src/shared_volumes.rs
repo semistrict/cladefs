@@ -42,7 +42,7 @@ pub mod host {
     /// Makes the publisher's cell at `path`: its default volume, and `volumes`.
     pub fn format_with(path: &Path, capacity: u64, volumes: &[&str]) -> anyhow::Result<()> {
         block_on(async {
-            let image = Image::format(Storage::create(path, capacity)?).await?;
+            let image = Image::format(Storage::create(path, capacity).await?).await?;
             for volume in ["default"].iter().chain(volumes) {
                 image.create_volume(volume).await?.unmount().await?;
             }

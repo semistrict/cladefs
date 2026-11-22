@@ -352,7 +352,7 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             let fork_to = |fork: &Path| -> anyhow::Result<()> {
                 match version {
                     Some(version) => {
-                        drop(crate::common::control(&cladefsd)?.fork_version(version, fork)?)
+                        crate::common::control(&cladefsd)?.fork_version(version, fork)?;
                     }
                     None => drop(
                         opened(&cladefsd, &base)?

@@ -187,6 +187,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b34d609dfbaf33d6889b2b7106d3ca345eacad44200913df5ba02bfd31d2ba9"
 
 [[package]]
+name = "astral-tokio-tar"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "821ed36daf7c40d00a7b62759f9833fb279fb7c87dd989ec0a4d626dcd8d1dca"
+dependencies = [
+ "futures-core",
+ "libc",
+ "portable-atomic",
+ "rustc-hash 2.1.3",
+ "rustix",
+ "tokio",
+ "tokio-stream",
+ "xattr",
+ "zerocopy",
+]
+
+[[package]]
 name = "async-channel"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -875,6 +892,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "block_device"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "log",
+ "storage_device",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "block_protocol"
 version = "0.1.0"
 dependencies = [
@@ -1114,14 +1142,15 @@ name = "cladefs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "astral-tokio-tar",
  "async-task",
  "async-trait",
  "backtrace",
  "base32_id",
  "bitflags 2.13.2",
+ "block_device",
  "bucket_cell",
  "event-listener",
- "block_device",
  "extent_frame",
  "extent_keys",
  "fail",
@@ -1677,17 +1706,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "block_device"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "futures",
- "log",
- "storage_device",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "extent_frame"
 version = "0.1.0"
 dependencies = [
@@ -1920,6 +1938,7 @@ dependencies = [
  "futures",
  "futures-lite",
  "linux-rt",
+ "madsim",
  "pin-project-lite",
  "smallvec",
  "tokio",
@@ -2398,6 +2417,7 @@ name = "host_fs"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "log",
  "madsim",
  "node_local",
 ]
@@ -4386,9 +4406,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "1.1.4"
+version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
+checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
 dependencies = [
  "bitflags 2.13.2",
  "errno",
@@ -6144,6 +6164,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "xattr"
+version = "1.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "963d6fab92d5504b971dc8bd90ca743c2575e590bc8071ea5bc571598667ae08"
+dependencies = [
+ "libc",
+ "rustix",
+]
+
+[[package]]
 name = "xmlparser"
 version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6174,18 +6204,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.48"
+version = "0.8.64"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eed437bf9d6692032087e337407a86f04cd8d6a16a37199ed57949d415bd68e9"
+checksum = "ed43f3060383c64b000f3c630550aebdfa9d3b76d48de32390483dd2cc7e0865"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.48"
+version = "0.8.64"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70e3cd084b1788766f53af483dd21f93881ff30d7320490ec3ef7526d203bad4"
+checksum = "a5cbd820fe3e35fb38c83b6dc7e6b1618bc46e0cd10073ae94e8d52dc468d8b9"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -20,7 +20,7 @@ use std::time::Duration;
 
 fn create_image(path: &Path) -> anyhow::Result<()> {
     block_on(async {
-        let fs = Filesystem::format(Storage::create(path, IMAGE_SIZE)?).await?;
+        let fs = Filesystem::format(Storage::create(path, IMAGE_SIZE).await?).await?;
         let owner = Owner { uid: 0, gid: 0 };
         let (file, _) = fs.root().create(b"from-host", 0o644, owner).await?;
         file.write(0, HOST_CONTENT).await?;
@@ -31,8 +31,11 @@ fn create_image(path: &Path) -> anyhow::Result<()> {
 
 /// Checks the image at `path`, and serves it.
 fn open_image(path: &Path) -> Filesystem {
-    let storage = Storage::open(path).expect("open image");
-    block_on(async { Filesystem::mount(storage.check().await?).await }).expect("mount image")
+    block_on(async {
+        let storage = Storage::open(path).await.expect("open image");
+        Filesystem::mount(storage.check().await?).await
+    })
+    .expect("mount image")
 }
 
 fn lookup_path(fs: &Filesystem, path: &str) -> (Node, Attr) {

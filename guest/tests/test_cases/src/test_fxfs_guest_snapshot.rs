@@ -242,7 +242,7 @@ mod host {
     /// Makes the cell at `path`, with the default volume, `volumes` others and `RO_VOLUME`, empty.
     fn format(path: &Path, volumes: usize) -> anyhow::Result<()> {
         block_on(async {
-            let image = Image::format(Storage::create(path, CAPACITY)?).await?;
+            let image = Image::format(Storage::create(path, CAPACITY).await?).await?;
             image.create_volume("default").await?.unmount().await?;
             for volume in 0..volumes {
                 image.create_volume(&format!("v{volume}")).await?.unmount().await?;
@@ -612,9 +612,10 @@ mod host {
             // Each cell holds what its guest wrote, checked, and not another's: but a migrated
             // one, whose data the daemon that served it took from its bucket, gone with it.
             let cell_dirs: Vec<(&str, PathBuf)> = match self.mode {
-                Mode::Zygote => {
-                    restores.iter().map(|name| (*name, cell_dir(&test_setup.tmp_dir, name))).collect()
-                }
+                Mode::Zygote => restores
+                    .iter()
+                    .map(|name| (*name, cell_dir(&test_setup.tmp_dir, name)))
+                    .collect(),
                 Mode::Suspend => vec![(restores[0], cell_dir(&test_setup.tmp_dir, "source"))],
                 Mode::Migrate | Mode::TenantMigrate => vec![],
             };
@@ -630,9 +631,11 @@ mod host {
                 control.stat_cell(Path::new(&version)).expect("the snapshot's version");
             }
             for (name, path) in cell_dirs {
-                let storage = Storage::open(path).expect("open cell");
-                let fs = block_on(async { Filesystem::mount(storage.check().await?).await })
-                    .expect("mount cell");
+                let fs = block_on(async {
+                    let storage = Storage::open(path).await.expect("open cell");
+                    Filesystem::mount(storage.check().await?).await
+                })
+                .expect("mount cell");
                 assert_eq!(read_file(&fs, "before"), BEFORE, "cell {name}: before");
                 assert_eq!(read_file(&fs, "who"), name.as_bytes(), "cell {name}: who");
                 assert_eq!(read_file(&fs, "after").len(), 4 << 20, "cell {name}: after");
