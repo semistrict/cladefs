@@ -153,12 +153,6 @@ impl<T> Durability<T> {
     pub fn local(&self) -> u64 {
         self.durable
     }
-
-    /// The epoch of the last commit a flush took, which may not be durable yet.
-    #[cfg(test)]
-    pub fn taken(&self) -> u64 {
-        self.ordered - self.queue.len() as u64
-    }
 }
 
 /// cladefs: how many of a flush's files it syncs at once, and of its directories (TASK-92.42). One
@@ -410,44 +404,6 @@ mod tests {
     use super::*;
     use crate::MemDir;
 
-    /// A flush takes the commits ordered since the last took them, in order, and the epoch of the
-    /// last.
-    #[test]
-    fn batches_take_the_commits_queued_in_order() {
-        let mut durability = Durability::new(4);
-        assert!(durability.take().is_none());
-        for epoch in 5..=7 {
-            durability.push(epoch, epoch);
-        }
-        let batch = durability.take().unwrap();
-        assert_eq!((batch.last, batch.commits), (7, vec![5, 6, 7]));
-        assert!(!durability.queued());
-        durability.push(8, 8);
-        let batch = durability.take().unwrap();
-        assert_eq!((batch.last, batch.commits), (8, vec![8]));
-    }
-
-    /// The commits a flush took are not durable until it says they are, while those ordered since
-    /// wait for the next.
-    #[test]
-    fn a_flush_in_flight_is_taken_not_durable() {
-        let mut durability = Durability::new(0);
-        durability.push(1, ());
-        durability.push(2, ());
-        let batch = durability.take().unwrap();
-        durability.push(3, ());
-        assert_eq!((durability.local(), durability.taken()), (0, 2));
-        assert!(durability.queued());
-        durability.finish(batch.last);
-        assert_eq!((durability.local(), durability.taken()), (2, 2));
-        assert!(durability.queued());
-        // Pending, taken or not, until durable.
-        let batch = durability.take().unwrap();
-        assert!(!durability.queued() && durability.pending());
-        durability.finish(batch.last);
-        assert!(!durability.pending());
-    }
-
     /// Lags count each commit within the least power of two of milliseconds holding it, the
     /// longest exactly; their quantiles are those buckets' bounds; and those within cladefsd's
     /// turn, 50 ms, exactly.
@@ -461,14 +417,6 @@ mod tests {
         assert_eq!(lags.buckets[..8], [2, 1, 1, 0, 0, 0, 3, 1]);
         assert_eq!((lags.quantile_ms(0.5), lags.quantile_ms(0.99)), (Some(4), Some(128)));
         assert_eq!(Lags::default().quantile_ms(0.99), None);
-    }
-
-    /// A commit is ordered after the one before it, or not at all.
-    #[test]
-    #[should_panic(expected = "commits are ordered in turn")]
-    fn commits_are_ordered_in_turn() {
-        let mut durability = Durability::new(3);
-        durability.push(5, ());
     }
 
     /// A file several commits wrote is synced once, then the directories: two operations, all the

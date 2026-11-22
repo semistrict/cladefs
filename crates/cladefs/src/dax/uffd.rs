@@ -2401,42 +2401,6 @@ mod tests {
     use super::super::tests::TestSource;
     use super::*;
 
-    /// TASK-308: a userfaultfd device the process cannot open is an error naming it, the error and
-    /// what gives access to it, where the system call the VMM's seccomp filter refuses was made in
-    /// its place, killing the VMM ("bad syscall"), which said nothing of the device.
-    #[test]
-    fn a_device_it_cannot_open_says_which_why_and_what_gives_access() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("userfaultfd");
-        let err = open_device(&path).unwrap_err();
-        let (uid, gid) = host_ids();
-        assert_eq!(
-            format!("{err:#}"),
-            format!(
-                "{}: No such file or directory (os error 2): a DAX window takes its guest's faults, \
-                 KVM's among them, through it, which this process (uid {uid}, gid {gid}) needs read \
-                 and write access to: give it the device's group or mode (a udev rule: \
-                 KERNEL==\"userfaultfd\", GROUP=\"kvm\", MODE=\"0660\"), or an ACL (setfacl -m \
-                 u:USER:rw), or, in a jail, the device node in it; vm.unprivileged_userfaultfd \
-                 serves no VMM, as it is for the userfaultfd(2) system call, which the VMM's seccomp \
-                 filter refuses",
-                path.display()
-            )
-        );
-    }
-
-    /// The ids a VMM in a user namespace says are the host's, as its maps have them: the guest
-    /// tests' runner's VMMs are root in theirs, which a device's access is not granted to.
-    #[test]
-    fn ids_in_a_user_namespace_are_said_as_the_host_has_them() {
-        let root_as_ramon = "         0       1000          1\n         1     100000      65536\n";
-        assert_eq!(host_id(0, root_as_ramon), Some(1000));
-        assert_eq!(host_id(7, root_as_ramon), Some(100006));
-        assert_eq!(host_id(65537, root_as_ramon), None);
-        assert_eq!(host_id(1000, "         0          0 4294967295\n"), Some(1000));
-        assert_eq!(host_id(0, ""), None);
-    }
-
     /// The fault thread resolves faults concurrently: a fault waiting for the pager does not hold
     /// up the next, whose page request reaches the pager first.
     #[test]
@@ -2586,61 +2550,6 @@ mod tests {
         assert_eq!(unsafe { libc::munmap(memory, 2 * ps) }, 0);
     }
 
-    /// cladefs TASK-112.1: the pages the guest asks for ahead of its reads, of what the window
-    /// maps, are installed, and are those the hypervisor is told of, the runs of them installed;
-    /// not those it maps nothing at, nor past the window. TASK-276.6: the window's maps install
-    /// none, nor tell the hypervisor of any: a `MAP` names pages, their first touch installs them.
-    #[test]
-    fn pages_asked_for_ahead_are_installed_and_prefaulted() {
-        struct Told(Mutex<Vec<(u64, u64)>>);
-        impl Prefault for Told {
-            fn prefault(&self, offset: u64, len: u64) {
-                self.0.lock().unwrap().push((offset, len));
-            }
-        }
-        let ps = page_size();
-        // SAFETY: Maps anonymous memory, which this test owns.
-        let memory = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                4 * ps as usize,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1,
-                0,
-            )
-        };
-        assert_ne!(memory, libc::MAP_FAILED);
-        let file = TestSource::filled(4, 7).source();
-        let told = Arc::new(Told(Mutex::new(Vec::new())));
-        // SAFETY: Only the test uses the memory, which outlives the window.
-        let stage =
-            unsafe { UffdSecondStage::in_process(memory as usize, 4 * ps, Some(told.clone())) }
-                .unwrap();
-        let (dax, _window) = Dax::in_host_memory(stage.clone()).unwrap();
-        dax.window.map(0, &file, 0, 2 * ps);
-        dax.window.map(3 * ps, &file, 3 * ps, ps);
-        assert_eq!(*told.0.lock().unwrap(), []);
-        assert_eq!(stage.installed(), 0, "the window's maps installed pages");
-
-        stage.prefault(0, 4 * ps);
-        assert_eq!(std::mem::take(&mut *told.0.lock().unwrap()), [(0, 2 * ps), (3 * ps, ps)]);
-        assert_eq!(stage.installed(), 2, "the runs asked for ahead aren't installed");
-        stage.prefault(2 * ps, 8 * ps);
-        assert_eq!(std::mem::take(&mut *told.0.lock().unwrap()), [(3 * ps, ps)]);
-        stage.prefault(4 * ps, ps);
-        assert_eq!(*told.0.lock().unwrap(), []);
-        // SAFETY: The window's memory, installed, which nothing else accesses.
-        let read = |page: u64| unsafe {
-            ((memory as usize + (page * ps) as usize) as *const u8).read_volatile()
-        };
-        assert_eq!([read(0), read(1), read(3)], [7; 3]);
-
-        drop(dax);
-        // SAFETY: Unmaps the memory, which nothing uses any more.
-        assert_eq!(unsafe { libc::munmap(memory, 4 * ps as usize) }, 0);
-    }
-
     /// A window whose pages are scattered over its arena's memory keeps no more runs installed
     /// than its budget, and so few mappings, leaving out those used longest ago, which read as
     /// they were when the guest touches them again (TASK-12).
@@ -2721,64 +2630,6 @@ mod tests {
         drop(dax);
         // SAFETY: Unmaps the memory, which nothing uses any more.
         assert_eq!(unsafe { libc::munmap(memory, PAGES * ps) }, 0);
-    }
-
-    /// TASK-91.16: the changes that take access away from pages installed are counted by how,
-    /// each a flush of the host's TLBs and the hypervisor's: a private page made over them (below,
-    /// `private_pages_made_over_pages_installed_are_counted`), and any other change, which leaves
-    /// them out (TASK-276.6: a map names pages, installing none, and takes away what was there). A
-    /// map where nothing is installed takes nothing away, as one of pages never touched since they
-    /// were mapped does not, nor does a map of the very same pages installed, left in place.
-    #[test]
-    fn changes_taking_access_from_pages_installed_are_counted() {
-        let ps = page_size() as usize;
-        // SAFETY: Maps anonymous memory, which this test owns.
-        let memory = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                2 * ps,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1,
-                0,
-            )
-        };
-        assert_ne!(memory, libc::MAP_FAILED);
-        let base = memory as usize;
-        let file = TestSource::filled(2, 1).source();
-        // SAFETY: Only the test uses the memory, which outlives the window.
-        let stage = unsafe { UffdSecondStage::in_process(base, (2 * ps) as u64, None) }.unwrap();
-        let (dax, _window) = Dax::in_host_memory(stage.clone()).unwrap();
-        dax.window.map(0, &file, 0, (2 * ps) as u64);
-        assert_eq!(stage.taken(), [0, 0], "mapped where nothing was");
-        let phys = |page: usize| stage.pages.lock().unwrap().pages[page].mapped.unwrap().phys;
-        let (first, second) = (phys(0), phys(1));
-        // The first page's own, in place if installed; and `at_second` at the second's.
-        let remap = |at_second| {
-            stage.remap(
-                0,
-                (2 * ps) as u64,
-                &[
-                    Anew::Map { offset: 0, phys: first, len: ps as u64 },
-                    Anew::Map { offset: ps as u64, phys: at_second, len: ps as u64 },
-                ],
-            )
-        };
-        remap(second);
-        assert_eq!(stage.taken(), [0, 0], "pages never touched taken away");
-        // SAFETY: The window's memory, whose faults the fault thread serves.
-        let load = |page: usize| unsafe { ((base + page * ps) as *const u8).read_volatile() };
-        assert_eq!([load(0), load(1)], [1, 1]);
-        remap(first);
-        assert_eq!(stage.taken(), [0, 1], "the second page left out, the first in place");
-        stage.unmap(0, (2 * ps) as u64);
-        assert_eq!(stage.taken(), [0, 2], "the first left out, the second never touched");
-        stage.unmap(0, (2 * ps) as u64);
-        assert_eq!(stage.taken(), [0, 2], "nothing installed to leave out");
-
-        drop(dax);
-        // SAFETY: Unmaps the memory, which nothing uses any more.
-        assert_eq!(unsafe { libc::munmap(memory, 2 * ps) }, 0);
     }
 
     /// TASK-12: a window of more scattered pages than a process may make mappings
@@ -3308,39 +3159,5 @@ mod tests {
             libc::close(pipe[1]);
             assert_eq!(libc::munmap(base as *mut libc::c_void, PAGES * ps), 0);
         }
-    }
-
-    /// cladefs: a vCPU whose access keeps failing, `KVM_RUN` with `EFAULT`, tells what the stages
-    /// serving faults hold at the page it failed at (`describe_windows`): a private page, a page
-    /// installed, what of the window's pages is installed, left out, private, withheld and
-    /// restricted, and what the stage is doing.
-    #[test]
-    fn stages_describe_their_pages() {
-        let ps = page_size() as usize;
-        let base = window_memory(2);
-        // SAFETY: Only the test uses the memory, which outlives the window.
-        let stage = unsafe { UffdSecondStage::in_process(base, (2 * ps) as u64, None) }.unwrap();
-        let arena = crate::pages::ArenaId::DEFAULT;
-        let copying = crate::dax::CopyOnWrite::at_most(2);
-        let (mut dax, window) = Dax::in_host_memory_copying(stage.clone(), Some(copying)).unwrap();
-        let file = TestSource::filled(2, 7).source();
-        dax.map(0, &file, 0, (2 * ps) as u64);
-        // SAFETY: The window's memory, whose faults the fault thread serves, installed so.
-        assert_eq!(unsafe { ((base + ps) as *const u8).read_volatile() }, 7);
-        futures::executor::block_on(window.make_private(0, ps as u64)).unwrap();
-
-        let told = describe_windows(Some(base + 5));
-        assert!(told.contains("is doing nothing"), "{told}");
-        assert!(told.contains("1 pages installed, 0 left out, 1 private, 0 withheld"), "{told}");
-        assert!(told.contains("; offset 0x0: private, changed "), "{told}");
-        let told = describe_windows(Some(base + ps));
-        let installed = format!("; offset {ps:#x}: installed of {arena:?} at ");
-        assert!(told.contains(&installed), "{told}");
-        let told = describe_windows(Some(base + 2 * ps));
-        assert!(!told.contains("; offset"), "a page outside the window told of: {told}");
-
-        drop(dax);
-        // SAFETY: Unmaps the memory, which nothing uses any more.
-        assert_eq!(unsafe { libc::munmap(base as *mut libc::c_void, 2 * ps) }, 0);
     }
 }

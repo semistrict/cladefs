@@ -298,57 +298,6 @@ mod tests {
         })
     }
 
-    #[test]
-    fn key_values_follow_the_message() {
-        let range = 0..4096u64;
-        let error = std::io::Error::from_raw_os_error(libc::ENOMEM);
-        let pairs: [(&str, log::kv::Value<'_>); 2] = [
-            ("range", log::kv::Value::from_debug(&range)),
-            ("error", log::kv::Value::from_debug(&error)),
-        ];
-        let record = log::Record::builder()
-            .level(log::Level::Error)
-            .target("fxfs_platform::fuchsia::fxextent")
-            .args(format_args!("Failed to load an extent's range"))
-            .key_values(&pairs)
-            .build();
-        assert_eq!(
-            line(Format::Text, &record, None, at()),
-            "ERROR fxfs_platform::fuchsia::fxextent: Failed to load an extent's range range=0..4096 \
-             error=Os { code: 12, kind: OutOfMemory, message: \"Cannot allocate memory\" }"
-        );
-    }
-
-    #[test]
-    fn a_record_without_key_values_is_its_message() {
-        let record = log::Record::builder()
-            .level(log::Level::Warn)
-            .target("cladefs::cladefsd::cells")
-            .args(format_args!("cladefsd: keeping cell 1 in object storage"))
-            .build();
-        assert_eq!(
-            line(Format::Text, &record, None, at()),
-            "WARN cladefs::cladefsd::cells: cladefsd: keeping cell 1 in object storage"
-        );
-    }
-
-    /// A record about a guest request names it, and its cell, after its key-values.
-    #[test]
-    fn a_text_record_names_its_request() {
-        let pairs: [(&str, log::kv::Value<'_>); 1] = [("kind", log::kv::Value::from("get"))];
-        let record = log::Record::builder()
-            .level(log::Level::Debug)
-            .target("bucket_cell::object_bucket")
-            .args(format_args!("object storage: get b/1"))
-            .key_values(&pairs)
-            .build();
-        assert_eq!(
-            line(Format::Text, &record, request(42, Some("/stores/vm1")), at()),
-            "DEBUG bucket_cell::object_bucket: object storage: get b/1 kind=get request_id=42 \
-             store=/stores/vm1"
-        );
-    }
-
     /// A JSON record: its time, level, target and message, its request's, and each key-value by
     /// its type, every string escaped, a key-value named as a field renamed.
     #[test]

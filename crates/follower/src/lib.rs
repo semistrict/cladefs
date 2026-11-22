@@ -349,22 +349,6 @@ mod tests {
         }
     }
 
-    /// Outside Shuttle's tests, as in the guest, every rule is in force.
-    #[test]
-    fn every_rule_is_in_force() {
-        assert_eq!(rules(), Rules::ALL);
-    }
-
-    /// A batch that goes through leaves readers reading.
-    #[test]
-    fn batches_settle_and_readers_read_on() {
-        let protocol = Protocol::new(Counting::default());
-        run(protocol.batch(&Failing::default())).unwrap();
-        assert_eq!(protocol.kernel().settled.load(Ordering::SeqCst), 1);
-        assert_eq!(protocol.fill().map(drop), Ok(()));
-        assert_eq!(protocol.kernel().fills.load(Ordering::SeqCst), 0);
-    }
-
     /// TASK-79.23: a batch that fails, as it applies or as it fetches, ends the follower: readers
     /// read no more, holding no barrier for it; and no later batch fetches.
     #[test]

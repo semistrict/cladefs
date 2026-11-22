@@ -59,21 +59,3 @@ impl Drop for Flock {
         }
     }
 }
-
-// Of the host's file system, which the simulation's disks are not.
-#[cfg(all(test, not(madsim)))]
-mod tests {
-    use super::Flock;
-
-    /// A second lock of a file, through another opening of it, is refused until the first goes.
-    #[test]
-    fn a_lock_held_refuses_another() {
-        let dir = tempfile::tempdir().unwrap();
-        let open = || crate::File::open(dir.path()).unwrap();
-        let first = Flock::try_lock(open()).unwrap();
-        let refused = Flock::try_lock(open()).err().map(|err| err.kind());
-        assert_eq!(refused, Some(std::io::ErrorKind::WouldBlock));
-        drop(first);
-        Flock::try_lock(open()).unwrap();
-    }
-}

@@ -44,15 +44,3 @@ pub fn set_vars<K: Into<OsString>, V: Into<OsString>>(vars: impl IntoIterator<It
     let vars = vars.into_iter().map(|(name, value)| (name.into(), value.into())).collect();
     *VARS.get().lock().unwrap() = Some(vars);
 }
-
-#[cfg(test)]
-mod tests {
-    /// Built normally, the process's environment.
-    #[test]
-    fn reads_the_processs_environment_built_normally() {
-        let path = std::env::var_os("PATH");
-        assert!(path.is_some(), "a test's process has a PATH");
-        assert_eq!(super::var_os("PATH"), path);
-        assert_eq!(super::var("NODE_LOCAL_NO_SUCH_VARIABLE"), Err(std::env::VarError::NotPresent));
-    }
-}

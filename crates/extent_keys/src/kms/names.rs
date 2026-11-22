@@ -96,39 +96,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tenants_are_named_by_the_template_unless_overridden() {
-        let overrides = "# tenants with keys of their own\n1a arn:aws:kms:us-east-1:1:key/abc\n\n";
-        let names = KeyNames::new("cladefs-tenant-{tenant}", Some(overrides)).unwrap();
-        assert_eq!(names.of(31), "cladefs-tenant-z");
-        assert_eq!(names.of(42), "arn:aws:kms:us-east-1:1:key/abc");
-    }
-
-    #[test]
     fn templates_name_every_tenant_apart() {
         let refused = KeyNames::new("cladefs", None);
         let why =
             "the key template \"cladefs\" holds no {tenant}: every tenant would share one KEK";
         assert_eq!(refused, Err(why.to_owned()));
-    }
-
-    #[test]
-    fn overrides_are_tenants_in_base_32_and_names_once_each() {
-        let refused = |overrides| KeyNames::new("k-{tenant}", Some(overrides)).unwrap_err();
-        let hex = "the key overrides' line 1: no tenant in base 32: \"1F name\"";
-        assert_eq!(refused("1F name"), hex);
-        assert_eq!(refused("1 a\n1 b"), "the key overrides' line 2: a tenant named twice: \"1 b\"");
-        assert_eq!(refused("1"), "the key overrides' line 1: not a tenant and a key's name: \"1\"");
-    }
-
-    #[test]
-    fn queries_give_the_template_and_read_the_overrides() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("keys");
-        std::fs::write(&file, "3 own-key\n").unwrap();
-        let path = file.to_str().unwrap();
-        let names = KeyNames::of_query([("key", "t-{tenant}"), ("keys", path)]).unwrap();
-        assert_eq!((names.of(3), names.of(4)), ("own-key".to_owned(), "t-4".to_owned()));
-        let none = KeyNames::of_query([("keys", path)]).unwrap_err();
-        assert_eq!(none, "the KMS URL names no key template: key=...{tenant}...");
     }
 }

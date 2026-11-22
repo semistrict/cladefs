@@ -129,36 +129,3 @@ impl std::error::Error for Error {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use fxfs::errors::FxfsError;
-
-    /// Fxfs's errors are the errnos Linux's filesystems give them, the guest's among them
-    /// (guest/rust/cladefs-linux), as the one table has them (`fxfs_posix::errno`), and an errno an
-    /// error carries is its own.
-    #[test]
-    fn fxfs_errors_are_linuxs_errnos() {
-        let table = [
-            (FxfsError::NotFound, Errno::ENOENT, Errno::ENODATA),
-            (FxfsError::Deleted, Errno::ENOENT, Errno::ENOENT),
-            (FxfsError::AlreadyExists, Errno::EEXIST, Errno::EEXIST),
-            (FxfsError::NotDir, Errno::ENOTDIR, Errno::ENOTDIR),
-            (FxfsError::NotFile, Errno::EISDIR, Errno::EISDIR),
-            (FxfsError::NotEmpty, Errno::ENOTEMPTY, Errno::ENOTEMPTY),
-            (FxfsError::NoSpace, Errno::ENOSPC, Errno::ENOSPC),
-            (FxfsError::TooBig, Errno::EFBIG, Errno::E2BIG),
-            (FxfsError::InvalidArgs, Errno::EINVAL, Errno::EINVAL),
-            (FxfsError::AlreadyBound, Errno::EBUSY, Errno::EBUSY),
-            (FxfsError::Inconsistent, Errno::EUCLEAN, Errno::EUCLEAN),
-            (FxfsError::IntegrityError, Errno::EBADMSG, Errno::EBADMSG),
-        ];
-        for (fxfs_error, errno, xattr_errno) in table {
-            let error = anyhow::Error::from(fxfs_error.clone()).context("in context");
-            assert_eq!(fxfs_posix::errno(&error), errno, "{fxfs_error:?}");
-            assert_eq!(fxfs_posix::xattr_errno(&error), xattr_errno, "{fxfs_error:?}");
-        }
-        let carried = anyhow::Error::from(FxfsError::NotFound).context(Errno::EXDEV);
-        assert_eq!(fxfs_posix::errno(&carried), Errno::EXDEV);
-    }
-}

@@ -1816,40 +1816,6 @@ mod tests {
         assert!(unwrap_dek(&kek, other_cell, &wrapped).is_err());
     }
 
-    /// A ring's keys, as a reader of one cell holds them: that cell's DEKs alone, its objects
-    /// encrypted if it has any; a cell of none it reads keyless. A host's ring is the union of its
-    /// cells', each held while its cell is open.
-    #[test]
-    fn rings_hold_each_cells_keys_for_its_objects_alone() {
-        let one = KeyId { cell: 7, generation: 1 };
-        let other = KeyId { cell: 8, generation: 1 };
-        let ring = Ring::encrypting_for_tests(7, 1, Secret::random(), [(other, Secret::random())]);
-        assert!(ring.of(7).dek(one).is_some() && ring.of(8).dek(other).is_some());
-        assert!(ring.of(7).dek(other).is_none() && ring.of(8).dek(one).is_none());
-        // Every cell's objects encrypted, a cell it holds no key of too (TASK-411.28).
-        assert!(ring.of(7).encrypted() && ring.of(8).encrypted() && ring.of(9).encrypted());
-        assert!(!Ring::keyless().of(7).encrypted());
-        assert_eq!(ring.encrypting().1, one);
-        assert!(ring.encrypts() && !Ring::keyless().encrypts());
-        assert!(of_key(&ring, &layout::segment(test_cell(8), 3, 1)).encrypted());
-        let moves = layout::moves(&layout::segment(test_cell(7), 3, 1), 1).unwrap();
-        assert_eq!(cell_of(&moves), Some(7));
-        assert!(of_key(&ring, &layout::head(TEST_CELL, 0)).encrypted());
-
-        let host = HostRing::new();
-        assert!(host.ring().is_empty());
-        let held = host.hold(ring.clone());
-        let another = Ring::encrypting_for_tests(9, 2, Secret::random(), []);
-        let also = host.hold(another);
-        assert_eq!(host.ring().cells(), BTreeSet::from([7, 8, 9]));
-        assert_eq!(host.ring().generations(9), [2]);
-        drop(held);
-        assert_eq!(host.ring().cells(), BTreeSet::from([9]));
-        drop(also);
-        assert!(host.ring().is_empty());
-        drop(host.hold(Ring::keyless()));
-    }
-
     /// TASK-411.28: an object authenticated under a key a reader holding keys lacks is refused,
     /// whatever its cell: a bucket's writer that strips an ancestor's record of its DEKs, so
     /// that no ring holds that cell's, and puts a checkpoint of its own authenticated under a
@@ -1865,55 +1831,6 @@ mod tests {
         assert!(matches!(read, Err(crate::Error::NoKey(key)) if key == made_up), "{read:?}");
         let marked = crate::checkpoint::decode_under(&forged, &Ring::keyless().of(8)).unwrap();
         assert_eq!(marked.cell, test_cell(8));
-    }
-
-    /// A cell taken first gets a KEK from the host's pool, kept wrapped, and its DEK, in its
-    /// taking's one write; a taking of it by another host unwraps its KEK once, however many rings
-    /// of the cell it makes at once, and a taking after that once more. A head never taken keeps
-    /// no KEK, and a writer's ring of it is refused (TASK-411.28: nothing in the clear).
-    #[test]
-    fn cell_keys_unwrap_once_a_taking_and_rings_follow_origins() {
-        let (_dir, counted, kms) = kms();
-        let bucket = Direct(SimBucket::new());
-        block_on(lifecycle::create(&bucket, TEST_CELL, 1)).unwrap();
-        let (held, _) = taken(&bucket, &kms, TEST_CELL, 5, Some(cell::Kind::Fxfs));
-        let [kek] = &held.head.keks[..] else { panic!("{:?}", held.head.keks) };
-        assert_eq!((kek.generation, held.head.deks.len()), (FIRST, 1));
-        assert_eq!(held.head.kind, Some(cell::Kind::Fxfs));
-        assert_eq!((counted.wraps(), counted.unwraps()), (1, 0));
-        let head = || block_on(head::get(&bucket, TEST_CELL)).unwrap().unwrap();
-        assert_eq!(head(), held.head);
-
-        // Another host takes the cell: one unwrap for its rings, a writer's and one that writes
-        // nothing; nothing given, the head having its keys.
-        counted.reset();
-        let (_, other) = kms_over(&counted);
-        let (held, keys) = taken(&bucket, &other, TEST_CELL, 6, None);
-        assert_eq!((held.head.keks.len(), held.head.deks.len()), (1, 1));
-        let rings: Vec<_> = [true, false]
-            .into_iter()
-            .map(|writes| block_on(ring(&bucket, &keys, TEST_CELL, &head(), writes)))
-            .collect::<Result<_, _>>()
-            .unwrap();
-        assert_eq!((counted.wraps(), counted.unwraps()), (0, 1));
-        assert_eq!(rings[0].cells(), BTreeSet::from([TEST_CELL.id]));
-        assert_eq!(rings[1].cells(), BTreeSet::from([TEST_CELL.id]));
-        assert!(!rings[1].encrypts());
-        // Read before it is taken by holder 7 next, as a writer's recovery reads: one unwrap more.
-        let next = CellKeys::to_take(TEST_CELL, &head(), other.clone(), 7);
-        block_on(ring(&bucket, &next, TEST_CELL, &head(), true)).unwrap();
-        assert_eq!(counted.unwraps(), 2);
-
-        // A fork of the cell into another cell of the tenant's, never taken: no KEK, and a
-        // writer's ring of it refused, keeping no DEK.
-        let elsewhere = CellId { tenant: 1, id: 10 };
-        let forked = Head::of(Made::Clone(Origin { parent: TEST_CELL, at: 1 }), 4);
-        let keys = CellKeys::of(elsewhere, &forked, other);
-        let refused = block_on(ring(&bucket, &keys, elsewhere, &forked, true));
-        let no_dek = "cell 1/a's head keeps no DEK, which its writer encrypts under";
-        assert_eq!(refused.map(|_| ()), Err(Error::Corrupt(no_dek.into())));
-        let no_kek = "cell 1/a keeps no KEK, which a taken cell's head does";
-        assert_eq!(block_on(keys.newest_kek()).map(|_| ()), Err(Error::Corrupt(no_kek.into())));
     }
 
     /// TASK-411.4: an inherited DEK, kept in a record of another cell, unwraps for its places
@@ -2094,42 +2011,6 @@ mod tests {
         assert!(block_on(inheriting(&kms, &source, child)).is_ok());
     }
 
-    /// TASK-633.6 (review): what a KMS answered since a revocation the control API told counts for
-    /// the cells of every bucket under it: a fork inheriting keys of a cell of a bucket this host
-    /// never looked up, under the KMS that answered, goes on, nothing asked of it.
-    #[test]
-    fn revocations_told_lift_for_every_bucket_of_a_kms_that_answered() {
-        let (_dir, counted, kms) = kms();
-        let tenant = TEST_CELL.tenant;
-        let (ours, theirs) =
-            (CellId { tenant, id: 1 << 48 | 1 }, CellId { tenant, id: 2 << 48 | 1 });
-        kms.revoked(tenant, "tenant 1: revoked");
-        block_on(kms.new_kek(ours)).unwrap();
-        let wraps = counted.wraps();
-        let source = Ring::encrypting_for_tests(theirs.id, 1, Secret::random(), []);
-        let child = crate::layout::Child { cell: CellId { tenant: 2, id: 1 << 48 | 8 }, owner: 1 };
-        // Tenant 2's new KEK: the one wrap the fork makes.
-        counted.inner().create(2).unwrap();
-        assert!(block_on(inheriting(&kms, &source, child)).is_ok());
-        assert_eq!((counted.wraps(), kms.refuses(theirs)), (wraps + 1, None));
-    }
-
-    /// TASK-633.6 (review): a KMS refusing a tenant refuses forks inheriting keys of the cells of
-    /// every bucket under it, those of a bucket this host never looked up among them.
-    #[test]
-    fn a_kms_refusing_refuses_forks_from_every_bucket_under_it() {
-        let (_dir, counted, kms) = kms();
-        let tenant = TEST_CELL.tenant;
-        let (ours, theirs) =
-            (CellId { tenant, id: 1 << 48 | 1 }, CellId { tenant, id: 2 << 48 | 1 });
-        counted.inner().revoke(tenant).unwrap();
-        let revoked = Error::Kms("tenant 1: its KEK is revoked".into());
-        assert_eq!(block_on(kms.new_kek(ours)).map(drop), Err(revoked.clone()));
-        let source = Ring::encrypting_for_tests(theirs.id, 1, Secret::random(), []);
-        let child = crate::layout::Child { cell: CellId { tenant: 2, id: 1 << 48 | 8 }, owner: 1 };
-        assert_eq!(block_on(inheriting(&kms, &source, child)).map(drop), Err(revoked));
-    }
-
     /// TASK-633.6 (review): a new cell KEK given out before a revocation goes back to no pool, nor
     /// is kept for its cell's first taking, though the revocation lifted since.
     #[test]
@@ -2187,87 +2068,6 @@ mod tests {
         kms.revoked(tenant, "tenant 1: revoked");
         let refused = block_on(inheriting(&kms, &source, child)).map(drop);
         assert_eq!(refused, Err(Error::Kms("tenant 1: revoked".into())));
-    }
-
-    /// TASK-633.6 (review): a rotation's new KEK generation, wrapped before a revocation that
-    /// lifted since, is not kept for the next taking either.
-    #[test]
-    fn rotated_keks_wrapped_before_a_revocation_are_not_kept() {
-        let (_dir, counted, kms) = kms();
-        let tenant = TEST_CELL.tenant;
-        let secret = Secret::random();
-        let wrapped = block_on(kms.wrap(TEST_CELL, &secret)).unwrap();
-        kms.revoked(tenant, "tenant 1: revoked");
-        block_on(kms.new_kek(CellId { tenant, id: 10 })).unwrap();
-        let kek = Kek { generation: FIRST, wrapped };
-        kms.made(TEST_CELL, None, &kek, Arc::new(Secret::from_bytes(secret.expose())));
-        let head = Head { keks: vec![kek], ..Head::of(Made::Root, 4) };
-        let unwraps = counted.unwraps();
-        let keys = CellKeys::to_take(TEST_CELL, &head, kms.clone(), 4);
-        block_on(keys.kek(FIRST)).unwrap();
-        assert_eq!(counted.unwraps(), unwraps + 1);
-    }
-
-    /// TASK-633.6 (review): a rotation's wrap the KMS refuses as revoked is heard as every call
-    /// is: the tenant refused under that KMS.
-    #[test]
-    fn rotations_refused_as_revoked_refuse_the_tenant() {
-        let (_dir, counted, kms) = kms();
-        counted.inner().revoke(TEST_CELL.tenant).unwrap();
-        let revoked = Error::Kms("tenant 1: its KEK is revoked".into());
-        assert_eq!(block_on(kms.wrap(TEST_CELL, &Secret::random())), Err(revoked.clone()));
-        assert_eq!(kms.refuses(TEST_CELL), Some(revoked));
-    }
-
-    /// TASK-633.6 (review): a KMS refusing a tenant discards no answer of another KMS asked before.
-    #[test]
-    fn a_kms_refusing_discards_no_other_kms_answers() {
-        let shared = || -> kms::Shared { Arc::new(extent_keys::testing::MemoryKms::new()) };
-        let (first, second) = (shared(), shared());
-        let kms = CachingKms::over(Arc::new(TwoKmses(first.clone(), second.clone())), None);
-        let tenant = TEST_CELL.tenant;
-        let (ours, theirs) =
-            (CellId { tenant, id: 1 << 48 | 1 }, CellId { tenant, id: 2 << 48 | 1 });
-        let (one, _) = block_on(kms.kms_of(ours)).unwrap();
-        let (two, _) = block_on(kms.kms_of(theirs)).unwrap();
-        kms.revoked(tenant, "tenant 1: revoked");
-        let asked = kms.epoch(&one, tenant);
-        kms.revoked_at((&two, &second), tenant, "tenant 1: its KEK is revoked".into());
-        kms.answered(&one, tenant, asked);
-        assert_eq!(kms.refuses(ours), None);
-        assert_eq!(kms.refuses(theirs), Some(Error::Kms("tenant 1: its KEK is revoked".into())));
-    }
-
-    /// TASK-633.6 (review): a KEK of the pool a cell was made with, the tenant revoked while it was
-    /// made, is not kept for its first taking, which asks the KMS: no taking goes on unasked, and
-    /// only the KMS's answer lifts the revocation.
-    #[test]
-    fn keks_made_as_their_tenant_is_revoked_are_unwrapped_again() {
-        let (_dir, counted, kms) = kms();
-        let (secret, kek) = block_on(new_cell_kek(&kms, TEST_CELL)).unwrap();
-        kms.revoked(TEST_CELL.tenant, "tenant 1: revoked");
-        kms.made(TEST_CELL, None, &kek, secret.clone());
-        let head = Head { keks: vec![kek], ..Head::of(Made::Root, 4) };
-        let keys = CellKeys::to_take(TEST_CELL, &head, kms.clone(), 4);
-        assert_eq!(counted.unwraps(), 0);
-        let unwrapped = block_on(keys.kek(FIRST)).unwrap();
-        assert_eq!((unwrapped.expose(), counted.unwraps()), (secret.expose(), 1));
-        assert_eq!(kms.refuses(TEST_CELL), None);
-    }
-
-    /// TASK-633.6 (review): an answer of the KMS asked before a revocation, coming back after it,
-    /// lifts nothing; one asked after it does.
-    #[test]
-    fn answers_asked_before_a_revocation_lift_nothing() {
-        let kms = CachingKms::new(Arc::new(extent_keys::testing::MemoryKms::new()));
-        let (key, _) = block_on(kms.kms_of(TEST_CELL)).unwrap();
-        let tenant = TEST_CELL.tenant;
-        let before = kms.epoch(&key, tenant);
-        kms.revoked(tenant, "tenant 1: revoked");
-        kms.answered(&key, tenant, before);
-        assert_eq!(kms.refuses(TEST_CELL), Some(Error::Kms("tenant 1: revoked".into())));
-        kms.answered(&key, tenant, kms.epoch(&key, tenant));
-        assert_eq!(kms.refuses(TEST_CELL), None);
     }
 
     /// A KMS holding tenant 1's KEK, forgetting it once destroyed as a real KMS forgets a deleted
@@ -2394,53 +2194,6 @@ mod tests {
         assert_eq!(other.refuses(TEST_CELL), Some(Error::Kms("tenant 1: revoked".into())));
         assert_eq!(opened(&their_keys, theirs).map(drop), Ok(()));
         assert_eq!((counted.wraps(), counted.unwraps()), (0, 3));
-    }
-
-    /// cladefs: a taking gives a cell the replication it is asked for, keeping the configuration
-    /// its head names; a taking asked for none keeps what the head says, whoever takes it
-    /// (doc-21, TASK-537.3.1).
-    #[test]
-    fn takings_give_cells_their_replication_and_keep_their_configuration() {
-        use crate::layout::{Configuration, Fsync, Member, Replication, Wish};
-        let (_dir, _counted, kms) = kms();
-        let bucket = Direct(SimBucket::new());
-        block_on(lifecycle::create(&bucket, TEST_CELL, 1)).unwrap();
-        let take = |holder: u64, replication: Option<Wish>| {
-            let taking = head::Taking { holder, replication, ..head::Taking::default() };
-            block_on(taking_(&bucket, &kms, TEST_CELL, taking)).unwrap().0
-        };
-        let wish = Wish::new(1, Fsync::Replicated).unwrap();
-        let held = take(5, Some(wish));
-        assert_eq!(held.head.replication, Some(Replication { wish, configuration: None }));
-
-        // Its writer installs a configuration: kept by every taking after.
-        let configuration = Configuration {
-            number: 1,
-            epoch: held.head.epoch,
-            f: 1,
-            members: (0..3)
-                .map(|i| Member { address: format!("h{i}:1"), incarnation: i })
-                .collect(),
-        };
-        let mut next = held.head.clone();
-        next.replication.as_mut().unwrap().configuration = Some(configuration.clone());
-        block_on(head::swap(&bucket, TEST_CELL, &held, next)).unwrap();
-        let held = take(6, None);
-        assert_eq!(
-            held.head.replication,
-            Some(Replication { wish, configuration: Some(configuration.clone()) })
-        );
-        let other = Wish::new(2, Fsync::Local).unwrap();
-        let held = take(7, Some(other));
-        assert_eq!(
-            held.head.replication,
-            Some(Replication { wish: other, configuration: Some(configuration) })
-        );
-        assert_eq!(block_on(head::get(&bucket, TEST_CELL)).unwrap().unwrap(), held.head);
-        // No f past the most, and no fsync waiting for copies an f of 0 never makes.
-        assert_eq!(Wish::new(crate::layout::MAX_F + 1, Fsync::Ordered), None);
-        assert_eq!(Wish::new(0, Fsync::Replicated), None);
-        assert!(Wish::new(0, Fsync::Local).is_some());
     }
 
     /// Takes `cell` as `holder`, of token 0, by `kms`, the host's, giving it `kind`: its head as

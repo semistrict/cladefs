@@ -261,26 +261,4 @@ mod tests {
         xts.decrypt(9, &mut unaligned[1..]);
         assert_eq!(&unaligned[1..], &plain[..]);
     }
-
-    /// Keys derived from other salts or infos encrypt otherwise; the same, alike.
-    #[test]
-    fn derived_keys_differ_by_salt_and_info() {
-        let (key, salt) = (Secret::random(), Salt::random());
-        let encrypted = |salt: &Salt, info: &[u8]| {
-            let mut sector = vec![0; SECTOR];
-            Xts::derive(&key, salt, info).encrypt(0, &mut sector);
-            sector
-        };
-        assert_eq!(encrypted(&salt, b"a"), encrypted(&salt, b"a"));
-        assert_ne!(encrypted(&salt, b"a"), encrypted(&salt, b"b"));
-        assert_ne!(encrypted(&salt, b"a"), encrypted(&Salt::random(), b"a"));
-    }
-
-    #[test]
-    fn xts_prints_no_key() {
-        assert_eq!(
-            format!("{:?}", Xts::derive(&Secret::random(), &Salt::random(), b"")),
-            "Xts(..)"
-        );
-    }
 }

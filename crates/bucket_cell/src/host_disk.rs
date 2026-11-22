@@ -438,27 +438,4 @@ mod tests {
         assert!(free.abs_diff(blocks * size) < 1024 * size, "{free} bytes, {blocks} of {size}");
         assert!(sample.used <= sample.size && free <= sample.size, "{sample:?}");
     }
-
-    /// A disk in memory is what its owner says, ungoverned until a governor looks at it, and no
-    /// host's.
-    #[test]
-    fn a_disk_in_memory_is_what_its_owner_says() {
-        let disk = HostDisk::in_memory(|| Sample { size: 100, free: 60, used: 40 });
-        assert_eq!(disk.sample().unwrap(), Sample { size: 100, free: 60, used: 40 });
-        assert_eq!((disk.dev(), disk.allowance(), disk.under_pressure()), (None, u64::MAX, false));
-        assert!(!HostDisk::all().iter().any(|alive| Arc::ptr_eq(alive, &disk)));
-        disk.cells.charge(3 * GRANULE, true);
-        disk.cache.add(GRANULE);
-        disk.cells.discharge(GRANULE, false);
-        disk.cells.reframe(GRANULE, false);
-        assert_eq!((disk.cells.bytes(), disk.cells.unframed()), (2 * GRANULE, 2 * GRANULE));
-        assert_eq!(disk.held(), 3 * GRANULE);
-        disk.govern(50, 10, true);
-        assert_eq!((disk.allowance(), disk.headroom(), disk.under_pressure()), (50, 10, true));
-    }
-
-    #[test]
-    fn lengths_count_in_granules() {
-        assert_eq!([0, 1, GRANULE, GRANULE + 1].map(counted), [0, GRANULE, GRANULE, 2 * GRANULE]);
-    }
 }

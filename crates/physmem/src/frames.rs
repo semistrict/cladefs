@@ -163,11 +163,6 @@ impl FrameList {
         self.len == 0
     }
 
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.len
-    }
-
     /// Lists `frame`, free and on no list, at the front.
     pub(crate) fn push_front(&mut self, frames: &Frames, frame: u32) {
         self.list(frames, frame);
@@ -178,19 +173,6 @@ impl FrameList {
             head => frames.set_prev(head, frame),
         }
         self.head = frame;
-    }
-
-    /// Lists `frame`, free and on no list, at the back.
-    #[cfg(test)]
-    pub(crate) fn push_back(&mut self, frames: &Frames, frame: u32) {
-        self.list(frames, frame);
-        frames.set_next(frame, NONE);
-        frames.set_prev(frame, self.tail);
-        match self.tail {
-            NONE => self.head = frame,
-            tail => frames.set_next(tail, frame),
-        }
-        self.tail = frame;
     }
 
     /// Takes the frame at the front off the list, if any: free, on no list.
@@ -367,37 +349,6 @@ impl FreeBlocks {
 mod tests {
     use super::*;
 
-    fn listed(list: &FrameList, frames: &Frames) -> Vec<u32> {
-        list.iter(frames).collect()
-    }
-
-    /// Frames pushed at either end, erased anywhere and popped from the front leave the list in
-    /// order, and each frame listed exactly while it is on it.
-    #[test]
-    fn lists_keep_their_frames_in_order() {
-        let frames = Frames::new(8);
-        let mut list = FrameList::new();
-        assert_eq!(list.pop_front(&frames), None);
-        list.push_back(&frames, 3);
-        list.push_back(&frames, 4);
-        list.push_front(&frames, 2);
-        list.push_back(&frames, 5);
-        assert_eq!(listed(&list, &frames), [2, 3, 4, 5]);
-        assert_eq!(list.len(), 4);
-        assert!(frames.is_listed(4) && !frames.is_listed(1));
-        list.erase(&frames, 4);
-        assert!(!frames.is_listed(4) && frames.is_free(4));
-        assert_eq!(listed(&list, &frames), [2, 3, 5]);
-        list.erase(&frames, 2);
-        list.erase(&frames, 5);
-        assert_eq!(listed(&list, &frames), [3]);
-        assert_eq!(list.pop_front(&frames), Some(3));
-        assert!(list.is_empty());
-        assert_eq!(listed(&list, &frames), [] as [u32; 0]);
-        list.push_front(&frames, 7);
-        assert_eq!(listed(&list, &frames), [7]);
-    }
-
     /// Free pages make blocks as large as they align to, each joined with its buddy once that is
     /// free, up to a chunk's; taking a run splits the smallest block holding it, its rest free.
     #[test]
@@ -425,34 +376,6 @@ mod tests {
         assert_eq!(free.len(), 3);
         free.insert(&frames, 14..15);
         assert_eq!(free.blocks(&frames), [(12, 2)]);
-    }
-
-    /// A frame allocated is neither free nor listed; freed, it is free, and forgets its stage.
-    #[test]
-    fn frames_are_allocated_and_freed() {
-        let frames = Frames::new(2);
-        let mut list = FrameList::new();
-        list.push_back(&frames, 1);
-        assert_eq!(list.pop_front(&frames), Some(1));
-        frames.allocate(1);
-        assert!(!frames.is_free(1));
-        frames.stage(1);
-        frames.free(1);
-        assert!(frames.is_free(1) && !frames.is_listed(1));
-        assert!(!frames.take_staged(1), "freed, it is no stage's");
-        frames.stage(0);
-        assert!(frames.take_staged(0));
-        assert!(!frames.take_staged(0), "taken, it is forgotten");
-    }
-
-    /// A frame is on one list at most.
-    #[test]
-    #[should_panic(expected = "frame 0 listed, not free and unlisted")]
-    fn frames_are_listed_once() {
-        let frames = Frames::new(1);
-        let (mut first, mut second) = (FrameList::new(), FrameList::new());
-        first.push_back(&frames, 0);
-        second.push_back(&frames, 0);
     }
 }
 

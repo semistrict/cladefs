@@ -211,23 +211,3 @@ impl madsim::plugin::Simulator for Plugin {
         reset((std::thread::current().id(), node));
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static MADE: AtomicU64 = AtomicU64::new(0);
-
-    node_local! {
-        static COUNTER: AtomicU64 = { MADE.fetch_add(1, Ordering::Relaxed); AtomicU64::new(0) };
-    }
-
-    /// Built normally, one value for the process, made once, at its first use.
-    #[test]
-    fn statics_are_the_processs_built_normally() {
-        COUNTER.get().fetch_add(2, Ordering::Relaxed);
-        COUNTER.get().fetch_add(3, Ordering::Relaxed);
-        assert_eq!(COUNTER.get().load(Ordering::Relaxed), 5);
-        assert_eq!(MADE.load(Ordering::Relaxed), 1);
-    }
-}

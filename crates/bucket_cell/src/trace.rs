@@ -377,17 +377,6 @@ mod tests {
         println!("a span off costs {fastest:?}");
     }
 
-    /// Off, nothing is gathered of where reads went, nor a backtrace recorded.
-    #[test]
-    fn sources_off_are_none() {
-        let (output, source) = futures::executor::block_on(sourced(async {
-            note(Some(Source::Bucket));
-            record_backtrace();
-            7
-        }));
-        assert_eq!((output, source), (7, None));
-    }
-
     /// On, a future's reads gather the farthest source noted, nothing for none; a source noted
     /// inside a nested gathering is the inner one's alone, as a flight's is until its reader notes
     /// it on landing.

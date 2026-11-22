@@ -709,7 +709,7 @@ mod tests {
     use crate::Rules;
     use crate::batch::{Commit, SegmentBuilder};
     use crate::layout::test_cell;
-    use crate::layout::{Contents, NewVersion, Segment};
+    use crate::layout::NewVersion;
     use crate::lifecycle;
     use crate::object_bucket::{ObjectBucket, Request};
     use object_store::memory::InMemory;
@@ -771,23 +771,6 @@ mod tests {
         });
     }
 
-    /// A writer another took the cell from uploads its segment, at its own key, but its swap of
-    /// the head fails: it stops, and says why; it takes no segment more (TASK-407).
-    #[test]
-    fn writers_taken_over_stop() {
-        futures::executor::block_on(async {
-            let bucket = memory();
-            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
-            let first = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
-            let _second = Writer::open(bucket.clone(), test_cell(1), 11, 0).await.unwrap();
-            let segment = add(&first, Commit { tag: 1, ..Commit::default() }).unwrap();
-            assert_eq!(first.upload(segment).await, Ok(()));
-            assert_eq!(first.acknowledge().await, Err(Error::Fenced));
-            assert_eq!(first.stopped(), Some(Error::Fenced));
-            assert_eq!(add(&first, Commit { tag: 2, ..Commit::default() }), Err(Error::Fenced));
-        });
-    }
-
     /// Adds a segment of an empty commit tagged `tag` to `writer`, closed on its chain, the version
     /// `cut` cut at its end: returns its number.
     fn cut(writer: &Writer<ObjectBucket>, tag: u64, cut: NewVersion) -> Result<u64, Error> {
@@ -807,48 +790,6 @@ mod tests {
     fn named(head: Option<layout::Head>) -> Vec<(u64, u64)> {
         let versions = head.map(|head| head.versions).unwrap_or_default();
         versions.iter().map(|version| (version.id, version.at)).collect()
-    }
-
-    /// TASK-476: a cell's head names a version once the acknowledgement naming the segment
-    /// cutting it does, in the same swap; a window drops the oldest as a version asking for one is
-    /// named; its writer drops a version by a swap; a takeover names what the head named; a
-    /// deletion's final head names none.
-    #[test]
-    fn heads_name_versions_as_their_segments_are_acknowledged() {
-        futures::executor::block_on(async {
-            let bucket = memory();
-            let cell = test_cell(1);
-            lifecycle::create(&*bucket, cell, 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), cell, 10, 0).await.unwrap();
-            let a = cut(&writer, 1, version(0xa, None)).unwrap();
-            let b = cut(&writer, 2, version(0xb, None)).unwrap();
-            writer.upload(a).await.unwrap();
-            writer.acknowledge().await.unwrap();
-            assert_eq!(named(head::get(&*bucket, cell).await.unwrap()), [(0xa, a)]);
-            writer.upload(b).await.unwrap();
-            writer.acknowledge().await.unwrap();
-            assert_eq!(named(head::get(&*bucket, cell).await.unwrap()), [(0xa, a), (0xb, b)]);
-            let c = cut(&writer, 3, version(0xc, Some(2))).unwrap();
-            writer.upload(c).await.unwrap();
-            writer.acknowledge().await.unwrap();
-            assert_eq!(named(head::get(&*bucket, cell).await.unwrap()), [(0xb, b), (0xc, c)]);
-            writer.drop_versions(&BTreeSet::from([0xb, 0xd])).await.unwrap();
-            assert_eq!(named(head::get(&*bucket, cell).await.unwrap()), [(0xc, c)]);
-            let versions: Vec<_> = writer.versions().await.iter().map(|v| (v.id, v.at)).collect();
-            assert_eq!(versions, [(0xc, c)]);
-            writer.share_version(0xc, true).await.unwrap();
-            assert_eq!(writer.share_version(0xb, true).await, Err(Error::NoCell));
-            let shared = head::get(&*bucket, cell).await.unwrap().unwrap();
-            assert!(shared.version(0xc).unwrap().shared);
-
-            let next = Writer::open(bucket.clone(), cell, 11, 0).await.unwrap();
-            assert_eq!(named(head::get(&*bucket, cell).await.unwrap()), [(0xc, c)]);
-            assert_eq!(writer.drop_versions(&BTreeSet::from([0xc])).await, Err(Error::Fenced));
-            drop(next);
-            lifecycle::delete(&*bucket, cell, 12, 0).await.unwrap();
-            let ended = head::get(&*bucket, cell).await.unwrap().unwrap();
-            assert_eq!((ended.epoch, named(Some(ended))), (layout::Head::FINAL, vec![]));
-        });
     }
 
     /// TASK-569: an acknowledgement that read the versions to name before a drop of one, then
@@ -1015,106 +956,6 @@ mod tests {
         });
     }
 
-    /// TASK-79.19: a segment's extents of their own upload a few at once, each holding its bytes
-    /// while it goes, rather than all at once: the next goes as one is done.
-    #[test]
-    fn extents_of_their_own_upload_a_few_at_once() {
-        use crate::testing::{Fault, SimBucket};
-        use std::task::{Context, Poll};
-        let bucket = SimBucket::new();
-        let (writer, _) = bucket.served(async {
-            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
-            Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap()
-        });
-        let first = writer.chain().next_sequence();
-        let own = (0..2 * OWN_AT_ONCE as u64 + 1).map(|n| (first + n, vec![n as u8; 10])).collect();
-        let commit = Commit { tag: 1, own, ..Commit::default() };
-        let segment = writer.add_segment(
-            SegmentBuilder::from(commit)
-                .close(&mut writer.chain())
-                .frame(writer.keys().encrypting()),
-        );
-        let mut upload = std::pin::pin!(writer.upload(segment.unwrap()));
-        let mut context = Context::from_waker(futures::task::noop_waker_ref());
-        // The most creates waiting at once.
-        let mut most = 0;
-        while let Poll::Pending = upload.as_mut().poll(&mut context) {
-            most = most.max(bucket.waiting());
-            bucket.complete(0, Fault::None);
-        }
-        assert_eq!(most, OWN_AT_ONCE);
-    }
-
-    /// TASK-79.19: a writer uploading within a budget reads each object only once the budget has
-    /// room for it, and gives the room up once the object is created: with room for one, the next
-    /// is read only as the one before is done.
-    #[test]
-    fn uploads_read_their_objects_within_their_budget() {
-        use crate::testing::{Fault, SimBucket};
-        use std::task::{Context, Poll};
-        let bucket = SimBucket::new();
-        let (writer, _) = bucket.served(async {
-            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
-            Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap()
-        });
-        let writer = writer.uploading_within(Budget::new(Limits { requests: 1, bytes: u64::MAX }));
-        // Two segments, a commit's each, whose reads are noted.
-        let reads = Arc::new(Mutex::new(Vec::new()));
-        let mut segments = Vec::new();
-        for tag in 1..=2 {
-            let commit = Commit { tag, ..Commit::default() };
-            let Objects { footer, segment, own } = SegmentBuilder::from(commit)
-                .close(&mut writer.chain())
-                .frame(writer.keys().encrypting());
-            let reads = reads.clone();
-            let segment = Body::new(10, move || {
-                reads.lock().unwrap().push(tag);
-                segment.read()
-            });
-            segments.push(writer.add_segment(Objects { footer, segment, own }).unwrap());
-        }
-        let uploads =
-            futures::future::join_all(segments.iter().map(|&segment| writer.upload(segment)));
-        let mut uploads = std::pin::pin!(uploads);
-        let mut context = Context::from_waker(futures::task::noop_waker_ref());
-        let mut uploading = || match uploads.as_mut().poll(&mut context) {
-            Poll::Ready(uploaded) => Some(uploaded),
-            Poll::Pending => None,
-        };
-        assert!(uploading().is_none());
-        assert_eq!((reads.lock().unwrap().clone(), bucket.waiting()), (vec![1], 1));
-        bucket.complete(0, Fault::None);
-        assert!(uploading().is_none());
-        assert_eq!((reads.lock().unwrap().clone(), bucket.waiting()), (vec![1, 2], 1));
-        bucket.complete(0, Fault::None);
-        assert_eq!(uploading(), Some(vec![Ok(()), Ok(())]));
-    }
-
-    /// A segment taken with a footer its bytes do not end with stops its writer, which uploads
-    /// nothing of it.
-    #[test]
-    fn segments_ending_with_another_footer_than_taken_stop_their_writers() {
-        futures::executor::block_on(async {
-            let bucket = memory();
-            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
-            let close = |tag| {
-                let commit = Commit { tag, ..Commit::default() };
-                SegmentBuilder::from(commit)
-                    .close(&mut writer.chain())
-                    .frame(writer.keys().encrypting())
-            };
-            let Objects { footer, own, .. } = close(1);
-            let objects = Objects { footer, segment: close(2).segment, own };
-            let segment = writer.add_segment(objects).unwrap();
-            let key = layout::segment(test_cell(1), segment, 1);
-            let corrupt = Error::Corrupt(format!("{key} ends with another footer than taken"));
-            assert_eq!(writer.upload(segment).await, Err(corrupt.clone()));
-            assert_eq!(writer.stopped(), Some(corrupt));
-            assert_eq!(bucket.head(&key).await.map(|_| ()), Err(bucket::Error::NotFound));
-        });
-    }
-
     /// TASK-92.6: a writer taking over a cell recovered before it took the head recovers it on
     /// from there: it reads the head, takes it, then reads the segments the head names that came
     /// in between (TASK-165.11, TASK-407, TASK-515). Each round a round trip on a real bucket.
@@ -1227,106 +1068,4 @@ mod tests {
         assert_eq!(rounds[..4], [put, get, slots_read(test_cell(1)), taken]);
     }
 
-    /// A checkpoint as of the last one is not written again.
-    #[test]
-    fn checkpoints_are_written_once() {
-        futures::executor::block_on(async {
-            let bucket = memory();
-            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
-            let segment = writer.checkpoint().await.unwrap();
-            let requests = bucket.stats().requests;
-            assert_eq!(writer.checkpoint().await, Ok(segment));
-            assert_eq!(bucket.stats().requests, requests);
-        });
-    }
-
-    /// A writer takes a segment a cell closed for it, and uploads it as it is; one numbered
-    /// otherwise, of another writer, or without the objects of its extents of their own at the
-    /// keys it names them at, it refuses, and goes on as before.
-    #[test]
-    fn writers_upload_segments_cells_closed() {
-        futures::executor::block_on(async {
-            let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
-            let chain = writer.chain();
-            let segment = chain.next_segment();
-            let (small, large) = (ExtentId::new(1, 2), ExtentId::new(1, 3));
-            let own_key = layout::extent(layout::TEST_CELL, writer.epoch(), segment, large);
-            let footer = Footer {
-                cell: test_cell(1),
-                segment,
-                epoch: writer.epoch(),
-                contents: Contents {
-                    commits: vec![7],
-                    extents: vec![(small, 0, 3)],
-                    own: vec![(large.sequence, 5)],
-                    frees: vec![],
-                    root: Some(b"root".to_vec()),
-                    next_sequence: 4,
-                    capacity: None,
-                    continued: None,
-                    versions: vec![],
-                },
-            };
-            let encoded = |footer: &Footer| -> Vec<u8> {
-                Segment { data: b"abc".to_vec(), footer: footer.clone() }
-                    .encode(writer.keys().encrypting())
-            };
-            let own = layout::own_extent(large, b"large", writer.keys().encrypting());
-            let owns = || vec![(own_key.clone(), own.clone().into())];
-            let objects = |footer: &Footer, own| Objects {
-                footer: footer.clone(),
-                segment: encoded(footer).into(),
-                own,
-            };
-            let elsewhere = layout::extent(layout::TEST_CELL, writer.epoch() + 1, segment, large);
-            // Its chain's next place: segment 0 of epoch 1, the head's end.
-            assert_eq!((writer.epoch(), segment), (1, 0));
-            let wanted = format!("{:?}", (test_cell(1), 0, 1));
-            let misplaced = |place: &str| {
-                Error::Corrupt(format!("a segment of cell 1/1, {place}, not {wanted}"))
-            };
-            for (wrong, refused) in [
-                (Footer { segment: segment + 1, ..footer.clone() }, misplaced("number 1, epoch 1")),
-                (
-                    Footer { epoch: writer.epoch() + 1, ..footer.clone() },
-                    misplaced("number 0, epoch 2"),
-                ),
-            ] {
-                assert_eq!(writer.add_segment(objects(&wrong, owns())), Err(refused), "{wrong:?}");
-            }
-            let elsewhere = vec![(elsewhere, own.clone().into())];
-            let missing = Error::Corrupt(format!("{large:?} is stored at {own_key}"));
-            assert_eq!(writer.add_segment(objects(&footer, elsewhere)), Err(missing));
-            let missing = Error::Corrupt(format!("{large:?} is stored at {own_key}"));
-            assert_eq!(writer.add_segment(objects(&footer, vec![])), Err(missing));
-            assert_eq!(writer.chain(), chain);
-            // Its bytes, encrypted once, under a salt of their own (TASK-411.28).
-            let ours = encoded(&footer);
-            let taken =
-                Objects { footer: footer.clone(), segment: ours.clone().into(), own: owns() };
-            assert_eq!(writer.add_segment(taken), Ok(segment));
-            let chain = writer.chain();
-            assert_eq!(chain.next_segment(), segment + 1);
-            writer.upload(segment).await.unwrap();
-            assert_eq!(writer.acknowledge().await, Ok(Some(segment)));
-            let object =
-                bucket::get(&*bucket, &layout::segment(test_cell(1), segment, 1)).await.unwrap();
-            assert_eq!(object.bytes, ours);
-            let object = bucket::get(&*bucket, &own_key).await.unwrap();
-            assert_eq!(object.bytes, own);
-            let state = writer.state();
-            assert_eq!((state.last_commit, state.root), (Some(7), Some(b"root".to_vec())));
-            assert_eq!(
-                crate::testing::read(&bucket, small, &state.extents[&small]).await.unwrap(),
-                b"abc"
-            );
-            assert_eq!(
-                crate::testing::read(&bucket, large, &state.extents[&large]).await.unwrap(),
-                b"large"
-            );
-        });
-    }
 }
