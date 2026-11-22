@@ -12,8 +12,8 @@ Design, 2026-11-04 (TASK-165, its AC #1). The user decided the direction that da
 copy-on-write DAX work (TASK-164). This doc says what goes, what local disk holds afterwards, the
 format changes, how each concern lives in doc-7's protocol alone, the one replay, the
 local-filesystem bucket, how the tests carry over and how the risky parts are checked, and the
-landable steps (TASK-165.1 to 165.10). Decisions taken here are also in OPEN_QUESTIONS.md under
-`# Decisions`.
+landable steps (TASK-165.1 to 165.10). Decisions taken here are also hotbed questions 296–303
+(project cladefs).
 
 **Status, 2026-11-07:** implemented. Steps 1 to 9 are on main (TASK-165.9 landed in c9207e5d4);
 this doc was brought to the code then (TASK-165.10): what it describes is what main does, and the
@@ -97,7 +97,7 @@ cleaning go.
 *Implemented 2026-11-06 (TASK-165.9), differing from the design in names, not in kind:* the
 design's `open/<n>`, `open/<n>.log` and `wal/<seq>` are the table's `open-segments/`, `logs/` and
 `segments/`, kept per branch; the design had no `unmade`, nor the WAL's start in a file of its own.
-OPEN_QUESTIONS.md says why each.
+Hotbed question 297 says why each.
 
 ## What went
 
@@ -462,7 +462,8 @@ Out of scope: the serial commit log over parallel data (a SlateDB-style manifest
 
 ## Decisions
 
-Taken on the way, each in OPEN_QUESTIONS.md under `# Decisions` with what else was possible:
+Taken on the way, each with what else was possible in hotbed questions 296–303 (project cladefs)
+or, once the user confirmed it, in OPEN_QUESTIONS.md's history:
 
 - **A child takes its state in O(extents), not shared in memory** (TASK-165.7): a fork's child's
   cell is made once its record exists, and opening it recovers its state from the bucket and
@@ -479,7 +480,7 @@ Taken on the way, each in OPEN_QUESTIONS.md under `# Decisions` with what else w
 - **`Uploader::unfork` stays:** a fork failing after its commit was made deletes the fork's child in
   the bucket, the fork's alone (`branch::delete_fork`), so that its segment, landing late, makes
   nothing (TASK-79.78).
-- **One recovery** (TASK-165.9, local format 8): see OPEN_QUESTIONS.md's line, which lists each of
+- **One recovery** (TASK-165.9, local format 8): see hotbed question 297, which lists each of
   its choices (the open segment's log, the WAL's start, framings as one queue, frees kept until
   acknowledged, the next sequence on opening, a resize a commit of its own).
 

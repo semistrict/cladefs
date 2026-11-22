@@ -48,7 +48,7 @@
 # tasks (renamed through its CLI, open ones only), dead-ends/, DONE.md,
 # vendor/firecracker.rewrites; the earlier renames' scripts, their tests and
 # crates/cladefs/src/renamed.rs, which name what they renamed; and what names the old names to say
-# what became of them, OPEN_QUESTIONS.md's decisions and docs/upgrading-a-host.md. This script and
+# what became of them, docs/upgrading-a-host.md. This script and
 # its test keep their words. A/B tooling that reads a side from before (scripts/ab-rounds.py) spells
 # the old name so that this script, run again, leaves it.
 set -euo pipefail
@@ -187,7 +187,7 @@ if [[ $mode == repo ]]; then
         ':(exclude)*.pb.go' ':(exclude)scripts/rename-to-cladefs-api.sh'
         ':(exclude)scripts/tests/test_rename_to_cladefs_api.py' ':(exclude)scripts/rename-to-cladefsd.sh'
         ':(exclude)scripts/tests/test_rename_to_cladefsd.py'
-        ':(exclude)crates/cladefs/src/renamed.rs' ':(exclude)OPEN_QUESTIONS.md'
+        ':(exclude)crates/cladefs/src/renamed.rs'
         ':(exclude)docs/upgrading-a-host.md')
 fi
 # Whether rustfmt, as the tree's rustfmt.toml and toolchain have it, leaves the Rust on stdin as it

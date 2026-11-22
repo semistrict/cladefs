@@ -224,7 +224,7 @@ fn outermost<E: std::error::Error + Send + Sync + 'static>(error: &Error) -> Opt
 }
 
 /// The errno of `error`, for `call`, and whether it is one a VFS's callers expect: the table,
-/// one row a variant. Corruption says so, as ext4's and XFS's do (OPEN_QUESTIONS.md, TASK-160.21).
+/// one row a variant. Corruption says so, as ext4's and XFS's do (hotbed question 354, TASK-160.21).
 const fn of_fxfs(error: &FxfsError, call: Call) -> (Errno, Reported) {
     use Reported::{Expected, Logged};
     let xattr = matches!(call, Call::Xattr);

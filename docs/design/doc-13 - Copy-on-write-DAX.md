@@ -165,7 +165,7 @@ window's changes take; 3 and 4 are the guest's, unchanged.
   decides. On arm64, the write-protect fault reports the address, as now. *Done differently
   (TASK-164.1):* a private page is the VM process's own memory, a memfd laid out as the window
   (`dax::uffd::PrivateMemory`), not a page of the tenant's arena; nothing is reserved for
-  `private_max` (TASK-501, OPEN_QUESTIONS.md).
+  `private_max` (TASK-501, hotbed question 341).
 - **Private pages** are the device's: a source evicting its page skips them; a `MAP` or `UNMAP`
   over one frees it; the device's count is kept with them.
 - **A `MAP` names pages; their first touch installs them** (TASK-276.6, `dax::uffd`). A page the

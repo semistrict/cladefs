@@ -8,8 +8,8 @@ updated_date: '2026-11-21 21:10'
 # Writers compact, a keyless collector, and one head object
 
 Design, 2026-11-21: Wave 2, track 2B, of the 2026-11-21 first-principles simplification (board
-6127). Nothing here is built yet. Decisions taken without the user are in `OPEN_QUESTIONS.md`
-(# Decisions, "doc-27"). The spec is `specs/bucket` (Bucket.tla, updated with this doc). The
+6127). Nothing here is built yet. Decisions taken without the user are hotbed
+questions 55–59 (project cladefs). The spec is `specs/bucket` (Bucket.tla, updated with this doc). The
 implementation tasks are listed under Order of work.
 
 Code is cited by file and exact text (`rg -F` finds it), as of main at 967e93b8a.
@@ -108,8 +108,8 @@ for Uploaded. A replicated cell's sync waits for *Replicated*, its peers, with n
      `MARKS_KEPT`, `UNMADE_FOR`, `Collector::unmade`, `Found::{Unmade, Failed}` and
      `head::fail`. A head is one create, so it is never half made.
    - The four slot rules and their sim toggles go.
-   - specs/head-slots stays until the code it models is gone. Deleting it then is the user's
-     call (`OPEN_QUESTIONS.md`).
+   - specs/head-slots stays until the code it models is gone. Deleting it then was the user's
+     call, and they allowed it (e7a694cb1).
 6. **Format.** The bucket `layout::FORMAT` goes one past whatever Wave 1 leaves it at (24 today;
    board 6017 bumps it). `Kind::Moves` and `<C>head/<slot>` are refused as `Error::Format`, and
    checkpoints gain each named object's data length (below). Nothing migrates, and no bucket
@@ -315,7 +315,7 @@ the idle case.
 
 fsync (Ordered), Local and Replicated levels are unaffected. A GCS cell that needs fast durable
 syncs is a replicated cell (doc-21), whose syncs wait for f peers' disks, not the bucket: the
-recommended setup, recorded in `OPEN_QUESTIONS.md`.
+recommended setup, recorded in hotbed question 56.
 
 Every bucket gains back the rest: creation is 1 PUT and opening is 1 GET (9 and 9 fewer at the
 default), with no marks, no day-old garbage and no hour-old unmade heads. Wave 1's board 6020
@@ -367,7 +367,7 @@ already takes non-GCS buckets to one slot. This finishes the job for GCS, and th
   code until Order of work's steps 2 and 4 land.
 
 specs/head-slots: retired once step 4 lands (the user's OK to delete a test suite,
-`OPEN_QUESTIONS.md`); until then it still models the code. specs/buckets mentions moves only as
+e7a694cb1); until then it still models the code. specs/buckets mentions moves only as
 not modelled, which needs one line changed.
 
 `make check-tla`: every model and mutation green, the three removed mutations' rules being gone
@@ -405,8 +405,8 @@ simulations and `make check-tla` passing.
    compaction off (`compact_below` 0 by default), so that relocations and moves never run
    together, a combination no spec checks; step 2 deletes it.
 2. **Moves go** (`collector.rs`, `moves.rs`, `fetch.rs`, `writer.rs`, `mirror.rs`, `local_cell`'s
-   follow, `layout.rs`, rules, FORMAT bumped). Deleting their tests needs the user's OK
-   (`OPEN_QUESTIONS.md`). Needs 1, and board 6017.
+   follow, `layout.rs`, rules, FORMAT bumped). Deleting their tests has the user's OK
+   (e7a694cb1). Needs 1, and board 6017.
 3. **The collector is keyless** (`collector.rs`, `sweep.rs`, `bin/cladefs-gc.rs`). Covers the KMS
    gone from sweeps, `Heard`, `uncompacted` and `--compact-below`/`--grace`. Test: a sweep of a
    bucket of encrypted cells with no KMS configured collects everything it did before. Needs 2.

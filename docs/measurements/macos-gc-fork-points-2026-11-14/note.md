@@ -35,5 +35,5 @@ Checkpoints of the cell: P = 1: 1 of 748 KB; P = 10: 4.2 MB in all; P = 100: 38.
 - So a written VM's pass costs about 1 + P/9 times its cost with one point: 1.8x at 10 points,
   12x at 100. TASK-395.12's cache would make it ~1x however many points (one object, the union,
   decoded once), for a protocol change (Bucket.tla, a new object under `<C>gc/`, its validation).
-- Decision (OPEN_QUESTIONS.md, TASK-395.12): not built now. Worth it once running VMs commonly keep
+- Decision (hotbed question 174, TASK-395.12): not built now. Worth it once running VMs commonly keep
   dozens of live snapshots while written: at 30, a pass is ~4x.

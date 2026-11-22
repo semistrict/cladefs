@@ -13,7 +13,7 @@ on:
     branches: [main]
     # cladefs: a push of backlog notes alone tests nothing new: what reaches main has passed its
     # land-X branch's run first. Their runs queued ahead of land-X branches' for half an hour.
-    paths-ignore: ['backlog/**', 'OPEN_QUESTIONS.md']
+    paths-ignore: ['backlog/**']
   pull_request:
   workflow_dispatch:
     inputs:

@@ -185,8 +185,9 @@ Not usable: **Kani** (Apache-2.0 itself) runs on **CBMC, BSD-4-Clause** (adverti
 OSI-approved): excluded. Antithesis is proprietary. agentic-pbt and MongoDB's test generator have
 no licence (ideas only). trailofbits/skills is CC-BY-SA-4.0.
 
-Pending: **herdtools7** (herd7, needed for LKMM litmus tests of dax.c's barriers) is under
-CeCILL-B, whose OSI status is unclear: OPEN_QUESTIONS.md.
+**herdtools7** (herd7, needed for LKMM litmus tests of dax.c's barriers) is under CeCILL-B, whose
+OSI status is unclear: the user allowed it as a dev-only checker, nothing linked or shipped
+(hotbed question 1).
 
 ## Sources
 

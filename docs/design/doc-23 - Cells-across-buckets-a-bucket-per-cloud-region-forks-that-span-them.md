@@ -10,7 +10,7 @@ updated_date: '2026-11-19 14:31'
 Design, 2026-11-18. The user chose the direction that day. This doc gathers what the code assumes
 today, quoting it by text as of 8368dfe5. It then says what changes, what the TLA+ spec must check,
 and the order of the work. Two research passes found that nothing in the backlog, the docs or
-OPEN_QUESTIONS.md had planned for more than one cloud region before this.
+the decisions then in OPEN_QUESTIONS.md had planned for more than one cloud region before this.
 
 "Region" in CONTEXT.md is the guest's DAX term. Here **cloud region** is the geographic one.
 
