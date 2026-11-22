@@ -68,8 +68,13 @@ impl RawEncryption {
         self.mac.verify(&at_bytes(at, bytes), mac).is_ok()
     }
 
+    /// Its sectors' key: the key of the object its raw file is once framed in place.
+    pub fn sectors(&self) -> &Arc<ObjectKey> {
+        &self.sectors
+    }
+
     /// Encrypts `sectors` in place, whole sectors at `at`, a multiple of [`SECTOR`], in the file.
-    fn encrypt(&self, at: u64, sectors: &mut [u8]) {
+    pub fn encrypt(&self, at: u64, sectors: &mut [u8]) {
         self.sectors.encrypt_sectors(at / SECTOR, sectors);
     }
 
@@ -109,6 +114,11 @@ impl<F: File> RawFile<F> {
     /// `file`, raw, encrypted by `encryption`.
     pub(crate) fn new(file: F, encryption: Arc<RawEncryption>) -> Self {
         Self { file: Arc::new(file), encryption }
+    }
+
+    /// `file`, already shared, raw, encrypted by `encryption`.
+    pub(crate) fn from_arc(file: Arc<F>, encryption: Arc<RawEncryption>) -> Self {
+        Self { file, encryption }
     }
 
     /// The file as it stores the bytes, encrypted: for a reader of them as stored, as a

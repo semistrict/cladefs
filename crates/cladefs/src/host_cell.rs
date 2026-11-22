@@ -718,7 +718,7 @@ pub(crate) async fn fork_ephemeral(
         Err(err) => Err(err),
         Ok(()) => match uploader.forked_ephemeral(child, inheriting, host.incarnation()).await {
             Err(err) => Err(fork_failure(cell, err)),
-            Ok(checkpoint) => upload::blocking(|| -> anyhow::Result<()> {
+            Ok((checkpoint, ring)) => upload::blocking(|| -> anyhow::Result<()> {
                 prepare(path)?;
                 let capacity = local.description().capacity;
                 let description = Description { block_size: BLOCK_SIZE, capacity, cell };
@@ -728,6 +728,7 @@ pub(crate) async fn fork_ephemeral(
                     &entry.bucket,
                     kind,
                     &checkpoint,
+                    ring.encrypting(),
                 )
                 .with_context(|| format!("forking to ephemeral cell {cell}: its cell directory"))?;
                 local_cell::made_host(path)?;

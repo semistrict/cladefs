@@ -169,6 +169,7 @@ async fn what_a_member_holds_recovers_on_another_host() {
     let lost = Host { runtime: host_runtime::HostRuntime::new(), bucket };
 
     let dir = MemDir::new();
+    let check_dir = dir.clone();
     LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
     let (open_cell, uploader) = lost.open(LocalCell::recover_unmade(dir).unwrap(), 1).await;
     open_cell.made().unwrap();
@@ -179,7 +180,7 @@ async fn what_a_member_holds_recovers_on_another_host() {
     let member = Arc::new(Member::default());
     let links: Vec<Arc<dyn MemberLink>> = vec![member.clone(), Arc::new(Down)];
     let replicator =
-        Replicator::start(1, base, open_cell.spool().unwrap(), links, uploader.waker());
+        Replicator::start(1, base, Some(open_cell.replica_source()), links, uploader.waker());
     open_cell.replicate_to(replicator.clone()).await;
 
     // Commits spanning segments, and extents stored on their own.
@@ -198,8 +199,9 @@ async fn what_a_member_holds_recovers_on_another_host() {
     uploader.replicated(last).await.unwrap();
     let expected = lost.contents(&open_cell).await;
     assert!(member.logs.lock().unwrap().keys().any(|log| log & 1 == 1), "own extents sent");
-    // What it sends is spooled on the cell's disk, not held in memory (TASK-537.3.3).
+    // Tracked in-flight logs, with no replica-spool directory written on disk (board 6902).
     assert!(replicator.spooled() > 0);
+    assert!(local_cell::Dir::list(&check_dir, "replica-spool").is_err(), "no replica-spool");
 
     // The host is lost: what the member holds, and the bucket, are all there is.
     lose(lost, (uploader, open_cell, replicator));
@@ -606,7 +608,7 @@ async fn replicated_waiters_are_woken_by_members_or_the_bucket() {
     let gated = Arc::new(Gated::default());
     let links: Vec<Arc<dyn MemberLink>> = vec![gated.clone(), Arc::new(Down)];
     let replicator =
-        Replicator::start(1, base, open_cell.spool().unwrap(), links, uploader.waker());
+        Replicator::start(1, base, Some(open_cell.replica_source()), links, uploader.waker());
     open_cell.replicate_to(replicator.clone()).await;
 
     let extent = ExtentId { cell: cell.id, sequence: open_cell.info().unwrap().next_sequence };
@@ -628,7 +630,7 @@ async fn replicated_waiters_are_woken_by_members_or_the_bucket() {
     // Its members down: degraded, its waiters woken by the bucket.
     drop(replicator);
     let links: Vec<Arc<dyn MemberLink>> = vec![Arc::new(Down), Arc::new(Down)];
-    let down = Replicator::start(1, epoch, open_cell.spool().unwrap(), links, uploader.waker());
+    let down = Replicator::start(1, epoch, Some(open_cell.replica_source()), links, uploader.waker());
     open_cell.replicate_to(down.clone()).await;
     open_cell.close_segment().unwrap();
     open_cell

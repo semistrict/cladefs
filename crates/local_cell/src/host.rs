@@ -313,6 +313,7 @@ pub fn create_host_ephemeral(
     bucket: &str,
     kind: Kind,
     checkpoint: &crate::LocalCheckpoint,
+    encrypting: (&extent_frame::Secret, extent_frame::KeyId),
 ) -> Result<(), Error> {
     LocalCell::make_ephemeral(
         &HostDir::new(path)?,
@@ -320,6 +321,7 @@ pub fn create_host_ephemeral(
         Some(bucket),
         Some(kind),
         checkpoint,
+        encrypting,
     )
 }
 

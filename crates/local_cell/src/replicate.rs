@@ -27,23 +27,103 @@
 //! sent nothing more, until a replacement (TASK-537.3.5); one that says a later epoch fenced the
 //! cell fences the writer: no commit of it is told replicated after.
 //!
-//! What it sends is spooled ([`Spool`]), not held in memory: a cell's spool is a directory of its
-//! own, its files bypassing the host's page cache as every cell file does, appended to as each
-//! flush is sent and read back as each member is sent what it lacks, each log's files removed as
-//! the head names its segment. The replicator holds each log's length alone. The spool is no
-//! durable state, the cell's own log being: it is synced never, and emptied as a replicator
-//! starts. Its failing breaks the replicator, whose commits then wait for the bucket.
+//! For hot replication (peers caught up), each flush's `Arc<[u8]>` batch is handed directly to the
+//! `2f` peer tasks in memory (zero spool disk writes, zero spool disk reads; board 6902) and
+//! dropped once live members pass it or total hot bytes exceed [`HOT_BYTES`]. For lagging peers or
+//! configuration replacement/catch-up, bytes evicted from the hot window are streamed directly
+//! from the cell's existing `logs/`, `open-segments/`/`segments/`, and `extents/` via
+//! [`LogSource`].
 
 use crate::untrusted::Cursor;
 use event_listener::Event;
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 /// The most of a log a member is sent at once.
 pub const PIECE: usize = 4 << 20;
+
+/// Maximum evictable hot bytes retained in memory per replicator before lagging/replacement peers
+/// fall back to reading from [`LogSource`] (board 6902).
+const HOT_BYTES: u64 = 16 << 20;
+
+/// Node-wide accounting and governor eviction hook for replication hot buffers (board 6902):
+/// counts every byte held across all live [`Replicator`] instances (including pinned take-time
+/// seeds) and lets the daemon's memory governor cap and reclaim persisted buffers under pressure.
+struct HotBudget {
+    total: AtomicU64,
+    limit: AtomicU64,
+    replicators: Mutex<Vec<Weak<Shared>>>,
+}
+
+impl HotBudget {
+    fn new() -> Self {
+        Self {
+            total: AtomicU64::new(0),
+            limit: AtomicU64::new(u64::MAX),
+            replicators: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+node_local::node_local! {
+    static HOT: HotBudget = HotBudget::new();
+}
+
+/// Total bytes held in hot replication buffers across all live replicators on this host,
+/// including pinned take-time seeds (board 6902).
+pub fn hot_bytes() -> u64 {
+    HOT.get().total.load(Ordering::Relaxed)
+}
+
+/// Sets the node-wide soft cap on hot replication buffers (called by the daemon's memory
+/// governor): new flushes past this cap evict persisted chunks as soon as they hit local disk.
+pub fn size_hot_to(limit: u64) {
+    HOT.get().limit.store(limit, Ordering::Relaxed);
+}
+
+/// Evicts persisted, non-pinned hot replication chunks across live replicators until total hot
+/// bytes are at most `target` (or only unpersisted/pinned chunks remain), returning bytes freed.
+pub fn evict_hot_to(target: u64) -> u64 {
+    let budget = HOT.get();
+    if budget.total.load(Ordering::Relaxed) <= target {
+        return 0;
+    }
+    let live: Vec<Arc<Shared>> = {
+        let mut list = budget.replicators.lock().unwrap();
+        list.retain(|weak| weak.strong_count() > 0);
+        list.iter().filter_map(Weak::upgrade).collect()
+    };
+    let mut evicted = 0u64;
+    loop {
+        let mut progress = false;
+        for shared in &live {
+            if budget.total.load(Ordering::Relaxed) <= target {
+                return evicted;
+            }
+            let mut state = shared.state.lock().unwrap();
+            if state.has_source {
+                let freed = state.evict_one_persisted();
+                if freed > 0 {
+                    evicted += freed;
+                    progress = true;
+                }
+            }
+        }
+        if !progress {
+            return evicted;
+        }
+    }
+}
+
+/// Seed for `own_frame` rapidhash integrity checks.
+const OWN_FRAME_SEED: u64 = 0x6678_6461_7832_0002;
+
+/// Header bytes of an `own_frame`: sequence (u64), len (u64), hash (u64).
+pub(crate) const OWN_FRAME_HEADER: u64 = 24;
 
 /// The log a member keeps segment `segment`'s replica log in.
 pub fn log_of(segment: u64) -> u64 {
@@ -55,30 +135,66 @@ pub fn own_of(segment: u64) -> u64 {
     (segment << 1) | 1
 }
 
+fn own_frame_hash(sequence: u64, file: &[u8]) -> u64 {
+    let mut header = [0u8; 16];
+    header[..8].copy_from_slice(&sequence.to_le_bytes());
+    header[8..].copy_from_slice(&(file.len() as u64).to_le_bytes());
+    let h = rapidhash::rapidhash_seeded(&header, OWN_FRAME_SEED);
+    rapidhash::rapidhash_seeded(file, h) | 1
+}
+
 /// An extent stored on its own as its segment's own log holds it: its sequence (u64), its file's
-/// length (u64), little-endian, then the file's bytes, the bucket's object byte for byte.
+/// length (u64), its rapidhash (u64, nonzero so zero-padding never matches), little-endian, then
+/// the file's bytes, the bucket's object byte for byte.
 pub fn own_frame(sequence: u64, file: &[u8]) -> Vec<u8> {
-    let mut frame = Vec::with_capacity(16 + file.len());
+    let mut frame = Vec::with_capacity(OWN_FRAME_HEADER as usize + file.len());
     frame.extend_from_slice(&sequence.to_le_bytes());
     frame.extend_from_slice(&(file.len() as u64).to_le_bytes());
+    frame.extend_from_slice(&own_frame_hash(sequence, file).to_le_bytes());
     frame.extend_from_slice(file);
     frame
 }
 
-/// The extents an own log's bytes hold, whole: each sequence and file. A member's bytes, untrusted:
-/// read through [`Cursor`], a frame cut short or of a length past what is left ending them
-/// (board 5408).
+/// The extents an own log's bytes hold, whole and hash-verified: each sequence and file. A
+/// member's bytes, untrusted: read through [`Cursor`], a frame cut short, corrupted, or of a
+/// length past what is left ending them (board 5408, board 6902).
 #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 pub fn own_frames(bytes: &[u8]) -> Vec<(u64, Vec<u8>)> {
-    let mut bytes = Cursor::new(bytes);
+    let mut cursor = Cursor::new(bytes);
     let mut frames = Vec::new();
-    while let Some(sequence) = bytes.u64()
-        && let Some(len) = bytes.u64().and_then(|len| usize::try_from(len).ok())
-        && let Some(file) = bytes.take(len)
+    while let Some(sequence) = cursor.u64()
+        && let Some(len) = cursor.u64().and_then(|len| usize::try_from(len).ok())
+        && let Some(expected) = cursor.u64()
+        && let Some(file) = cursor.take(len)
     {
+        if own_frame_hash(sequence, file) != expected {
+            break;
+        }
         frames.push((sequence, file.to_vec()));
     }
     frames
+}
+
+/// Byte offset past the last whole, hash-verified frame in an own log (board 6902).
+#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+pub(crate) fn own_frames_end(bytes: &[u8]) -> usize {
+    let mut cursor = Cursor::new(bytes);
+    let mut end = 0usize;
+    while let Some(sequence) = cursor.u64()
+        && let Some(len) = cursor.u64().and_then(|len| usize::try_from(len).ok())
+        && let Some(expected) = cursor.u64()
+        && let Some(file) = cursor.take(len)
+    {
+        if own_frame_hash(sequence, file) != expected {
+            break;
+        }
+        let Some(next) = end.checked_add(OWN_FRAME_HEADER as usize).and_then(|n| n.checked_add(len))
+        else {
+            break;
+        };
+        end = next;
+    }
+    end
 }
 
 /// What of `logs`, what members hold of a replicated cell `cell`'s writer's logs by their numbers,
@@ -257,44 +373,12 @@ pub fn restore<D: crate::Dir>(
     Ok(())
 }
 
-/// Where a replicator keeps what it sends, until the bucket holds it: logs by their numbers,
-/// appended to, read back, and removed. None of it synced.
-pub trait Spool: Send + Sync + 'static {
-    /// Appends `bytes` at `offset`, the log's end.
-    fn append(&self, log: u64, offset: u64, bytes: &[u8]) -> std::io::Result<()>;
-    /// `len` bytes at `offset` of the log.
+/// Reads bytes of a replicated log on catch-up from the cell's existing `logs/`,
+/// `open-segments/`/`segments/`, and `extents/` when evicted from the hot in-memory window
+/// (board 6902).
+pub trait LogSource: Send + Sync + 'static {
+    /// Reads up to `len` bytes at `offset` of `log`.
     fn read(&self, log: u64, offset: u64, len: u64) -> std::io::Result<Vec<u8>>;
-    /// Removes the log, if it is there.
-    fn remove(&self, log: u64) -> std::io::Result<()>;
-}
-
-/// A spool in memory, for tests.
-#[derive(Default)]
-pub struct MemSpool {
-    logs: Mutex<BTreeMap<u64, Vec<u8>>>,
-}
-
-impl Spool for MemSpool {
-    fn append(&self, log: u64, offset: u64, bytes: &[u8]) -> std::io::Result<()> {
-        let mut logs = self.logs.lock().unwrap();
-        let held = logs.entry(log).or_default();
-        assert_eq!(held.len() as u64, offset, "appended at its end");
-        held.extend_from_slice(bytes);
-        Ok(())
-    }
-
-    fn read(&self, log: u64, offset: u64, len: u64) -> std::io::Result<Vec<u8>> {
-        let logs = self.logs.lock().unwrap();
-        let held = logs.get(&log).map_or(&[][..], Vec::as_slice);
-        let from = (offset as usize).min(held.len());
-        let to = (offset + len).min(held.len() as u64) as usize;
-        Ok(held[from..to.max(from)].to_vec())
-    }
-
-    fn remove(&self, log: u64) -> std::io::Result<()> {
-        self.logs.lock().unwrap().remove(&log);
-        Ok(())
-    }
 }
 
 /// How the writer reaches a member of its configuration: each call a future, which holds no thread
@@ -327,8 +411,8 @@ pub enum LinkError {
 #[derive(Clone, Debug, Default)]
 pub struct Flushed {
     pub epoch: u64,
-    /// Each append: the log, the offset, and the bytes.
-    pub appends: Vec<(u64, u64, Vec<u8>)>,
+    /// Each append: the log, the offset, and the shared bytes.
+    pub appends: Vec<(u64, u64, Arc<[u8]>)>,
 }
 
 /// A replicated cell's writer's replicator: what its members hold, and what is replicated.
@@ -362,12 +446,32 @@ struct Shared {
     /// The epoch of the last commit on no member: before it started, or recorded in a segment
     /// whose log it started in the middle of.
     base: std::sync::atomic::AtomicU64,
-    spool: Arc<dyn Spool>,
+    /// Catch-up reader backed by the cell's existing files, if any (none in memory-only unit tests).
+    source: Option<Arc<dyn LogSource>>,
     state: Mutex<State>,
     /// Said as its state changes, to the members' tasks waiting for something to send.
     changed: Event,
     /// Called once more is replicated, or the writer is fenced, holding no lock.
     notify: Box<dyn Fn() + Send + Sync>,
+}
+
+/// A batch held in the hot in-memory replication window until live members pass it or it is
+/// evicted to keep memory bounded by [`HOT_BYTES`].
+struct HotChunk {
+    offset: u64,
+    bytes: Arc<[u8]>,
+    /// Whether the batch has been written to the cell's local `logs/` file on disk (so [`LogSource`]
+    /// can reconstruct it if evicted).
+    persisted: bool,
+    /// Pinned in memory until acknowledged (used for take-time seeds whose local `logs/` were
+    /// closed during recovery).
+    pinned: bool,
+}
+
+impl HotChunk {
+    fn end(&self) -> u64 {
+        self.offset + self.bytes.len() as u64
+    }
 }
 
 /// A configuration's members, among a replicator's: its f, and where they are in
@@ -380,8 +484,14 @@ struct Group {
 
 #[derive(Default)]
 struct State {
-    /// Each log's length in the spool, until its segment is in the bucket.
+    /// Each log's length, until its segment is in the bucket.
     logs: BTreeMap<u64, u64>,
+    /// Hot in-memory batches per log, ordered by offset.
+    hot: BTreeMap<u64, VecDeque<HotChunk>>,
+    /// Total bytes held in `hot` across all logs (evictable + unpersisted + pinned).
+    hot_bytes: u64,
+    /// Whether a [`LogSource`] backs evicted chunks.
+    has_source: bool,
     /// The logs dropped, to this one, their segments in the bucket.
     dropped: Option<u64>,
     /// The epoch of the last flush's last commit.
@@ -397,7 +507,7 @@ struct State {
     pending: Option<Group>,
     replicated: u64,
     fenced: Option<String>,
-    /// Why the spool failed, if it did: nothing more is sent.
+    /// Why catch-up reading failed, if it did: nothing more is sent.
     broken: Option<String>,
     stopping: bool,
 }
@@ -419,7 +529,50 @@ struct Member {
     retired: bool,
 }
 
+impl Drop for State {
+    fn drop(&mut self) {
+        self.clear_hot();
+    }
+}
+
 impl State {
+    fn add_hot(&mut self, len: u64) {
+        if len > 0 {
+            self.hot_bytes += len;
+            HOT.get().total.fetch_add(len, Ordering::Relaxed);
+        }
+    }
+
+    fn sub_hot(&mut self, len: u64) {
+        if len > 0 {
+            self.hot_bytes -= len;
+            HOT.get().total.fetch_sub(len, Ordering::Relaxed);
+        }
+    }
+
+    fn clear_hot(&mut self) {
+        self.hot.clear();
+        if self.hot_bytes > 0 {
+            let len = std::mem::take(&mut self.hot_bytes);
+            HOT.get().total.fetch_sub(len, Ordering::Relaxed);
+        }
+    }
+
+    fn evict_one_persisted(&mut self) -> u64 {
+        let evict_log = self.hot.iter().find_map(|(&log, queue)| {
+            queue.front().is_some_and(|c| c.persisted && !c.pinned).then_some(log)
+        });
+        let Some(log) = evict_log else { return 0 };
+        let queue = self.hot.get_mut(&log).unwrap();
+        let chunk = queue.pop_front().unwrap();
+        let len = chunk.bytes.len() as u64;
+        if queue.is_empty() {
+            self.hot.remove(&log);
+        }
+        self.sub_hot(len);
+        len
+    }
+
     /// Whether member `m` holds a mark's `ends`: every log it appended to, to its end, or dropped,
     /// in the bucket.
     fn holds(&self, m: usize, ends: &[(u64, u64)]) -> bool {
@@ -485,9 +638,81 @@ impl State {
             let end = member.ends.get(&log).copied().unwrap_or(0);
             (end < have).then(|| {
                 let len = (have - end).min(PIECE as u64);
-                Sending::Append { log, offset: end, len }
+                let hot = self.hot_slice(log, end, len);
+                Sending::Append { log, offset: end, len, hot }
             })
         })
+    }
+
+    /// Slices up to `len` bytes starting at `offset` from the hot in-memory window if present.
+    fn hot_slice(&self, log: u64, offset: u64, len: u64) -> Option<Vec<u8>> {
+        let queue = self.hot.get(&log)?;
+        let mut out = Vec::new();
+        let mut at = offset;
+        let target = offset + len;
+        for chunk in queue {
+            if chunk.end() <= at {
+                continue;
+            }
+            if chunk.offset > at {
+                break;
+            }
+            let start = (at - chunk.offset) as usize;
+            let take = (chunk.end().min(target) - at) as usize;
+            out.extend_from_slice(&chunk.bytes[start..start + take]);
+            at += take as u64;
+            if at >= target {
+                break;
+            }
+        }
+        (!out.is_empty()).then_some(out)
+    }
+
+    /// Drops hot chunks that all live members have acked (when backed by a [`LogSource`]), and
+    /// evicts oldest persisted non-pinned chunks while total hot bytes exceed [`HOT_BYTES`].
+    fn trim_hot(&mut self) {
+        if !self.has_source {
+            return;
+        }
+        let mut freed = 0u64;
+        {
+            let live: Vec<&Member> = self
+                .members
+                .iter()
+                .filter(|m| !m.retired && !m.refused && m.down.is_none())
+                .collect();
+            if !live.is_empty() {
+                let logs: Vec<u64> = self.hot.keys().copied().collect();
+                for log in logs {
+                    let min_end = live
+                        .iter()
+                        .map(|m| m.ends.get(&log).copied().unwrap_or(0))
+                        .min()
+                        .unwrap_or(0);
+                    if let Some(queue) = self.hot.get_mut(&log) {
+                        while let Some(front) = queue.front() {
+                            if !front.persisted || front.pinned || front.end() > min_end {
+                                break;
+                            }
+                            freed += front.bytes.len() as u64;
+                            queue.pop_front();
+                        }
+                        if queue.is_empty() {
+                            self.hot.remove(&log);
+                        }
+                    }
+                }
+            }
+        }
+        self.sub_hot(freed);
+        let budget = HOT.get();
+        while self.hot_bytes > HOT_BYTES
+            || budget.total.load(Ordering::Relaxed) > budget.limit.load(Ordering::Relaxed)
+        {
+            if self.evict_one_persisted() == 0 {
+                break;
+            }
+        }
     }
 
     /// The members of the active configuration.
@@ -498,21 +723,22 @@ impl State {
 
 enum Sending {
     Drop(u64),
-    Append { log: u64, offset: u64, len: u64 },
+    Append { log: u64, offset: u64, len: u64, hot: Option<Vec<u8>> },
 }
 
 impl Replicator {
     /// A replicator of a configuration of `f`, its members reached by `links` (2f of them, the
-    /// writer aside), started after the commit of epoch `base`, which none holds, spooling what it
-    /// sends in `spool`, empty: `notify` called once more is replicated, or the writer is fenced.
+    /// writer aside), started after the commit of epoch `base`, which none holds, backed by
+    /// `source` for catch-up when lagging or replacing: `notify` called once more is replicated,
+    /// or the writer is fenced.
     pub fn start(
         f: usize,
         base: u64,
-        spool: Arc<dyn Spool>,
+        source: Option<Arc<dyn LogSource>>,
         links: Vec<Arc<dyn MemberLink>>,
         notify: impl Fn() + Send + Sync + 'static,
     ) -> Arc<Self> {
-        let replicator = Self::idle(f, base, spool, links, notify);
+        let replicator = Self::idle(f, base, source, links, notify);
         replicator.run_tasks();
         replicator
     }
@@ -524,23 +750,27 @@ impl Replicator {
     pub fn idle(
         f: usize,
         base: u64,
-        spool: Arc<dyn Spool>,
+        source: Option<Arc<dyn LogSource>>,
         links: Vec<Arc<dyn MemberLink>>,
         notify: impl Fn() + Send + Sync + 'static,
     ) -> Arc<Self> {
-        let state = State {
-            members: vec![Member::default(); links.len()],
-            active: Some(Group { f, members: 0..links.len() }),
-            last: base,
-            ..State::default()
-        };
+        let mut state = State::default();
+        state.has_source = source.is_some();
+        state.members = vec![Member::default(); links.len()];
+        state.active = Some(Group { f, members: 0..links.len() });
+        state.last = base;
         let shared = Arc::new(Shared {
             base: base.into(),
-            spool,
+            source,
             state: Mutex::new(state),
             changed: Event::new(),
             notify: Box::new(notify),
         });
+        {
+            let mut list = HOT.get().replicators.lock().unwrap();
+            list.retain(|weak| weak.strong_count() > 0);
+            list.push(Arc::downgrade(&shared));
+        }
         Arc::new(Self {
             shared,
             links: Mutex::new(links),
@@ -597,22 +827,36 @@ impl Replicator {
         }
     }
 
-    /// The commits through `flushed`'s epoch are local: spools them, and sends them to the
-    /// members. Fails if the spool does: nothing of them is sent, and the replicator is broken.
-    pub fn flushed(&self, flushed: Flushed) -> std::io::Result<()> {
+    /// The commits through `flushed`'s epoch are being flushed: hands their shared batches directly
+    /// to the members in memory without writing a separate spool on disk (board 6902).
+    pub fn flushed(&self, flushed: Flushed) {
+        self.push_batches(flushed, false);
+    }
+
+    /// Seeds the replicator with logs recovered from a previous configuration at take time: pinned
+    /// in memory until acknowledged by the bucket (their local `logs/` were closed at recovery).
+    pub fn seed(&self, epoch: u64, seed: Vec<(u64, Vec<u8>)>) {
+        let appends = seed.into_iter().map(|(log, bytes)| (log, 0, Arc::from(bytes))).collect();
+        self.push_batches(Flushed { epoch, appends }, true);
+    }
+
+    fn push_batches(&self, flushed: Flushed, pinned: bool) {
         let mut state = self.shared.state.lock().unwrap();
         let mut ends = Vec::with_capacity(flushed.appends.len());
-        for (log, offset, bytes) in &flushed.appends {
-            let have = state.logs.get(log).copied().unwrap_or(0);
-            debug_assert_eq!(have, *offset, "a flush appends at its log's end");
-            if let Err(err) = self.shared.spool.append(*log, have, bytes) {
-                state.broken = Some(format!("spooling log {log}: {err}"));
-                drop(state);
-                self.shared.changed.notify(usize::MAX);
-                (self.shared.notify)();
-                return Err(err);
+        for (log, offset, bytes) in flushed.appends {
+            let have = state.logs.get(&log).copied().unwrap_or(0);
+            debug_assert_eq!(have, offset, "a flush appends at its log's end");
+            let len = bytes.len() as u64;
+            if len > 0 {
+                state.add_hot(len);
+                state.hot.entry(log).or_default().push_back(HotChunk {
+                    offset,
+                    bytes,
+                    persisted: pinned,
+                    pinned,
+                });
             }
-            ends.push((*log, have + bytes.len() as u64));
+            ends.push((log, have + len));
         }
         for &(log, end) in &ends {
             state.logs.insert(log, end);
@@ -622,12 +866,24 @@ impl Replicator {
             member.marks.push_back((flushed.epoch, ends.clone()));
         }
         let moved = state.advance();
+        state.trim_hot();
         drop(state);
         self.shared.changed.notify(usize::MAX);
         if moved {
             (self.shared.notify)();
         }
-        Ok(())
+    }
+
+    /// Marks all in-memory hot batches so far as persisted in the cell's local `logs/` on disk so
+    /// they may be evicted once live peers pass them or [`HOT_BYTES`] is exceeded.
+    pub fn persisted(&self) {
+        let mut state = self.shared.state.lock().unwrap();
+        for queue in state.hot.values_mut() {
+            for chunk in queue.iter_mut() {
+                chunk.persisted = true;
+            }
+        }
+        state.trim_hot();
     }
 
     /// The head names segment `segment` and those before it: their logs go, here and on the
@@ -642,8 +898,9 @@ impl Replicator {
         let gone: Vec<u64> = state.logs.range(..=through).map(|(&log, _)| log).collect();
         for log in gone {
             state.logs.remove(&log);
-            if let Err(err) = self.shared.spool.remove(log) {
-                log::warn!("cladefs: replicating: removing spooled log {log}: {err}");
+            if let Some(queue) = state.hot.remove(&log) {
+                let freed: u64 = queue.into_iter().map(|c| c.bytes.len() as u64).sum();
+                state.sub_hot(freed);
             }
         }
         let moved = state.advance();
@@ -839,20 +1096,22 @@ impl Replicator {
         self.shared.state.lock().unwrap().broken.clone()
     }
 
-    /// The bytes it spools of logs not in the bucket.
+    /// The bytes of logs not yet acknowledged in the bucket.
     pub fn spooled(&self) -> u64 {
         self.shared.state.lock().unwrap().logs.values().sum()
     }
 
-    /// Stops it, and empties its spool: its cell replicated no more.
+    /// The bytes currently held in the hot in-memory window.
+    pub fn hot_bytes(&self) -> u64 {
+        self.shared.state.lock().unwrap().hot_bytes
+    }
+
+    /// Stops it, and clears its in-memory state: its cell replicated no more.
     pub fn stop(&self) {
         let mut state = self.shared.state.lock().unwrap();
         state.stopping = true;
-        for log in std::mem::take(&mut state.logs).into_keys() {
-            if let Err(err) = self.shared.spool.remove(log) {
-                log::warn!("cladefs: replicating: removing spooled log {log}: {err}");
-            }
-        }
+        state.logs.clear();
+        state.clear_hot();
         drop(state);
         self.shared.changed.notify(usize::MAX);
     }
@@ -872,7 +1131,10 @@ impl Drop for Replicator {
     /// meanwhile. What a task sends as it is dropped is a member's to take or not: nothing waits
     /// for its answer.
     fn drop(&mut self) {
-        self.shared.state.lock().unwrap().stopping = true;
+        let mut state = self.shared.state.lock().unwrap();
+        state.stopping = true;
+        state.clear_hot();
+        drop(state);
         self.shared.changed.notify(usize::MAX);
     }
 }
@@ -910,7 +1172,7 @@ async fn serve(shared: &Shared, m: usize, link: &dyn MemberLink) {
 
 /// Sends member `m`, through `link`, what it lacks next, if anything, and takes in its answer.
 async fn turn(shared: &Shared, m: usize, link: &dyn MemberLink) -> Turn {
-    let sending = {
+    let mut sending = {
         let state = shared.state.lock().unwrap();
         if state.stopping || state.members[m].retired {
             return Turn::Stop;
@@ -926,34 +1188,46 @@ async fn turn(shared: &Shared, m: usize, link: &dyn MemberLink) -> Turn {
             None => return Turn::Idle,
         }
     };
-    let done = match &sending {
-        Sending::Drop(through) => link.drop_through(*through).await.map(|()| None),
-        // cladefs: the spool's read off the runtime's threads (`upload::blocking`).
-        Sending::Append { log, offset, len } => match crate::upload::blocking(|| {
-            shared.spool.read(*log, *offset, *len)
-        }) {
-            Ok(bytes) if bytes.len() as u64 == *len => {
-                link.append(*log, *offset, bytes).await.map(Some)
+    let done = match sending {
+        Sending::Drop(through) => link.drop_through(through).await.map(|()| None),
+        Sending::Append { log, offset, len, ref mut hot } => {
+            let bytes = match hot.take() {
+                Some(bytes) => Ok(bytes),
+                None => match &shared.source {
+                    Some(source) => crate::upload::blocking(|| source.read(log, offset, len)),
+                    None => Err(std::io::Error::other("evicted without log source")),
+                },
+            };
+            match bytes {
+                Ok(bytes) if !bytes.is_empty() => link.append(log, offset, bytes).await.map(Some),
+                // Dropped since it was chosen, the head naming its segment (Codex's review of
+                // TASK-537.3.3): nothing to send, nothing broken.
+                _ if shared
+                    .state
+                    .lock()
+                    .unwrap()
+                    .dropped
+                    .is_some_and(|dropped| log <= dropped) =>
+                {
+                    return Turn::Again;
+                }
+                // The replicator stopped meanwhile: nothing broken.
+                _ if shared.state.lock().unwrap().stopping => return Turn::Stop,
+                read => {
+                    let why = match read {
+                        Ok(bytes) => {
+                            format!("log {log}: {} of {len} bytes read at {offset}", bytes.len())
+                        }
+                        Err(err) => format!("reading log {log}: {err}"),
+                    };
+                    log::error!("cladefs: replicating: {why}");
+                    shared.state.lock().unwrap().broken = Some(why);
+                    shared.changed.notify(usize::MAX);
+                    (shared.notify)();
+                    return Turn::Stop;
+                }
             }
-            // Dropped since it was chosen, the head naming its segment (Codex's review of
-            // TASK-537.3.3): nothing to send, nothing broken.
-            _ if shared.state.lock().unwrap().dropped.is_some_and(|dropped| *log <= dropped) => {
-                return Turn::Again;
-            }
-            // The replicator stopped meanwhile, its spool going with it: nothing broken.
-            _ if shared.state.lock().unwrap().stopping => return Turn::Stop,
-            read => {
-                let why = match read {
-                    Ok(bytes) => format!("log {log}: {} of {len} bytes spooled", bytes.len()),
-                    Err(err) => format!("reading spooled log {log}: {err}"),
-                };
-                log::error!("cladefs: replicating: {why}");
-                shared.state.lock().unwrap().broken = Some(why);
-                shared.changed.notify(usize::MAX);
-                (shared.notify)();
-                return Turn::Stop;
-            }
-        },
+        }
     };
     let mut state = shared.state.lock().unwrap();
     let moved = match (sending, done) {
@@ -969,7 +1243,9 @@ async fn turn(shared: &Shared, m: usize, link: &dyn MemberLink) -> Turn {
             // Its end as it says: less than it was sent if it lacked what came before.
             state.members[m].ends.insert(log, end);
             state.members[m].down = None;
-            state.advance()
+            let moved = state.advance();
+            state.trim_hot();
+            moved
         }
         (_, Ok(_)) => false,
         (_, Err(LinkError::Fenced(why))) => {

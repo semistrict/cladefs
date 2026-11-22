@@ -53,8 +53,16 @@ fn make(dir: &MemDir) {
         b"wrapped".to_vec(),
     );
     let description = Description { block_size: BLOCK as u32, capacity: 1 << 30, cell: CHILD };
-    LocalCell::make_ephemeral(dir, description, Some("memory:///p"), Some(Kind::Fxfs), &checkpoint)
-        .unwrap();
+    let ring = keys();
+    LocalCell::make_ephemeral(
+        dir,
+        description,
+        Some("memory:///p"),
+        Some(Kind::Fxfs),
+        &checkpoint,
+        ring.encrypting(),
+    )
+    .unwrap();
 }
 
 /// The ephemeral cell in `dir`, opened.
@@ -92,17 +100,18 @@ fn numbers(dir: &MemDir, kind: &'static str) -> Vec<u64> {
     list_numbers(dir, &cell_dir(kind, CHILD.id)).unwrap()
 }
 
-/// The bytes the child's kept segment `number` takes of its disk.
+/// The bytes the child's segment `number` takes of its disk.
 fn allocated(dir: &MemDir, number: u64) -> u64 {
-    let path = kept_path(SegmentId { cell: CHILD.id, number });
+    let path = segment_path(SegmentId { cell: CHILD.id, number });
     dir.open(&path, true).unwrap().allocated().unwrap()
 }
 
 /// An ephemeral cell reads its parent's extents in the bucket, and its own here; its segments
-/// close raw, never framed, and a checkpoint covers them once eight are closed, moving them to
-/// `kept/`, its local checkpoint naming them; it reopens as it was.
+/// frame in place as `Encryption::Sectors` in `segments/` (no `kept/`), and a checkpoint covers
+/// them once eight are closed, its authenticated `extent_frame::table` local checkpoint naming
+/// them; it reopens as it was and refuses tampered or legacy `cfsbase2` checkpoints.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_ephemeral_cell_keeps_its_segments_raw_and_checkpoints_them() {
+async fn an_ephemeral_cell_frames_segments_in_place_and_checkpoints_them() {
     let dir = MemDir::new();
     make(&dir);
     let cell = open(&dir);
@@ -115,24 +124,39 @@ async fn an_ephemeral_cell_keeps_its_segments_raw_and_checkpoints_them() {
     for sequence in 0..7 {
         commit(&cell, sequence, sequence as u8 + 1).await;
     }
-    assert_eq!(numbers(&dir, SEGMENTS), Vec::<u64>::new(), "nothing framed");
-    assert_eq!(numbers(&dir, KEPT), Vec::<u64>::new(), "seven closed: no checkpoint yet");
-    // Those of the seven closed and the open one's; the next one's, if prepared ahead yet.
-    let logs = numbers(&dir, LOGS);
-    assert_eq!(logs[..8], (0..8).collect::<Vec<_>>(), "{logs:?}");
+    cell.wait_framed().await.unwrap();
+    assert_eq!(numbers(&dir, SEGMENTS), (0..7).collect::<Vec<_>>(), "framed in place");
+    assert!(dir.list("kept").is_err(), "no kept/ directory");
+    assert_eq!(LocalCheckpoint::read(&dir).unwrap().through, None, "seven closed: no checkpoint yet");
     commit(&cell, 7, 8).await;
-    assert_eq!(numbers(&dir, KEPT), (0..8).collect::<Vec<_>>(), "eight closed: covered");
+    assert_eq!(numbers(&dir, SEGMENTS), (0..8).collect::<Vec<_>>(), "eight closed: covered");
     for kind in [LOGS, OPEN_SEGMENTS] {
         let left = numbers(&dir, kind);
         assert_eq!(left[0], 8, "the open segment's, and the next's if prepared: {left:?}");
     }
-    let checkpoint = LocalCheckpoint::read(&dir).unwrap();
-    assert_eq!((checkpoint.through, checkpoint.own.len(), checkpoint.kept.len()), (Some(7), 8, 8));
+    let ring = keys();
+    let checkpoint = LocalCheckpoint::read_under(&dir, &ring.of(CHILD.id)).unwrap();
+    assert_eq!((checkpoint.through, checkpoint.own.len()), (Some(7), 8));
     assert_eq!(checkpoint.last_commit, Some(tag(0, 18)), "the parent's commit 10, then eight");
+    // Every closed ephemeral segment is sector-encrypted.
+    for number in 0..8 {
+        let path = segment_path(SegmentId { cell: CHILD.id, number });
+        let bytes = crate::framed::read_whole(&dir.open(&path, true).unwrap()).unwrap();
+        assert!(matches!(
+            extent_frame::Frame::of(&bytes).unwrap().encryption,
+            extent_frame::Encryption::Sectors { .. }
+        ));
+    }
     for sequence in 0..8 {
         assert_eq!(byte_of(&cell, sequence), Some(sequence as u8 + 1));
     }
     drop(cell);
+
+    // Tampered local checkpoint is refused when authenticated under keys, and legacy cfsbase2 is
+    // refused outright.
+    let wrong_ring = Ring::writing_under(CHILD, extent_frame::Secret::from_bytes(&[0x42; 32]));
+    assert!(LocalCheckpoint::read_under(&dir, &wrong_ring.of(CHILD.id)).is_err());
+    assert!(LocalCheckpoint::decode(b"cfsbase2\x00\x00\x00\x00", &extent_frame::NoKeys).is_err());
 
     let cell = open(&dir);
     for sequence in 0..8 {
@@ -142,9 +166,9 @@ async fn an_ephemeral_cell_keeps_its_segments_raw_and_checkpoints_them() {
     assert_eq!(cell.last_commit().unwrap(), 18);
 }
 
-/// What a checkpoint covers of frees gives back the runs of the extents freed, in their kept
-/// segments, which then take less of the disk; a kept segment no extent is in any more goes; a
-/// freed extent of the parent's is the bucket's no more.
+/// What a checkpoint covers of frees gives back the runs of the extents freed, in their segments,
+/// which then take less of the disk; a segment no extent is in any more goes; a freed extent of
+/// the parent's is the bucket's no more.
 #[tokio::test(flavor = "multi_thread")]
 async fn checkpoints_give_back_what_was_freed() {
     let dir = MemDir::new();
@@ -153,9 +177,9 @@ async fn checkpoints_give_back_what_was_freed() {
     for sequence in 0..8 {
         commit(&cell, sequence, 1).await;
     }
-    assert_eq!(numbers(&dir, KEPT), (0..8).collect::<Vec<_>>());
+    assert_eq!(numbers(&dir, SEGMENTS), (0..8).collect::<Vec<_>>());
     let whole = allocated(&dir, 0);
-    assert!(whole >= BLOCK as u64, "a kept segment holds its block: {whole}");
+    assert!(whole >= BLOCK as u64, "a segment holds its block: {whole}");
     cell.free(own(0)).unwrap();
     cell.free(inherited()).unwrap();
     cell.commit(None).await.unwrap();
@@ -164,7 +188,7 @@ async fn checkpoints_give_back_what_was_freed() {
         commit(&cell, sequence, 2).await;
     }
     assert_eq!(byte_of(&cell, 0), None);
-    assert!(!numbers(&dir, KEPT).contains(&0), "segment 0 held extent 0 alone: it goes");
+    assert!(!numbers(&dir, SEGMENTS).contains(&0), "segment 0 held extent 0 alone: it goes");
     let checkpoint = LocalCheckpoint::read(&dir).unwrap();
     assert_eq!(checkpoint.freed, vec![inherited()]);
     assert!(checkpoint.own.iter().all(|(extent, _)| *extent != own(0)));
@@ -179,8 +203,8 @@ async fn checkpoints_give_back_what_was_freed() {
     }
 }
 
-/// A run freed in a kept segment that still holds others is given back alone: the segment takes
-/// less of the disk, and its other extents read as they were.
+/// A run freed in a segment that still holds others is given back alone: the segment takes less of
+/// the disk, and its other extents read as they were (even in the same 1 MiB part).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_kept_segment_gives_back_a_run_alone() {
     let dir = MemDir::new();
@@ -194,7 +218,7 @@ async fn a_kept_segment_gives_back_a_run_alone() {
     for sequence in 0..32 {
         commit(&cell, sequence, sequence as u8).await;
     }
-    assert!(numbers(&dir, KEPT).contains(&0));
+    assert!(numbers(&dir, SEGMENTS).contains(&0));
     let before = allocated(&dir, 0);
     cell.free(own(1)).unwrap();
     cell.commit(None).await.unwrap();
@@ -219,9 +243,10 @@ async fn closing_covers_every_closed_segment() {
     for sequence in 0..3 {
         commit(&cell, sequence, 9).await;
     }
-    assert_eq!(numbers(&dir, KEPT), Vec::<u64>::new());
+    assert_eq!(LocalCheckpoint::read(&dir).unwrap().through, None);
     drop(cell);
-    assert_eq!(numbers(&dir, KEPT), vec![0, 1, 2]);
+    assert_eq!(LocalCheckpoint::read(&dir).unwrap().through, Some(2));
+    assert_eq!(numbers(&dir, SEGMENTS), vec![0, 1, 2]);
     let cell = open(&dir);
     for sequence in 0..3 {
         assert_eq!(byte_of(&cell, sequence), Some(9));
@@ -291,5 +316,63 @@ async fn stops_at_every_step(killed: bool) {
         let mut data = [0; BLOCK];
         let parent = cell.read(inherited(), 0, &mut data).unwrap_err();
         assert!(parent.is::<BucketData>(), "after {fail_after}: {parent:#}");
+    }
+}
+
+/// Board 6905 (verifying review): closing an ephemeral segment whose live bytes dropped to 0
+/// (e.g. an uncommitted write freed before commit) must not hard-link the longer raw file with
+/// stale trailing ciphertext after the trailer, which lost durable commits on crash.
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_live_segment_with_dead_raw_bytes_survives_crash() {
+    let dir = MemDir::new();
+    make(&dir);
+    let cell = open(&dir);
+    cell.write(own(0), 0, &[0x55; BLOCK]).await.unwrap();
+    cell.free(own(0)).unwrap();
+    cell.close_segment().unwrap();
+    cell.commit(Some(b"after")).await.unwrap();
+    cell.wait_framed().await.unwrap();
+    cell.flush().await.unwrap();
+    // Simulate a crash without running clean-close checkpointing.
+    let crashed = dir.crash(0);
+    std::mem::forget(cell);
+    let reopened = open(&crashed);
+    assert_eq!(reopened.root().unwrap(), b"after");
+}
+
+/// Board 6905 (verifying review): a second kill/crash after reopening an ephemeral cell whose WAL
+/// freed the last extent of a checkpoint-covered segment must still reopen cleanly even though
+/// the first reopen already unlinked that segment's file while `local-checkpoint` still named it.
+#[tokio::test(flavor = "multi_thread")]
+async fn second_kill_after_reaping_checkpointed_segment_reopens() {
+    let dir = MemDir::new();
+    make(&dir);
+    let cell = open(&dir);
+    for seq in 0..8u64 {
+        cell.write(own(seq), 0, &[seq as u8 + 1; BLOCK]).await.unwrap();
+        cell.commit(None).await.unwrap();
+    }
+    // Wait for the 8th segment's checkpoint (`through = Some(7)`).
+    cell.wait_framed().await.unwrap();
+    cell.flush().await.unwrap();
+    // Free the sole extent in checkpoint-covered segment 0 (recorded in WAL segment 8).
+    cell.free(own(0)).unwrap();
+    cell.commit(Some(b"freed-0")).await.unwrap();
+    cell.wait_framed().await.unwrap();
+    cell.flush().await.unwrap();
+    // Kill 1 without clean close (keeps `local-checkpoint` referencing segment 0).
+    let killed1 = dir.killed();
+    std::mem::forget(cell);
+    // Reopen 1 unlinks segment 0, then kill 2 before any new checkpoint is written.
+    let cell2 = open(&killed1);
+    assert_eq!(byte_of(&cell2, 0), None);
+    let killed2 = killed1.killed();
+    std::mem::forget(cell2);
+    // Reopen 2 must succeed without ENOENT on segment 0.
+    let cell3 = open(&killed2);
+    assert_eq!(cell3.root().unwrap(), b"freed-0");
+    assert_eq!(byte_of(&cell3, 0), None);
+    for seq in 1..8u64 {
+        assert_eq!(byte_of(&cell3, seq), Some(seq as u8 + 1));
     }
 }

@@ -1271,10 +1271,13 @@ async fn encrypted_logs_changed_are_refused() {
         log[at..at + framed.len()].copy_from_slice(&framed);
         log
     };
-    // The header's DEK generation changed, or its salt.
+    // The header's DEK generation changed, or its salt, its unkeyed hash made anew (as a tamperer
+    // holding no key would, passing keyless recovery to test the keyed MAC).
     let changed_header = |at: usize| {
         let mut log = log.clone();
         log[at] ^= 1;
+        let hash = rapidhash::rapidhash(&log[..crate::wal::LOG_HASHED]);
+        log[crate::wal::LOG_HASHED..crate::wal::LOG_HEADER].copy_from_slice(&hash.to_le_bytes());
         log
     };
     let (generation, salt) = (8 + 3 * 8 + 8, 8 + 3 * 8 + 8 + 4);

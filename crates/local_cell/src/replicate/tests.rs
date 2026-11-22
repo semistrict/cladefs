@@ -67,8 +67,7 @@ fn members(count: usize) -> Vec<Arc<Fake>> {
 
 fn start(f: usize, base: u64, members: &[Arc<Fake>]) -> Arc<Replicator> {
     let links = members.iter().map(|member| member.clone() as Arc<dyn MemberLink>).collect();
-    let spool = Arc::new(MemSpool::default());
-    Replicator::start(f, base, spool, links, || {})
+    Replicator::start(f, base, None, links, || {})
 }
 
 /// Waits for `done` to hold, failing the test past 10 s.
@@ -85,35 +84,76 @@ fn flushed(epoch: u64, appends: &[(u64, u64, &[u8])]) -> Flushed {
         epoch,
         appends: appends
             .iter()
-            .map(|&(log, offset, bytes)| (log, offset, bytes.to_vec()))
+            .map(|&(log, offset, bytes)| (log, offset, Arc::from(bytes)))
             .collect(),
     }
 }
 
-/// A spool that fails breaks the replicator: nothing more is sent, its commits wait for the bucket
-/// (degraded), and the flush that found it fails.
+/// A backing source that fails when read on catch-up after hot eviction breaks the replicator:
+/// nothing more is sent, its commits wait for the bucket (degraded).
 #[test]
-fn a_spool_failing_breaks_the_replicator() {
+fn a_failing_source_breaks_the_replicator() {
     struct Failing;
-    impl Spool for Failing {
-        fn append(&self, _: u64, _: u64, _: &[u8]) -> std::io::Result<()> {
-            Err(std::io::Error::other("the disk is full"))
-        }
+    impl LogSource for Failing {
         fn read(&self, _: u64, _: u64, _: u64) -> std::io::Result<Vec<u8>> {
-            unreachable!()
-        }
-        fn remove(&self, _: u64) -> std::io::Result<()> {
-            Ok(())
+            Err(std::io::Error::other("the disk failed"))
         }
     }
     let members = members(2);
+    members[0].fail(Some(LinkError::Down("lagging".into())));
+    members[1].fail(Some(LinkError::Down("lagging".into())));
     let links = members.iter().map(|member| member.clone() as Arc<dyn MemberLink>).collect();
-    let replicator = Replicator::start(1, 0, Arc::new(Failing), links, || {});
-    assert!(replicator.flushed(flushed(1, &[(log_of(1), 0, b"x")])).is_err());
-    assert!(replicator.broken().is_some());
+    let replicator = Replicator::start(1, 0, Some(Arc::new(Failing)), links, || {});
+    // Exceed HOT_BYTES so the first chunk is evicted from the hot window once persisted.
+    let big = vec![b'a'; (HOT_BYTES as usize / 2) + 4096];
+    for i in 0..3u64 {
+        let log = log_of(i + 1);
+        replicator.flushed(Flushed {
+            epoch: i + 1,
+            appends: vec![(log, 0, Arc::from(big.as_slice()))],
+        });
+        replicator.persisted();
+    }
+    assert!(replicator.hot_bytes() <= HOT_BYTES);
+    members[0].fail(None);
+    until("broken by source read failure", || replicator.broken().is_some());
     assert!(replicator.degraded());
-    std::thread::sleep(Duration::from_millis(50));
     assert_eq!(members[0].log(log_of(1)), b"");
+}
+
+/// Hot bytes evicted past HOT_BYTES are streamed from the backing LogSource when a lagging or
+/// replacement member catches up (board 6902).
+#[test]
+fn evicted_hot_bytes_stream_from_log_source() {
+    struct MemSource(Mutex<BTreeMap<u64, Vec<u8>>>);
+    impl LogSource for MemSource {
+        fn read(&self, log: u64, offset: u64, len: u64) -> std::io::Result<Vec<u8>> {
+            let map = self.0.lock().unwrap();
+            let Some(bytes) = map.get(&log) else { return Ok(Vec::new()) };
+            let start = (offset as usize).min(bytes.len());
+            let end = start.saturating_add(len as usize).min(bytes.len());
+            Ok(bytes[start..end].to_vec())
+        }
+    }
+    let backing = Arc::new(MemSource(Mutex::default()));
+    let members = members(2);
+    members[1].fail(Some(LinkError::Down("lagging".into())));
+    let links = members.iter().map(|member| member.clone() as Arc<dyn MemberLink>).collect();
+    let replicator = Replicator::start(1, 0, Some(backing.clone()), links, || {});
+    let chunk_len = (HOT_BYTES as usize / 2) + 4096;
+    for i in 0..3u64 {
+        let log = log_of(i + 1);
+        let data = vec![(i as u8) + 1; chunk_len];
+        backing.0.lock().unwrap().insert(log, data.clone());
+        replicator.flushed(Flushed { epoch: i + 1, appends: vec![(log, 0, Arc::from(data))] });
+        replicator.persisted();
+    }
+    until("caught-up member replicated", || replicator.replicated() == 3);
+    assert!(replicator.hot_bytes() <= HOT_BYTES);
+    members[1].fail(None);
+    until("lagging member caught up from LogSource", || {
+        (0..3u64).all(|i| members[1].log(log_of(i + 1)) == vec![(i as u8) + 1; chunk_len])
+    });
 }
 
 /// TASK-537.3.4's review: a member is sent each segment's own extents before its records, so that
@@ -145,8 +185,8 @@ fn own_extents_go_before_their_records() {
     let ordered = Arc::new(Ordered::default());
     let links: Vec<Arc<dyn MemberLink>> = vec![ordered.clone(), Arc::new(Fake::default())];
     // Started with its sends held back by a flush of both at once.
-    let replicator = Replicator::start(1, 0, Arc::new(MemSpool::default()), links, || {});
-    replicator.flushed(flushed(1, &[(log_of(3), 0, b"records"), (own_of(3), 0, b"own")])).unwrap();
+    let replicator = Replicator::start(1, 0, None, links, || {});
+    replicator.flushed(flushed(1, &[(log_of(3), 0, b"records"), (own_of(3), 0, b"own")]));
     until("both sent", || ordered.0.lock().unwrap().len() == 2);
     assert_eq!(*ordered.0.lock().unwrap(), [own_of(3), log_of(3)]);
 }
@@ -162,7 +202,7 @@ fn links(members: &[Arc<Fake>]) -> Vec<Arc<dyn MemberLink>> {
 fn replacements_get_the_tail_and_count_jointly_until_swapped() {
     let old = members(2);
     let replicator = start(1, 0, &old);
-    replicator.flushed(flushed(1, &[(2, 0, b"one")])).unwrap();
+    replicator.flushed(flushed(1, &[(2, 0, b"one")]));
     until("the first commit replicated", || replicator.replicated() == 1);
     old[1].fail(Some(LinkError::Down("lost".into())));
 
@@ -172,7 +212,7 @@ fn replacements_get_the_tail_and_count_jointly_until_swapped() {
     }
     replicator.replacing(1, links(&new));
     assert!(!replicator.installed(0), "installed before a new member held the tail");
-    replicator.flushed(flushed(2, &[(2, 3, b"two")])).unwrap();
+    replicator.flushed(flushed(2, &[(2, 3, b"two")]));
     until("the old configuration holds it", || old[0].log(2) == b"onetwo");
     std::thread::sleep(Duration::from_millis(50));
     assert_eq!(replicator.replicated(), 1, "told on the old configuration alone");
@@ -184,7 +224,7 @@ fn replacements_get_the_tail_and_count_jointly_until_swapped() {
 
     replicator.swapped();
     old[0].fail(Some(LinkError::Down("gone".into())));
-    replicator.flushed(flushed(3, &[(2, 6, b"three")])).unwrap();
+    replicator.flushed(flushed(3, &[(2, 6, b"three")]));
     until("replicated on the new one alone", || replicator.replicated() == 3);
     assert_eq!(old[0].log(2), b"onetwo", "a retired member is sent nothing more");
     assert_eq!(replicator.members_up(), 1);
@@ -198,10 +238,10 @@ fn replacements_get_the_tail_and_count_jointly_until_swapped() {
 fn drops_to_f_zero_wait_for_the_bucket_and_tell_nothing_replicated() {
     let old = members(2);
     let replicator = start(1, 0, &old);
-    replicator.flushed(flushed(1, &[(2, 0, b"one")])).unwrap();
+    replicator.flushed(flushed(1, &[(2, 0, b"one")]));
     until("replicated", || replicator.replicated() == 1);
     replicator.replacing(0, Vec::new());
-    replicator.flushed(flushed(2, &[(2, 3, b"two")])).unwrap();
+    replicator.flushed(flushed(2, &[(2, 3, b"two")]));
     until("the old configuration holds it", || old[0].log(2) == b"onetwo");
     std::thread::sleep(Duration::from_millis(50));
     assert_eq!(replicator.replicated(), 1, "told replicated while dropping to f = 0");
@@ -218,14 +258,14 @@ fn drops_to_f_zero_wait_for_the_bucket_and_tell_nothing_replicated() {
 fn replacements_whose_members_refuse_are_not_installed() {
     let old = members(2);
     let replicator = start(1, 0, &old);
-    replicator.flushed(flushed(1, &[(2, 0, b"one")])).unwrap();
+    replicator.flushed(flushed(1, &[(2, 0, b"one")]));
     until("replicated", || replicator.replicated() == 1);
     let new = members(2);
     for member in &new {
         member.fail(Some(LinkError::Refused("full".into())));
     }
     replicator.replacing(1, links(&new));
-    replicator.flushed(flushed(2, &[(2, 3, b"two")])).unwrap();
+    replicator.flushed(flushed(2, &[(2, 3, b"two")]));
     std::thread::sleep(Duration::from_millis(100));
     assert!(!replicator.installed(2), "installed on the bucket alone");
     assert_eq!(replicator.abandon(), vec![0, 1]);
@@ -237,10 +277,10 @@ fn replacements_whose_members_refuse_are_not_installed() {
 fn members_back_with_a_drop_are_up() {
     let members = members(2);
     let replicator = start(1, 0, &members);
-    replicator.flushed(flushed(1, &[(2, 0, b"one")])).unwrap();
+    replicator.flushed(flushed(1, &[(2, 0, b"one")]));
     until("replicated", || replicator.replicated() == 1);
     members[1].fail(Some(LinkError::Down("out of reach".into())));
-    replicator.flushed(flushed(2, &[(2, 3, b"two")])).unwrap();
+    replicator.flushed(flushed(2, &[(2, 3, b"two")]));
     until("down", || replicator.members_up() == 1);
     replicator.acknowledged(1);
     members[1].fail(None);
@@ -335,28 +375,117 @@ fn trims_keep_what_follows_the_head_and_refuse_forged_logs() {
 /// among them), which overflowed `16 + len` before its bounds check.
 #[test]
 fn own_frames_end_at_one_cut_short_or_past_the_end() {
-    let frame = |sequence: u64, file: &[u8]| {
-        let mut bytes = sequence.to_le_bytes().to_vec();
-        bytes.extend_from_slice(&(file.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(file);
-        bytes
-    };
-    let whole = [frame(1, b"one"), frame(2, b"")].concat();
+    let whole = [own_frame(1, b"one"), own_frame(2, b"")].concat();
     assert_eq!(own_frames(&whole), [(1, b"one".to_vec()), (2, Vec::new())]);
-    for len in [4, u64::MAX, u64::MAX - 15, 1 << 63] {
+    assert_eq!(own_frames_end(&whole), whole.len());
+    for len in [4, u64::MAX, u64::MAX - 23, 1 << 63] {
         let mut bytes = whole.clone();
         bytes.extend_from_slice(&3u64.to_le_bytes());
         bytes.extend_from_slice(&len.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
         bytes.extend_from_slice(b"abc");
         assert_eq!(own_frames(&bytes).len(), 2, "a frame of {len} bytes");
+        assert_eq!(own_frames_end(&bytes), whole.len());
     }
-    // Cut short anywhere: the first frame whole from its 19th byte, the second at the 35th.
+    // Corrupted payload byte stops at the frame before it.
+    let mut bad = whole.clone();
+    bad[25] ^= 1;
+    assert_eq!(own_frames(&bad), []);
+    assert_eq!(own_frames_end(&bad), 0);
+    // Cut short anywhere: the first frame whole from its 27th byte, the second at the 51st.
     for cut in 0..=whole.len() {
         let expected = match cut {
-            0..19 => 0,
-            19..35 => 1,
+            0..27 => 0,
+            27..51 => 1,
             _ => 2,
         };
         assert_eq!(own_frames(&whole[..cut]).len(), expected, "cut at {cut}");
     }
+}
+
+/// Board 6902 (Codex review): replication hot buffers across multiple replicators (including
+/// pinned take-time seeds larger than `HOT_BYTES`) are counted by `replicate::hot_bytes()`,
+/// capped by `size_hot_to()`, and reclaimed by `evict_hot_to()` while lagging peers still catch
+/// up cleanly from `LogSource`.
+#[test]
+fn hot_buffers_are_counted_and_evicted_by_global_budget() {
+    struct MemSource(Mutex<BTreeMap<u64, Vec<u8>>>);
+    impl LogSource for MemSource {
+        fn read(&self, log: u64, offset: u64, len: u64) -> std::io::Result<Vec<u8>> {
+            let logs = self.0.lock().unwrap();
+            let Some(data) = logs.get(&log) else { return Ok(Vec::new()) };
+            let start = (offset as usize).min(data.len());
+            let end = (offset.saturating_add(len) as usize).min(data.len());
+            Ok(data[start..end].to_vec())
+        }
+    }
+    let _reset = {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                size_hot_to(u64::MAX);
+            }
+        }
+        Reset
+    };
+    let baseline = hot_bytes();
+
+    let mut replicators = Vec::new();
+    let mut all_members = Vec::new();
+    let chunk = vec![0x42u8; 4 << 20];
+    for r in 0..2u64 {
+        let src = Arc::new(MemSource(Mutex::new(BTreeMap::new())));
+        let ms = members(2);
+        for m in &ms {
+            m.fail(Some(LinkError::Down("gated".into())));
+        }
+        let links = ms.iter().map(|m| m.clone() as Arc<dyn MemberLink>).collect();
+        let rep = Replicator::start(1, 0, Some(src.clone()), links, || {});
+        let log = log_of(r + 1);
+        src.0.lock().unwrap().insert(log, chunk.clone());
+        rep.flushed(Flushed { epoch: 1, appends: vec![(log, 0, Arc::from(chunk.as_slice()))] });
+        rep.persisted();
+        replicators.push((rep, log));
+        all_members.push(ms);
+    }
+
+    // Include a take-time seed larger than HOT_BYTES so its bytes are counted in the global total.
+    let seed_len = (HOT_BYTES as usize) + (1 << 20);
+    let seed_ms = members(2);
+    for m in &seed_ms {
+        m.fail(Some(LinkError::Down("gated".into())));
+    }
+    let seed_links = seed_ms.iter().map(|m| m.clone() as Arc<dyn MemberLink>).collect();
+    let seeded = Replicator::start(1, 0, None, seed_links, || {});
+    seeded.seed(1, vec![(log_of(10), vec![0x77u8; seed_len])]);
+
+    let expected_total = 2 * chunk.len() as u64 + seed_len as u64;
+    assert!(
+        hot_bytes() >= baseline + expected_total,
+        "global hot_bytes {} missing replicators/seed ({expected_total})",
+        hot_bytes()
+    );
+
+    // Governor shrinks budget to 0: all persisted non-pinned chunks across both replicators must be
+    // evicted, leaving only the pinned seed counted.
+    size_hot_to(0);
+    let freed = evict_hot_to(0);
+    assert!(freed >= 2 * chunk.len() as u64, "freed {freed}");
+    for (rep, _) in &replicators {
+        assert_eq!(rep.hot_bytes(), 0);
+    }
+    assert_eq!(seeded.hot_bytes(), seed_len as u64);
+
+    // Re-enabling peers lets them catch up cleanly from MemSource.
+    for (ms, (rep, log)) in all_members.iter().zip(&replicators) {
+        for m in ms {
+            m.fail(None);
+        }
+        until("caught up from source", || rep.replicated() == 1);
+        assert_eq!(ms[0].log(*log).len(), chunk.len());
+    }
+
+    // Acknowledging the seed drops its pinned bytes from global accounting too.
+    seeded.acknowledged(10);
+    assert_eq!(seeded.hot_bytes(), 0);
 }

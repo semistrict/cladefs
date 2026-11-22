@@ -29,9 +29,11 @@ use storage_device::ExtentId;
 /// cut at their ends, and its description may name a version of its cell it is a copy of
 /// (TASK-476); 14 writes every ID in base 32, its description's and its files' names, which
 /// were in hexadecimal (`base32_id`, TASK-504); 15's description names its cell's kind alone, as a
-/// cell has one kind, of no cell's name (doc-20, TASK-508.1). A cell of another format is
-/// refused ([`Format`]): nothing reads, converts or upgrades it.
-pub(crate) const FORMAT: &str = "cladefs extent store 15";
+/// cell has one kind, of no cell's name (doc-20, TASK-508.1); 16's logs carry a keyless header
+/// hash (`FXLOG\0\0\x04`, board 6902) and ephemeral cells store closed segments in `segments/`
+/// with an authenticated `extent_frame::table` `local-checkpoint` (board 6905). A cell of another
+/// format is refused ([`Format`]): nothing reads, converts or upgrades it.
+pub(crate) const FORMAT: &str = "cladefs extent store 16";
 
 /// cladefs: the error of a cell whose description is of another format than [`FORMAT`], an older
 /// one included: refused, as nothing reads it.
@@ -202,19 +204,9 @@ pub(crate) const EXTENTS: &str = "extents";
 /// cladefs: the directory of the open segments' logs, a directory for each cell's: the commits each
 /// holds, appended and synced by the flushes that make them durable (TASK-165.9).
 pub(crate) const LOGS: &str = "logs";
-/// cladefs: the directory of an ephemeral cell's kept segments, raw, a directory for each cell's:
-/// segments its local checkpoint covers, read in place, the runs of the extents freed in them given
-/// back (doc-25, TASK-698.2).
-pub(crate) const KEPT: &str = "kept";
-
 /// cladefs: an ephemeral cell's local checkpoint: its state as of the last segment it covers
 /// ([`crate::ephemeral::LocalCheckpoint`], TASK-698.2).
 pub(crate) const LOCAL_CHECKPOINT: &str = "local-checkpoint";
-
-/// cladefs: the path of an ephemeral cell's kept segment ([`KEPT`]).
-pub(crate) fn kept_path(segment: SegmentId) -> String {
-    numbered_path(KEPT, segment.cell, segment.number)
-}
 
 /// The directory of open segments' files, raw, a directory for each cell's.
 pub(crate) const OPEN_SEGMENTS: &str = "open-segments";
@@ -651,6 +643,7 @@ mod tests {
             "cladefs extent store 12",
             "cladefs extent store 13",
             "cladefs extent store 14",
+            "cladefs extent store 15",
         ] {
             let refused = CellFile::parse(&format!("{older}\nblock_size 4096\ncell 1\n"));
             let found = refused.unwrap_err().downcast::<Format>().unwrap().found;

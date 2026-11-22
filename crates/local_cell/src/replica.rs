@@ -33,8 +33,12 @@ use std::sync::{Arc, Mutex};
 
 /// The directory's incarnation file.
 const INCARNATION: &str = "incarnation";
-/// Its first line.
-const MAGIC: &str = "cladefs replicas 1";
+/// Its first line (format 2: direct ReplicaLog / own_frame storage without outer framing, board 6902).
+const MAGIC: &str = "cladefs replicas 2";
+/// Maximum open replica log file handles cached across all cells (board 6902): keeps sequential
+/// append handles (`DiskFile` direct-I/O tail) warm without allowing tiny logs to exhaust
+/// `RLIMIT_NOFILE`.
+const OPEN_FILES: usize = 64;
 
 /// A configuration of a cell, as a member keys its logs: its number, and the epoch of the writer
 /// that made it, which alone appends to it. Ordered as configurations supersede each other: by
@@ -75,6 +79,9 @@ impl From<io::Error> for Error {
     }
 }
 
+/// Bounded LRU of open replica log file handles across all cells (board 6902).
+type FileCache<F> = bucket_cell::lru::LruMap<(CellId, Key, u64), Arc<F>>;
+
 /// A host's replica directory.
 pub struct Replicas<D: Dir> {
     dir: D,
@@ -84,6 +91,8 @@ pub struct Replicas<D: Dir> {
     /// its own while the one before, holding the same commits, is still here until it activates.
     most: u64,
     cells: Mutex<HashMap<CellId, Arc<Mutex<Held>>>>,
+    /// Bounded LRU of open log file handles across all cells (board 6902).
+    files: Mutex<FileCache<D::File>>,
 }
 
 /// What the directory holds of a cell, under its lock: an append and a fence of it never at once,
@@ -106,81 +115,28 @@ impl Held {
     }
 }
 
-/// A log a member holds: its frames, each of bytes the writer sent at an offset of its log, one
-/// after another in the file and in the log (a frame's offset its frame before's end), each
-/// written whole, with its CRC, so that a reopening reads the log's end from its frames, never from
-/// the file's size, which a crash leaves past them, padded with zeros (a direct write's whole
-/// blocks, `bucket_cell::direct::write_at`, cut back after; TASK-537.3.2's review).
-#[derive(Default)]
+/// A log a member holds (board 6902): raw `ReplicaLog` bytes (even log) or `own_frame` bytes (odd
+/// log) appended directly at their log offset without any outer envelope. On reopen after a crash,
+/// `end` is recovered by scanning the self-delimited, hash-checked inner records (so zero-padding
+/// from `O_DIRECT` block writes or torn tails are ignored). Open file handles live in
+/// [`Replicas::files`] so descriptor use stays bounded by [`OPEN_FILES`].
 struct Log {
-    /// Its end: the last frame's offset and length.
+    /// Its valid end in bytes.
     end: u64,
-    /// Where its next frame goes in the file.
-    at: u64,
-    /// Each frame's offset in the log, and where its bytes are in the file.
-    frames: Vec<(u64, u64)>,
-}
-
-/// A frame's header: its offset in the log (u64), its length (u32), and the CRC of the two and its
-/// bytes (u32), little-endian.
-const HEADER: u64 = 16;
-
-fn frame(offset: u64, bytes: &[u8]) -> Vec<u8> {
-    let mut frame = Vec::with_capacity(HEADER as usize + bytes.len());
-    frame.extend_from_slice(&offset.to_le_bytes());
-    frame.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    let crc = frame_crc(&frame, bytes);
-    frame.extend_from_slice(&crc.to_le_bytes());
-    frame.extend_from_slice(bytes);
-    frame
-}
-
-fn frame_crc(head: &[u8], bytes: &[u8]) -> u32 {
-    let mut both = head[..12].to_vec();
-    both.extend_from_slice(bytes);
-    extent_frame::crc(&both)
 }
 
 impl Log {
-    /// The log in `file`, as far as its frames go: each whole, its CRC right, at the end of the one
-    /// before. A frame torn by a crash, zeros past the last, or anything after either, is no part
-    /// of it: none of it was answered synced.
-    fn read(file: &impl File) -> io::Result<Self> {
-        let size = file.size()?;
-        let mut log = Self::default();
-        while log.at + HEADER <= size {
-            let mut head = [0; HEADER as usize];
-            file.read_at(&mut head, log.at)?;
-            let offset = u64::from_le_bytes(head[..8].try_into().unwrap());
-            let len = u64::from(u32::from_le_bytes(head[8..12].try_into().unwrap()));
-            let crc = u32::from_le_bytes(head[12..].try_into().unwrap());
-            if len == 0 || offset != log.end || log.at + HEADER + len > size {
-                break;
+    /// Recovers the log in `file` for `(cell, log)` up to the last intact record or own-frame.
+    fn read(cell: CellId, log: u64, file: &impl File) -> io::Result<Self> {
+        let bytes = crate::dir::read_file(file)?;
+        let end = match log & 1 {
+            0 => {
+                let segment = crate::layout::SegmentId { cell: cell.id, number: log >> 1 };
+                crate::wal::replica_valid_end(&bytes, segment)
             }
-            let mut bytes = vec![0; len as usize];
-            file.read_at(&mut bytes, log.at + HEADER)?;
-            if frame_crc(&head, &bytes) != crc {
-                break;
-            }
-            log.frames.push((offset, log.at + HEADER));
-            log.end += len;
-            log.at += HEADER + len;
-        }
-        Ok(log)
-    }
-
-    /// Where the log's bytes from `offset`, `len` of them at most, are in the file, frame by frame.
-    fn pieces(&self, offset: u64, len: u64) -> Vec<(u64, u64)> {
-        let last = offset.saturating_add(len).min(self.end);
-        let mut pieces = Vec::new();
-        for (i, &(start, at)) in self.frames.iter().enumerate() {
-            let stop = self.frames.get(i + 1).map_or(self.end, |&(next, _)| next);
-            let (from, to) = (start.max(offset), stop.min(last));
-            if from < to {
-                pieces.push((at + (from - start), to - from));
-            }
-        }
-        pieces
+            _ => crate::replicate::own_frames_end(&bytes) as u64,
+        };
+        Ok(Self { end })
     }
 }
 
@@ -232,7 +188,40 @@ impl<D: Dir> Replicas<D> {
             write_text(&dir, INCARNATION, &format!("{MAGIC}\nincarnation {incarnation}\n"))?;
             incarnation
         };
-        Ok(Self { dir, incarnation, most, cells: Mutex::default() })
+        Ok(Self {
+            dir,
+            incarnation,
+            most,
+            cells: Mutex::default(),
+            files: Mutex::new(bucket_cell::lru::LruMap::new()),
+        })
+    }
+
+    fn cache_file(&self, id: (CellId, Key, u64), file: Arc<D::File>) {
+        let mut files = self.files.lock().unwrap();
+        files.insert(id, file);
+        while files.len() > OPEN_FILES {
+            files.pop_oldest();
+        }
+    }
+
+    fn open_cached(&self, id: (CellId, Key, u64), path: &str) -> Result<Arc<D::File>, Error> {
+        if let Some(file) = self.files.lock().unwrap().get(&id).cloned() {
+            return Ok(file);
+        }
+        let opened =
+            Arc::new(self.dir.open(path, false).with_context(|| format!("opening {path}"))?);
+        self.cache_file(id, opened.clone());
+        Ok(opened)
+    }
+
+    fn forget_file(&self, id: &(CellId, Key, u64)) {
+        self.files.lock().unwrap().remove(id);
+    }
+
+    #[cfg(test)]
+    fn open_files(&self) -> usize {
+        self.files.lock().unwrap().len()
     }
 
     /// The directory's incarnation: what a configuration naming this host as a member names.
@@ -274,12 +263,16 @@ impl<D: Dir> Replicas<D> {
         if would > self.most {
             return Err(Refused::Full { would, most: self.most }.into());
         }
+        let mut created_file = None;
         if !held.logs.contains_key(&(key, log)) {
             // Its file made, it is held at once, empty, however its first append ends: a failure
             // after leaves a file the next append opens, and drops and sweeps remove.
             match self.dir.create(&path, false) {
-                Ok(_) => {
-                    held.logs.insert((key, log), Log::default());
+                Ok(file) => {
+                    let file = Arc::new(file);
+                    self.cache_file((cell, key, log), file.clone());
+                    created_file = Some(file);
+                    held.logs.insert((key, log), Log { end: 0 });
                     self.dir.sync_dir("").context("syncing the replica directory")?;
                 }
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
@@ -287,13 +280,18 @@ impl<D: Dir> Replicas<D> {
                     // it was written, read as a reopening would.
                     let file =
                         self.dir.open(&path, false).with_context(|| format!("opening {path}"))?;
-                    let found = Log::read(&file).with_context(|| format!("reading {path}"))?;
+                    let found =
+                        Log::read(cell, log, &file).with_context(|| format!("reading {path}"))?;
                     let found_end = found.end;
                     held.logs.insert((key, log), found);
                     if found_end != 0 {
+                        drop(file);
                         drop(held);
                         return self.append((cell, key, incarnation), log, offset, bytes);
                     }
+                    let file = Arc::new(file);
+                    self.cache_file((cell, key, log), file.clone());
+                    created_file = Some(file);
                 }
                 Err(err) => {
                     return Err(anyhow::Error::from(err).context(format!("making {path}")).into());
@@ -302,11 +300,12 @@ impl<D: Dir> Replicas<D> {
         }
         let state = held.logs.get_mut(&(key, log)).unwrap();
         let new = &bytes[(end - offset) as usize..];
-        let file = self.dir.open(&path, false).with_context(|| format!("opening {path}"))?;
-        file.write_at(&frame(end, new), state.at).with_context(|| format!("writing {path}"))?;
+        let file = match created_file {
+            Some(file) => file,
+            None => self.open_cached((cell, key, log), &path)?,
+        };
+        file.write_at(new, state.end).with_context(|| format!("writing {path}"))?;
         file.sync_cached().with_context(|| format!("syncing {path}"))?;
-        state.frames.push((end, state.at + HEADER));
-        state.at += HEADER + new.len() as u64;
         state.end += new.len() as u64;
         Ok(state.end)
     }
@@ -366,17 +365,14 @@ impl<D: Dir> Replicas<D> {
         let held = self.held(cell)?;
         let held = held.lock().unwrap();
         let Some(state) = held.logs.get(&(key, log)) else { return Ok(Vec::new()) };
-        let pieces = state.pieces(offset, len);
-        let mut bytes = Vec::new();
-        if !pieces.is_empty() {
-            let path = log_path(cell, key, log);
-            let file = self.dir.open(&path, false).with_context(|| format!("opening {path}"))?;
-            for (at, len) in pieces {
-                let start = bytes.len();
-                bytes.resize(start + len as usize, 0);
-                file.read_at(&mut bytes[start..], at).with_context(|| format!("reading {path}"))?;
-            }
+        let available = state.end.saturating_sub(offset).min(len) as usize;
+        if available == 0 {
+            return Ok(Vec::new());
         }
+        let path = log_path(cell, key, log);
+        let file = self.open_cached((cell, key, log), &path)?;
+        let mut bytes = vec![0; available];
+        file.read_at(&mut bytes, offset).with_context(|| format!("reading {path}"))?;
         Ok(bytes)
     }
 
@@ -466,6 +462,7 @@ impl<D: Dir> Replicas<D> {
     fn remove(&self, cell: CellId, held: &mut Held, gone: &[(Key, u64)]) -> Result<(), Error> {
         for &(key, log) in gone {
             let path = log_path(cell, key, log);
+            self.forget_file(&(cell, key, log));
             self.dir.remove(&path).with_context(|| format!("removing {path}"))?;
             held.logs.remove(&(key, log));
         }
@@ -505,7 +502,7 @@ impl<D: Dir> Replicas<D> {
                         self.dir.open(&name, false).with_context(|| format!("opening {name}"))?;
                     held.logs.insert(
                         (key, log),
-                        Log::read(&file).with_context(|| format!("reading {name}"))?,
+                        Log::read(cell, log, &file).with_context(|| format!("reading {name}"))?,
                     );
                 }
                 _ => {}

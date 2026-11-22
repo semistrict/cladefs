@@ -1074,7 +1074,7 @@ impl<D: Dir> Uploader<D> {
         child: Child,
         inheriting: keys::Inheriting,
         incarnation: u64,
-    ) -> Result<crate::LocalCheckpoint, Failure> {
+    ) -> Result<(crate::LocalCheckpoint, Arc<Ring>), Failure> {
         failing!("upload::forked_ephemeral");
         let at = self.shared.at_version.get().expect("a fork is of a cell at a version");
         let forking = lifecycle::fork_ephemeral(
@@ -1093,13 +1093,20 @@ impl<D: Dir> Uploader<D> {
         let (deks, inherited) = given.deks.unwrap_or_default();
         let keys = EphemeralKeys { owner: child.owner, kek: given.kek, deks, inherited };
         inheriting.made();
+        let mut head = Head::of(bucket_cell::record::Made::Clone(at.origin), child.owner);
+        head.keks.extend(keys.kek.clone());
+        (head.deks, head.inherited) = (keys.deks.clone(), keys.inherited.clone());
+        let cell_keys = CellKeys::of(child.cell, &head, self.shared.keys.kms.clone());
+        let ring = keys::ring(&*self.bucket, &cell_keys, child.cell, &head, true).await?;
         let parent = crate::Parent {
             cell: at.origin.parent,
             version: at.version,
             at: at.origin.at,
             epoch: at.origin.epoch,
         };
-        Ok(crate::LocalCheckpoint::fork(parent, &at.state, bucket_cell::layout::encode(&keys)))
+        let checkpoint =
+            crate::LocalCheckpoint::fork(parent, &at.state, bucket_cell::layout::encode(&keys));
+        Ok((checkpoint, ring))
     }
 
     /// cladefs: what a fork of the cell to `child` gives its child, asked for before anything of
@@ -1957,8 +1964,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                      commits waiting for the bucket: {err}",
                     wish.f
                 );
-                let spool = blocking(|| open_cell.spool())?;
-                let replicator = self.replicator(&members, 0, base, spool, Vec::new());
+                let source = Some(open_cell.replica_source());
+                let replicator = self.replicator(&members, 0, base, source, Vec::new());
                 open_cell.replicate_to(replicator).await;
                 return Ok(match before {
                     Some(before) if before.f == 0 => (before, false),
@@ -1984,8 +1991,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let configuration = Configuration { number, epoch, f: wish.f, members: all };
         let links =
             others.iter().map(|member| members.link(cell, &configuration, member)).collect();
-        let spool = blocking(|| open_cell.spool())?;
-        let replicator = self.replicator(&members, usize::from(wish.f), base, spool, links);
+        let source = Some(open_cell.replica_source());
+        let replicator = self.replicator(&members, usize::from(wish.f), base, source, links);
         // What `old`'s members held, which they give the new configuration's: through the seed's
         // last commit, or the head's. The cell holding more, its own log's, of `old`'s writer's
         // (TASK-678): the head names the new configuration once it names those too.
@@ -2003,9 +2010,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             return Ok((configuration, true));
         }
         if !seed.is_empty() {
-            let appends = seed.into_iter().map(|(log, bytes)| (log, 0, bytes)).collect();
-            let flushed = crate::replicate::Flushed { epoch: base, appends };
-            replicator.flushed(flushed).map_err(|err| Failure::local(err, "spooling the seed"))?;
+            replicator.seed(base, seed);
             let started = std::time::Instant::now();
             while replicator.replicated() < base {
                 if replicator.fenced().is_some() || started.elapsed() > SEEDING {
@@ -2032,21 +2037,22 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     }
 
     /// cladefs: a replicator of a configuration of `f`, its members reached by `links`, started
-    /// after the commit of epoch `base`, spooling in `spool` ([`crate::replicate::Replicator`]):
-    /// its members served by threads of their own, unless `members` drive it.
+    /// after the commit of epoch `base`, reading evicted logs from `source`
+    /// ([`crate::replicate::Replicator`]): its members served by threads of their own, unless
+    /// `members` drive it.
     fn replicator(
         &self,
         members: &Arc<dyn Members>,
         f: usize,
         base: u64,
-        spool: Arc<dyn crate::replicate::Spool>,
+        source: Option<Arc<dyn crate::replicate::LogSource>>,
         links: Vec<Arc<dyn crate::replicate::MemberLink>>,
     ) -> Arc<crate::replicate::Replicator> {
         let changed = self.changed.clone();
         let waker = move || {
             changed.notify(usize::MAX);
         };
-        let replicator = crate::replicate::Replicator::idle(f, base, spool, links, waker);
+        let replicator = crate::replicate::Replicator::idle(f, base, source, links, waker);
         if !members.drives(&replicator) {
             replicator.run_tasks();
         }

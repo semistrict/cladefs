@@ -54,41 +54,46 @@ bucket (CONTEXT.md, Cell), and its sync, syncfs and unmount wait for an upload (
 - **Its levels:** Ordered and Local only. It has no uploader, so its sync, syncfs and unmount wait
   for Local (`OpenCell` without an uploader), or for nothing on a device with `cache_type` Unsafe
   (TASK-363). Versions and replicas need an uploader and are refused.
-- **Its writes:** commits append to the open segment as they do today. A closed segment stays raw
-  (`Phase::Raw`): read from its raw file, its log beside it, never framed nor looked at ahead, never
-  in a write-ahead log an uploader takes. Its extents are all in segments: none is stored on its
-  own (`large_extent` is unbounded for it).
-- **Its local checkpoint**, `local-checkpoint`: its state as of the last segment a checkpoint covered, over its parent's
-  version: its own extents, where they are in its kept segments, keyed by segment number at epoch
-  0 (recovery stamps footers anew, so their chain's numbers can't key runs); the parent's extents it
-  freed; its root, sequence numbers, spent set and capacity; the headers of its kept segments' logs,
-  which say how their raw files are encrypted; the runs its last checkpoint gave back; and its keys.
-  It holds none of the parent's map, which the opener gives (`EphemeralOpening::parent`, recovered
-  with `recovery::recover_version` under the child's ring and shared as the version's layer).
-- **A checkpoint** covers the closed segments whose commits are local, once eight wait
-  (`CHECKPOINT_SEGMENTS`), or all of them as the cell closes. In order: their footers applied to
-  the local checkpoint; their raw files synced, since a flush that sealed little made their runs durable in
-  their logs alone (`LogRecord`'s held runs); the local checkpoint written whole; each raw file linked into
-  `kept/` and that directory synced; then their old names and logs removed and those directories
-  synced; then the write-ahead log's start moved past them. Linking before removing matters because
-  a crash may keep each directory's entries apart. The next opening finishes a checkpoint a crash
-  cut short (`settle`) before the write-ahead log is recovered, which would otherwise remove a
-  segment the start covers, taking it for one the bucket acknowledged.
+- **Its writes:** commits append to the open segment as they do today. Closed segments frame
+  through the same pipeline as any cell's (`Phase::Framing` → `Phase::Closed` in `segments/`),
+  always in place as `Encryption::Sectors` without compression (board 6905). Reads of closed
+  ephemeral segments decrypt sector-by-sector (`Source::Raw`) so freed 4 KiB sectors can be
+  punched in place without invalidating 1 MiB part tags. Its extents are all in segments: none is
+  stored on its own (`large_extent` is unbounded for it).
+- **Its local checkpoint**, `local-checkpoint`: encoded as an authenticated `extent_frame::table`
+  under the child's DEK (readable with `NoKeys` by CRC for `settle` and metadata lookups; board
+  6905). Its table entries hold the cell's own extents keyed by segment number at epoch 0
+  (recovery stamps footers anew, so their chain's numbers can't key runs), and its footer's `rest`
+  holds the parent origin, the parent's extents it freed, root, sequence numbers, spent set,
+  capacity, the runs its last checkpoint gave back, the last covered segment number (`through`),
+  and its wrapped keys. It holds none of the parent's map, which the opener gives
+  (`EphemeralOpening::parent`, recovered with `recovery::recover_version` under the child's ring
+  and shared as the version's layer).
+- **A checkpoint** covers the closed, framed segments whose commits are local, once eight wait
+  (`CHECKPOINT_SEGMENTS`), or all of them as the cell closes. In order: await framing of the
+  covered segments; apply their footers to the local checkpoint; write the authenticated local
+  checkpoint whole; move the write-ahead log's start past them; and acknowledge the covered
+  segments in `Segments` so freed runs are punched once views release them and empty segments are
+  reaped. The next opening finishes a checkpoint a crash cut short (`settle`) before the
+  write-ahead log is recovered (`wal::recover` skips segments `<= through` while preserving
+  `segments/`).
 - **Its frees:** a free of a sealed extent waits, as for an uploader, until a checkpoint covers the
-  commit that freed it (`release_kept`), then for views to let go (`trim_kept`). Letting go of a run
-  in a kept segment queues it to give back (`Segments::take_punches`), and the flush or checkpoint
-  after punches it (`File::punch`: `FALLOC_FL_PUNCH_HOLE` on Linux, `F_PUNCHHOLE` on macOS). Raw
-  segments are written in whole 4 KiB XTS sectors, so every run is whole blocks and no compaction
-  is needed. A kept segment with nothing left in it is unlinked. The runs a checkpoint gave back are
-  also written in the local checkpoint, and the next opening punches them again: punching is idempotent, and
-  a crash may have cut it short.
-- **Its footprint** counts a kept segment by the blocks it has allocated (`File::allocated`,
+  commit that freed it (`release_kept`), then for views to let go (`trim_kept`). Letting go of a
+  run in an acknowledged ephemeral segment queues it to give back (`Segments::take_punches`), and
+  the flush or checkpoint after punches it (`File::punch`: `FALLOC_FL_PUNCH_HOLE` on Linux,
+  `F_PUNCHHOLE` on macOS). Segments are written in whole 4 KiB XTS sectors, so every run is whole
+  blocks and no compaction is needed. An acknowledged segment with nothing left in it is reaped
+  and unlinked from `segments/`. The runs a checkpoint gave back are also written in the local
+  checkpoint, and the next opening punches them again: punching is idempotent, and a crash may
+  have cut it short.
+- **Its footprint** counts segments under `segments/` by the blocks allocated (`File::allocated`,
   `st_blocks`), so that a punched hole gives its space back to the tenant's allotment (doc-22).
-- **Its recovery:** settle, then recover the write-ahead log as any cell does. The runs that the
-  raw segments' logs held are written back into their raw files (`Recovered::restore_raw`), the
-  local checkpoint is applied over the parent's version, the recovered footers are applied over that, and the
-  runs the last checkpoint gave back are punched again. Recovery reads only the raw segments after
-  the local checkpoint, at most a checkpoint's worth.
+- **Its recovery:** settle, then recover the write-ahead log skipping segments `<= through`. Any
+  open segment after `through` is closed in place as `Encryption::Sectors` (`Recovered::close`),
+  the authenticated local checkpoint is applied over the parent's version, the recovered footers
+  are applied over that, any unreferenced segments `<= through` are removed, and the runs the last
+  checkpoint gave back are punched again. Recovery reads only the segments after the local
+  checkpoint, at most a checkpoint's worth.
 
 ## Forking one
 

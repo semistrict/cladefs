@@ -34,7 +34,7 @@
 //! counts the cells in its directory not counted yet, closed, by one listing of each.
 
 use crate::dir::{Dir, DirFile};
-use crate::layout::{KEPT, OPEN_EXTENTS, OPEN_SEGMENTS};
+use crate::layout::{OPEN_EXTENTS, OPEN_SEGMENTS, SEGMENTS};
 use crate::sync::Mutex;
 use bucket_cell::host_disk::{self, HostDisk, Tally};
 use std::collections::{BTreeSet, HashMap};
@@ -300,8 +300,9 @@ impl Footprint {
                 .or_insert_with(|| Arc::new(FileLen { state: Mutex::new(LenState::default()) }));
             {
                 let mut state = file.state.lock().unwrap();
-                // cladefs: a kept segment's blocks allocated, its holes given back (TASK-698.2).
-                let counted = match kept_path(&found.path) {
+                // cladefs: an ephemeral segment's blocks allocated, its holes given back
+                // (TASK-698.2, board 6905).
+                let counted = match segment_dir_path(&found.path) {
                     true => found.allocated.min(found.len),
                     false => found.len,
                 };
@@ -736,10 +737,10 @@ fn unframed_path(path: &str) -> bool {
     kind == OPEN_SEGMENTS || kind == OPEN_EXTENTS
 }
 
-/// cladefs: whether `path` is a kept segment's: one under `kept/`, whose holes are given back
-/// (doc-25, TASK-698.2).
-fn kept_path(path: &str) -> bool {
-    path.split('/').next().unwrap_or_default() == KEPT
+/// cladefs: whether `path` is a segment's: one under `segments/`, whose holes an ephemeral cell
+/// may have given back (doc-25, TASK-698.2, board 6905).
+fn segment_dir_path(path: &str) -> bool {
+    path.split('/').next().unwrap_or_default() == SEGMENTS
 }
 
 /// A file of a cell, as its footprint counts it: shared by all its names and openings.

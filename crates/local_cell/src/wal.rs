@@ -250,7 +250,7 @@ impl LogRecord {
     /// are torn then; none if its header isn't `segment`'s ([`log_salt`]). cladefs: each followed
     /// by its MAC, which is checked if `encryption`, its encryption, is given: one not authentic
     /// fails it, naming it; read holding no key, as recovery reads, it is not checked (TASK-411.5).
-    fn decode(
+    pub(crate) fn decode(
         bytes: &[u8],
         segment: SegmentId,
         encryption: Option<&RawEncryption>,
@@ -265,6 +265,11 @@ impl LogRecord {
         segment: SegmentId,
         encryption: Option<&RawEncryption>,
     ) -> Result<(Vec<Self>, usize), Error> {
+        if let Some(found) = unsupported_log_magic(bytes) {
+            anyhow::bail!(
+                "{segment:?}'s log has unsupported format {found:?}, not {LOG_MAGIC:?}: refused"
+            );
+        }
         let Some(header) = LogHeader::of(bytes, segment) else { return Ok((Vec::new(), 0)) };
         let bytes = bytes.get(LOG_RECORDS as usize..).unwrap_or_default();
         let unauthentic = std::cell::Cell::new(None);
@@ -303,11 +308,20 @@ impl LogRecord {
 /// 81); a log whose header names another segment holds none of its own. cladefs: after those
 /// fields, the DEK its segment's raw file is encrypted under and its log authenticated with, its
 /// cell's and its generation, and the salt of their subkeys (`raw::RawEncryption`), then the
-/// header's MAC; each record of it is followed by its MAC, of its offset in the log and its bytes
-/// (TASK-411.5). Its records hold of the runs of its commits what the raw file stores, encrypted.
-/// Every cell's are so (TASK-411.28): a log headed in the clear, `FXLOG\0\0\x02` as before, is no
-/// segment's log.
-pub(crate) const LOG_MAGIC: &[u8; 8] = b"FXLOG\0\0\x03";
+/// header's MAC, then an 8-byte rapidhash of the header fields and MAC so a member holding no key
+/// detects a torn or corrupted header on reopen (board 6902); each record of it is followed by its
+/// MAC, of its offset in the log and its bytes (TASK-411.5). Its records hold of the runs of its
+/// commits what the raw file stores, encrypted. Every cell's are so (TASK-411.28): a log headed in
+/// the clear, `FXLOG\0\0\x02` as before, or `FXLOG\0\0\x03` without the header hash, is refused.
+pub(crate) const LOG_MAGIC: &[u8; 8] = b"FXLOG\0\0\x04";
+
+/// cladefs: whether `log` begins with an older or unknown `FXLOG\0\0*` magic other than
+/// [`LOG_MAGIC`]: refused rather than treated as empty and deleted by recovery (no migrations,
+/// ever; board 6902).
+pub(crate) fn unsupported_log_magic(log: &[u8]) -> Option<[u8; 8]> {
+    let (&magic, _) = log.split_first_chunk::<8>()?;
+    (magic[..7] == LOG_MAGIC[..7] && magic != *LOG_MAGIC).then_some(magic)
+}
 
 /// cladefs: where a segment's log's records start, after its header.
 pub(crate) const LOG_RECORDS: u64 = 4096;
@@ -315,12 +329,18 @@ pub(crate) const LOG_RECORDS: u64 = 4096;
 /// cladefs: the bytes of a log's header's first fields ([`LOG_MAGIC`]).
 const LOG_FIELDS: usize = LOG_MAGIC.len() + 3 * 8;
 
+/// cladefs: the bytes of the header's keyless integrity hash (board 6902).
+const LOG_HASH: usize = 8;
+
 /// cladefs: the bytes of a log's header that say anything ([`LOG_MAGIC`]): what a reader of its
 /// header reads.
-pub(crate) const LOG_HEADER: usize = LOG_FIELDS + 8 + 4 + SALT_LEN + MAC_LEN;
+pub(crate) const LOG_HEADER: usize = LOG_FIELDS + 8 + 4 + SALT_LEN + MAC_LEN + LOG_HASH;
 
-/// cladefs: the bytes of a log's header its MAC is of: all but the MAC.
-const LOG_SIGNED: usize = LOG_HEADER - MAC_LEN;
+/// cladefs: the bytes of a log's header its MAC is of: all before the MAC.
+const LOG_SIGNED: usize = LOG_FIELDS + 8 + 4 + SALT_LEN;
+
+/// cladefs: the bytes of a log's header its keyless integrity hash covers: all before the hash.
+pub(crate) const LOG_HASHED: usize = LOG_HEADER - LOG_HASH;
 
 /// cladefs: the header of `segment`'s log, its records salted with `salt`, MACed by `encryption`,
 /// which encrypts its raw file and log ([`LOG_MAGIC`]).
@@ -337,6 +357,9 @@ pub(crate) fn log_header(salt: u64, segment: SegmentId, encryption: &RawEncrypti
     }
     let mac = encryption.mac(0, &header[..at]);
     header[at..at + MAC_LEN].copy_from_slice(&mac);
+    at += MAC_LEN;
+    let hash = rapidhash::rapidhash(&header[..at]);
+    header[at..at + LOG_HASH].copy_from_slice(&hash.to_le_bytes());
     header
 }
 
@@ -366,6 +389,11 @@ impl LogHeader {
         let key = KeyId { cell: fields.u64()?, generation: fields.u32()? };
         let key_salt = Salt(fields.array()?);
         let mac = fields.array()?;
+        let hash = fields.u64()?;
+        let (hashed, _) = header.split_first_chunk::<LOG_HASHED>()?;
+        if rapidhash::rapidhash(hashed) != hash {
+            return None;
+        }
         let (signed, _) = header.split_first_chunk::<LOG_SIGNED>()?;
         Some(Self { salt, encrypted: (key, key_salt, mac), signed: signed.to_vec() })
     }
@@ -472,11 +500,35 @@ impl<F: File> SegmentLog<F> {
 
 /// `record` as a log holds it at `at`: encoded, MACed at `at` by `encryption` (TASK-411.5), and
 /// framed, salted with `salt` ([`LOG_MAGIC`]).
-fn framed(record: &LogRecord, at: u64, salt: u64, encryption: &RawEncryption) -> Vec<u8> {
+pub(crate) fn framed(record: &LogRecord, at: u64, salt: u64, encryption: &RawEncryption) -> Vec<u8> {
     let mut payload = bincode::serialize(record).expect("records serialize");
     let mac = encryption.mac(at, &payload);
     payload.extend_from_slice(&mac);
     crate::layout::frame_salted(&payload, salt)
+}
+
+/// The byte length of `contents` encoded as a [`Runs::Held`] record by [`framed`], without reading
+/// its runs' bytes.
+pub(crate) fn held_framed_len(contents: &Contents) -> u64 {
+    let empty = LogRecord { contents: contents.clone(), runs: Runs::Held(Bytes(Vec::new())) };
+    let empty_len = bincode::serialized_size(&empty).expect("records serialize");
+    let run_bytes = LogRecord::run_bytes(contents);
+    12 + empty_len + run_bytes + MAC_LEN as u64
+}
+
+/// Keyless recovery of a member's replica log end (board 6902): 0 if the 4 KiB header is absent or
+/// fails its hash, else `LOG_RECORDS` plus the bytes of intact salted records after it.
+pub(crate) fn replica_valid_end(log: &[u8], segment: SegmentId) -> u64 {
+    if log.len() < LOG_RECORDS as usize {
+        return 0;
+    }
+    let Some(header) = LogHeader::of(log, segment) else {
+        return 0;
+    };
+    let (_, end) = crate::layout::decode_with(&log[LOG_RECORDS as usize..], header.salt, |_, _| {
+        Some(())
+    });
+    LOG_RECORDS + end as u64
 }
 
 /// cladefs: the commits the records of `log`, segment `segment`'s replica log as a member holds it,
@@ -556,6 +608,11 @@ impl ReplicaLog {
         bytes
     }
 
+    /// Advances the log offset past a skipped record whose encoded length is `len` bytes.
+    pub fn advance(&mut self, len: u64) {
+        self.end += len;
+    }
+
     /// Where its next record goes.
     pub fn end(&self) -> u64 {
         self.end
@@ -577,7 +634,8 @@ pub(crate) struct Recovered {
 
 impl Recovered {
     /// cladefs: frames the segments recovery closed again ([`Recovered::closing`]), in `dir`, of
-    /// `cell`, holding `keys`, the cell's: encrypted under its cell's newest DEK; each from its raw
+    /// `cell`, holding `keys`, the cell's: encrypted under its cell's newest DEK, or as in-place
+    /// `Encryption::Sectors` if `sectors` (for ephemeral cells, board 6905); each from its raw
     /// data and its log's records read again, which must still be those recovery kept, with the
     /// footer recovery folded them into, and synced; then the directory of framed files synced, and
     /// their raw files and logs removed, as the commits they hold are durable in the framed files
@@ -593,6 +651,7 @@ impl Recovered {
         dir: &D,
         cell: CellId,
         keys: &bucket_cell::keys::Ring,
+        sectors: bool,
     ) -> Result<(), Error> {
         if self.closing.is_empty() {
             return Ok(());
@@ -611,20 +670,37 @@ impl Recovered {
             // in place cut short leaves the raw file with its tail, torn (TASK-310).
             let end = footer.contents.runs().map(|&(_, offset, len)| offset + len).max();
             data.truncate((end.unwrap_or(0) as usize).min(data.len()));
-            // cladefs: decrypted: its runs are whole sectors (TASK-411.5, TASK-411.8).
+            // cladefs: its runs are whole sectors (TASK-411.5, TASK-411.8).
             let encryption = encryption.with_context(|| format!("{segment:?} has no log"))?;
             ensure!(
                 (data.len() as u64).is_multiple_of(SECTOR),
                 "{segment:?}'s runs end at {}, inside a sector",
                 data.len()
             );
-            encryption.decrypt(0, &mut data);
-            let framed = extent_frame::framed(&data, &footer.encode(), encrypting);
             let path = segment_path(segment);
             remove(dir, &path)?;
             let file = dir.create(&path, true)?;
-            file.write_at(&framed, 0)?;
-            crate::written::wrote(crate::written::Kind::Framed, framed.len());
+            if sectors {
+                let mut packer = extent_frame::Packer::in_place(encryption.sectors().clone());
+                let raw_parts = data
+                    .chunks(extent_frame::PART as usize)
+                    .enumerate()
+                    .map(|(index, chunk)| {
+                        extent_frame::RawPart::of(index as u64, chunk, encryption.sectors())
+                    });
+                packer.push_raw_parts(raw_parts);
+                let tail = packer.finish(&footer.encode());
+                if !data.is_empty() {
+                    file.write_at(&data, 0)?;
+                }
+                file.write_at(&tail, data.len() as u64)?;
+                crate::written::wrote(crate::written::Kind::Framed, data.len() + tail.len());
+            } else {
+                encryption.decrypt(0, &mut data);
+                let framed = extent_frame::framed(&data, &footer.encode(), encrypting);
+                file.write_at(&framed, 0)?;
+                crate::written::wrote(crate::written::Kind::Framed, framed.len());
+            }
             file.sync()?;
         }
         dir.sync_dir(&cell_dir(SEGMENTS, cell.id))?;
@@ -633,34 +709,6 @@ impl Recovered {
             let segment = SegmentId { cell: cell.id, number };
             remove(dir, &open_segment_path(segment))?;
             remove(dir, &log_path(segment))?;
-        }
-        Ok(())
-    }
-
-    /// cladefs: of an ephemeral cell, whose segments closed again stay raw (doc-25, TASK-698.2):
-    /// writes into each raw file, in `dir`, of `cell`, holding `keys`, the runs its log's records
-    /// hold, which a flush that sealed little made durable in its log alone ([`LogRecord`]), and
-    /// syncs it: its raw file holds its commits whole from then on, as a framing's file does. The
-    /// records must still be those recovery kept.
-    pub fn restore_raw<D: Dir>(
-        &self,
-        dir: &D,
-        cell: CellId,
-        keys: &bucket_cell::keys::Ring,
-    ) -> Result<(), Error> {
-        for (footer, number) in &self.segments {
-            let Some(kept) = self.closing.get(number) else { continue };
-            let segment = SegmentId { cell: cell.id, number: *number };
-            let Logged { records, data, .. } = log_records(dir, segment, Some(keys))?;
-            ensure!(
-                records.get(..kept.len()) == Some(&kept[..]),
-                "{segment:?}'s log changed since its recovery"
-            );
-            let end = footer.contents.runs().map(|&(_, offset, len)| offset + len).max();
-            let data = &data[..(end.unwrap_or(0) as usize).min(data.len())];
-            let file = dir.open(&open_segment_path(segment), true)?;
-            file.write_at(data, 0)?;
-            file.sync()?;
         }
         Ok(())
     }
@@ -686,8 +734,14 @@ impl Recovered {
 /// Recovers the WAL of `cell` in `dir` (see the module's docs): each segment whose framed file
 /// is whole, in order, and each whose framed file is not that its log closes again, holding
 /// commits, to the last durable commit; and nothing else of segments: raw data, logs and framed
-/// files torn, closed again or holding nothing durable, go.
-pub(crate) fn recover<D: Dir>(dir: &D, cell: CellId) -> Result<Recovered, Error> {
+/// files torn, closed again or holding nothing durable, go. For an ephemeral cell, `ephemeral`
+/// holds `Some(through)`, the last segment covered by its local checkpoint: segments `<= through`
+/// stay in `segments/` untouched by WAL recovery, and acknowledged segments are kept locally.
+pub(crate) fn recover<D: Dir>(
+    dir: &D,
+    cell: CellId,
+    ephemeral: Option<Option<u64>>,
+) -> Result<Recovered, Error> {
     let (start_file, start) = StartFile::read(dir)?;
     let listed = |kind| -> Result<BTreeSet<u64>, Error> {
         Ok(list_numbers(dir, &cell_dir(kind, cell.id))?.into_iter().collect())
@@ -700,7 +754,9 @@ pub(crate) fn recover<D: Dir>(dir: &D, cell: CellId) -> Result<Recovered, Error>
         }
     }
     let (framed, raw, logs) = (listed(SEGMENTS)?, listed(OPEN_SEGMENTS)?, listed(LOGS)?);
-    let numbers: BTreeSet<u64> = framed.iter().chain(&raw).chain(&logs).copied().collect();
+    let covered = |number: u64| ephemeral.flatten().is_some_and(|through| number <= through);
+    let numbers: BTreeSet<u64> =
+        framed.iter().chain(&raw).chain(&logs).copied().filter(|&n| !covered(n)).collect();
     let left = |number| raw.contains(&number) || logs.contains(&number);
     // cladefs: the logs that are their segments' own, their headers naming them: one renamed a
     // spare and taken as another segment's log, which a crash brought back under its old name,
@@ -933,16 +989,21 @@ pub(crate) fn recover<D: Dir>(dir: &D, cell: CellId) -> Result<Recovered, Error>
         }
     }
     // Those acknowledged by the start, whose files' removal a crash undid, are the bucket's: they
-    // go again.
+    // go again. For an ephemeral cell, segments live locally until all their extents are freed.
     let (gone, segments): (Vec<_>, Vec<_>) =
         segments.into_iter().partition(|(footer, _)| acknowledged(footer));
-    for (footer, number) in gone {
-        remove(dir, &segment_path(SegmentId { cell: cell.id, number }))?;
-        for (extent, _) in footer.own() {
-            remove(dir, &extent_path(extent))?;
+    if ephemeral.is_none() {
+        for (footer, number) in gone {
+            remove(dir, &segment_path(SegmentId { cell: cell.id, number }))?;
+            for (extent, _) in footer.own() {
+                remove(dir, &extent_path(extent))?;
+            }
         }
     }
-    let next = (framed.iter().chain(&raw).chain(&logs)).max().map_or(0, |last| last + 1);
+    let next = (framed.iter().chain(&raw).chain(&logs))
+        .max()
+        .map_or(0, |last| last + 1)
+        .max(ephemeral.flatten().map_or(0, |through| through + 1));
     Ok(Recovered { start, start_file, segments, next, closing })
 }
 
@@ -983,6 +1044,11 @@ fn own_log<D: Dir>(dir: &D, segment: SegmentId) -> Result<bool, Error> {
     }
     let mut header = [0; LOG_HEADER];
     log.read_cached(&mut header, 0)?;
+    if let Some(found) = unsupported_log_magic(&header) {
+        anyhow::bail!(
+            "{segment:?}'s log has unsupported format {found:?}, not {LOG_MAGIC:?}: refused"
+        );
+    }
     Ok(log_salt(&header, segment).is_some())
 }
 
@@ -1320,8 +1386,8 @@ mod tests {
     /// cladefs: the WAL in `dir` recovered, and the segments it closed again framed, encrypted, as
     /// a cell opens it holding its keys (TASK-411.9).
     fn recover_closing(dir: &MemDir) -> Result<Recovered, Error> {
-        let mut recovered = recover(dir, CELL)?;
-        recovered.close(dir, CELL, &bucket_cell::testing::ring([CELL]))?;
+        let mut recovered = recover(dir, CELL, None)?;
+        recovered.close(dir, CELL, &bucket_cell::testing::ring([CELL]), false)?;
         Ok(recovered)
     }
 
@@ -1356,15 +1422,15 @@ mod tests {
         let dir = MemDir::new();
         create_cell_dirs(&dir, CELL.id).unwrap();
         left_open(&dir, 0, 1, &[commit(1, 1, 0)]);
-        let mut recovered = recover(&dir, CELL).unwrap();
+        let mut recovered = recover(&dir, CELL, None).unwrap();
         let footer = recovered.segments[0].0.clone();
         assert_eq!(recovered.closing.keys().copied().collect::<Vec<_>>(), [0]);
         assert_eq!(files(&dir, SEGMENTS), Vec::<u64>::new());
         assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![0], vec![0]));
         // Recovered again before it is framed, it holds the same.
-        assert_eq!(recover(&dir, CELL).unwrap().segments, recovered.segments);
+        assert_eq!(recover(&dir, CELL, None).unwrap().segments, recovered.segments);
         let keys = bucket_cell::testing::ring([CELL]);
-        recovered.close(&dir, CELL, &keys).unwrap();
+        recovered.close(&dir, CELL, &keys, false).unwrap();
         assert!(recovered.closing.is_empty());
         assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![], vec![]));
         let path = segment_path(segment(0));
@@ -1382,7 +1448,7 @@ mod tests {
         );
         // Framed whole, encrypted, its raw data and log still there.
         left_open(&dir, 0, 1, &[commit(1, 1, 0)]);
-        let recovered = recover(&dir, CELL).unwrap();
+        let recovered = recover(&dir, CELL, None).unwrap();
         assert_eq!(recovered.segments, [(footer, 0)]);
         assert!(recovered.closing.is_empty());
         assert_eq!(read(), encrypted);
@@ -1805,5 +1871,38 @@ mod tests {
         assert_eq!(queue.acknowledge(3).map(numbers), Some(vec![]));
         assert_eq!(queue.acknowledge(4).map(numbers), Some(vec![2, 3, 4]));
         assert_eq!(queue.start(), Some(tag(2, 7)));
+    }
+
+    /// Board 6902 (Codex review): a log from the previous WAL format (`FXLOG\0\0\x03`) must be
+    /// refused with a format error, never treated as empty and deleted along with its open segment.
+    #[test]
+    fn previous_wal_format_is_refused_without_deleting_files() {
+        let dir = MemDir::new();
+        create_cell_dirs(&dir, CELL.id).unwrap();
+        let seg = segment(0);
+        let raw = dir.create(&open_segment_path(seg), true).unwrap();
+        raw.write_at(&[0xab; 4096], 0).unwrap();
+        raw.sync().unwrap();
+        let enc = encryption();
+        let mut header = log_header(7, seg, &enc);
+        // Simulate a genuine v3 header: magic FXLOG\0\0\x03, MAC over signed fields, no trailing hash.
+        header[..8].copy_from_slice(b"FXLOG\0\0\x03");
+        let mac = enc.mac(0, &header[..LOG_SIGNED]);
+        header[LOG_SIGNED..LOG_SIGNED + MAC_LEN].copy_from_slice(&mac);
+        header[LOG_HASHED..LOG_HEADER].fill(0);
+        let record = framed(
+            &LogRecord { contents: commit(1, 1, 0), runs: Runs::Synced },
+            LOG_RECORDS,
+            7,
+            &enc,
+        );
+        let log = dir.create(&log_path(seg), false).unwrap();
+        log.write_at(&header, 0).unwrap();
+        log.write_at(&record, LOG_RECORDS).unwrap();
+        log.sync().unwrap();
+        let before = dir.files();
+        let err = recover(&dir, CELL, None).err().expect("v3 WAL must be refused");
+        assert!(err.to_string().contains("unsupported format"), "{err:#}");
+        assert_eq!(dir.files(), before, "refused recovery must preserve every file byte-for-byte");
     }
 }
