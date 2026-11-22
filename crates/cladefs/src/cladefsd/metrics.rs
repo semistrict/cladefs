@@ -96,7 +96,7 @@ use super::wire::*;
 use std::fmt::Write as _;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The kinds of request metrics are kept of, and their names.
 const KINDS: [(u32, &str); 22] = [
@@ -194,9 +194,48 @@ pub(super) fn requests_line() -> String {
     line
 }
 
+/// cladefs: how long a render of the metrics takes, said by its parts once the whole took longer
+/// than [`SLOW_RENDER`]: a scrape is answered at once, or its scraper gives up, as the case
+/// measuring cells per host did after 10 s, 161 VMs restored on a loaded disk (board 7416).
+const SLOW_RENDER: Duration = Duration::from_secs(1);
+
+/// cladefs: the parts of a render of the metrics, each as long as it took ([`SLOW_RENDER`]).
+struct Laps {
+    began: Instant,
+    last: Instant,
+    parts: Vec<(&'static str, Duration)>,
+}
+
+impl Laps {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self { began: now, last: now, parts: Vec::new() }
+    }
+
+    /// The part `part` is done.
+    fn lap(&mut self, part: &'static str) {
+        let now = Instant::now();
+        self.parts.push((part, now - self.last));
+        self.last = now;
+    }
+
+    /// The last part, `part`, is done: the render's parts said if it took longer than
+    /// [`SLOW_RENDER`].
+    fn said(mut self, part: &'static str) {
+        self.lap(part);
+        let took = self.last - self.began;
+        if took > SLOW_RENDER {
+            let parts: Vec<String> =
+                self.parts.iter().map(|(part, took)| format!("{part} {took:.1?}")).collect();
+            log::warn!("cladefsd: rendering the metrics took {took:.1?}: {}", parts.join(", "));
+        }
+    }
+}
+
 /// The metrics as of now, in Prometheus' text format.
 pub fn render() -> String {
     let mut out = String::new();
+    let mut laps = Laps::new();
     let load = |count: &AtomicU64| count.load(Ordering::Relaxed);
 
     out += "# HELP cladefsd_requests_total VM processes' requests served, by kind.\n";
@@ -231,6 +270,7 @@ pub fn render() -> String {
         let _ = writeln!(out, "{name}_count{{kind=\"{kind}\"}} {count}");
     }
 
+    laps.lap("requests");
     let name = "cladefsd_build_info";
     let _ = writeln!(out, "# HELP {name} The daemon's build, by the commit it was built of.");
     let _ = writeln!(out, "# TYPE {name} gauge");
@@ -250,11 +290,13 @@ pub fn render() -> String {
         );
     }
 
+    laps.lap("builds");
     for (name, help, value) in gauges() {
         let _ = writeln!(out, "# HELP cladefsd_{name} {help}");
         let _ = writeln!(out, "# TYPE cladefsd_{name} gauge");
         let _ = writeln!(out, "cladefsd_{name} {value}");
     }
+    laps.lap("gauges");
     // cladefs: a tripwire (backlog doc-13): no guest maps an open extent.
     let name = "cladefsd_window_open_maps_refused_total";
     let _ = writeln!(out, "# HELP {name} MAPs of open extents refused.");
@@ -302,6 +344,7 @@ pub fn render() -> String {
         }
     }
 
+    laps.lap("each VM's");
     let tenants = super::memory::tenants();
     let name = "cladefsd_tenant_memory_bytes";
     let _ = writeln!(out, "# HELP {name} Memory a tenant's extents' pages hold, by its ID.");
@@ -377,6 +420,7 @@ pub fn render() -> String {
             }
         }
     }
+    laps.lap("tenants");
     // cladefs: the host's disks, as the disk governor sees them (doc-22).
     for (name, help, values) in super::disk::host_disks() {
         let _ = writeln!(out, "# HELP {name} {help}");
@@ -386,6 +430,7 @@ pub fn render() -> String {
         }
     }
 
+    laps.lap("host disks");
     for (name, value) in crate::stats::stats().named() {
         let name = format!("cladefsd_{}_total", name.replace('-', "_"));
         let _ = writeln!(out, "# HELP {name} As the control API's GetCounters reports it.");
@@ -501,6 +546,7 @@ pub fn render() -> String {
         let _ = writeln!(out, "{name} {value}");
     }
 
+    laps.lap("stats, uploads' memory, the part cache, peers and the process");
     let uploads = super::cells::upload_statuses();
     let series: [(&str, &str, &str, fn(&local_cell::upload::UploadStatus) -> String); 3] = [
         (
@@ -534,6 +580,7 @@ pub fn render() -> String {
         }
     }
 
+    laps.lap("uploads");
     // cladefs: each replicated cell's writer's replication (doc-21, Degraded; TASK-537.3.5).
     let replicated: Vec<_> =
         (uploads.iter()).filter_map(|(cell, status)| Some((cell, status.replication?))).collect();
@@ -615,6 +662,7 @@ pub fn render() -> String {
             let _ = writeln!(out, "{name}{{bucket=\"{number}\"}} {}", stats.downloaded);
         }
     }
+    laps.said("replication");
     out
 }
 
