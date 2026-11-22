@@ -36,8 +36,9 @@ semaphore shared until the write or copy is done.
 <Ref id="guest_dirty" />
 <Ref id="guest_device_private" />
 
-The host side: cladefsd serves `PRIVATE` by copying each page into the VM process's own memory,
-laid out as the window is, so a private page costs it no mapping of its own.
+The host side: the VM process serves `PRIVATE` itself (doc-26), copying each page from its
+tenant's arena into its own memory, laid out as the window is, so a private page costs it no
+mapping of its own, and no round trip to cladefsd.
 
 <Ref id="server_make_private" />
 <Ref id="window_make_private" />

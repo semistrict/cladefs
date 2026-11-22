@@ -4,9 +4,9 @@
 # Killer: cladefsd::tests::hostile::a_compromised_vm_process_harms_no_tenant_beside_it
 --- a/crates/cladefs/src/cladefsd/server.rs
 +++ b/crates/cladefs/src/cladefsd/server.rs
-@@ -1353,7 +1353,7 @@
-     /// it says ([`Opened`]): its tenant's arena, and the default one, read-only (TASK-43); the
-     /// default tenant's as any other's (TASK-79.17).
+@@ -1743,7 +1743,7 @@ impl Connection {
+     /// it says ([`Opened`]): its tenant's arena, and the default one, each read-only (TASK-43,
+     /// doc-26); the default tenant's as any other's (TASK-79.17).
      fn memories(&self) -> [std::os::fd::BorrowedFd<'_>; 2] {
 -        let memory = &self.tenant.memory;
 +        let memory = &Box::leak(Box::new(default_tenant().unwrap())).memory;

@@ -4,12 +4,12 @@
 # Killer: sim::versions_mirrored_across_regions
 --- a/crates/bucket_cell/src/mirror.rs
 +++ b/crates/bucket_cell/src/mirror.rs
-@@ -344,7 +344,7 @@
+@@ -342,7 +342,7 @@ pub async fn mirror(
      };
      // Its pin let go whatever the listing came to: the marker, and the references written here,
      // stand, and a mirror begun again lists them again.
 -    let referred = refer_here(bucket, own, number, parent, at).await;
 +    let referred: Result<(usize, usize), Error> = Ok((0, 0));
      failpoint!("mirror::referred");
-     pin.release(own).await;
+     pin.release(own).await?;
      let (referred, retired) = referred?;
