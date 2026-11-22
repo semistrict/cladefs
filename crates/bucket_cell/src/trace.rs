@@ -70,9 +70,11 @@ pub const SOURCE: &str = "cladefs.source";
 pub const BACKTRACE: &str = "cladefs.backtrace";
 
 /// Whether spans are made, which [`enable`] says.
+// The process's tracing, on or off: its spans, every simulated host's, go to one tracer.
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// The tracer spans are made with, of the global tracer provider as [`enable`] found it.
+// The process's tracer, of its global provider: one for every simulated host.
 static TRACER: OnceLock<global::BoxedTracer> = OnceLock::new();
 
 /// The name of the tracer, the instrumentation's scope.

@@ -169,6 +169,7 @@ impl Density {
 
 /// What the cells of this process hold of their own ([`own_held`]).
 static OWN_ENTRIES: AtomicU64 = AtomicU64::new(0);
+// The process's count, every simulated host's together, as a process's metrics are.
 static OWN_RUNS: AtomicU64 = AtomicU64::new(0);
 
 /// What the cells open in this process hold of their own ([`Own`]). What the extent daemon

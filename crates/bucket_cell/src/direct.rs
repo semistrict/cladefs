@@ -110,6 +110,7 @@ const SPARE_MOST: usize = 1 << 20;
 
 thread_local! {
     /// The memory of the last [`Buffer`] the thread let go, if no more than [`SPARE_MOST`].
+    // Per thread, a spare buffer's memory: no host's state, whichever host's thread reuses it.
     static SPARE: std::cell::Cell<Option<Aligned>> = const { std::cell::Cell::new(None) };
 }
 

@@ -157,6 +157,7 @@ const LEVEL: i32 = 1;
 
 /// The zstd level parts are compressed at: `CLADEFS_ZSTD_LEVEL`'s, or [`LEVEL`].
 fn level() -> i32 {
+    // The process's environment, read once: the same for every simulated host.
     static CHOSEN: std::sync::LazyLock<i32> =
         std::sync::LazyLock::new(|| match std::env::var("CLADEFS_ZSTD_LEVEL") {
             Ok(level) => {

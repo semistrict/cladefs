@@ -59,7 +59,9 @@ impl Written {
     }
 }
 
+// The process's count, every simulated host's together, as a process's metrics are.
 static WRITTEN: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
+// The process's count, every simulated host's together, as a process's metrics are.
 static WRITES: AtomicU64 = AtomicU64::new(0);
 
 /// A cell of this process's wrote `bytes` of `kind`, in one write.

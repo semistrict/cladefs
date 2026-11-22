@@ -377,6 +377,7 @@ impl Places for Layered {
 const RESTARTS: usize = 64;
 
 /// The ring of a recovery holding no key.
+// Immutable once made: the same for every simulated host of the process.
 static KEYLESS: std::sync::LazyLock<Arc<Ring>> = std::sync::LazyLock::new(Ring::keyless);
 
 /// How many segments' footers recovery reads at once, at most: their keys are known, the head

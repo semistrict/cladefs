@@ -36,6 +36,7 @@ pub struct RequestId {
 }
 
 thread_local! {
+    // Per thread, set and cleared within one call: no host's state outlives it.
     static CURRENT: Cell<Option<RequestId>> = const { Cell::new(None) };
 }
 

@@ -329,6 +329,7 @@ impl Recorder {
 
 /// The recorder of the process's spans, which `/z/tracez` shows.
 pub fn recorder() -> &'static Arc<Recorder> {
+    // The process's spans' recorder, as the tracer is the process's.
     static RECORDER: OnceLock<Arc<Recorder>> = OnceLock::new();
     RECORDER.get_or_init(Arc::default)
 }

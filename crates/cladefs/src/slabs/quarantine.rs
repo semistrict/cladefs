@@ -100,6 +100,7 @@ impl Drop for Quarantined {
 }
 
 /// What quarantines the runs freed, if the daemon gave it.
+// The process's, given once, by whichever simulated host is first (TASK-685.14): physical memory's quarantine is the process's.
 static QUARANTINE: OnceLock<Box<dyn Fn(Quarantined) + Send + Sync>> = OnceLock::new();
 
 /// Has `quarantine` take the runs freed that were staged to VM processes, from now on: it frees

@@ -144,6 +144,7 @@ struct Requests {
 }
 
 /// Each kind's requests, in [`KINDS`]' order.
+// The process's count, every simulated host's together, as a process's metrics are.
 static REQUESTS: LazyLock<[Requests; KINDS.len()]> = LazyLock::new(Default::default);
 
 /// The name of the kind of request `kind` ([`KINDS`]), if it is one.
@@ -154,6 +155,7 @@ pub(super) fn kind_name(kind: u32) -> Option<&'static str> {
 /// cladefs: the name of the span of a request of `kind`, `cladefsd.NAME` ([`kind_name`]), or
 /// `cladefsd.request` of a kind it isn't (`super::otel`, TASK-258).
 pub(super) fn span_name(kind: u32) -> &'static str {
+    // Immutable once made: the same for every simulated host of the process.
     static NAMES: LazyLock<[String; KINDS.len()]> =
         LazyLock::new(|| KINDS.map(|(_, name)| format!("cladefsd.{name}")));
     match KINDS.iter().position(|(known, _)| *known == kind) {

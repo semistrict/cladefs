@@ -157,6 +157,7 @@ pub(crate) fn read_parts<F: File>(file: &F, keys: &dyn Keys) -> Result<Option<Pa
 }
 
 /// Numbers the framed files opened, for the parts unpacked to name them by.
+// Numbers the process gives out: unique among simulated hosts too, all it asks.
 static OPENED: AtomicU64 = AtomicU64::new(0);
 
 /// A framed file, open, and where its parts are.

@@ -34,6 +34,7 @@ pub const MOST: Duration = Duration::from_secs(300);
 pub const FREQUENCY: i32 = 99;
 
 /// Held while a profile is taken: one at a time.
+// The process's profiler, which samples every thread of it: one profile at a time for the process.
 static PROFILING: Mutex<()> = Mutex::new(());
 
 /// What a profile is given as.

@@ -208,6 +208,10 @@ reaching what those can't reach, or reach only by luck: a pure function's edge c
 malformed inputs, an interleaving. A unit test restating its code (a map's insert and remove, a
 getter, a constant) is never written; one found is deleted, saying so in a `Weakens-tests:` line.
 
+## A daemon's statics are per simulated host, or say why not
+
+madsim runs every simulated host in one process, on one thread (doc-24): a `static` that is not `node_local!`, a `thread_local!`'s among them, is shared by all of them, and a host's state kept in one leaks to the others and outlives the host's kill (board 5450's part cache; board 7451's replicator, whose tasks ran on the process's bucket runtime after their host was lost). `scripts/rust-rules.py`'s `process-wide-static` rule finds each static in the crates the simulation runs: make it `node_local!`, or say over it why it is the process's (a count of the whole process's, a fact of the hardware, a pool of spare buffers, outside the simulation).
+
 ## Never write a test around a bug
 
 The user's rule (2026-11-12): when a test only passes by steering clear of what the code under test

@@ -189,6 +189,7 @@ pub(crate) const HELPERS: usize = AT_ONCE - 1;
 fn helping() -> &'static std::sync::atomic::AtomicUsize {
     #[cfg(not(feature = "shuttle"))]
     {
+        // The process's helper threads, a count of them, whichever host's flushes they help.
         static HELPING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         &HELPING
     }

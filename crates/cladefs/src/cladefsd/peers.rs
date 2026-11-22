@@ -60,7 +60,9 @@ pub(crate) const MESSAGE_MOST: usize = 64 << 20;
 const SWEEP_EVERY: Duration = Duration::from_secs(600);
 
 /// The parts the daemon served its peers, and those it had not as they asked.
+// The process's count, every simulated host's together, as a process's metrics are.
 static SERVED: AtomicU64 = AtomicU64::new(0);
+// The process's count, every simulated host's together, as a process's metrics are.
 static SERVED_MISSING: AtomicU64 = AtomicU64::new(0);
 
 /// Has the daemon serve the hosts sharing its bucket, at `address` (`CLADEFSD_PEER_ADDRESS`),

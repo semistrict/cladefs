@@ -860,6 +860,7 @@ type Reply = std::result::Result<Message, Errno>;
 
 thread_local! {
     /// Whether this thread receives a daemon's replies ([`Client::receive`]).
+    // Per thread: whether it receives a client's replies, set for the thread's life; a client is no simulated host.
     static RECEIVING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 

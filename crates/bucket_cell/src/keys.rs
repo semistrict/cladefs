@@ -207,6 +207,7 @@ pub struct Ring {
 }
 
 /// The empty ring ([`Ring::keyless`]).
+// Immutable once made: the same for every simulated host of the process.
 static KEYLESS: LazyLock<Arc<Ring>> = LazyLock::new(Arc::default);
 
 impl Ring {

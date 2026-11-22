@@ -63,6 +63,7 @@ pub const REQUEST_ID: &str = "cladefs.request_id";
 pub const ERRNO: &str = "cladefs.errno";
 
 /// The tracer provider spans go to, once started ([`install`]): what [`shutdown`] flushes.
+// The process's tracer provider, as OpenTelemetry's global one is: every simulated host's spans go to it.
 static PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 
 /// Starts the daemon's spans as `CLADEFSD_TRACES` says ([`Tracing`]): a sample of the traces

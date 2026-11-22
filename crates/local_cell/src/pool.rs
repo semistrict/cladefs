@@ -38,6 +38,7 @@ use std::sync::Arc;
 /// for the framings' packing, which wants them. A cell's job queued past them waits for one to be
 /// done. Not measured yet against a bound of another size (board 2944's benches).
 pub fn threads() -> usize {
+    // The process's CPUs, the hardware's: the same for every simulated host.
     static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *THREADS.get_or_init(|| {
         let cpus = std::thread::available_parallelism().map_or(1, |cpus| cpus.get());
@@ -149,6 +150,7 @@ struct State {
 fn pool() -> &'static Pool {
     #[cfg(not(feature = "shuttle"))]
     {
+        // The process's worker threads; under madsim the caller does the work and none start.
         static POOL: Pool = Pool {
             state: Mutex::new(State { queue: VecDeque::new(), threads: 0, idle: 0 }),
             ready: Condvar::new(),

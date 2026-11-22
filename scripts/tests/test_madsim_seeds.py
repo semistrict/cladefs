@@ -164,14 +164,27 @@ class RunTest(unittest.TestCase):
 
     def test_a_new_failure_fails_the_run_after_every_seed(self):
         new = ("cladefs::madsim", "uploaded_commits_survive_attrition",
-               panic("blocks told uploaded, lost or other: [7] of [7]", 1))
-        status, said, calls = self.run_seeds({"1": [new]})
+               panic("blocks told uploaded, lost or other: [7] of [7]", 2))
+        status, said, calls = self.run_seeds({"2": [new]})
         self.assertEqual(status, 1)
         self.assertEqual([call["seed"] for call in calls], ["71", "1", "2", "3"])
-        self.assertIn("madsim: new: seed 1: cladefs::madsim uploaded_commits_survive_attrition: "
+        self.assertIn("madsim: new: seed 2: cladefs::madsim uploaded_commits_survive_attrition: "
                       "blocks told uploaded, lost or other: [7] of [7]: "
-                      "MADSIM_TEST_SEED=1 replays it\n", said)
-        self.assertIn("::error title=madsim: a new failure::seed 1:", said)
+                      "MADSIM_TEST_SEED=2 replays it\n", said)
+        self.assertIn("::error title=madsim: a new failure::seed 2:", said)
+
+    def test_the_first_fresh_seed_is_checked_to_replay(self):
+        """Board 7583: the first fresh seed runs with MADSIM_TEST_CHECK_DETERMINISM, and its
+        failure says how to replay it so."""
+        diverged = ("cladefs::madsim", "replicated_commits_survive_attrition",
+                    panic("non-determinism detected at 0x2a", 1))
+        status, said, calls = self.run_seeds({"1": [diverged]})
+        self.assertEqual(status, 1)
+        self.assertEqual([(call["seed"], call["checked"]) for call in calls],
+                         [("71", False), ("1", True), ("2", False), ("3", False)])
+        self.assertIn("madsim: new: seed 1: cladefs::madsim replicated_commits_survive_attrition: "
+                      "non-determinism detected at 0x2a: MADSIM_TEST_SEED=1 "
+                      "MADSIM_TEST_CHECK_DETERMINISM=1 replays it\n", said)
 
     def test_a_run_failing_but_for_its_tests_ends_it(self):
         status, said, calls = self.run_seeds({"1": 101})

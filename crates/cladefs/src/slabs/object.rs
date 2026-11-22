@@ -225,6 +225,7 @@ fn create() -> io::Result<OwnedFd> {
     // is: outside the simulation, here and below.
     use std::os::unix::fs::OpenOptionsExt;
     use std::sync::atomic::{AtomicU32, Ordering};
+    // Numbers the process gives out: unique among simulated hosts too, all it asks.
     static NEXT: AtomicU32 = AtomicU32::new(0);
     let name =
         format!("cladefs-arena-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));

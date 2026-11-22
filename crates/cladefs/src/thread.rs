@@ -17,6 +17,7 @@ pub trait Spawn: Send + Sync {
     fn spawn(&self, name: String, run: Box<dyn FnOnce() + Send>) -> std::io::Result<()>;
 }
 
+// The process's seam: every simulated host's threads start through the simulation's one spawner.
 static SPAWNER: OnceLock<Box<dyn Spawn>> = OnceLock::new();
 
 /// Has `spawner` start every thread [`spawn`] starts in this process from now on; once a process.

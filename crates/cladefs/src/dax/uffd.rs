@@ -300,6 +300,7 @@ impl Drop for Busied<'_> {
 
 /// cladefs: the threads whose faults are the guest's own accesses, its vCPUs'
 /// ([`guest_thread_started`]), by their IDs, as userfaultfd reports them.
+// Outside the simulation: userfaultfd serves VMs, which no simulated host runs.
 static GUEST_THREADS: std::sync::RwLock<Vec<u32>> = std::sync::RwLock::new(Vec::new());
 
 /// cladefs: the calling thread's accesses to guest memory are the guest's own, as a vCPU's are: a
@@ -324,6 +325,7 @@ fn is_guests(thread: u32) -> bool {
 
 /// cladefs: the lifts of the stages serving faults ([`guest_access_failed`]), each its fault
 /// thread's while it runs.
+// Outside the simulation: userfaultfd serves VMs, which no simulated host runs.
 static LIFTS: std::sync::Mutex<Vec<Arc<Lift>>> = std::sync::Mutex::new(Vec::new());
 
 /// cladefs: how long a guest's access failing waits for the fault threads' lifts at most
@@ -435,6 +437,7 @@ pub(crate) fn budget(max_map_count: Option<u64>) -> usize {
 /// first thousand, a run's few, and every power of two after: a vCPU whose access stays refused
 /// for a second stops its VM with only `EFAULT` to say so, from `KVM_RUN` (TASK-99, TASK-101).
 fn refused(what: &str, offset: u64, thread: u32) {
+    // Outside the simulation: userfaultfd serves VMs, which no simulated host runs.
     static REFUSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let count = REFUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     if count <= 1000 || count.is_power_of_two() {
@@ -470,6 +473,7 @@ fn thread_name(thread: u32) -> String {
 /// thousand and every power of two after: which side was wrong, the window or the guest, when a
 /// write stays refused (TASK-102).
 fn changed_protection(what: &str, offset: u64, made: u32, seen: Option<u32>) {
+    // Outside the simulation: userfaultfd serves VMs, which no simulated host runs.
     static CHANGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let count = CHANGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     if count <= 1000 || count.is_power_of_two() {
@@ -2500,6 +2504,7 @@ impl<H: HostMemory> UffdSecondStage<H> {
 
 /// cladefs: the second stages serving faults ([`UffdSecondStage::serve`]), which a vCPU whose
 /// access keeps failing tells of ([`describe_windows`]).
+// Outside the simulation: userfaultfd serves VMs, which no simulated host runs.
 static SERVING: std::sync::Mutex<Vec<Weak<UffdSecondStage>>> = std::sync::Mutex::new(Vec::new());
 
 /// cladefs: what the DAX windows' second stages serving faults hold and are doing, for a vCPU whose

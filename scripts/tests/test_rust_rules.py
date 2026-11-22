@@ -295,6 +295,58 @@ class SilentFallback(unittest.TestCase):
         self.assertEqual(self.matches(source, src / "live.rs"), [(1, "silent-fallback")])
 
 
+class ProcessWideStatic(unittest.TestCase):
+    """cladefs: a daemon's static is per node, or says why it is the process's (board 7583)."""
+
+    def matches(self, source, path="/nowhere/crates/local_cell/src/x.rs"):
+        return [(match.line, match.rule)
+                for match in rules.process_wide_static(Path(path), textwrap.dedent(source))]
+
+    def test_statics_every_simulated_host_would_share_are_flagged(self):
+        self.assertEqual(self.matches("""\
+            /// The parts unpacked lately.
+            static UNPACKED: Unpacked = Unpacked::new();
+            fn f() {
+                static NEXT: AtomicU64 = AtomicU64::new(0);
+            }
+            thread_local! {
+                static SPARE: Cell<Option<Buffer>> = const { Cell::new(None) };
+            }
+            """), [(2, "process-wide-static"), (4, "process-wide-static"),
+                   (7, "process-wide-static")])
+
+    def test_node_local_task_local_plain_and_explained_statics_pass(self):
+        self.assertEqual(self.matches("""\
+            node_local::node_local! {
+                static UNPACKED: Unpacked = Unpacked::new();
+            }
+            tokio::task_local! {
+                static GONE: Shared<Receiver<()>>;
+            }
+            static NAME: &str = "cladefsd";
+            static SIZES: [u64; 3] = [1, 2, 3];
+            /// The process's count, every simulated host's together.
+            static SERVED: AtomicU64 = AtomicU64::new(0);
+            #[cfg(not(madsim))]
+            static MOUNT: Mutex<Option<Mount>> = Mutex::new(None);
+            thread_local! {
+                // Per thread, set and cleared within one call.
+                static CURRENT: Cell<Option<u64>> = const { Cell::new(None) };
+            }
+            """), [])
+
+    def test_tests_and_crates_the_simulation_runs_not_pass(self):
+        source = "static NEXT: AtomicU64 = AtomicU64::new(0);\n"
+        self.assertEqual(self.matches(source), [(1, "process-wide-static")])
+        self.assertEqual(self.matches(source, "/nowhere/crates/virtio_extent/src/x.rs"), [])
+        self.assertEqual(self.matches(source, "/nowhere/crates/cladefs/src/bin/cladefsctl.rs"), [])
+        self.assertEqual(self.matches(source, "/nowhere/crates/cladefs/src/cladefsd/tests.rs"), [])
+        self.assertEqual(self.matches("""\
+            #[cfg(feature = "shuttle")]
+            static RULES: Mutex<Rules> = Mutex::new(Rules::ALL);
+            """), [])
+
+
 class MixedOrderings(unittest.TestCase):
     def test_a_counter_all_relaxed_passes(self):
         self.assertEqual(matches(rules.mixed_orderings, """\

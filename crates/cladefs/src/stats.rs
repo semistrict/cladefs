@@ -166,6 +166,7 @@ const COUNTED: usize = 36;
 /// The counters a reading holds: those it keeps, and the extent store's.
 const COUNTERS: usize = COUNTED + 3;
 
+// The process's count, every simulated host's together, as a process's metrics are.
 static COUNTS: [AtomicU64; COUNTED] = [const { AtomicU64::new(0) }; COUNTED];
 
 /// Adds `value` to `counter`.

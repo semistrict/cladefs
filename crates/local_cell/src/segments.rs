@@ -2233,10 +2233,13 @@ pub(crate) fn segment_footer(bytes: &[u8]) -> Result<Option<Footer>, Error> {
 
 /// cladefs: the segments this process's cells closed, and the nanoseconds closing them took.
 static SEGMENT_CLOSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+// The process's count, every simulated host's together, as a process's metrics are.
 static SEGMENT_CLOSE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// cladefs: of those, the segments framed in place ([`frame_in_place`], TASK-310).
+// The process's count, every simulated host's together, as a process's metrics are.
 static IN_PLACE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// cladefs: the bytes of segments' data their framings read (TASK-400).
+// The process's count, every simulated host's together, as a process's metrics are.
 static FRAMING_READ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// cladefs: the bytes of segments' data this process's cells' framings read since it started, and

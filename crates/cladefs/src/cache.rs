@@ -537,11 +537,14 @@ async fn allocate(arena: ArenaId, pages: u64) -> Result<PartSlab, slabs::NoMemor
     return slabs::alloc(arena, pages, slabs::Wait::Yes);
 }
 
-/// cladefs: whether the cap on every arena's memory together is the memory governor's, the host's
-/// memory, not a limit the control API set: what a page-in finding no page waits out rather than
-/// fails (board 5662). Set as the cap is (`cladefsd::memory`); a daemon not governed has none.
-static TOTAL_IS_THE_HOSTS: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+node_local::node_local! {
+    /// cladefs: whether the cap on every arena's memory together is the memory governor's, the
+    /// host's memory, not a limit the control API set: what a page-in finding no page waits out
+    /// rather than fails (board 5662). Set as the cap is (`cladefsd::memory`); a daemon not
+    /// governed has none. Each daemon's, a simulated host's among them, as its arenas are.
+    static TOTAL_IS_THE_HOSTS: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+}
 
 /// cladefs: says whether the cap on every arena's memory together is the host's
 /// ([`TOTAL_IS_THE_HOSTS`]).
@@ -550,15 +553,17 @@ static TOTAL_IS_THE_HOSTS: std::sync::atomic::AtomicBool =
     allow(dead_code, reason = "the daemon, Linux's alone, sets it")
 )]
 pub(crate) fn set_total_is_the_hosts(is: bool) {
-    TOTAL_IS_THE_HOSTS.store(is, Ordering::Relaxed);
+    TOTAL_IS_THE_HOSTS.get().store(is, Ordering::Relaxed);
 }
 
 /// cladefs: how many times page-ins waited for memory ([`waiting_for_memory`]).
+// The process's count, every simulated host's together, as a process's metrics are.
 static WAITS_FOR_MEMORY: AtomicU64 = AtomicU64::new(0);
 
 /// cladefs: says a page-in waits for memory, the host's full and relief having found nothing to
 /// free: at most once every 10 s, with how many waits since, as a full host makes many (board 5662).
 fn waiting_for_memory() {
+    // When the process last said its page-ins wait: one warning for every host, at most every 10 s.
     static SAID_AT: AtomicU64 = AtomicU64::new(0);
     let waited = WAITS_FOR_MEMORY.fetch_add(1, Ordering::Relaxed) + 1;
     let now = std::time::SystemTime::now()
@@ -645,6 +650,7 @@ mod buffers {
     /// How many it keeps.
     const KEPT: usize = super::PAGER_THREADS;
 
+    // The process's pool of spare buffers: what it holds is no host's.
     static KEPT_BUFFERS: Mutex<Vec<Box<[u8]>>> = Mutex::new(Vec::new());
 
     /// A buffer of a part at most, given back as it is dropped.
@@ -911,6 +917,7 @@ struct EvictionToken(u64);
 impl EvictionToken {
     /// A token no other eviction has.
     fn new() -> Self {
+        // Numbers the process gives out: unique among simulated hosts too, all it asks.
         static NEXT: AtomicU64 = AtomicU64::new(0);
         Self(NEXT.fetch_add(1, Ordering::Relaxed))
     }
@@ -1355,7 +1362,7 @@ impl CachedExtent {
                 Ok(slab) => break slab,
                 Err(slabs::NoMemory)
                     if slabs::room_may_come(self.arena)
-                        && TOTAL_IS_THE_HOSTS.load(Ordering::Relaxed) =>
+                        && TOTAL_IS_THE_HOSTS.get().load(Ordering::Relaxed) =>
                 {
                     waiting_for_memory();
                     tokio::time::sleep(pause).await;
@@ -1501,6 +1508,7 @@ impl Source for Zeros {
 /// the first can't be made, which each window has made as it is created (`Dax::new`): a free maps
 /// them holding the cell's locks, memory out, as memory run out finds them.
 pub(crate) fn zeros() -> Result<Arc<dyn Source>> {
+    // The process's zero pages, immutable: the same for every simulated host.
     static ZEROS: OnceLock<Arc<Zeros>> = OnceLock::new();
     if let Some(zeros) = ZEROS.get() {
         return Ok(zeros.clone());

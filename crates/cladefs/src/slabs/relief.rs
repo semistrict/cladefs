@@ -35,10 +35,12 @@ struct Reliever {
 }
 
 /// The relief thread's, if [`relieve_with`] started it.
+// The process's, started once, by whichever simulated host is first (TASK-685.14); under madsim it starts no thread.
 static RELIEVER: OnceLock<Option<Arc<Reliever>>> = OnceLock::new();
 
 thread_local! {
     /// On the relief thread, the arena its evictor is evicting for, while it is (TASK-161).
+    // Per thread, the relief thread's alone: no simulated host has one (TASK-685.14).
     static RELIEVING: Cell<Option<ArenaId>> = const { Cell::new(None) };
 }
 

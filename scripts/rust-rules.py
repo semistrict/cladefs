@@ -166,9 +166,9 @@ def only_in_tests(tree, tests=("test",)):
 
 
 # What tests alone build: `test`; the `testing` feature, which a crate's tests turn on in the
-# crates they test for their harnesses (`any(test, feature = "testing")`); and `madsim`, the
-# full-stack simulation's build (doc-24).
-TESTS_AND_HARNESSES = ("test", 'feature="testing"', "madsim")
+# crates they test for their harnesses (`any(test, feature = "testing")`); `madsim`, the
+# full-stack simulation's build (doc-24); and the model checkers' features, Shuttle's and loom's.
+TESTS_AND_HARNESSES = ("test", 'feature="testing"', "madsim", 'feature="shuttle"', 'feature="loom"')
 
 
 def starts_tests(lines, number, tests=("test",)):
@@ -416,11 +416,75 @@ def silent_fallback(path, text):
                     "its statement, or let it fail (board 6908)")
 
 
-# Each rule, and the mutants of the bugs it is from.
+# cladefs: the crates the full-stack simulation runs, and what they link into the daemon (doc-24).
+SIMULATED_CRATES = ("bucket_cell", "cladefs", "extent_frame", "extent_keys", "host_fs", "local_cell")
+# A static's declaration: its name and type.
+STATIC = re.compile(r"^\s*(?:pub(?:\([\w:]+\))? )?static (?:mut )?([A-Z_0-9]+)\s*:\s*(.*)")
+# A static's type that holds nothing that changes: a string, a slice or array of plain values, a
+# number, a flag.
+PLAIN_TYPE = re.compile(r"(?:&'static |&)(?:str|\[)|\[&|\[?(?:u|i)(?:8|16|32|64|128|size)\b|bool\b|"
+                        r"f(?:32|64)\b|char\b")
+# A block of statics: node_local's, one per simulated node; task_local's, one per task, each a
+# node's; thread_local's, one per thread, which the simulation's one thread gives every node alike.
+STATICS_BLOCK = re.compile(r"\b(node_local|task_local|thread_local)!\s*\{")
+# What says a static is the process's, or per node: its comment's words, or a cfg that leaves it
+# out of the simulation.
+PROCESS_WIDE = ("process", "node", "per thread", "outside the simulation", "not(madsim)")
+
+
+def said_above(lines, number, words):
+    """Whether line `number` of `lines`, from 1, or the comments and attributes right over it,
+    say one of `words`."""
+    said = lines[number - 1].split("//", 1)[1] if "//" in lines[number - 1] else ""
+    above = number - 1
+    while above >= 1 and lines[above - 1].lstrip().startswith(("//", "#[")):
+        said += lines[above - 1]
+        above -= 1
+    return any(word in said.lower() for word in words)
+
+
+def process_wide_static(path, text):
+    """A static of a daemon's that every simulated host shares: madsim runs them all in one
+    process, on one thread, so a static not `node_local!`, a thread_local's among them, is one for
+    every host, and a host's state kept in one leaks to the others and outlives its kill (board
+    5450: a part cache all hosts shared; board 7451: a lost host's replicator, on the process's
+    runtime, went on). Each, of a type that holds what changes, is node_local, or says on its line
+    or in the comments over it why it is the process's or that it is per node (board 7583). Tests
+    aside: their files, modules and harnesses."""
+    posix = path.as_posix()
+    crate = re.search(r"crates/([^/]+)/src/", posix)
+    if crate is None or crate.group(1) not in SIMULATED_CRATES or "/tests/" in posix \
+            or "/src/bin/" in posix \
+            or posix.endswith(("/tests.rs", "_tests.rs", "/testing.rs")) \
+            or built_only_in(path, TESTS_AND_HARNESSES):
+        return
+    lines = text.splitlines()
+    depth, block = 0, None
+    for number, line in outside_tests(lines, TESTS_AND_HARNESSES):
+        code = line.split("//", 1)[0]
+        opened = STATICS_BLOCK.search(code)
+        if block is None and opened:
+            block, depth = opened.group(1), 0
+        in_block = block
+        if block is not None:
+            depth += brackets(code)
+            if depth <= 0:
+                block = None
+        declared = STATIC.match(code)
+        if declared is None or in_block in ("node_local", "task_local") \
+                or PLAIN_TYPE.match(declared.group(2)) or said_above(lines, number, PROCESS_WIDE):
+            continue
+        yield Match(path, number, "process-wide-static",
+                    f"`{declared.group(1)}` is one for every host the simulation runs: make it "
+                    "node_local!, or say why it is the process's (board 7583)")
+
+
+# Each rule, and the mutants of the bugs it is from.# Each rule, and the mutants of the bugs it is from.
 RULES = [
     (outside_the_seam, []),
     (off_host_fs, []),
     (silent_fallback, []),
+    (process_wide_static, []),
     (mixed_orderings, [
         "latest-listens-relaxed", "latest-rises-relaxed", "occurrence-happens-relaxed",
         "occurrence-listens-relaxed", "answers-release-no-capacity", "capacities-read-relaxed",

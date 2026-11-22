@@ -23,9 +23,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 static EXITING: AtomicBool = AtomicBool::new(false);
 
 /// The draws under way, which the exit waits for.
+// The process's draws, which its exit waits for: every host's, as the exit is the process's.
 static DRAWING: AtomicUsize = AtomicUsize::new(0);
 
 /// The exit's handler, registered with the first draw.
+// The process's exit handler, registered once.
 static REGISTERED: Once = Once::new();
 
 /// Fills `dest` with random bytes, from aws-lc's generator; once the process is exiting, never

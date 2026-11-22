@@ -139,6 +139,7 @@ impl Why {
 
 /// Whether CLADEFS_SEAL_STATS is set: read once.
 pub(crate) fn enabled() -> bool {
+    // The process's environment, read once: the same for every simulated host.
     static ENABLED: std::sync::LazyLock<bool> =
         std::sync::LazyLock::new(|| std::env::var_os("CLADEFS_SEAL_STATS").is_some());
     *ENABLED

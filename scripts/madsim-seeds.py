@@ -5,6 +5,9 @@
 """The full-stack simulation over its seeds (scripts/test.sh's madsim part, board 2912): the
 simulated crates' tests/madsim.rs, each seed a process of its own (TASK-685.15), the regression
 seeds first (crates/cladefs/tests/madsim-seeds, TASK-685.8), then COUNT fresh ones from FIRST.
+The first fresh seed runs twice, its runs compared (`MADSIM_TEST_CHECK_DETERMINISM`): a seed that
+does not replay is a failure as any other, as a simulation whose seed doesn't decide it finds
+nothing it can show again (board 7583).
 
 Every seed runs, whatever an earlier one found, all its tests (nextest's profile madsim, whose
 JUnit report gives each failure's output). A failure crates/cladefs/tests/madsim-known lists, an
@@ -104,9 +107,11 @@ class Failure:
     test: str
     message: str
     known: Known | None
+    checked: bool = False
 
     def replay(self):
-        return f"MADSIM_TEST_SEED={self.seed} replays it"
+        check = " MADSIM_TEST_CHECK_DETERMINISM=1" if self.checked else ""
+        return f"MADSIM_TEST_SEED={self.seed}{check} replays it"
 
     def __str__(self):
         said = f"seed {self.seed}: {self.binary} {self.test}: {self.message.splitlines()[0]}"
@@ -115,9 +120,9 @@ class Failure:
         return f"{said}: {self.replay()}"
 
 
-def failures(report, seed, listed):
-    """The failures of the JUnit report `report`, of the run at `seed`, each known as `listed`
-    says, or not."""
+def failures(report, seed, listed, checked=False):
+    """The failures of the JUnit report `report`, of the run at `seed`, its determinism checked
+    if `checked`, each known as `listed` says, or not."""
     found = []
     for case in ET.fromstring(report).iter("testcase"):
         failed = case.find("failure")
@@ -134,17 +139,21 @@ def failures(report, seed, listed):
         bug = None
         if panic is not None and binary == BINARY:
             bug = next((entry for entry in listed if entry.matches(test, panic)), None)
-        found.append(Failure(seed, binary, test, message, bug))
+        found.append(Failure(seed, binary, test, message, bug, checked))
     return found
 
 
-def run(seed, args):
-    """The simulation's tests at `seed`, nextest given `args` too: their failures' JUnit report,
-    or None if all passed. Exits as nextest did if it failed but for tests failing."""
+def run(seed, args, checked=False):
+    """The simulation's tests at `seed`, nextest given `args` too, each run twice and its runs
+    compared if `checked`: their failures' JUnit report, or None if all passed. Exits as nextest
+    did if it failed but for tests failing."""
     JUNIT.unlink(missing_ok=True)
     command = ["cargo", "nextest", "run", "--manifest-path", str(ROOT / "Cargo.toml"),
                "--profile", PROFILE, *SIMULATED, *args]
-    status = subprocess.run(command, env={**os.environ, "MADSIM_TEST_SEED": str(seed)}).returncode
+    env = {**os.environ, "MADSIM_TEST_SEED": str(seed)}
+    if checked:
+        env["MADSIM_TEST_CHECK_DETERMINISM"] = "1"
+    status = subprocess.run(command, env=env).returncode
     if status == 0:
         return None
     if status != TESTS_FAILED or not JUNIT.exists():
@@ -181,13 +190,14 @@ def main(argv):
     options, args = parser.parse_known_args(argv)
     listed = known(KNOWN.read_text())
     seeds = regression_seeds(REGRESSIONS.read_text())
+    checked = len(seeds) if options.count > 0 else None
     seeds += range(options.first, options.first + options.count)
     found = []
-    for seed in seeds:
-        report = run(seed, args)
+    for at, seed in enumerate(seeds):
+        report = run(seed, args, at == checked)
         if report is None:
             continue
-        failed = failures(report, seed, listed)
+        failed = failures(report, seed, listed, at == checked)
         if not failed:
             sys.exit(f"madsim: seed {seed}: tests failed, but the JUnit report names none")
         for failure in failed:

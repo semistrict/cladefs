@@ -8,8 +8,8 @@ $FAKE_NEXTEST/runs.json says each seed's run, by its MADSIM_TEST_SEED: a list of
 outcomes, `[BINARY, TEST, FAILURE]` (FAILURE null for a pass), which it writes to
 $FAKE_NEXTEST_JUNIT as nextest 0.9's JUnit report, exiting 100 if any failed; or a status, which it
 exits with, writing nothing, as nextest does when it fails before its tests run. A seed it doesn't
-name passes. Each call's seed and arguments are appended to $FAKE_NEXTEST/calls, a line of JSON
-each.
+name passes. Each call's seed, arguments and whether it checks determinism are appended to
+$FAKE_NEXTEST/calls, a line of JSON each.
 
 Usage: python3 fake_nextest.py nextest run ARG...
 """
@@ -46,7 +46,8 @@ def main(argv):
     state = Path(os.environ["FAKE_NEXTEST"])
     seed = os.environ["MADSIM_TEST_SEED"]
     with open(state / "calls", "a") as calls:
-        print(json.dumps({"seed": seed, "args": argv[2:]}), file=calls)
+        checked = os.environ.get("MADSIM_TEST_CHECK_DETERMINISM") == "1"
+        print(json.dumps({"seed": seed, "args": argv[2:], "checked": checked}), file=calls)
     run = json.loads((state / "runs.json").read_text()).get(seed, [])
     if isinstance(run, int):
         sys.exit(run)

@@ -154,6 +154,7 @@ impl GuestStats {
 }
 
 /// The asks made so far, each a number of its own ([`super::wire::STATS_ASK`]).
+// Numbers the process gives out: unique among simulated hosts too, all it asks.
 static ASKS: AtomicU64 = AtomicU64::new(0);
 
 /// What the daemon and its VM processes counted, as of now: the VM processes asked first, and
@@ -271,6 +272,7 @@ node_local::node_local! {
 }
 
 /// The connections' numbers, given in turn ([`Report::id`]).
+// Numbers the process gives out: unique among simulated hosts too, all it asks.
 static IDS: AtomicU64 = AtomicU64::new(0);
 
 /// How many asks each connection's VM process has yet to answer, in the order they were made.

@@ -290,6 +290,7 @@ impl Opening {
 
 /// cladefs: the `MAP`s of open extents refused (backlog doc-13), which no guest makes: a tripwire,
 /// which the daemon's metrics show.
+// The process's count, every simulated host's together, as a process's metrics are.
 static OPEN_MAPS_REFUSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// cladefs: the `MAP`s of open extents refused so far.

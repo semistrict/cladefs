@@ -159,6 +159,7 @@ fn stats_response(stats: super::stats::HostStats) -> GetStatsResponse {
 }
 
 /// cladefs: the API's calls in flight, which a drain waits for, refusing more (TASK-141.4).
+// Per node: drain::Work keeps a node_local count.
 pub(super) static CALLS: super::drain::Work = super::drain::Work::new();
 
 /// cladefs: the API's service, `S`, its calls counted in [`CALLS`] until they end, and refused

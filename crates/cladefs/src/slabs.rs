@@ -91,6 +91,7 @@ impl VmProcessId {
     /// The ID of a VM process connecting, which no other ever had: one reused would have a run
     /// staged to the VM process gone wait for the next, another tenant's perhaps.
     pub fn connected() -> Self {
+        // Numbers the process gives out: unique among simulated hosts too, all it asks.
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
         CONNECTED.lock().unwrap().insert(id);
@@ -105,6 +106,7 @@ impl VmProcessId {
 
 /// The host's page size (sysconf), which pages are: such as 16 KiB on Apple silicon.
 pub fn page_size() -> u64 {
+    // The process's page size, the hardware's: the same for every simulated host.
     static PAGE_SIZE: OnceLock<u64> = OnceLock::new();
     *PAGE_SIZE.get_or_init(|| {
         // SAFETY: sysconf has no preconditions.

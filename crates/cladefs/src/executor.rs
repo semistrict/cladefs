@@ -160,6 +160,7 @@ impl Drop for Running {
 
 thread_local! {
     /// Whether the thread is polling one of the executor's jobs.
+    // Per thread, set and cleared within one call: no host's state outlives it.
     static ON_EXECUTOR: Cell<bool> = const { Cell::new(false) };
 }
 

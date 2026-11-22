@@ -1731,6 +1731,7 @@ impl Connection {
         // and every power of two after (TASK-99, TASK-101, TASK-119.21).
         let refused = refusal(&fault, faulted);
         if let Some(what) = refused {
+            // The process's count of refusals, which spaces their warnings: every host's together.
             static REFUSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let count = REFUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             if (count <= 1000 || count.is_power_of_two())

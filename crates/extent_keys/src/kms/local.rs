@@ -240,6 +240,7 @@ impl LocalKms {
     /// Makes version `version` of `tenant`'s KEK, failing with an [`io::ErrorKind::AlreadyExists`]
     /// if another made it first.
     fn add_version(&self, tenant: u64, version: u32) -> Result<(), Error> {
+        // Numbers the process gives out: unique among simulated hosts too, all it asks.
         static STAGED: AtomicU64 = AtomicU64::new(0);
         let dir = self.tenant_dir(tenant);
         let staged = dir.join(format!(

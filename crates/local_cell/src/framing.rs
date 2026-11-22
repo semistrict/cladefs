@@ -80,7 +80,9 @@ impl<T> Pool<T> {
     }
 }
 
+// The process's pool of spare buffers: what it holds is no host's.
 static BUFFERS: Pool<Vec<u8>> = Pool::new();
+// The process's pool of spare packers: what it holds is no host's.
 static PACKERS: Pool<PartPacker> = Pool::new();
 
 /// cladefs: total capacity in bytes of pooled framing scratch buffers currently held (board 6026).

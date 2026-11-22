@@ -26,6 +26,7 @@ use std::sync::{LockResult, Once};
 
 thread_local! {
     /// The shared locks this thread holds, by name, as it took them.
+    // Per thread, the shared locks it holds, which a panic names: no host's state outlives the guard.
     static HELD: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -69,6 +70,7 @@ impl Holder {
 }
 
 /// The shared locks awaited, by their holders ([`Awaited`]).
+// The process's awaited locks, which a panic names: diagnostics, every host's together.
 static AWAITED: std::sync::Mutex<Vec<(Holder, &'static str)>> = std::sync::Mutex::new(Vec::new());
 
 /// cladefs: a holding of a shared lock taken by awaiting it, as a cell's commit's and flush's are
@@ -117,6 +119,7 @@ pub fn aborted_holding(said: &str, lock: &str) -> bool {
 /// hook before this one says it: the process's log names the locks, and nothing unwinds past them.
 /// Once a process; the extent daemon asks as it starts.
 pub fn abort_on_panics() {
+    // The process's panic hook, installed once.
     static HOOKED: Once = Once::new();
     HOOKED.call_once(|| {
         let said = std::panic::take_hook();
