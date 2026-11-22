@@ -3040,7 +3040,6 @@ mod tests {
         let sequences: Vec<u64> = state.extents.keys().map(|extent| extent.sequence).collect();
         assert_eq!(sequences, (1..=last).collect::<Vec<_>>());
     }
-
 }
 
 /// cladefs: a cell committing, sealing and forking, its uploader uploading what it commits, and

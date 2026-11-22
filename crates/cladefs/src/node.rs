@@ -235,4 +235,3 @@ pub(crate) fn nanos_from_time(time: SystemTime) -> Result<u64> {
     let since_epoch = time.duration_since(UNIX_EPOCH).map_err(|_| Errno::EINVAL)?;
     u64::try_from(since_epoch.as_nanos()).map_err(|_| Errno::EINVAL)
 }
-

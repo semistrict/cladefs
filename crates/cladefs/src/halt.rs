@@ -272,5 +272,4 @@ pub(crate) mod tests {
         assert!(panicked.is_err());
         assert_eq!(futures::executor::block_on(rw.write(&halt)).err(), Some(Errno::EIO));
     }
-
 }

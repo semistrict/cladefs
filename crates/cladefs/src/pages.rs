@@ -113,4 +113,3 @@ pub fn window_fits_host(block: u64, host_page: u64) -> Result<(), Error> {
         ))),
     }
 }
-

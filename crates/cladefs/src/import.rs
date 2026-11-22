@@ -1170,5 +1170,4 @@ mod tests {
             assert!(!inside.contains(&path.to_vec()), "{path:?}");
         }
     }
-
 }

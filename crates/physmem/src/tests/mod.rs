@@ -10,9 +10,9 @@
 //! Physical memory, relief and quarantine are the process's: nextest runs each test in a process
 //! of its own, which configures them as it needs.
 
-use crate::CHUNK_SIZE;
 #[cfg(all(not(feature = "shuttle"), target_os = "linux"))]
 use crate::ArenaId;
+use crate::CHUNK_SIZE;
 #[cfg(not(feature = "shuttle"))]
 use crate::{Page, page_bytes};
 

@@ -479,5 +479,4 @@ mod tests {
         assert!(buffer.as_slice().iter().all(|&b| b == 7));
         assert_eq!(Arc::strong_count(&file), 1, "the operation let the file go");
     }
-
 }

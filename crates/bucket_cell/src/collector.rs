@@ -2384,8 +2384,8 @@ mod tests {
     use super::*;
     use crate::batch::{Commit, SegmentBuilder};
     use crate::bucket::{ByteRange, Created, Error as BucketError, Object, PutMode, Version};
-    use crate::layout::test_cell;
     use crate::layout::Child;
+    use crate::layout::test_cell;
     use crate::object_bucket::{ObjectBucket, Request};
     use crate::testing::{Direct, SimBucket};
     use crate::writer::Writer;

@@ -2190,21 +2190,6 @@ fn cells_open_in_another_arena_are_busy() {
     served.join().unwrap();
 }
 
-/// The names of this process's threads alive as they are read: one that ends between the listing of
-/// `/proc/self/task` and the read of its name, as an idle blocking thread of the daemon's runtimes
-/// does, is gone, and holds nothing: its name not found, or, as it exits, its process no more
-/// (`ESRCH`), as for the threads a cell's flush syncs its files on (`local_cell`'s `AT_ONCE`).
-fn thread_comms() -> impl Iterator<Item = String> {
-    std::fs::read_dir("/proc/self/task").unwrap().filter_map(|task| {
-        match std::fs::read_to_string(task.unwrap().path().join("comm")) {
-            Ok(comm) => Some(comm.trim().to_owned()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-            Err(err) if err.raw_os_error() == Some(libc::ESRCH) => None,
-            Err(err) => panic!("reading a thread's name: {err}"),
-        }
-    })
-}
-
 /// TASK-79.27: the daemon's metrics server answers a request line longer than it reads with `431`,
 /// holding no more of it than it reads (`HEAD_MAX`): what the client sends after that it reads and
 /// drops, until the client is done, as the connection, closed with bytes unread, would be reset,

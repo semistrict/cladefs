@@ -55,4 +55,3 @@ fn refuse(names: impl Iterator<Item = std::ffi::OsString>) -> Result<(), String>
         renamed.join(", ")
     ))
 }
-

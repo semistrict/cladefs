@@ -11,13 +11,13 @@
 #[cfg(target_os = "linux")]
 use super::{chunk_arena, fill, first_byte};
 use super::{chunk_of, chunk_pages};
-#[cfg(target_os = "linux")]
-use crate::{arenas_bytes, default_fd, page_bytes, set_total_cap};
 use crate::{
     ArenaId, CHUNK_SIZE, NoMemory, Page, Wait, alloc, arena_bytes, arena_fd, count_free_chunks,
     create_arena, has_alloc_failed_no_mem, keep_spare_chunks, page_size, relieve_with,
     set_arena_cap,
 };
+#[cfg(target_os = "linux")]
+use crate::{arenas_bytes, default_fd, page_bytes, set_total_cap};
 use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
