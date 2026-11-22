@@ -262,9 +262,9 @@ _Avoid_: store
 One of an Fxfs filesystem's object stores, mounted with `-o volume=NAME`, as upstream Fxfs says.
 _Avoid_: volume for a cell
 
-**File set**:
-Named files kept straight on an extent device, with no filesystem between, each committed alone: what a SQLite or memory cell holds (`extent_files`).
-_Avoid_: volume
+**Block device**:
+A cell's contents as one array of blocks, read and written at offsets, discarded, resized and flushed, each flush one commit, kept straight on its extent store with no filesystem between: what a SQLite cell (its one database) and a memory cell (a VM's memory) hold (`block_device::BlockDevice`). No names or files: a cell needing those is an Fxfs cell. Not the extent store device, which is none.
+_Avoid_: file set (retired 2026-11-21, board 5790), volume
 
 **Version**:
 A read-only state of a cell in its past, kept inside the cell. Only the cell's writer makes or drops one. Making one is local: one commit in the cell's local log that closes its segment, nothing touching the bucket; uploading it and naming it in the head come later, in the background.
@@ -613,8 +613,8 @@ code does not have yet are said so.
 - **seal**: extents' alone; encryption is **encrypted**, in code too.
 - **remote**: retired, in code too; say **bucket** or **daemon client** (`CLADEFSD_BUCKET`).
 - **store**: retired for a cell on a host, in code too (2026-11-21, board 5622): its directory is the **cell directory** (`cell_dir`), the cell opened from it an **open cell** (`OpenCell`), and else just the **cell**. Left to the **extent store**, the component (`local_cell`, the daemon's storage), and to Fxfs's **object stores**. A CPU's is a **write** (a **store instruction** where a syscall's write could be meant); the object-storage backend's calls are `object_*`, its `ObjectStore` implementations `...Backend`. The cell directory's files (`store`, `store.deleted`), metric names, proto fields and CLI flags keep the word until their own rename.
-- **volume**: Fxfs's alone. Named files on an extent device, with no filesystem, are a
-  **file set** (`extent_files::FileSet`).
+- **volume**: Fxfs's alone. A cell's array of blocks on an extent device, with no filesystem, is
+  its **block device** (`block_device::BlockDevice`).
 - **snapshot**: VMs' (Firecracker's) and Fxfs's alone. A cell's named state is a **version**; the daemon's counters are **stats** (no `GetSnapshot`).
 - **version**: a cell's past state alone; a format's is its **format**, a tool's a **pinned version**.
 - **epoch**: a taking's number alone. A commit's number is a **commit number**, in the device protocol,

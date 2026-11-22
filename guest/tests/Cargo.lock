@@ -987,7 +987,7 @@ dependencies = [
  "bitflags 2.13.2",
  "bucket_cell",
  "event-listener",
- "extent_files",
+ "block_device",
  "extent_frame",
  "extent_keys",
  "fail",
@@ -1379,7 +1379,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "extent_files"
+name = "block_device"
 version = "0.1.0"
 dependencies = [
  "anyhow",

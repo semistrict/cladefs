@@ -45,6 +45,12 @@ struct Daemon {
 /// A daemon serving in `dir`, keeping its cells in the file bucket at `bucket`, its
 /// ephemeral cells' directory in `dir`, serving its peers at `peers`' first address.
 fn daemon(dir: &Path, bucket: &Path, peers: &[String]) -> Daemon {
+    daemon_with(dir, bucket, peers, &[])
+}
+
+/// A daemon as [`daemon`] starts one, its environment `env` besides: failpoints (FAILPOINTS) its
+/// build has, as this crate's tests build it with the `failpoints` feature.
+fn daemon_with(dir: &Path, bucket: &Path, peers: &[String], env: &[(&str, &str)]) -> Daemon {
     let (vms, control, ephemeral) =
         (dir.join("cladefsd.sock"), dir.join("control.sock"), dir.join("ephemeral"));
     // A daemon killed before leaves its sockets, which one started again would bind.
@@ -60,6 +66,7 @@ fn daemon(dir: &Path, bucket: &Path, peers: &[String]) -> Daemon {
         .env("CLADEFSD_EPHEMERAL", &ephemeral)
         .env("CLADEFSD_PEER_ADDRESS", &peers[0])
         .env("CLADEFSD_PEERS", peers.join(","))
+        .envs(env.iter().copied())
         .spawn()
         .unwrap();
     let process = KillOnDrop(process);
@@ -262,15 +269,25 @@ impl Forked {
         &self.peers[1][0]
     }
 
+    /// The source's peer address.
+    fn source_at(&self) -> &str {
+        &self.peers[0][0]
+    }
+
     /// Host `host`'s daemon, killed, as a crash does, and started again.
     fn restart(&mut self, host: usize) {
+        self.restart_with(host, &[]);
+    }
+
+    /// Host `host`'s daemon, killed, as a crash does, and started again with `env` besides.
+    fn restart_with(&mut self, host: usize, env: &[(&str, &str)]) {
         let (dir, bucket) = (self.host(host), self.bucket());
         let killed = match host {
             0 => &mut self.source,
             _ => &mut self.target,
         };
         killed.kill();
-        *killed = daemon(&dir, &bucket, &self.peers[host]);
+        *killed = daemon_with(&dir, &bucket, &self.peers[host], env);
     }
 
     /// How many cells each host's journal notes: the source's, then the target's.
@@ -429,5 +446,96 @@ fn hand_overs_asked_again_send_and_name_every_file() {
     assert_eq!(unanswered.errno(), Some(cladefs::Errno::ENOTCONN));
     std::fs::remove_dir(&blocked).unwrap();
     control.hand_over_cell(&forked.here).unwrap();
+    forked.assert_handed_over(&there, 4);
+}
+
+/// Board 5728: a target crashed between renaming a migration's cell into place and remembering the
+/// migration accepted removes that cell as it starts again, never accepted, and retires its
+/// reference; the source, asked again, is refused and serves the cell again; and the cell migrates
+/// to the same path after, rather than finding it taken.
+#[test]
+fn a_target_crashed_between_its_rename_and_accepting_is_clean_as_it_starts() {
+    let mut forked = forked(4);
+    let there = forked.host(1).join("ephemeral-cell");
+    forked.restart_with(1, &[("FAILPOINTS", "migration::renamed=return")]);
+    forked.source.control.migrate_cell(&forked.here, forked.target_at(), &there).unwrap();
+    let unanswered = forked.source.control.hand_over_cell(&forked.here).unwrap_err();
+    assert_eq!(unanswered.errno(), Some(cladefs::Errno::ENOTCONN));
+    assert!(there.exists(), "renamed into place as the target crashed");
+    forked.restart(1);
+    assert!(!there.exists(), "the cell, never accepted, removed as the target started again");
+    let refused = forked.source.control.hand_over_cell(&forked.here).unwrap_err();
+    assert_eq!(refused.errno(), Some(cladefs::Errno::EAGAIN));
+    forked.assert_served_again(&there, 4);
+    forked.source.control.migrate_cell(&forked.here, forked.target_at(), &there).unwrap();
+    forked.source.control.hand_over_cell(&forked.here).unwrap();
+    forked.assert_handed_over(&there, 4);
+}
+
+/// Board 5730: a source crashed letting go of a cell it handed over, its cell directory gone,
+/// finishes as it starts again: its reference retired, its journal entry gone. The cell migrated
+/// back to the same path, then on again, is served there while its migration runs, and goes only
+/// once handed over.
+#[test]
+fn a_source_crashed_letting_a_cell_go_finishes_as_it_starts() {
+    let mut forked = forked(4);
+    let there = forked.host(1).join("ephemeral-cell");
+    forked.restart_with(0, &[("FAILPOINTS", "migration::let_go=return")]);
+    forked.source.control.migrate_cell(&forked.here, forked.target_at(), &there).unwrap();
+    forked.source.control.hand_over_cell(&forked.here).unwrap_err();
+    assert!(!forked.here.exists(), "its cell directory gone as the source crashed");
+    assert_eq!(forked.noted(), (1, 1), "the source's entry kept, noting the cell handed over");
+    forked.restart(0);
+    forked.assert_handed_over(&there, 4);
+
+    let target = &forked.target.control;
+    target.migrate_cell(&there, forked.source_at(), &forked.here).unwrap();
+    target.hand_over_cell(&there).unwrap();
+    assert_eq!(forked.noted(), (1, 0), "back on the source alone");
+    forked.source.control.migrate_cell(&forked.here, forked.target_at(), &there).unwrap();
+    let client = CellClient::connect(&forked.source.vms, &forked.here, CAPACITY).unwrap();
+    for sequence in 1..=4 {
+        let extent = ExtentId { cell: forked.child.id, sequence };
+        assert!(read(&client, extent) == data(sequence), "extent {sequence} read otherwise");
+    }
+    drop(client);
+    forked.source.control.hand_over_cell(&forked.here).unwrap();
+    forked.assert_handed_over(&there, 4);
+}
+
+/// Board 5734: a target gives up a migration whose source it hears nothing of for
+/// CLADEFSD_MIGRATION_IDLE, its source crashed: what it took, its journal entry and its reference.
+/// The source started again serves the cell.
+#[test]
+fn targets_give_up_migrations_their_sources_abandoned() {
+    let mut forked = forked(4);
+    let there = forked.host(1).join("ephemeral-cell");
+    forked.restart_with(1, &[("CLADEFSD_MIGRATION_IDLE", "2")]);
+    let control = &forked.source.control;
+    let migration = control.migrate_cell(&forked.here, forked.target_at(), &there).unwrap();
+    let staged = staging(&forked.host(1), migration);
+    assert!(staged.exists());
+    forked.source.kill();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while staged.exists() {
+        assert!(Instant::now() < deadline, "the abandoned migration was never given up");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert_eq!(forked.noted(), (1, 0), "nothing of it left in the target's journal");
+    assert_eq!(referring(&forked.bucket()).len(), 1, "the source's reference alone");
+    forked.restart(0);
+    forked.assert_served_again(&there, 4);
+}
+
+/// Board 5734: a migration whose source renews it outlasts CLADEFSD_MIGRATION_IDLE, its guest
+/// writing nothing meanwhile, and is handed over.
+#[test]
+fn migrations_their_sources_renew_outlast_the_idle_bound() {
+    let mut forked = forked(4);
+    let there = forked.host(1).join("ephemeral-cell");
+    forked.restart_with(1, &[("CLADEFSD_MIGRATION_IDLE", "2")]);
+    forked.source.control.migrate_cell(&forked.here, forked.target_at(), &there).unwrap();
+    std::thread::sleep(Duration::from_secs(6));
+    forked.source.control.hand_over_cell(&forked.here).unwrap();
     forked.assert_handed_over(&there, 4);
 }

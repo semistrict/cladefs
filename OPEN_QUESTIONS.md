@@ -93,6 +93,10 @@ Decided without you, designing Wave 2's track 2B:
   deleting tests to you: say so, and they come back with the spec before this change.
   *Undo:* `git revert` of the spec commit.
 
+## A cell's contents are one block device: `extent_files` became `block_device` (board 5790, 2026-11-21)
+
+The user's direction: a SQLite or memory cell holds a block device on its extents, not another filesystem ("if we need a file system, then we should have just used Fxfs"); a Durable Object's facets are cells of their own. Picked **block device** (crate `block_device`, type `BlockDevice`, trait `Window`; CONTEXT.md's term, **file set** retired) over keeping "file" words. Its calls: `read`, `write`, `discard` (was punch), `resize` (was truncate), `flush` (was a file's sync), `runs`, `fetch`. Gone: names, `open_file`/`close_file`/`exists`/`delete`, the file list in the root and the extent listing more of them (TASK-551: the root's largest now fits 4 KiB, asserted at compile time), the window's regions (`Options::window_regions`: the contents map from the window's offset 0). The format changed outright (root magic `CLADEBLK`, version 1); old roots are refused. `sqlite_cladefs::FileSet` became `Database`: the first name SQLite opens it by is its name while it lives, a second (another file, `ATTACH`) is refused with `OneDatabase`, and the name is not kept on the cell. `MemoryCell::punch` became `discard`, and `IMAGE` went. Tests of the multiplexing itself were turned into their one-device analogues, none dropped: TASK-516's failed delete into a failed discard, TASK-530's region given back into a first flush fetched in place, TASK-551's many files into the largest root fitting and a cell opening its one database by any name. Undoing: a later change bringing names back would be a new format.
+
 ## "store" retired for a cell on a host: cell directory and open cell (board 5622, 2026-11-21)
 
 The user asked for "store" to go. Picked **cell directory** (`cell_dir`) for the directory on a host's disk and **open cell** (`OpenCell`, already the type) for the cell opened in the daemon, else just **cell**, over **host copy**, which misleads for an ephemeral cell, whose only copy it is. A CPU's store is a **write**; the object-storage backend's calls `object_*`, its `ObjectStore` implementations `...Backend`. Kept for a later task: the cell directory's file names (`store`, `store.deleted`: renaming them is a format change, and a directory with no description is deleted as never made), metric names, proto and JSON fields, CLI flags, environment variables, the guest scripts' language. Undoing: rename back, CONTEXT.md first.
@@ -116,7 +120,7 @@ choice. *Undo:* `Drained::call` awaiting `self.0.call(request)` itself; the cont
 The first arm64 test host (16 KiB pages, SELinux) failed three ways. A window maps a store's 4 KiB
 blocks, and mmap maps only whole host pages at whole-page offsets in an extent, so on such a host
 a memory cell's window is refused as it is made (`cladefs::pages::window_fits_host`), and
-sqlite_cladefs' daemon file set opens with no window, reading copies. Supporting it instead would
+sqlite_cladefs' daemon database opens with no window, reading copies. Supporting it instead would
 mean blocks (or extents' layout) of the host's page size, a format change; arm64 servers mostly run
 4 KiB pages. cladefs-mount stores no SELinux label: the FUSE differential leaves the host's label
 out. Undoing: blocks of the host's page size for memory and SQLite cells, then drop the refusal; or

@@ -33,8 +33,8 @@ REGRESSIONS = ROOT / "crates" / "cladefs" / "tests" / "madsim-seeds"
 KNOWN = ROOT / "crates" / "cladefs" / "tests" / "madsim-known"
 # The crates the simulation runs, each its tests/madsim.rs; a rule search, `*_needs_*`, runs its
 # own seeds, once, apart (scripts/test.sh).
-SIMULATED = ["-p", "node_local", "-p", "host_fs", "-p", "bucket_cell", "-p", "local_cell",
-             "-p", "cladefs", "--test", "madsim", "-E", "not test(/_needs_/)"]
+SIMULATED = ["-p", "node_local", "-p", "host_fs", "-p", "physmem", "-p", "bucket_cell",
+             "-p", "local_cell", "-p", "cladefs", "--test", "madsim", "-E", "not test(/_needs_/)"]
 # The test binary madsim-known's tests are of.
 BINARY = "cladefs::madsim"
 PROFILE = "madsim"

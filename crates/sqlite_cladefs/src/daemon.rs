@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! A file set on a cell the host's extent daemon serves (TASK-300): its reads, and its window's
+//! A database on a cell the host's extent daemon serves (TASK-300): its reads, and its window's
 //! pages, are the daemon's cache's, the one copy of each extent every cell and VM it serves
 //! shares; its writes and commits are the daemon's requests, as a VM's are.
 //!
@@ -10,20 +10,20 @@
 //! maps its cache's pages there, read-only, and this process's faults there go to it, through
 //! userfaultfd. So a page SQLite reads in place is the cache's page itself. On a host whose pages
 //! are larger than the cell's blocks (an arm64 kernel of 16 KiB pages), no window maps them
-//! (`cladefs::pages::window_fits_host`): the file set has none there, and reads copy from the
+//! (`cladefs::pages::window_fits_host`): the database has none there, and reads copy from the
 //! device, SQLite reading nothing in place (board 5232).
 
-use crate::{FileSet, Options};
+use crate::{Database, Options};
 use anyhow::{Context as _, Error, ensure};
+use block_device::{Contents, Run, Window};
 use cladefs::{CellClient, DaemonDevice, MappingContents, WindowMapping};
-use extent_files::{Contents, FileSetWindow, Run};
 use std::path::Path;
 use std::ptr::NonNull;
 use std::sync::Arc;
 use storage_device::{Device, DeviceHolder};
 
-/// A file set on the cell at `cell_dir` that the daemon listening at `socket` serves, made with
-/// `capacity` bytes if it doesn't exist, its files mapped into a window of `window` bytes of this
+/// The database on the cell at `cell_dir` that the daemon listening at `socket` serves, made with
+/// `capacity` bytes if it doesn't exist, its file mapped into a window of `window` bytes of this
 /// process's address space, which takes memory only as the daemon maps its pages there: where the
 /// host's pages fit the cell's blocks, unmapped elsewhere (see the module docs).
 pub fn open(
@@ -32,7 +32,7 @@ pub fn open(
     capacity: u64,
     window: u64,
     options: Options,
-) -> Result<Arc<FileSet>, Error> {
+) -> Result<Arc<Database>, Error> {
     // A SQLite cell, if the daemon makes it (TASK-364): one the FUSE mounts of its
     // cell leave be, as no filesystem's.
     let opened = cladefs::DaemonConnection::connect(socket)
@@ -44,11 +44,11 @@ pub fn open(
     let device = DeviceHolder::new(DaemonDevice::new(cell.clone())?);
     let block = device.block_size() as u64;
     if let Err(error) = cladefs::pages::window_fits_host(block, cladefs::pages::page_size()) {
-        log::info!("sqlite_cladefs: a file set with no window, reading from the daemon: {error:#}");
-        return FileSet::open(device, options);
+        log::info!("sqlite_cladefs: a database with no window, reading from the daemon: {error:#}");
+        return Database::open(device, options);
     }
     let window = DaemonWindow::new(cell, window)?;
-    FileSet::open_mapped(device, Box::new(window), options)
+    Database::open_mapped(device, Box::new(window), options)
 }
 
 /// A cell's DAX window in this process's memory. See the module docs.
@@ -100,7 +100,7 @@ impl DaemonWindow {
     }
 }
 
-impl FileSetWindow for DaemonWindow {
+impl Window for DaemonWindow {
     fn memory(&self) -> (NonNull<u8>, u64) {
         (self.memory, self.size)
     }

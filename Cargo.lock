@@ -925,6 +925,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "block_device"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "block_device",
+ "futures",
+ "log",
+ "rand 0.10.3",
+ "storage_device",
+ "thiserror",
+]
+
+[[package]]
 name = "block_protocol"
 version = "0.1.0"
 dependencies = [
@@ -1124,10 +1137,10 @@ dependencies = [
  "backtrace",
  "base32_id",
  "bitflags 2.13.2",
+ "block_device",
  "bucket_cell",
  "cladefs",
  "event-listener",
- "extent_files",
  "extent_frame",
  "extent_keys",
  "fail",
@@ -1635,19 +1648,6 @@ checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
 dependencies = [
  "event-listener",
  "pin-project-lite",
-]
-
-[[package]]
-name = "extent_files"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "extent_files",
- "futures",
- "log",
- "rand 0.10.3",
- "storage_device",
- "thiserror",
 ]
 
 [[package]]
@@ -3681,6 +3681,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "loom",
+ "madsim",
  "node_local",
  "shuttle",
  "shuttle-parking_lot",
@@ -4876,9 +4877,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "block_device",
  "bucket_cell",
  "cladefs",
- "extent_files",
  "extent_keys",
  "futures",
  "libc",

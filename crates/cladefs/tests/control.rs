@@ -40,7 +40,7 @@ fn cells_through_the_control_api() {
     assert_eq!(vm.cell(), cell.id);
     write(&vm, &pattern(1), b"base");
     drop(vm);
-    let stat = daemon.stat(&base).unwrap();
+    let stat = daemon.wait_closed(&base);
     assert_eq!(
         stat,
         StatCellResponse {
@@ -100,6 +100,7 @@ fn cells_through_the_control_api() {
     let vm = daemon.open(&taken, CAPACITY);
     assert_eq!(vm.root().unwrap(), b"base");
     drop(vm);
+    daemon.wait_closed(&taken);
 
     daemon.place(&base, 3).unwrap();
     daemon.delete(&taken).unwrap();
@@ -218,9 +219,9 @@ fn open_cells_are_their_vms() {
     // Synced as its VM process goes on.
     daemon.sync(&cell_dir).unwrap();
 
-    // Gone with its VM process, it is the API's.
+    // Gone with its VM process, once the daemon finds it gone, it is the API's.
     drop(vm);
-    assert!(!daemon.stat(&cell_dir).unwrap().open);
+    daemon.wait_closed(&cell_dir);
     daemon.delete(&cell_dir).unwrap();
 }
 

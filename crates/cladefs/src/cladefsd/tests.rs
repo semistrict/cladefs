@@ -2536,7 +2536,7 @@ fn memory_cells_commit_pages_and_holes_and_forks_store_only_their_own() {
     assert_eq!(page, 4096);
     let filled = |byte: u8, pages: u64| vec![byte; (pages * page) as usize];
     memory.write(0, &filled(1, PAGES)).unwrap();
-    memory.punch(100 * page, 20 * page).unwrap();
+    memory.discard(100 * page, 20 * page).unwrap();
     memory.commit().unwrap();
     let parent_extents = memory.extents().unwrap();
     let fork = dir.path().join("fork");
@@ -2557,7 +2557,7 @@ fn memory_cells_commit_pages_and_holes_and_forks_store_only_their_own() {
     child.read(0, &mut image).unwrap();
     assert!(image == expected, "the fork reads its parent's pages");
     child.write(3 * page, &filled(2, 4)).unwrap();
-    child.punch(10 * page, page).unwrap();
+    child.discard(10 * page, page).unwrap();
     child.commit().unwrap();
     expected[(3 * page) as usize..(7 * page) as usize].fill(2);
     expected[(10 * page) as usize..(11 * page) as usize].fill(0);
@@ -2595,7 +2595,7 @@ fn a_memory_cell_opens_again_after_a_commit_freeing_many_extents() {
     }
     let extents = memory.extents().unwrap().len();
     assert!(extents > 64, "{extents} extents, too few to list");
-    memory.punch(0, PAGES * page).unwrap();
+    memory.discard(0, PAGES * page).unwrap();
     memory.commit().unwrap();
     memory.close().unwrap();
 
@@ -2631,7 +2631,7 @@ fn memory_windows_map_what_faults_reach_and_share_their_pages() {
         image.extend(pattern(page as u8, ps as usize));
     }
     memory.write(0, &image).unwrap();
-    memory.punch(200 * ps, 30 * ps).unwrap();
+    memory.discard(200 * ps, 30 * ps).unwrap();
     image[(200 * ps) as usize..(230 * ps) as usize].fill(0);
     memory.commit().unwrap();
     let (one, two) = (dir.path().join("one"), dir.path().join("two"));
@@ -7194,6 +7194,87 @@ fn ephemeral_cells_fork_from_versions_and_retire_their_references() {
     let retired = control(bucket_cell::lifecycle::decommission(&*bucket, ephemeral.incarnation()));
     assert_eq!(retired, 1);
     assert_eq!(references(), vec![]);
+}
+
+/// Boards 5732 and 5734: a target takes a cell's migrations by the cell's epoch, one request at a
+/// time: a prepare asked again answers as before; a newer one supersedes the migration it took,
+/// dropping what that staged; an older one, late, it refuses. A hand-over asked of another
+/// incarnation of the target's is answered neither yes nor no; one naming another take of the
+/// migration than its prepare's answer is refused, what it took dropped, its reference with it.
+/// A migration is renewed while taken, and an accepted one released.
+#[test]
+fn targets_take_a_cells_migrations_by_its_epoch() {
+    use super::migration::target;
+    use super::peers::proto::{FileDigest, MigrateHandOverRequest, MigratePrepareRequest};
+    use tonic::Code;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let ephemeral = crate::ephemeral_host::open(&dir.path().join("ephemeral")).unwrap();
+    let path = dir.path().join("cell");
+    let staged = |migration| crate::ephemeral_host::staging(&path, migration);
+    let (parent, child) = (crate::CellId { tenant: 1, id: 2 }, crate::CellId { tenant: 1, id: 7 });
+    let prepare = |migration, epoch| MigratePrepareRequest {
+        migration,
+        tenant: child.tenant,
+        cell: child.id,
+        parent_tenant: parent.tenant,
+        parent_cell: parent.id,
+        at: 3,
+        bucket: "memory:///cells".into(),
+        to: path.display().to_string(),
+        epoch,
+    };
+    let bucket = super::cells::daemon_bucket().unwrap();
+    let references = || {
+        let listing =
+            bucket_cell::lifecycle::ephemeral_references(&*bucket, ephemeral.incarnation());
+        control(listing).into_iter().map(|(_, child)| child).collect::<Vec<_>>()
+    };
+
+    let (incarnation, token) = control(target::prepare(prepare(0x11, 2))).unwrap();
+    assert_eq!(incarnation, ephemeral.incarnation());
+    assert!(staged(0x11).is_dir());
+    assert_eq!(references(), vec![child]);
+    assert_eq!(control(target::prepare(prepare(0x11, 2))).unwrap(), (incarnation, token));
+    let late = control(target::prepare(prepare(0x13, 1))).unwrap_err();
+    assert_eq!(late.code(), Code::Aborted, "{late}");
+    assert!(staged(0x11).is_dir() && !staged(0x13).exists());
+    let (_, newer) = control(target::prepare(prepare(0x15, 3))).unwrap();
+    assert_ne!(newer, token);
+    assert!(!staged(0x11).exists() && staged(0x15).is_dir());
+    assert_eq!(references(), vec![child], "the reference kept, the newer migration's alike");
+    target::renew(0x15).unwrap();
+    assert_eq!(target::renew(0x11).unwrap_err().code(), Code::NotFound);
+
+    let hand_over = |incarnation, token| MigrateHandOverRequest {
+        migration: 0x15,
+        incarnation,
+        token,
+        files: vec![FileDigest { path: "description".into(), len: 1, crc: None }],
+    };
+    let unknown = control(target::hand_over(hand_over(incarnation ^ 2, newer))).unwrap_err();
+    assert_eq!(unknown.code(), Code::FailedPrecondition, "{unknown}");
+    assert!(staged(0x15).is_dir(), "neither yes nor no: nothing dropped");
+    assert!(!control(target::hand_over(hand_over(incarnation, newer ^ 2))).unwrap());
+    assert!(!staged(0x15).exists(), "refused, what it took dropped");
+    assert_eq!(ephemeral.entries().unwrap(), vec![]);
+    assert_eq!(references(), vec![]);
+    assert!(
+        !control(target::hand_over(hand_over(incarnation, newer))).unwrap(),
+        "refused for good"
+    );
+
+    // Released, an acceptance whose cell's noting failed has it noted taken first.
+    let (_, token) = control(target::prepare(prepare(0x19, 4))).unwrap();
+    ephemeral.accept(0x19, child).unwrap();
+    assert_eq!(ephemeral.entry(child).unwrap().receiving(), Some((0x19, token)));
+    control(target::release(0x19)).unwrap();
+    assert!(!ephemeral.accepted(0x19));
+    assert_eq!(
+        ephemeral.entry(child).unwrap().migrating,
+        None,
+        "noted taken before it was forgotten"
+    );
 }
 
 /// TASK-704: an open ephemeral cell is halted as its host forgets its keys, or its

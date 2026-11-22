@@ -158,6 +158,13 @@ pub fn remove_cell_dir(cell_dir: &Path) -> Result<(), Error> {
     crate::footprint::removing(cell_dir, || remove_cell(cell_dir))
 }
 
+/// cladefs: whether the directory at `path` is a cell's going ([`remove_cell_dir`]): its
+/// description renamed, the rest going, a removal stopped part way among them, which removing it
+/// again finishes (board 5730).
+pub fn deleting_host(path: &Path) -> bool {
+    host_fs::exists(path.join(DELETED))
+}
+
 /// Removes the directory of the cell at `cell_dir`, as [`remove_cell_dir`] says.
 fn remove_cell(cell_dir: &Path) -> Result<(), Error> {
     let name = DELETED;

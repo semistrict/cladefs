@@ -25,6 +25,24 @@ macro_rules! failpoint {
 }
 pub(crate) use failpoint;
 
+/// A crash at a step: the process aborting there, its disk as the step left it, as FAILPOINTS's
+/// `NAME=return` asks of a daemon built with the failpoints feature (board 5728). A panic would
+/// end only the request it is in.
+#[cfg_attr(not(any(target_os = "linux", madsim)), allow(unused_macros))]
+macro_rules! crashpoint {
+    ($name:literal) => {
+        fail::fail_point!($name, |_| $crate::faults::crash($name))
+    };
+}
+#[cfg_attr(not(any(target_os = "linux", madsim)), allow(unused_imports))]
+pub(crate) use crashpoint;
+
+/// Aborts the process at the crashpoint `name` ([`crashpoint`]).
+pub fn crash(name: &str) -> ! {
+    eprintln!("cladefs: crashpoint {name}: aborting");
+    std::process::abort()
+}
+
 /// The steps of a fork of a cell with a writer, in the order it takes them, those that fail: a
 /// version of its last commit made, then, on the uploader's side, its segment's upload and
 /// acknowledgement, which names the version in the head; then the fork of the version, as a
