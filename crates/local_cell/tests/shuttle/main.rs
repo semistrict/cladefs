@@ -287,7 +287,7 @@ fn run_with(Run { steps, follow }: Run) {
                         .unwrap();
                         let own: BTreeMap<_, _> = closed.own_bytes().unwrap().into_iter().collect();
                         bucket.put(bucket_key(&closed), data.to_vec());
-                        bucket.acknowledge(closed.footer.clone());
+                        bucket.acknowledge(closed.footer.clone(), closed.data_len);
                         for (key, bytes) in &own {
                             bucket.put(
                                 key.clone(),
@@ -488,24 +488,25 @@ fn run_with(Run { steps, follow }: Run) {
 /// acknowledged, in order, the cell's history there, which a crash's cell opens as of
 /// (TASK-165.9).
 #[derive(Clone, Default)]
-struct Bucket(Arc<Mutex<BTreeMap<String, Vec<u8>>>>, Arc<Mutex<Vec<Footer>>>);
+struct Bucket(Arc<Mutex<BTreeMap<String, Vec<u8>>>>, Arc<Mutex<Vec<(Footer, u64)>>>);
 
 impl Bucket {
     fn put(&self, key: String, data: Vec<u8>) {
         self.0.lock().unwrap().insert(key, data);
     }
 
-    /// The segment whose footer is `footer` is acknowledged: the cell's from now on.
-    fn acknowledge(&self, footer: Footer) {
-        self.1.lock().unwrap().push(footer);
+    /// The segment whose footer is `footer`, its data `len` bytes long, is acknowledged: the
+    /// cell's from now on.
+    fn acknowledge(&self, footer: Footer, len: u64) {
+        self.1.lock().unwrap().push((footer, len));
     }
 
     /// The cell in `dir`, opened as the bucket holds its cell: its acknowledged footers
     /// replayed, its writer's chain after them.
     fn reopen(&self, dir: MemDir) -> LocalCell<MemDir> {
         let (mut state, mut chain) = (bucket_cell::State::new(CELL), WRITER);
-        for footer in self.1.lock().unwrap().iter() {
-            state.apply(footer);
+        for (footer, len) in self.1.lock().unwrap().iter() {
+            state.apply(footer, *len);
             chain = chain.admit(footer).expect("the footers acknowledged follow each other");
         }
         let head =
