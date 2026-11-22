@@ -1123,7 +1123,9 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         ranges: &[Range<u64>],
         buf: MutableBufferRef<'_>,
     ) -> Result<(), Error> {
-        self.handle.multi_write(transaction, attribute_id, None, ranges, buf).await
+        // cladefs: box `multi_write` in a non-inlined frame so compaction and write paths stay
+        // small on 16 KiB guest kernel stacks (TASK-26.9).
+        crate::boxed(|| self.handle.multi_write(transaction, attribute_id, None, ranges, buf)).await
     }
 
     // `buf` is mutable as an optimization, since the write may require encryption, we can

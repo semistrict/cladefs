@@ -55,6 +55,17 @@ where
     Box::pin(make())
 }
 
+/// cladefs: like [`boxed`], but keeps the concrete future type so callers in a recursive
+/// `async fn` chain (`allocate_in` -> `sync`) do not trip `Send` auto-trait cycles (TASK-26.9).
+#[inline(never)]
+pub(crate) fn boxed_pin<F, Fut>(make: F) -> std::pin::Pin<Box<Fut>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future,
+{
+    Box::pin(make())
+}
+
 /// cladefs: runs `make()` on a fresh task stack (`fuchsia_async::Task::spawn` — a fresh 16 KiB
 /// kernel worker stack in the guest and executor depth 0 on the host), constructing the inner
 /// future inside the spawned task so deep mount, replay, compaction, and super-block chains stay

@@ -463,13 +463,13 @@ impl SuperBlockManager {
         debug_assert!(MIN_SUPER_BLOCK_SIZE == block_size);
 
         *self.root.lock().await = Root::read(&*device).await?;
-        // cladefs: read A and B sequentially on fresh task stacks rather than `futures::join!` so
-        // two `read` futures and two `ObjectStore`s are never live on 16 KiB guest kernel stacks
-        // together (TASK-26.9).
-        let dev_a = device.clone();
-        let a = crate::offload(move || read(dev_a, block_size, SuperBlockInstance::A)).await;
-        let dev_b = device.clone();
-        let b = crate::offload(move || read(dev_b, block_size, SuperBlockInstance::B)).await;
+        // cladefs: box A and B in non-inlined frames so `futures::join!` reads both super-blocks
+        // concurrently in one round trip while keeping `load`'s stack small on 16 KiB guest kernel
+        // stacks (TASK-26.9).
+        let (a, b) = futures::join!(
+            crate::boxed(|| read(device.clone(), block_size, SuperBlockInstance::A)),
+            crate::boxed(|| read(device.clone(), block_size, SuperBlockInstance::B)),
+        );
         let (super_block, current_super_block, root_parent) = match (a, b) {
             // cladefs: the first's error, whose kind it keeps (`FxfsError::InvalidVersion` for a
             // filesystem of another version), with the second's.

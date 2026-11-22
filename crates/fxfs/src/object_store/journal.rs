@@ -927,16 +927,13 @@ impl Journal {
         }
 
         // Now we can open the root store.
-        // cladefs: offload deep replay stages onto fresh task stacks for 16 KiB stacks
-        // (TASK-26.9).
-        let rp = root_parent.clone();
-        let root_store_id = super_block.root_store_object_id;
-        let root_store =
-            crate::offload(
-                move || async move { ObjectStore::open(&rp, root_store_id, None).await },
-            )
-            .await
-            .context("Unable to open root store")?;
+        // cladefs: box deep replay stages in non-inlined frames (already inside top-level
+        // offloaded `replay`) so 16 KiB stacks stay small without extra task yields (TASK-26.9).
+        let root_store = crate::boxed(|| {
+            ObjectStore::open(&root_parent, super_block.root_store_object_id, None)
+        })
+        .await
+        .context("Unable to open root store")?;
 
         ensure!(
             !root_store.is_encrypted(),
@@ -967,10 +964,7 @@ impl Journal {
         }
 
         // Now we can open the allocator.
-        let alloc = allocator.clone();
-        crate::offload(move || async move { alloc.open().await })
-            .await
-            .context("Failed to open allocator")?;
+        crate::boxed(|| allocator.open()).await.context("Failed to open allocator")?;
 
         // Now replay all other mutations.
         for JournaledTransaction { checkpoint, non_root_mutations, end_offset, .. } in transactions
@@ -1068,9 +1062,8 @@ impl Journal {
             inner.output_reset_version = true;
         }
 
-        // cladefs: offload onto a fresh task stack for 16 KiB stacks (TASK-26.9).
-        let objects = self.objects.clone();
-        crate::offload(move || async move { objects.on_replay_complete().await })
+        // cladefs: box in a non-inlined frame (already inside offloaded `replay`) (TASK-26.9).
+        crate::boxed(|| self.objects.on_replay_complete())
             .await
             .context("Failed to complete replay for object manager")?;
 
@@ -1704,7 +1697,9 @@ impl Journal {
             return Ok(self.inner.lock().writer.journal_file_checkpoint().file_offset);
         }
 
-        self.pre_commit(transaction).await?;
+        // cladefs: box `pre_commit` in a non-inlined frame so `Journal::commit` stays small on
+        // 16 KiB guest kernel stacks during normal commits (TASK-26.9).
+        crate::boxed_pin(|| self.pre_commit(transaction)).await?;
         self.write_and_apply_mutations(transaction)
     }
 

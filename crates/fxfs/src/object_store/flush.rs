@@ -155,7 +155,10 @@ impl ObjectStore {
 
         // The BeginFlush mutation must be within a transaction that has no impact on StoreInfo
         // since we want to get an accurate snapshot of StoreInfo.
-        let mut transaction = self.new_transaction(lock_keys![], txn_options).await?;
+        // cladefs: box setup/teardown transaction calls so `flush_unlocked` stays small on
+        // 16 KiB guest kernel stacks (TASK-26.9).
+        let mut transaction =
+            crate::boxed(|| self.new_transaction(lock_keys![], txn_options)).await?;
         transaction.add_with_object(
             self.store_object_id(),
             Mutation::BeginFlush,
@@ -169,7 +172,10 @@ impl ObjectStore {
         // end. Between those two transactions, there are transactions that write to the files.  In
         // the first transaction, objects are created in the graveyard. Upon success, the objects
         // are removed from the graveyard.
-        let mut transaction = self.new_transaction(lock_keys![], txn_options).await?;
+        // cladefs: box setup/teardown transaction calls so `flush_unlocked` stays small on
+        // 16 KiB guest kernel stacks (TASK-26.9).
+        let mut transaction =
+            crate::boxed(|| self.new_transaction(lock_keys![], txn_options)).await?;
 
         // Create and write a new layer, compacting existing layers.
         let parent_store = self.parent_store.as_ref().unwrap();
@@ -194,26 +200,30 @@ impl ObjectStore {
             }
         }?;
 
-        let (new_object_tree_layer, unwrapped_key) = if let Some((raw_id, key, unwrapped_key)) =
-            id_and_key
-        {
-            let object_id = ReservedId::new(parent_store, raw_id);
-            let handle = ObjectStore::create_object_with_key(
-                parent_store,
-                &mut transaction,
-                object_id,
-                handle_options,
-                key,
-                UnwrappedKey::new(unwrapped_key.clone()),
-            )
-            .await?;
-            (handle, Some(unwrapped_key))
-        } else {
-            let handle =
-                ObjectStore::create_object(parent_store, &mut transaction, handle_options, None)
-                    .await?;
-            (handle, None)
-        };
+        let (new_object_tree_layer, unwrapped_key) =
+            if let Some((raw_id, key, unwrapped_key)) = id_and_key {
+                let object_id = ReservedId::new(parent_store, raw_id);
+                // cladefs: box object creation so `flush_unlocked` stays small on 16 KiB stacks
+                // (TASK-26.9).
+                let handle = crate::boxed(|| {
+                    ObjectStore::create_object_with_key(
+                        parent_store,
+                        &mut transaction,
+                        object_id,
+                        handle_options,
+                        key,
+                        UnwrappedKey::new(unwrapped_key.clone()),
+                    )
+                })
+                .await?;
+                (handle, Some(unwrapped_key))
+            } else {
+                let handle = crate::boxed(|| {
+                    ObjectStore::create_object(parent_store, &mut transaction, handle_options, None)
+                })
+                .await?;
+                (handle, None)
+            };
         // cladefs: keeping what it writes, which the new layer caches rather than reads back.
         let kept = KeptContents::default();
         let writer = KeptWriter::new(
@@ -224,7 +234,10 @@ impl ObjectStore {
         let new_object_tree_layer_object_id = new_object_tree_layer.object_id();
         parent_store.add_to_graveyard(&mut transaction, new_object_tree_layer_object_id);
 
-        transaction.commit().await.context("Failed to commit create layer transaction")?;
+        // cladefs: box `commit` so `flush_unlocked` stays small on 16 KiB stacks (TASK-26.9).
+        crate::boxed(|| transaction.commit())
+            .await
+            .context("Failed to commit create layer transaction")?;
 
         // *Do* the actual compaction.
         let full_compaction = match reason {
@@ -276,8 +289,11 @@ impl ObjectStore {
         end_keys.extend(
             old_layer_object_ids.iter().map(|id| LockKey::object(parent_store_object_id, *id)),
         );
+        // cladefs: box `new_transaction` so `flush_unlocked` stays small on 16 KiB stacks
+        // (TASK-26.9).
         let mut end_transaction =
-            parent_store.new_transaction(LockKeys::Vec(end_keys), txn_options).await?;
+            crate::boxed(|| parent_store.new_transaction(LockKeys::Vec(end_keys), txn_options))
+                .await?;
 
         parent_store.remove_from_graveyard(&mut end_transaction, new_object_tree_layer_object_id);
 
@@ -286,7 +302,11 @@ impl ObjectStore {
         // references to it; upstream, a store's layers are its own, and all move to the graveyard.
         let mut released_layer_object_ids = Vec::new();
         for object_id in old_layer_object_ids {
-            if parent_store.adjust_refs(&mut end_transaction, object_id, -1).await? {
+            // cladefs: box `adjust_refs` so `flush_unlocked` stays small on 16 KiB stacks
+            // (TASK-26.9).
+            if crate::boxed(|| parent_store.adjust_refs(&mut end_transaction, object_id, -1))
+                .await?
+            {
                 released_layer_object_ids.push(object_id);
             }
         }
@@ -332,7 +352,9 @@ impl ObjectStore {
             LastObjectIdInfo::Low32Bit => {}
         }
 
-        self.write_store_info(&mut end_transaction, &new_store_info).await?;
+        // cladefs: box `write_store_info` and `commit_with_callback` so `flush_unlocked` stays
+        // small on 16 KiB guest kernel stacks (TASK-26.9).
+        crate::boxed(|| self.write_store_info(&mut end_transaction, &new_store_info)).await?;
 
         let layer_file_sizes = own_layers
             .iter()
@@ -360,8 +382,8 @@ impl ObjectStore {
             );
         }
 
-        end_transaction
-            .commit_with_callback(|_| {
+        crate::boxed(|| {
+            end_transaction.commit_with_callback(|_| {
                 let mut store_info = self.store_info.lock();
                 let info = store_info.as_mut().unwrap();
                 info.layers = new_store_info.layers;
@@ -369,8 +391,9 @@ impl ObjectStore {
                 info.mutations_cipher_offset = new_store_info.mutations_cipher_offset;
                 self.tree.set_layers(new_layers);
             })
-            .await
-            .context("Failed to commit EndFlush transaction")?;
+        })
+        .await
+        .context("Failed to commit EndFlush transaction")?;
 
         // Now close the layers and purge those released.
         for layer in old_layers {
@@ -408,7 +431,10 @@ impl ObjectStore {
             ..Default::default()
         };
 
-        let mut transaction = self.new_transaction(lock_keys![], txn_options).await?;
+        // cladefs: box setup/teardown transaction calls so `flush_unlocked` stays small on
+        // 16 KiB guest kernel stacks (TASK-26.9).
+        let mut transaction =
+            crate::boxed(|| self.new_transaction(lock_keys![], txn_options)).await?;
         transaction.add(self.store_object_id(), Mutation::BeginFlush);
         transaction.commit().await.context("Failed to commit BeginFlush transaction")?;
 
@@ -418,7 +444,10 @@ impl ObjectStore {
         // end. Between those two transactions, there are transactions that write to the files.  In
         // the first transaction, objects are created in the graveyard. Upon success, the objects
         // are removed from the graveyard.
-        let mut transaction = self.new_transaction(lock_keys![], txn_options).await?;
+        // cladefs: box setup/teardown transaction calls so `flush_unlocked` stays small on
+        // 16 KiB guest kernel stacks (TASK-26.9).
+        let mut transaction =
+            crate::boxed(|| self.new_transaction(lock_keys![], txn_options)).await?;
 
         let reservation_update: ReservationUpdate; // Must live longer than end_transaction.
         let handle; // Must live longer than end_transaction.
