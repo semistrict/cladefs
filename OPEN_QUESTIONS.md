@@ -72,6 +72,13 @@ Decided without you, designing Wave 2's track 2B:
   Uploaded-level sync loop gets about one sync a second, where ten slots gave about ten. fsync is
   Ordered and unaffected. A GCS cell wanting fast durable syncs should be replicated (doc-21):
   recommended. *Undo:* keep `head_slots` for GCS buckets alone (board 6020's state).
+- **The open cell keeps density, not `bucket_cell::Writer`** (board 6214, famous-pig). A segment's
+  live bytes are kept in `local_cell::Extents`, beside the extents themselves. The writer's state
+  is the acknowledged one, but whether an extent is live is the guest's view at the relocation
+  commit, and that view includes frees not yet uploaded. Keeping it there also leaves Wave 1's
+  writer and recovery code alone. Only the cell's own segments are counted, and an emptied
+  segment is forgotten. Data lengths come in at acknowledgement now, and from checkpoints and
+  tails later in 6214. *Undo:* keep a per-key map in `Writer`'s `Inner`, updated as `apply` runs.
 
 ## A fork's prefetch reads its prediction into memory, its tenant's arena paying (board 6225, 2026-11-21)
 

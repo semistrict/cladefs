@@ -6,7 +6,7 @@
 
 use crate::dir::{Dir, File, not_found, read_file};
 use crate::durability::{Due, Durability, FileSyncs, Syncs};
-use crate::extents::{Entry, Extents};
+use crate::extents::{Entry, Extents, Sparse};
 use crate::framed::{Aligned, Framed, Located, Packed, Source, read_aligned};
 use crate::framing::{self, Look, Seen};
 use crate::held::{HeldParts, Hold};
@@ -1156,7 +1156,7 @@ impl<D: Dir> Recovering<D> {
         // The cell: the bucket's state, the log's footers applied over it. cladefs: the bucket's
         // map of its extents its layer, shared, not copied, the log's its own over it (TASK-453).
         let mut replay = state.placed(|extents| Local {
-            extents: Extents::over(extents, layer),
+            extents: Extents::over(extents, layer, cell),
             segments: HashMap::new(),
         });
         let mut named_own = BTreeSet::new();
@@ -2711,7 +2711,7 @@ impl<D: Dir> LocalCell<D> {
             Data::Pieces(pieces)
         };
         state.segments.place(extent, &data_now);
-        state.extents.own_mut(&extent).expect("an extent open is its cell's own").data = data_now;
+        state.extents.place(&extent, data_now);
         Ok(entry.len)
     }
 
@@ -3222,7 +3222,8 @@ impl<D: Dir> LocalCell<D> {
                 let key = bucket_cell::layout::segment(self.cell, footer.segment, footer.epoch);
                 let own: Vec<_> = footer.own().collect();
                 let segment = SegmentId { cell: self.cell.id, number: queued.number };
-                leaving.extend(state.acknowledge(segment, (&key, !queued.restamped), &own));
+                let at = (key.as_str(), !queued.restamped);
+                leaving.extend(state.acknowledge(segment, at, &own, queued.data_len()));
             }
             // Those no extent's data is in here any more leave now.
             let reaped = state.segments.reap().into_iter();
@@ -3790,6 +3791,14 @@ impl<D: Dir> LocalCell<D> {
 
     pub fn info(&self) -> Result<Info, Error> {
         Ok(self.state()?.info())
+    }
+
+    /// cladefs: the cell's own segments in the bucket that are sparse, but those `pinned` says a
+    /// kept state reads, most dead bytes first: what its writer relocates out of (doc-27,
+    /// Choosing what to relocate).
+    /// Their live bytes counted the first time it is asked, walking every extent the cell holds.
+    pub fn sparse(&self, pinned: impl Fn(&str) -> bool) -> Result<Vec<Sparse>, Error> {
+        Ok(self.state()?.extents.sparse(pinned))
     }
 
     pub fn usage(&self) -> Result<Usage, Error> {

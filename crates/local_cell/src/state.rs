@@ -303,15 +303,19 @@ impl<F: File> State<F> {
     /// bucket, if into the cache: the extents' own files, those no extent holds nor keeps any more
     /// too, which the segment kept for the bucket (TASK-165.9); the segment's leaves once no
     /// extent's data is in it here, which writes since the last commit may be
-    /// ([`Reaped`](crate::segments::Reaped)).
+    /// ([`Reaped`](crate::segments::Reaped)). cladefs: its data `len` bytes long, which its
+    /// density is measured against (doc-27).
     pub fn acknowledge(
         &mut self,
         segment: SegmentId,
         (key, cached): (&str, bool),
         own: &[(ExtentId, Location)],
+        len: u64,
     ) -> Vec<(String, Option<String>)> {
         let sealed = self.segments.acknowledge(segment, cached.then_some(key));
-        self.into_bucket(segment, (key, cached), sealed, own, |_| true)
+        let leaving = self.into_bucket(segment, (key, cached), sealed, own, |_| true);
+        self.extents.sized(key, len);
+        leaving
     }
 
     /// cladefs: `sealed`, extents sealed in segment `segment`, one run each, those kept in it that
@@ -331,22 +335,22 @@ impl<F: File> State<F> {
         };
         let cached_key = |key: &str| cached.then(|| key.to_owned());
         for extent in sealed {
-            let entry =
-                self.extents.own_mut(&extent).expect("an extent sealed in a segment is held");
+            let entry = self.extents.get(&extent).and_then(Entry::own);
+            let entry = entry.expect("an extent sealed in a segment is held");
             let Data::Pieces(pieces) = &entry.data else {
                 unreachable!("{extent:?}, sealed, is not")
             };
             let [piece] = pieces[..] else { unreachable!("{extent:?}, sealed, is not in one run") };
-            let held = std::mem::replace(&mut entry.data, in_bucket(entry.len, &piece));
+            let placed = in_bucket(entry.len, &piece);
+            let held = self.extents.place(&extent, placed);
             self.segments.displace(extent, &held);
             self.segments.let_go(&piece);
         }
         let mut leaving = Vec::new();
         for (extent, location) in own {
-            if let Some(entry) = self.extents.own_mut(extent)
-                && entry.data == Data::Own
-            {
-                entry.data = Data::Bucket(location.clone());
+            let entry = self.extents.get(extent).and_then(Entry::own);
+            if entry.is_some_and(|entry| entry.data == Data::Own) {
+                self.extents.place(extent, Data::Bucket(location.clone()));
                 self.own_files.forget(*extent);
                 leaving.push((extent_path(*extent), cached_key(&location.key)));
             } else if self.kept.get(extent).is_none_or(|kept| kept.entry.data != Data::Own) {
@@ -665,6 +669,7 @@ impl<F: File> State<F> {
     pub fn audit(&self) {
         let cell = self.segments.open_segment().cell;
         self.space.audit(cell, self.extents.lens(), self.gate.is_writing());
+        self.extents.audit();
         self.uncommitted.audit(&self.extents);
         self.kept.audit();
         let own =
