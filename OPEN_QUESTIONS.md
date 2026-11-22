@@ -1,32 +1,6 @@
 # Open questions
 
-## Is herdtools7 (CeCILL-B) acceptable? (TASK-444.2, 2026-11-15)
-
-Needed: your call on herdtools7's licence, CeCILL-B (BSD-like, French law; GitHub reports
-NOASSERTION; not on OSI's list as far as I could find). Why: herd7 runs the Linux kernel memory
-model's litmus tests (tools/memory-model), the natural disposer for an audit of dax.c's barriers.
-Recommend: allow it as a dev-only checker (nothing linked or shipped). Until answered: TASK-444.2
-audits the host crates' Rust atomics with loom only; dax.c's barriers wait.
-
-## Which model resumes TASK-444.1 and .3? (2026-11-15)
-
-Needed: a model for three delegates that stopped when Claude Opus hit its rate limit (resets in
-about 75 h from 10:30 on 2026-11-15). Their work is uncommitted or unmerged in their worktrees:
-TASK-444.1 journal (`~/.t3/worktrees/fxdax/t3-863ac33f-…`, 6 commits and edits), TASK-444.1
-dax-cow (`t3-e87d4577-…`, 8 commits), and TASK-444.3 (`t3-29dc269c-…`, three dax.c fixes
-reproduced in guest/sim, not yet run on the test host). Why: T3 doesn't switch a delegate's provider
-unasked. Available: Claude Sonnet 5.5, a second Claude instance (claudeAgent_claude_echophase),
-and Codex. Recommend: the second Claude instance on Opus, else wait for the reset. Until answered:
-the worktrees stay as they are, nothing in them is lost, and TASK-444.4–.11 wait too.
-
-## Delete the dead crates `name` and `test_util`? (board 5762, 2026-11-21)
-
-Needed: your OK to delete two workspace members nothing depends on, with their tests:
-`crates/name` (the vfs library's names, 22 tests) and `crates/test_util` (18 tests), both copied
-from Fuchsia for code since removed (last touched by 7f8d6b69e). Why: your instructions reserve
-deleting tests to you; they build and run in every workspace run for nothing. Recommend: delete
-both. Until answered: they stay; their `[workspace.dependencies]` entries, which nothing took and
-Cargo warned of, are gone, as is `crates/fidl-fuchsia-fs`, dead with no tests.
+Open questions live in hotbed (`hotbed question ls -p cladefs` / `hotbed question add`). This file records `# Decisions` made without waiting on the user.
 
 # Decisions
 
