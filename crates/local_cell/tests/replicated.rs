@@ -124,8 +124,13 @@ impl Host {
 
 /// Loses `host`, and what of it `leaked` is: its runtime stopped, nothing of its uploads going on,
 /// and the rest left as a host's crash leaves it, never dropped (a drop would upload, or close).
-fn lose(host: Host, leaked: impl Sized) {
-    std::mem::forget(leaked);
+/// Its replicator stops sending, as it would with the host's process: its members' tasks run on
+/// the process's bucket runtime, not the host's, and left to run they went on catching up members
+/// that came back after the host was lost (board 7451: c, back, given the commits a retake's own
+/// log was to name alone).
+fn lose(host: Host, leaked: impl Sized, replicator: Arc<Replicator>) {
+    replicator.stop();
+    std::mem::forget((leaked, replicator));
     host.runtime.stop();
 }
 
@@ -204,7 +209,7 @@ async fn what_a_member_holds_recovers_on_another_host() {
     assert!(local_cell::Dir::list(&check_dir, "replica-spool").is_err(), "no replica-spool");
 
     // The host is lost: what the member holds, and the bucket, are all there is.
-    lose(lost, (uploader, open_cell, replicator));
+    lose(lost, (uploader, open_cell), replicator);
     let bucket = bucket_cell::recover(&*host.bucket, cell, None).await.unwrap();
     let uploaded = bucket.state.last_commit.map_or(0, extent_frame::segment::epoch_of);
     assert!(uploaded < last, "the bucket holds commit {uploaded}, of {last}: nothing to recover");
@@ -480,7 +485,7 @@ async fn takes_recover_what_a_lost_writers_members_hold() {
     let expected = lost.contents(&open_cell).await;
 
     // Host a is lost, its disk and replica directory with it; d takes the cell from b and c.
-    lose(lost, (uploader, open_cell, replicator));
+    lose(lost, (uploader, open_cell), replicator);
     // The bucket holds not all of them: the take must recover the rest from the members.
     let bucket = bucket_cell::recover(&*host.bucket, cell, None).await.unwrap();
     let uploaded = bucket.state.last_commit.map_or(0, extent_frame::segment::epoch_of);
@@ -738,7 +743,7 @@ async fn lost_members_are_replaced_and_commits_stay_replicated() {
     assert!(uploader.last_uploaded() < last, "told replicated by the bucket, not d");
     let expected = writer.contents(&cell).await;
     let replicator = cell.replicator().unwrap();
-    lose(writer, (uploader, cell, replicator));
+    lose(writer, (uploader, cell), replicator);
 
     // a lost, and c back: e takes the cell, fencing c and d, and recovers every commit.
     lost.lock().unwrap().extend(["a".to_string()]);
@@ -846,7 +851,7 @@ async fn takes_asking_for_f_zero_drop_once_the_bucket_holds_what_was_told() {
     uploader.replicated(last).await.unwrap();
     let expected = writer.contents(&cell).await;
     let replicator = cell.replicator().unwrap();
-    lose(writer, (uploader, cell, replicator));
+    lose(writer, (uploader, cell), replicator);
     lost.lock().unwrap().insert("a".into());
 
     let elsewhere = MemDir::new();
@@ -899,12 +904,15 @@ async fn retakes_on_the_writers_disk_install_what_its_own_log_holds() {
     let expected = writer.contents(&open_cell).await;
     let replicator = open_cell.replicator().unwrap();
     // a's daemon restarts before it replaces c, its disk kept.
-    lose(writer, (uploader, open_cell, replicator));
+    lose(writer, (uploader, open_cell), replicator);
     assert_eq!(configuration_named(&host).await.number, 1, "c replaced before the restart");
 
     // b out of reach now, c back: a takes the cell again on its own disk, fencing c alone.
     lost.lock().unwrap().remove("c");
     lost.lock().unwrap().insert("b".into());
+    // c back a while before a's daemon is up again, as it would be: long enough for anything of
+    // the lost writer's still sending to catch it up, which a lost host sends none of (board 7451).
+    tokio::time::sleep(Duration::from_millis(500)).await;
     let again = Host { runtime: host_runtime::HostRuntime::new(), bucket: host.bucket.clone() };
     let recovering = LocalCell::recover(dir.crash(1)).unwrap();
     let (retaken, uploader) = again.open_replicated(recovering, 2, None, peers("a")).await.unwrap();
@@ -920,7 +928,7 @@ async fn retakes_on_the_writers_disk_install_what_its_own_log_holds() {
 
     // a lost, its disk with it: e takes the cell from c, d and the bucket.
     let replicator = retaken.replicator().unwrap();
-    lose(again, (uploader, retaken, replicator));
+    lose(again, (uploader, retaken), replicator);
     lost.lock().unwrap().insert("a".into());
     let elsewhere = MemDir::new();
     LocalCell::make(&elsewhere, DESCRIPTION, Some(URL), None).unwrap();
@@ -962,7 +970,7 @@ async fn takes_of_cells_whose_members_are_lost_go_on_by_force() {
     uploader.replicated(last).await.unwrap();
     assert!(uploader.last_uploaded() < last, "told replicated by b and c, not the bucket");
     let replicator = open_cell.replicator().unwrap();
-    lose(writer, (uploader, open_cell, replicator));
+    lose(writer, (uploader, open_cell), replicator);
     let bucket = bucket_cell::recover(&*host.bucket, cell(), None).await.unwrap();
     let uploaded = bucket.state.last_commit.map_or(0, extent_frame::segment::epoch_of);
 
@@ -1018,7 +1026,7 @@ async fn retakes_on_the_writers_disk_count_its_empty_log() {
     let expected = writer.contents(&cell).await;
     // a's daemon restarts, every commit uploaded, its disk kept; b's disk lost meanwhile.
     let replicator = cell.replicator().unwrap();
-    lose(writer, (uploader, cell, replicator));
+    lose(writer, (uploader, cell), replicator);
     lost.lock().unwrap().insert("b".into());
     let recovering = LocalCell::recover(dir.crash(1)).unwrap();
     assert!(!recovering.has_wal(), "its log holds what the bucket does not");
@@ -1063,7 +1071,7 @@ async fn dropped_logs_are_no_writers_copy() {
     uploader.replicated(last).await.unwrap();
     let configuration = configuration_named(&host).await;
     let replicator = cell.replicator().unwrap();
-    lose(writer, (uploader, cell, replicator));
+    lose(writer, (uploader, cell), replicator);
     let restarted = dir.crash(1);
     let mut recovering = LocalCell::recover(restarted.clone()).unwrap();
     assert!(recovering.has_wal(), "its log holds commits the bucket does not");
@@ -1172,7 +1180,7 @@ async fn earlier_writers_logs_given_up(budget: u64) -> bool {
     }
     let sent = flushed.is_err() && ends(&all["b"], &first) > before;
     let replicator = open_cell.replicator().unwrap();
-    lose(writer, (uploader, open_cell, replicator));
+    lose(writer, (uploader, open_cell), replicator);
     if !sent {
         return false;
     }
@@ -1196,7 +1204,7 @@ async fn earlier_writers_logs_given_up(budget: u64) -> bool {
     let own = commit(&retaken, 10, 1).await;
     assert_eq!(own, unsynced - 1, "its own commit at the place of the first of them");
     let replicator = retaken.replicator().unwrap();
-    lose(again, (uploader, retaken, replicator));
+    lose(again, (uploader, retaken), replicator);
 
     // A retake on a again, b back, c out of reach: it fences b alone.
     writes_fail(&faults, false);
@@ -1216,7 +1224,7 @@ async fn earlier_writers_logs_given_up(budget: u64) -> bool {
     assert!(uploader.last_uploaded() < last, "told replicated by its members, not the bucket");
     let expected = third.contents(&taken).await;
     let replicator = taken.replicator().unwrap();
-    lose(third, (uploader, taken, replicator));
+    lose(third, (uploader, taken), replicator);
 
     // a lost: d takes the cell from that configuration's members and the bucket.
     writes_fail(&faults, false);
@@ -1384,7 +1392,7 @@ async fn take_past(how: Misreport) {
     assert!(uploader.last_uploaded() < last, "told replicated by b, not the bucket");
     let expected = writer.contents(&cell).await;
     let replicator = cell.replicator().unwrap();
-    lose(writer, (uploader, cell, replicator));
+    lose(writer, (uploader, cell), replicator);
 
     // a lost, c back, misreporting its logs: d takes the cell.
     lost.lock().unwrap().remove("c");
@@ -1528,7 +1536,7 @@ async fn written_then_lost(
     assert!(uploader.last_uploaded() < last, "told replicated by members, not the bucket");
     let expected = writer.contents(&cell).await;
     let replicator = cell.replicator().unwrap();
-    lose(writer, (uploader, cell, replicator));
+    lose(writer, (uploader, cell), replicator);
     let mut lost = lost.lock().unwrap();
     lost.remove("c");
     lost.insert("a".into());
