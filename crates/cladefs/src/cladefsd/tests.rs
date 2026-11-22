@@ -2095,8 +2095,11 @@ fn transfer_areas_are_their_vm_processes_memory() {
     let at = unsafe { addr.cast::<u8>().add(swapped) };
     let span = BLOCK.max(crate::pages::page_size() as usize);
     let mut resident = vec![1u8; span / crate::pages::page_size() as usize];
-    // Reclaim may leave a page in the swap cache a moment, still resident.
-    for _ in 0..100 {
+    // Paged out to a swap file, a page stays in the swap cache, in memory, until it is written
+    // there, and unmapped then, so no second MADV_PAGEOUT reaches it: read, it is mapped again,
+    // and once written to swap, clean, the next takes it out at once (board 6881: CI's runners
+    // swap to a file; ubu1's to zram, at once).
+    for _ in 0..500 {
         // SAFETY: Of the mapping, page-aligned, a page or more of it.
         assert_eq!(unsafe { libc::madvise(at.cast(), span, libc::MADV_PAGEOUT) }, 0);
         // SAFETY: As above, a byte a page.
@@ -2105,6 +2108,10 @@ fn transfer_areas_are_their_vm_processes_memory() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
+        for page in (0..span).step_by(crate::pages::page_size() as usize) {
+            // SAFETY: Within the mapping.
+            unsafe { at.add(page).read_volatile() };
+        }
     }
     assert!(resident.iter().all(|page| page & 1 == 0), "not paged out: the host has no swap");
     let swapped_in = call(&sender, &mut receiver, read_at(6, swapped as u64), &[]);
