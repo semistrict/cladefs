@@ -38,6 +38,14 @@ FIELD = re.compile(r"(\w+)=(\S+)")
 COLUMNS = ("step", "vms", "added", "room_mib", "per_vm_mib", "ready_s", "boot_p99_ms",
            "tick_p99_ms", "echo_p99_ms", "cat_p99_ms", "fsync_p99_ms", "past")
 
+# Where a VM's memory goes, as a step says it, each the mean of its VMs, in MiB (board 5649): the
+# guest's (its RAM its kernel never had, not available, slab, stacks, page tables, page cache, its
+# window's struct pages), its VM process's (share, anonymous, shared, page tables), KVM's page
+# tables for it, and the daemon's anonymous memory and extents' pages over the VMs.
+BREAKDOWN = ("guest_reserved_mib", "guest_used_mib", "guest_slab_mib", "guest_stack_mib",
+             "guest_pt_mib", "guest_cached_mib", "guest_memmap_mib", "vmm_pss_mib", "vmm_anon_mib",
+             "vmm_shmem_mib", "vmm_pt_mib", "kvm_pt_mib", "daemon_anon_mib", "daemon_cache_mib")
+
 
 def number(text):
     """`text` as an int, or a float, or as it is."""
@@ -74,7 +82,7 @@ def summary(steps, end):
     held = [step for step in steps if step.get("vms") == end["held"] and "past" not in step]
     if held:
         last = held[-1]
-        found.update({name: last[name] for name in COLUMNS[3:-1] if name in last})
+        found.update({name: last[name] for name in COLUMNS[3:-1] + BREAKDOWN if name in last})
     return found
 
 
@@ -94,6 +102,12 @@ def markdown(cases):
         out += ["", f"## {case}", "", "| " + " | ".join(COLUMNS) + " |", "|" + " --- |" * len(COLUMNS)]
         for step in steps:
             out.append("| " + " | ".join(str(step.get(name, "")) for name in COLUMNS) + " |")
+        if any(name in step for step in steps for name in BREAKDOWN):
+            columns = ("step", "vms") + BREAKDOWN
+            out += ["", f"### {case}: MiB per VM", "", "| " + " | ".join(columns) + " |",
+                    "|" + " --- |" * len(columns)]
+            for step in steps:
+                out.append("| " + " | ".join(str(step.get(name, "")) for name in columns) + " |")
     return "\n".join(out) + "\n"
 
 

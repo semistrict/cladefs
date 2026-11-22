@@ -23,7 +23,8 @@
 //! - `cladefsd_*`: some of the daemon's metrics (cladefs::cladefsd::metrics): the bytes its arenas
 //!   hold, every tenant's extents' pages (`cladefsd_memory_bytes`), the pages the windows map, its
 //!   faults, and any gauge of private pages it keeps (copy-on-write DAX's, TASK-164.1);
-//! - `guest_*`: what the guest said of itself: its memory (/proc/meminfo), faults (/proc/vmstat),
+//! - `guest_*`: what the guest said of itself: its memory (/proc/meminfo; cladefs: its kernel's
+//!   slab, stacks and page tables too, board 5649), faults (/proc/vmstat),
 //!   and its Fxfs's counts of copy-on-write DAX's private pages (`guest_fxfs_*`); cladefs: how long
 //!   its kernel took from its start to running init (`guest_boot_ns`, the kernel log's record of
 //!   it); the struct pages its kernel made after it booted, its DAX windows' (`guest_memmap`,
@@ -164,10 +165,18 @@ mod host {
     }
 
     /// What /proc/PID/smaps_rollup says of process `pid`'s memory, in bytes, by name.
-    fn rollup(pid: u32) -> anyhow::Result<BTreeMap<String, u64>> {
+    pub fn rollup(pid: u32) -> anyhow::Result<BTreeMap<String, u64>> {
         let path = format!("/proc/{pid}/smaps_rollup");
         let text = std::fs::read_to_string(&path).with_context(|| format!("reading {path}"))?;
         // Its lines but the first, the mappings' range, which has no size, are as meminfo's.
+        Ok(meminfo(&text))
+    }
+
+    /// cladefs: what /proc/PID/status says of process `pid`, its sizes in bytes, by name: its page
+    /// tables' (`VmPTE`) among them (board 5649).
+    pub fn status(pid: u32) -> anyhow::Result<BTreeMap<String, u64>> {
+        let path = format!("/proc/{pid}/status");
+        let text = std::fs::read_to_string(&path).with_context(|| format!("reading {path}"))?;
         Ok(meminfo(&text))
     }
 
@@ -329,7 +338,7 @@ mod guest {
 
     /// This guest's memory, and the page faults it took so far, as `guest_NAME=VALUE` separated by
     /// spaces.
-    fn itself() -> String {
+    pub fn itself() -> String {
         let memory = meminfo(&fs::read_to_string("/proc/meminfo").unwrap());
         let vmstat = fs::read_to_string("/proc/vmstat").unwrap();
         let count = |name: &str| {
@@ -343,6 +352,10 @@ mod guest {
             ("cached", "Cached"),
             ("anon", "AnonPages"),
             ("shmem", "Shmem"),
+            // cladefs: the kernel's own, for cells-per-host's breakdown of a VM (board 5649).
+            ("slab", "Slab"),
+            ("kernel_stack", "KernelStack"),
+            ("page_tables", "PageTables"),
         ]
         .iter()
         .map(|(name, field)| {

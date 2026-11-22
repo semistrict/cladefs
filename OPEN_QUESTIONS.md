@@ -30,6 +30,31 @@ Cargo warned of, are gone, as is `crates/fidl-fuchsia-fs`, dead with no tests.
 
 # Decisions
 
+## Density, a VM's memory: the first cuts and how they are measured (board 5649, 2026-11-21)
+
+Decided without you:
+- **A step's line breaks a VM's memory down**, each the mean over the VMs running, in MiB: the
+  guest's (RAM its kernel never had, not available, slab, stacks, page tables, page cache, its
+  window's struct pages, as it says each window), its VM process's (Pss, anonymous, shared, page
+  tables), KVM's page tables for it, and the daemon's anonymous memory and extents' pages over the
+  VMs. *Undo:* `breakdown` in test_cells_per_host.rs.
+- **The balloon is in every VM `Vm` configures**, of nothing, free page reporting on, at the
+  kernel's reporting order (2 MiB blocks); CLADEFS_GUEST_BALLOON=0 leaves it out for the baseline,
+  and CLADEFS_GUEST_CMDLINE's `page_reporting.page_reporting_order=` tries a smaller order.
+- **Fxfs's 16 MiB transfer heap stays 16 MiB, zeroed as buffers first reach it** rather than all at
+  mount. *Instead:* a heap sized by RAM, which the task suggested: an allocation past the heap
+  panics the guest, and nothing bounds Fxfs's largest. *Undo:* `BufferSource::touch`.
+- **A DAX window's struct pages are made 2 MiB at a time** (a memory subsection), not 128 MiB (a
+  section): at least 64 KiB, not 4 MiB, but a grace period for each 2 MiB first reached.
+  `virtio_extent.window_part_shift=27` is the old way, for the A/B. *Undo:* `vext_part_shift`.
+- **The guest kernel leaves out** NFS and its RPC, SquashFS, IPv6 segment routing, multicast
+  routing, DAMON, USB, the BPF preload helper and kmem DAX: nothing a test or sandbox uses. Kept:
+  XFS (xfstests), netfilter (Docker), SELinux and audit, which a sandbox may want. *Undo:*
+  cladefs.config's last section.
+- **Not in this batch:** 16 KiB kernel stacks, which wait for Fxfs's mount to fit them (TASK-26.9:
+  a replay takes 34 KiB); and every item past the guest's (private pages, the VM process's
+  bookkeeping, the daemon's per-VM work), each its own task once the breakdown says it matters.
+
 ## A full host: the daemon's floor, cells refused, page-ins waiting (board 5662, 2026-11-21)
 
 You chose floor + refuse + wait. Decided without you:

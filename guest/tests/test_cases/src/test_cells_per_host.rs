@@ -42,7 +42,20 @@
 //!
 //! It says each step on its standard error (`cells-per-host: step=...`, with a `memory:` line of
 //! `crate::measure`'s), and how it ended (`cells-per-host: held=N limit=LIMIT`); and records what
-//! it measured in the bench's shape (`common::Measured`, CLADEFS_BENCH_RESULTS).
+//! it measured in the bench's shape (`common::Measured`, CLADEFS_BENCH_RESULTS). A step's line
+//! says where a VM's memory goes, each the mean of the VMs running, in MiB (board 5649):
+//!
+//! - of its guest, as it last said (`crate::measure::itself`, each window): the RAM its kernel
+//!   never had (`guest_reserved_mib`, its image and boot's reservations), what is not available
+//!   (`guest_used_mib`), and of that its kernel's slab, stacks and page tables, its page cache,
+//!   and the struct pages its DAX window took (`guest_memmap_mib`);
+//! - of its VM process (/proc/PID/smaps_rollup and status): its share of its memory (`vmm_pss_mib`),
+//!   of that its anonymous memory, the guest's RAM touched (`vmm_anon_mib`), and its shared
+//!   memory, the daemon's pages its window maps (`vmm_shmem_mib`); and its page tables
+//!   (`vmm_pt_mib`, VmPTE);
+//! - KVM's page tables for it, the host's grown since the first VM (`kvm_pt_mib`, SecPageTables);
+//! - the daemon's, its anonymous memory, its bookkeeping (`daemon_anon_mib`), and its extents'
+//!   pages (`daemon_cache_mib`, `cladefsd_memory_bytes`), each over the VMs.
 
 use macros::{guest, host};
 
@@ -91,6 +104,18 @@ fn probe_of(line: &str) -> Option<[u64; PROBES.len()]> {
         *us = field.strip_prefix(name)?.strip_prefix('=')?.parse().ok()?;
     }
     Some(micros)
+}
+
+/// What a guest's `memory` line says of it (`crate::measure::itself`), each `guest_NAME=VALUE` by
+/// NAME: none if it isn't one.
+#[cfg_attr(feature = "guest", allow(dead_code))]
+fn memory_of(line: &str) -> Option<std::collections::BTreeMap<String, u64>> {
+    (line.strip_prefix("memory ")?.split(' '))
+        .map(|field| {
+            let (name, value) = field.split_once('=')?;
+            Some((name.strip_prefix("guest_")?.to_owned(), value.parse().ok()?))
+        })
+        .collect()
 }
 
 #[host]
@@ -302,6 +327,73 @@ mod host {
         (past, judged)
     }
 
+    /// A VM process's memory, in bytes ([`Host::breakdown`]).
+    struct Vmm {
+        pss: u64,
+        anon: u64,
+        shmem: u64,
+        page_tables: u64,
+    }
+
+    /// Where each VM's memory goes, as a step's line says it (the module's docs): the mean of
+    /// `vmms`, of `guests`, each a guest's memory as it said it, of VMs of `ram` bytes, and over
+    /// `vmms`' count, KVM's page tables `kvm_tables` and the daemon's `daemon_anon` and
+    /// `daemon_cache`.
+    fn breakdown(
+        ram: u64,
+        guests: &[&BTreeMap<String, u64>],
+        vmms: &[Vmm],
+        kvm_tables: u64,
+        daemon_anon: u64,
+        daemon_cache: u64,
+    ) -> anyhow::Result<String> {
+        let mean = |sum: u64, count: usize| sum as f64 / count.max(1) as f64 / MIB as f64;
+        let mut line = String::new();
+        let said = |guest: &BTreeMap<String, u64>, name: &str| {
+            guest.get(name).copied().with_context(|| format!("a guest said no {name}"))
+        };
+        let mut sums = [0; 7];
+        for guest in guests {
+            let total = said(guest, "total")?;
+            let parts = [
+                ram.saturating_sub(total),
+                total.saturating_sub(said(guest, "available")?),
+                said(guest, "slab")?,
+                said(guest, "kernel_stack")?,
+                said(guest, "page_tables")?,
+                said(guest, "cached")?,
+                said(guest, "memmap")?,
+            ];
+            for (sum, part) in sums.iter_mut().zip(parts) {
+                *sum += part;
+            }
+        }
+        let names = ["reserved", "used", "slab", "stack", "pt", "cached", "memmap"];
+        for (name, sum) in names.iter().zip(sums) {
+            line.push_str(&format!(" guest_{name}_mib={:.1}", mean(sum, guests.len())));
+        }
+        let of = |part: fn(&Vmm) -> u64| vmms.iter().map(part).sum::<u64>();
+        for (name, sum) in [
+            ("vmm_pss", of(|vmm| vmm.pss)),
+            ("vmm_anon", of(|vmm| vmm.anon)),
+            ("vmm_shmem", of(|vmm| vmm.shmem)),
+            ("vmm_pt", of(|vmm| vmm.page_tables)),
+            ("kvm_pt", kvm_tables),
+            ("daemon_anon", daemon_anon),
+            ("daemon_cache", daemon_cache),
+        ] {
+            line.push_str(&format!(" {name}_mib={:.1}", mean(sum, vmms.len())));
+        }
+        Ok(line)
+    }
+
+    /// The host's KVM page tables for its guests (/proc/meminfo's SecPageTables), none on a
+    /// kernel that doesn't say them.
+    fn kvm_tables() -> anyhow::Result<u64> {
+        let host = crate::measure::meminfo(&std::fs::read_to_string("/proc/meminfo")?);
+        Ok(host.get("SecPageTables").copied().unwrap_or(0))
+    }
+
     /// What the VMs' guests said, by VM: kept by each's reader as it hears it.
     #[derive(Default)]
     struct Heard {
@@ -319,6 +411,8 @@ mod host {
         last: Option<Instant>,
         /// Why its reader stopped hearing it: it hung up, or said what is no line of its.
         gone: Option<String>,
+        /// Its memory, as it last said ([`memory_of`]).
+        memory: Option<BTreeMap<String, u64>>,
     }
 
     /// Reads what VM `vm`'s guest says on `stream` into `heard` until it hangs up.
@@ -332,6 +426,8 @@ mod host {
                 } else if let Some(ms) = line.strip_prefix("ready uptime_ms=") {
                     let ms = ms.parse().map_err(|_| format!("it said {line:?}"))?;
                     heard.vms.entry(vm).or_default().ready_ms = Some(ms);
+                } else if let Some(memory) = memory_of(&line) {
+                    heard.vms.entry(vm).or_default().memory = Some(memory);
                 } else {
                     return Err(format!("it said {line:?}"));
                 }
@@ -455,6 +551,48 @@ mod host {
                 .map(str::to_owned)
                 .collect())
         }
+
+        /// Where each VM of `cells` goes, as [`breakdown`] says, its guests' memory as they said
+        /// it in `heard`, KVM's page tables less `kvm_before`, before the first VM.
+        fn breakdown(
+            &self,
+            cells: &Cells,
+            heard: &Heard,
+            kvm_before: u64,
+        ) -> anyhow::Result<String> {
+            let mut vmms = Vec::new();
+            for cell in &cells.0 {
+                let pid = cell.firecracker.pid();
+                let rollup = crate::measure::rollup(pid)
+                    .with_context(|| format!("{}'s VM process's memory", cell.name))?;
+                let status = crate::measure::status(pid)
+                    .with_context(|| format!("{}'s VM process's status", cell.name))?;
+                let field = |of: &BTreeMap<String, u64>, name: &str| {
+                    of.get(name).copied().with_context(|| format!("{}: no {name}", cell.name))
+                };
+                vmms.push(Vmm {
+                    pss: field(&rollup, "Pss")?,
+                    anon: field(&rollup, "Pss_Anon")?,
+                    shmem: field(&rollup, "Pss_Shmem")?,
+                    page_tables: field(&status, "VmPTE")?,
+                });
+            }
+            let guests: Vec<_> =
+                heard.vms.values().filter_map(|guest| guest.memory.as_ref()).collect();
+            let daemon = crate::measure::rollup(self.daemon.id()).context("the daemon's memory")?;
+            let daemon_anon = *daemon.get("Pss_Anon").context("the daemon: no Pss_Anon")?;
+            let gauges = self.memory.gauges()?;
+            let cache = *gauges.get("cladefsd_memory_bytes").context("no cladefsd_memory_bytes")?;
+            let kvm = kvm_tables()?.saturating_sub(kvm_before);
+            breakdown(
+                u64::from(self.settings.vm_mib) * MIB,
+                &guests,
+                &vmms,
+                kvm,
+                daemon_anon,
+                cache,
+            )
+        }
     }
 
     /// Fails, at `step`, if the case does now, each check failed recorded in `measured` by its
@@ -567,6 +705,7 @@ mod host {
             let heard = Arc::new(Mutex::new(Heard::default()));
             let mut cells = Cells::default();
             host.memory.say(0, "base", None, "")?;
+            let kvm_before = kvm_tables()?;
             let mut ramp = Ramp::new(settings, host.room()?);
             let (mut step, mut last, mut full) = (0, None, false);
             let limit = loop {
@@ -644,6 +783,7 @@ mod host {
                 for ((name, _), (p99, worst)) in PROBES.iter().zip(&judged) {
                     line.push_str(&format!(" {name}_p99_ms={p99} {name}_max_ms={worst}"));
                 }
+                line.push_str(&host.breakdown(&cells, &heard.lock().unwrap(), kvm_before)?);
                 if let Some(past) = past {
                     line.push_str(&format!(" past={past}"));
                 }
@@ -868,6 +1008,68 @@ mod host {
             assert_eq!(probe_of("probe tick=12 echo=3400 fsync=1 cat=560"), None);
             assert_eq!(probe_of("ready uptime_ms=812"), None);
         }
+
+        /// A guest's memory line reads back by its fields' names less `guest_`; a line of another
+        /// shape, or a field of no number, is none.
+        #[test]
+        fn a_guests_memory_line_reads_back() {
+            let memory = memory_of("memory guest_total=230686720 guest_slab=9437184").unwrap();
+            assert_eq!(
+                memory,
+                BTreeMap::from([("slab".to_owned(), 9_437_184), ("total".to_owned(), 230_686_720)])
+            );
+            assert_eq!(memory_of("memory guest_total=230686720 slab=9437184"), None);
+            assert_eq!(memory_of("memory guest_total=lots"), None);
+            assert_eq!(memory_of("probe tick=12 echo=3400 cat=560 fsync=78000"), None);
+        }
+
+        /// A step's breakdown is each part's mean over the VMs, in MiB: the guests' RAM their
+        /// kernels never had and what isn't available among them, the VM processes', and KVM's and
+        /// the daemon's over the VM processes' count.
+        #[test]
+        fn a_breakdown_is_the_mean_of_the_vms() {
+            let guest = |total: u64, available: u64| {
+                BTreeMap::from(
+                    [
+                        ("total", total),
+                        ("available", available),
+                        ("slab", 8 * MIB),
+                        ("kernel_stack", MIB),
+                        ("page_tables", MIB / 2),
+                        ("cached", 20 * MIB),
+                        ("memmap", 4 * MIB),
+                    ]
+                    .map(|(name, bytes)| (name.to_owned(), bytes)),
+                )
+            };
+            let (one, two) = (guest(220 * MIB, 180 * MIB), guest(218 * MIB, 168 * MIB));
+            let vmm =
+                |pss: u64| Vmm { pss, anon: pss - 10 * MIB, shmem: 10 * MIB, page_tables: MIB };
+            let line = breakdown(
+                256 * MIB,
+                &[&one, &two],
+                &[vmm(60 * MIB), vmm(80 * MIB)],
+                6 * MIB,
+                3 * MIB,
+                50 * MIB,
+            )
+            .unwrap();
+            assert_eq!(
+                line,
+                " guest_reserved_mib=37.0 guest_used_mib=45.0 guest_slab_mib=8.0 guest_stack_mib=1.0 \
+                 guest_pt_mib=0.5 guest_cached_mib=20.0 guest_memmap_mib=4.0 vmm_pss_mib=70.0 \
+                 vmm_anon_mib=60.0 vmm_shmem_mib=10.0 vmm_pt_mib=1.0 kvm_pt_mib=3.0 \
+                 daemon_anon_mib=1.5 daemon_cache_mib=25.0"
+            );
+        }
+
+        /// A guest that said no part of its memory fails the breakdown rather than count it none.
+        #[test]
+        fn a_guest_missing_a_part_fails_the_breakdown() {
+            let guest = BTreeMap::from([("total".to_owned(), 220 * MIB)]);
+            let err = breakdown(256 * MIB, &[&guest], &[], 0, 0, 0).unwrap_err();
+            assert_eq!(err.to_string(), "a guest said no available");
+        }
     }
 }
 
@@ -882,6 +1084,10 @@ mod guest {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
+
+    /// How many rounds go between the guest's `memory` lines ([`memory_of`]): one each window
+    /// of the host's (CLADEFS_CELLS_WINDOW_SECS, 10 by default).
+    const MEMORY_ROUNDS: u64 = 10;
 
     /// The file of its own each round writes over and fsyncs, on the fork's root.
     const PROBED: &str = "/var/cells-probe";
@@ -950,6 +1156,10 @@ mod guest {
             probes.round(Duration::ZERO);
             let mut to_host = connect();
             writeln!(to_host, "ready uptime_ms={}", uptime_ms()).expect("telling the host");
+            let memory = |to_host: &mut fs::File| {
+                writeln!(to_host, "memory {}", crate::measure::itself()).expect("telling the host")
+            };
+            memory(&mut to_host);
             let stop = Arc::new(AtomicBool::new(false));
             let told = std::thread::spawn({
                 let (stop, from_host) = (stop.clone(), to_host.try_clone().unwrap());
@@ -961,7 +1171,10 @@ mod guest {
                 }
             });
             let mut due = Instant::now();
-            while !stop.load(Ordering::Relaxed) {
+            for round in 1.. {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
                 due += Duration::from_secs(1);
                 let now = Instant::now();
                 if let Some(wait) = due.checked_duration_since(now) {
@@ -974,6 +1187,10 @@ mod guest {
                 }
                 let micros = probes.round(late);
                 writeln!(to_host, "{}", probe_line(&micros)).expect("telling the host");
+                // A window's worth of rounds: the host's breakdown of a step, its last window's.
+                if round % MEMORY_ROUNDS == 0 {
+                    memory(&mut to_host);
+                }
             }
             told.join().unwrap();
             println!("OK cell");

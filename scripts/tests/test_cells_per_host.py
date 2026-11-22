@@ -22,7 +22,7 @@ LOG = """\
 cells-per-host: Settings { vm_mib: 256 }, dax false
 memory: vm=0 phase=base host_used=1
 cells-per-host: step=1 vms=1 added=1 room_mib=19000 per_vm_mib=110.5 spawn_s=0.1 ready_s=1.2 boot_p99_ms=900 samples=10 tick_p99_ms=1 tick_max_ms=2 echo_p99_ms=3 echo_max_ms=4 cat_p99_ms=2 cat_max_ms=2 fsync_p99_ms=9 fsync_max_ms=12
-cells-per-host: step=2 vms=17 added=16 room_mib=17200 per_vm_mib=105.0 spawn_s=1.0 ready_s=3.4 boot_p99_ms=2100 samples=170 tick_p99_ms=4 tick_max_ms=9 echo_p99_ms=6 echo_max_ms=8 cat_p99_ms=3 cat_max_ms=5 fsync_p99_ms=40 fsync_max_ms=80
+cells-per-host: step=2 vms=17 added=16 room_mib=17200 per_vm_mib=105.0 spawn_s=1.0 ready_s=3.4 boot_p99_ms=2100 samples=170 tick_p99_ms=4 tick_max_ms=9 echo_p99_ms=6 echo_max_ms=8 cat_p99_ms=3 cat_max_ms=5 fsync_p99_ms=40 fsync_max_ms=80 guest_reserved_mib=37.0 guest_used_mib=45.0 guest_slab_mib=8.0 guest_stack_mib=1.0 guest_pt_mib=0.5 guest_cached_mib=20.0 guest_memmap_mib=4.0 vmm_pss_mib=70.0 vmm_anon_mib=60.0 vmm_shmem_mib=10.0 vmm_pt_mib=1.0 kvm_pt_mib=3.0 daemon_anon_mib=1.5 daemon_cache_mib=25.0
 cells-per-host: step=3 vms=33 added=16 room_mib=15500 per_vm_mib=104.0 spawn_s=1.0 ready_s=3.9 boot_p99_ms=2600 samples=330 tick_p99_ms=7 tick_max_ms=20 echo_p99_ms=9 echo_max_ms=30 cat_p99_ms=5 cat_max_ms=9 fsync_p99_ms=300 fsync_max_ms=900 past=fsync
 cells-per-host: step=4 vms=33 added=0 room_mib=15400 per_vm_mib=104.5 spawn_s=0.0 ready_s=0.0 boot_p99_ms=0 samples=330 tick_p99_ms=7 tick_max_ms=19 echo_p99_ms=9 echo_max_ms=31 cat_p99_ms=5 cat_max_ms=8 fsync_p99_ms=310 fsync_max_ms=950 past=fsync
 cells-per-host: held=17 limit=latency:fsync
@@ -48,7 +48,11 @@ class CellsPerHost(unittest.TestCase):
         self.assertEqual(cells.summary(steps, end), {
             "held": 17, "limit": "latency:fsync", "room_mib": 17200, "per_vm_mib": 105.0,
             "ready_s": 3.4, "boot_p99_ms": 2100, "tick_p99_ms": 4, "echo_p99_ms": 6,
-            "cat_p99_ms": 3, "fsync_p99_ms": 40,
+            "cat_p99_ms": 3, "fsync_p99_ms": 40, "guest_reserved_mib": 37.0, "guest_used_mib": 45.0,
+            "guest_slab_mib": 8.0, "guest_stack_mib": 1.0, "guest_pt_mib": 0.5,
+            "guest_cached_mib": 20.0, "guest_memmap_mib": 4.0, "vmm_pss_mib": 70.0,
+            "vmm_anon_mib": 60.0, "vmm_shmem_mib": 10.0, "vmm_pt_mib": 1.0, "kvm_pt_mib": 3.0,
+            "daemon_anon_mib": 1.5, "daemon_cache_mib": 25.0,
         })
 
     def test_a_case_that_said_no_end_has_no_summary(self):
@@ -70,6 +74,10 @@ class CellsPerHost(unittest.TestCase):
                          "cells-per-host: cells-per-host: held 17 VMs, fewer than its floor of 20\n")
         self.assertIn("| cells-per-host | 17 | latency:fsync | 105.0 | 2100 | 4 | 6 | 3 | 40 |",
                       ran.stdout)
+        # Each step's memory per VM, in a table of its own: none said by the steps that say none.
+        self.assertIn("| 2 | 17 | 37.0 | 45.0 | 8.0 | 1.0 | 0.5 | 20.0 | 4.0 | 70.0 | 60.0 | 10.0 "
+                      "| 1.0 | 3.0 | 1.5 | 25.0 |", ran.stdout)
+        self.assertIn("| 1 | 1 |  |  |  |  |  |  |  |  |  |  |  |  |  |  |", ran.stdout)
         # The DAX case held 33, its last step's not past a budget: none is, so no memory per VM.
         self.assertIn("| cells-per-host-dax | 33 | memory |  |  |  |  |  |  |", ran.stdout)
         written = json.loads(out.read_text())
