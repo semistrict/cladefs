@@ -135,12 +135,13 @@ impl LocalCheckpoint {
             keys: self.keys.clone(),
         };
         let entries = own.iter().map(|(id, at)| (*id, at.key.as_str(), at.offset, at.len));
-        extent_frame::table::encode(entries, bucket_cell::layout::encode(&rest), encrypting)
+        extent_frame::table::encode(entries, bucket_cell::layout::encode(&rest), &[], encrypting)
     }
 
     fn decode(bytes: &[u8], keys: &dyn extent_frame::Keys) -> Result<Self, Error> {
-        let (footer, entries) = extent_frame::table::decode(bytes, keys)
-            .context("decoding an ephemeral cell's local checkpoint")?;
+        let extent_frame::table::Decoded { footer, entries, .. } =
+            extent_frame::table::decode(bytes, keys)
+                .context("decoding an ephemeral cell's local checkpoint")?;
         let Rest {
             parent,
             freed,
