@@ -155,6 +155,7 @@ pub mod memory_cell;
 mod node;
 mod open_cell;
 pub mod pages;
+pub mod protocol;
 pub mod renamed;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub mod request;
