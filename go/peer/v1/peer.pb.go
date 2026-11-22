@@ -51,8 +51,11 @@ type MigratePrepareRequest struct {
 	At uint64 `protobuf:"varint,6,opt,name=at,proto3" json:"at,omitempty"`
 	// The URL of the bucket its parent is kept in.
 	Bucket string `protobuf:"bytes,7,opt,name=bucket,proto3" json:"bucket,omitempty"`
-	// Where its store goes on this host.
-	To            string `protobuf:"bytes,8,opt,name=to,proto3" json:"to,omitempty"`
+	// Where it goes on this host.
+	To string `protobuf:"bytes,8,opt,name=to,proto3" json:"to,omitempty"`
+	// The cell's epoch, as of this migration: greater than every migration's of the cell before it
+	// (board 5732).
+	Epoch         uint64 `protobuf:"varint,9,opt,name=epoch,proto3" json:"epoch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -143,11 +146,21 @@ func (x *MigratePrepareRequest) GetTo() string {
 	return ""
 }
 
+func (x *MigratePrepareRequest) GetEpoch() uint64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
 // A migration prepared.
 type MigratePrepareResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// This host's incarnation, which its reference to the cell names, and the hand-over must name.
-	Incarnation   uint64 `protobuf:"varint,1,opt,name=incarnation,proto3" json:"incarnation,omitempty"`
+	Incarnation uint64 `protobuf:"varint,1,opt,name=incarnation,proto3" json:"incarnation,omitempty"`
+	// This host's token for its take of the migration, new to it, which the hand-over must name
+	// (specs/ephemeral, boundToPrepare).
+	Token         uint64 `protobuf:"varint,2,opt,name=token,proto3" json:"token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -185,6 +198,13 @@ func (*MigratePrepareResponse) Descriptor() ([]byte, []int) {
 func (x *MigratePrepareResponse) GetIncarnation() uint64 {
 	if x != nil {
 		return x.Incarnation
+	}
+	return 0
+}
+
+func (x *MigratePrepareResponse) GetToken() uint64 {
+	if x != nil {
+		return x.Token
 	}
 	return 0
 }
@@ -244,12 +264,12 @@ func (x *Range) GetLen() uint64 {
 	return 0
 }
 
-// A piece of a file of the store being migrated.
+// A piece of a file of the cell being migrated.
 type MigrateFileRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The migration.
 	Migration uint64 `protobuf:"varint,1,opt,name=migration,proto3" json:"migration,omitempty"`
-	// The file's path in the store; a directory's, made if it is not there, ends with `/`.
+	// The file's path in the cell; a directory's, made if it is not there, ends with `/`.
 	Path string `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
 	// Where `bytes` go in it.
 	Offset uint64 `protobuf:"varint,3,opt,name=offset,proto3" json:"offset,omitempty"`
@@ -372,10 +392,10 @@ func (*MigrateFileResponse) Descriptor() ([]byte, []int) {
 	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{4}
 }
 
-// A file of the store a hand-over names.
+// A file of the cell a hand-over names.
 type FileDigest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Its path in the store.
+	// Its path in the cell.
 	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
 	// Its length.
 	Len uint64 `protobuf:"varint,2,opt,name=len,proto3" json:"len,omitempty"`
@@ -443,8 +463,10 @@ type MigrateHandOverRequest struct {
 	Migration uint64 `protobuf:"varint,1,opt,name=migration,proto3" json:"migration,omitempty"`
 	// The incarnation of this host's its preparation answered.
 	Incarnation uint64 `protobuf:"varint,2,opt,name=incarnation,proto3" json:"incarnation,omitempty"`
-	// Every file of the store.
-	Files         []*FileDigest `protobuf:"bytes,3,rep,name=files,proto3" json:"files,omitempty"`
+	// Every file of the cell.
+	Files []*FileDigest `protobuf:"bytes,3,rep,name=files,proto3" json:"files,omitempty"`
+	// The token its preparation answered.
+	Token         uint64 `protobuf:"varint,4,opt,name=token,proto3" json:"token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -498,6 +520,13 @@ func (x *MigrateHandOverRequest) GetFiles() []*FileDigest {
 		return x.Files
 	}
 	return nil
+}
+
+func (x *MigrateHandOverRequest) GetToken() uint64 {
+	if x != nil {
+		return x.Token
+	}
+	return 0
 }
 
 // A hand-over's answer.
@@ -629,6 +658,172 @@ func (*MigrateAbortResponse) Descriptor() ([]byte, []int) {
 	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{9}
 }
 
+// A migration going on.
+type MigrateRenewRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The migration.
+	Migration     uint64 `protobuf:"varint,1,opt,name=migration,proto3" json:"migration,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MigrateRenewRequest) Reset() {
+	*x = MigrateRenewRequest{}
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MigrateRenewRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MigrateRenewRequest) ProtoMessage() {}
+
+func (x *MigrateRenewRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MigrateRenewRequest.ProtoReflect.Descriptor instead.
+func (*MigrateRenewRequest) Descriptor() ([]byte, []int) {
+	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *MigrateRenewRequest) GetMigration() uint64 {
+	if x != nil {
+		return x.Migration
+	}
+	return 0
+}
+
+// A migration renewed.
+type MigrateRenewResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MigrateRenewResponse) Reset() {
+	*x = MigrateRenewResponse{}
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MigrateRenewResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MigrateRenewResponse) ProtoMessage() {}
+
+func (x *MigrateRenewResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MigrateRenewResponse.ProtoReflect.Descriptor instead.
+func (*MigrateRenewResponse) Descriptor() ([]byte, []int) {
+	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{11}
+}
+
+// A migration accepted, its cell let go of by its source.
+type MigrateReleaseRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The migration.
+	Migration     uint64 `protobuf:"varint,1,opt,name=migration,proto3" json:"migration,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MigrateReleaseRequest) Reset() {
+	*x = MigrateReleaseRequest{}
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MigrateReleaseRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MigrateReleaseRequest) ProtoMessage() {}
+
+func (x *MigrateReleaseRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MigrateReleaseRequest.ProtoReflect.Descriptor instead.
+func (*MigrateReleaseRequest) Descriptor() ([]byte, []int) {
+	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *MigrateReleaseRequest) GetMigration() uint64 {
+	if x != nil {
+		return x.Migration
+	}
+	return 0
+}
+
+// A migration released.
+type MigrateReleaseResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MigrateReleaseResponse) Reset() {
+	*x = MigrateReleaseResponse{}
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MigrateReleaseResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MigrateReleaseResponse) ProtoMessage() {}
+
+func (x *MigrateReleaseResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MigrateReleaseResponse.ProtoReflect.Descriptor instead.
+func (*MigrateReleaseResponse) Descriptor() ([]byte, []int) {
+	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{13}
+}
+
 // A configuration of a cell: its number, and the epoch of the writer that made it.
 type Configuration struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -642,7 +837,7 @@ type Configuration struct {
 
 func (x *Configuration) Reset() {
 	*x = Configuration{}
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[10]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -654,7 +849,7 @@ func (x *Configuration) String() string {
 func (*Configuration) ProtoMessage() {}
 
 func (x *Configuration) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[10]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -667,7 +862,7 @@ func (x *Configuration) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Configuration.ProtoReflect.Descriptor instead.
 func (*Configuration) Descriptor() ([]byte, []int) {
-	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{10}
+	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *Configuration) GetNumber() uint64 {
@@ -704,7 +899,7 @@ type ReplicaOf struct {
 
 func (x *ReplicaOf) Reset() {
 	*x = ReplicaOf{}
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[11]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -716,7 +911,7 @@ func (x *ReplicaOf) String() string {
 func (*ReplicaOf) ProtoMessage() {}
 
 func (x *ReplicaOf) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[11]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -729,7 +924,7 @@ func (x *ReplicaOf) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplicaOf.ProtoReflect.Descriptor instead.
 func (*ReplicaOf) Descriptor() ([]byte, []int) {
-	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{11}
+	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ReplicaOf) GetBucket() string {
@@ -778,7 +973,7 @@ type IncarnationRequest struct {
 
 func (x *IncarnationRequest) Reset() {
 	*x = IncarnationRequest{}
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[12]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -790,7 +985,7 @@ func (x *IncarnationRequest) String() string {
 func (*IncarnationRequest) ProtoMessage() {}
 
 func (x *IncarnationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[12]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -803,7 +998,7 @@ func (x *IncarnationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IncarnationRequest.ProtoReflect.Descriptor instead.
 func (*IncarnationRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{12}
+	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *IncarnationRequest) GetBucket() string {
@@ -824,7 +1019,7 @@ type IncarnationResponse struct {
 
 func (x *IncarnationResponse) Reset() {
 	*x = IncarnationResponse{}
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[13]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -836,7 +1031,7 @@ func (x *IncarnationResponse) String() string {
 func (*IncarnationResponse) ProtoMessage() {}
 
 func (x *IncarnationResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[13]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -849,7 +1044,7 @@ func (x *IncarnationResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IncarnationResponse.ProtoReflect.Descriptor instead.
 func (*IncarnationResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{13}
+	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *IncarnationResponse) GetIncarnation() uint64 {
@@ -877,7 +1072,7 @@ type AppendRequest struct {
 
 func (x *AppendRequest) Reset() {
 	*x = AppendRequest{}
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[14]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -889,7 +1084,7 @@ func (x *AppendRequest) String() string {
 func (*AppendRequest) ProtoMessage() {}
 
 func (x *AppendRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[14]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -902,7 +1097,7 @@ func (x *AppendRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AppendRequest.ProtoReflect.Descriptor instead.
 func (*AppendRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{14}
+	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *AppendRequest) GetOf() *ReplicaOf {
@@ -946,7 +1141,7 @@ type AppendResponse struct {
 
 func (x *AppendResponse) Reset() {
 	*x = AppendResponse{}
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[15]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -958,7 +1153,7 @@ func (x *AppendResponse) String() string {
 func (*AppendResponse) ProtoMessage() {}
 
 func (x *AppendResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[15]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -971,7 +1166,7 @@ func (x *AppendResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AppendResponse.ProtoReflect.Descriptor instead.
 func (*AppendResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{15}
+	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *AppendResponse) GetLog() uint64 {
@@ -1001,7 +1196,7 @@ type FenceRequest struct {
 
 func (x *FenceRequest) Reset() {
 	*x = FenceRequest{}
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[16]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1013,7 +1208,7 @@ func (x *FenceRequest) String() string {
 func (*FenceRequest) ProtoMessage() {}
 
 func (x *FenceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[16]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1026,7 +1221,7 @@ func (x *FenceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FenceRequest.ProtoReflect.Descriptor instead.
 func (*FenceRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{16}
+	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *FenceRequest) GetOf() *ReplicaOf {
@@ -1054,7 +1249,7 @@ type FenceResponse struct {
 
 func (x *FenceResponse) Reset() {
 	*x = FenceResponse{}
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[17]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1066,7 +1261,7 @@ func (x *FenceResponse) String() string {
 func (*FenceResponse) ProtoMessage() {}
 
 func (x *FenceResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[17]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1079,7 +1274,7 @@ func (x *FenceResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FenceResponse.ProtoReflect.Descriptor instead.
 func (*FenceResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{17}
+	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *FenceResponse) GetLogs() []*LogEnd {
@@ -1102,7 +1297,7 @@ type LogEnd struct {
 
 func (x *LogEnd) Reset() {
 	*x = LogEnd{}
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[18]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1114,7 +1309,7 @@ func (x *LogEnd) String() string {
 func (*LogEnd) ProtoMessage() {}
 
 func (x *LogEnd) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[18]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1127,7 +1322,7 @@ func (x *LogEnd) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogEnd.ProtoReflect.Descriptor instead.
 func (*LogEnd) Descriptor() ([]byte, []int) {
-	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{18}
+	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *LogEnd) GetLog() uint64 {
@@ -1159,7 +1354,7 @@ type ReadLogRequest struct {
 
 func (x *ReadLogRequest) Reset() {
 	*x = ReadLogRequest{}
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[19]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1171,7 +1366,7 @@ func (x *ReadLogRequest) String() string {
 func (*ReadLogRequest) ProtoMessage() {}
 
 func (x *ReadLogRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[19]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1184,7 +1379,7 @@ func (x *ReadLogRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadLogRequest.ProtoReflect.Descriptor instead.
 func (*ReadLogRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{19}
+	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *ReadLogRequest) GetOf() *ReplicaOf {
@@ -1219,7 +1414,7 @@ type ReadLogResponse struct {
 
 func (x *ReadLogResponse) Reset() {
 	*x = ReadLogResponse{}
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[20]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1231,7 +1426,7 @@ func (x *ReadLogResponse) String() string {
 func (*ReadLogResponse) ProtoMessage() {}
 
 func (x *ReadLogResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[20]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1244,7 +1439,7 @@ func (x *ReadLogResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadLogResponse.ProtoReflect.Descriptor instead.
 func (*ReadLogResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{20}
+	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *ReadLogResponse) GetBytes() []byte {
@@ -1268,7 +1463,7 @@ type DropLogsRequest struct {
 
 func (x *DropLogsRequest) Reset() {
 	*x = DropLogsRequest{}
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[21]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1280,7 +1475,7 @@ func (x *DropLogsRequest) String() string {
 func (*DropLogsRequest) ProtoMessage() {}
 
 func (x *DropLogsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[21]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1293,7 +1488,7 @@ func (x *DropLogsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DropLogsRequest.ProtoReflect.Descriptor instead.
 func (*DropLogsRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{21}
+	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *DropLogsRequest) GetOf() *ReplicaOf {
@@ -1319,7 +1514,7 @@ type DropLogsResponse struct {
 
 func (x *DropLogsResponse) Reset() {
 	*x = DropLogsResponse{}
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[22]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1331,7 +1526,7 @@ func (x *DropLogsResponse) String() string {
 func (*DropLogsResponse) ProtoMessage() {}
 
 func (x *DropLogsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[22]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1344,7 +1539,7 @@ func (x *DropLogsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DropLogsResponse.ProtoReflect.Descriptor instead.
 func (*DropLogsResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{22}
+	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{26}
 }
 
 // A part asked for.
@@ -1367,7 +1562,7 @@ type GetPartRequest struct {
 
 func (x *GetPartRequest) Reset() {
 	*x = GetPartRequest{}
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[23]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1379,7 +1574,7 @@ func (x *GetPartRequest) String() string {
 func (*GetPartRequest) ProtoMessage() {}
 
 func (x *GetPartRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[23]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1392,7 +1587,7 @@ func (x *GetPartRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPartRequest.ProtoReflect.Descriptor instead.
 func (*GetPartRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{23}
+	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *GetPartRequest) GetBucket() string {
@@ -1441,7 +1636,7 @@ type GetPartResponse struct {
 
 func (x *GetPartResponse) Reset() {
 	*x = GetPartResponse{}
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[24]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1453,7 +1648,7 @@ func (x *GetPartResponse) String() string {
 func (*GetPartResponse) ProtoMessage() {}
 
 func (x *GetPartResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[24]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1466,7 +1661,7 @@ func (x *GetPartResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPartResponse.ProtoReflect.Descriptor instead.
 func (*GetPartResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{24}
+	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *GetPartResponse) GetBytes() []byte {
@@ -1480,7 +1675,7 @@ var File_cladefs_peer_v1_peer_proto protoreflect.FileDescriptor
 
 const file_cladefs_peer_v1_peer_proto_rawDesc = "" +
 	"\n" +
-	"\x1acladefs/peer/v1/peer.proto\x12\x0fcladefs.peer.v1\"\xdf\x01\n" +
+	"\x1acladefs/peer/v1/peer.proto\x12\x0fcladefs.peer.v1\"\xf5\x01\n" +
 	"\x15MigratePrepareRequest\x12\x1c\n" +
 	"\tmigration\x18\x01 \x01(\x04R\tmigration\x12\x16\n" +
 	"\x06tenant\x18\x02 \x01(\x04R\x06tenant\x12\x12\n" +
@@ -1490,9 +1685,11 @@ const file_cladefs_peer_v1_peer_proto_rawDesc = "" +
 	"parentCell\x12\x0e\n" +
 	"\x02at\x18\x06 \x01(\x04R\x02at\x12\x16\n" +
 	"\x06bucket\x18\a \x01(\tR\x06bucket\x12\x0e\n" +
-	"\x02to\x18\b \x01(\tR\x02to\":\n" +
+	"\x02to\x18\b \x01(\tR\x02to\x12\x14\n" +
+	"\x05epoch\x18\t \x01(\x04R\x05epoch\"P\n" +
 	"\x16MigratePrepareResponse\x12 \n" +
-	"\vincarnation\x18\x01 \x01(\x04R\vincarnation\"1\n" +
+	"\vincarnation\x18\x01 \x01(\x04R\vincarnation\x12\x14\n" +
+	"\x05token\x18\x02 \x01(\x04R\x05token\"1\n" +
 	"\x05Range\x12\x16\n" +
 	"\x06offset\x18\x01 \x01(\x04R\x06offset\x12\x10\n" +
 	"\x03len\x18\x02 \x01(\x04R\x03len\"\xb4\x01\n" +
@@ -1509,16 +1706,23 @@ const file_cladefs_peer_v1_peer_proto_rawDesc = "" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x10\n" +
 	"\x03len\x18\x02 \x01(\x04R\x03len\x12\x15\n" +
 	"\x03crc\x18\x03 \x01(\rH\x00R\x03crc\x88\x01\x01B\x06\n" +
-	"\x04_crc\"\x8b\x01\n" +
+	"\x04_crc\"\xa1\x01\n" +
 	"\x16MigrateHandOverRequest\x12\x1c\n" +
 	"\tmigration\x18\x01 \x01(\x04R\tmigration\x12 \n" +
 	"\vincarnation\x18\x02 \x01(\x04R\vincarnation\x121\n" +
-	"\x05files\x18\x03 \x03(\v2\x1b.cladefs.peer.v1.FileDigestR\x05files\"5\n" +
+	"\x05files\x18\x03 \x03(\v2\x1b.cladefs.peer.v1.FileDigestR\x05files\x12\x14\n" +
+	"\x05token\x18\x04 \x01(\x04R\x05token\"5\n" +
 	"\x17MigrateHandOverResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\"3\n" +
 	"\x13MigrateAbortRequest\x12\x1c\n" +
 	"\tmigration\x18\x01 \x01(\x04R\tmigration\"\x16\n" +
-	"\x14MigrateAbortResponse\"=\n" +
+	"\x14MigrateAbortResponse\"3\n" +
+	"\x13MigrateRenewRequest\x12\x1c\n" +
+	"\tmigration\x18\x01 \x01(\x04R\tmigration\"\x16\n" +
+	"\x14MigrateRenewResponse\"5\n" +
+	"\x15MigrateReleaseRequest\x12\x1c\n" +
+	"\tmigration\x18\x01 \x01(\x04R\tmigration\"\x18\n" +
+	"\x16MigrateReleaseResponse\"=\n" +
 	"\rConfiguration\x12\x16\n" +
 	"\x06number\x18\x01 \x01(\x04R\x06number\x12\x14\n" +
 	"\x05epoch\x18\x02 \x01(\x04R\x05epoch\"\xb7\x01\n" +
@@ -1567,7 +1771,7 @@ const file_cladefs_peer_v1_peer_proto_rawDesc = "" +
 	"\x04home\x18\b \x01(\rR\x04home\x12\x12\n" +
 	"\x04root\x18\t \x01(\x06R\x04rootJ\x04\b\x04\x10\x05J\x04\b\x05\x10\x06J\x04\b\x06\x10\aJ\x04\b\a\x10\bR\x06offsetR\x03lenR\x03crcR\bencoding\"'\n" +
 	"\x0fGetPartResponse\x12\x14\n" +
-	"\x05bytes\x18\x01 \x01(\fR\x05bytes2\xe6\x06\n" +
+	"\x05bytes\x18\x01 \x01(\fR\x05bytes2\xa6\b\n" +
 	"\x04Peer\x12L\n" +
 	"\aGetPart\x12\x1f.cladefs.peer.v1.GetPartRequest\x1a .cladefs.peer.v1.GetPartResponse\x12X\n" +
 	"\vIncarnation\x12#.cladefs.peer.v1.IncarnationRequest\x1a$.cladefs.peer.v1.IncarnationResponse\x12M\n" +
@@ -1578,7 +1782,9 @@ const file_cladefs_peer_v1_peer_proto_rawDesc = "" +
 	"\x0eMigratePrepare\x12&.cladefs.peer.v1.MigratePrepareRequest\x1a'.cladefs.peer.v1.MigratePrepareResponse\x12X\n" +
 	"\vMigrateFile\x12#.cladefs.peer.v1.MigrateFileRequest\x1a$.cladefs.peer.v1.MigrateFileResponse\x12d\n" +
 	"\x0fMigrateHandOver\x12'.cladefs.peer.v1.MigrateHandOverRequest\x1a(.cladefs.peer.v1.MigrateHandOverResponse\x12[\n" +
-	"\fMigrateAbort\x12$.cladefs.peer.v1.MigrateAbortRequest\x1a%.cladefs.peer.v1.MigrateAbortResponseB1Z/github.com/semistrict/cladefs/go/peer/v1;peerv1b\x06proto3"
+	"\fMigrateAbort\x12$.cladefs.peer.v1.MigrateAbortRequest\x1a%.cladefs.peer.v1.MigrateAbortResponse\x12[\n" +
+	"\fMigrateRenew\x12$.cladefs.peer.v1.MigrateRenewRequest\x1a%.cladefs.peer.v1.MigrateRenewResponse\x12a\n" +
+	"\x0eMigrateRelease\x12&.cladefs.peer.v1.MigrateReleaseRequest\x1a'.cladefs.peer.v1.MigrateReleaseResponseB1Z/github.com/semistrict/cladefs/go/peer/v1;peerv1b\x06proto3"
 
 var (
 	file_cladefs_peer_v1_peer_proto_rawDescOnce sync.Once
@@ -1592,7 +1798,7 @@ func file_cladefs_peer_v1_peer_proto_rawDescGZIP() []byte {
 	return file_cladefs_peer_v1_peer_proto_rawDescData
 }
 
-var file_cladefs_peer_v1_peer_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
+var file_cladefs_peer_v1_peer_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
 var file_cladefs_peer_v1_peer_proto_goTypes = []any{
 	(*MigratePrepareRequest)(nil),   // 0: cladefs.peer.v1.MigratePrepareRequest
 	(*MigratePrepareResponse)(nil),  // 1: cladefs.peer.v1.MigratePrepareResponse
@@ -1604,53 +1810,61 @@ var file_cladefs_peer_v1_peer_proto_goTypes = []any{
 	(*MigrateHandOverResponse)(nil), // 7: cladefs.peer.v1.MigrateHandOverResponse
 	(*MigrateAbortRequest)(nil),     // 8: cladefs.peer.v1.MigrateAbortRequest
 	(*MigrateAbortResponse)(nil),    // 9: cladefs.peer.v1.MigrateAbortResponse
-	(*Configuration)(nil),           // 10: cladefs.peer.v1.Configuration
-	(*ReplicaOf)(nil),               // 11: cladefs.peer.v1.ReplicaOf
-	(*IncarnationRequest)(nil),      // 12: cladefs.peer.v1.IncarnationRequest
-	(*IncarnationResponse)(nil),     // 13: cladefs.peer.v1.IncarnationResponse
-	(*AppendRequest)(nil),           // 14: cladefs.peer.v1.AppendRequest
-	(*AppendResponse)(nil),          // 15: cladefs.peer.v1.AppendResponse
-	(*FenceRequest)(nil),            // 16: cladefs.peer.v1.FenceRequest
-	(*FenceResponse)(nil),           // 17: cladefs.peer.v1.FenceResponse
-	(*LogEnd)(nil),                  // 18: cladefs.peer.v1.LogEnd
-	(*ReadLogRequest)(nil),          // 19: cladefs.peer.v1.ReadLogRequest
-	(*ReadLogResponse)(nil),         // 20: cladefs.peer.v1.ReadLogResponse
-	(*DropLogsRequest)(nil),         // 21: cladefs.peer.v1.DropLogsRequest
-	(*DropLogsResponse)(nil),        // 22: cladefs.peer.v1.DropLogsResponse
-	(*GetPartRequest)(nil),          // 23: cladefs.peer.v1.GetPartRequest
-	(*GetPartResponse)(nil),         // 24: cladefs.peer.v1.GetPartResponse
+	(*MigrateRenewRequest)(nil),     // 10: cladefs.peer.v1.MigrateRenewRequest
+	(*MigrateRenewResponse)(nil),    // 11: cladefs.peer.v1.MigrateRenewResponse
+	(*MigrateReleaseRequest)(nil),   // 12: cladefs.peer.v1.MigrateReleaseRequest
+	(*MigrateReleaseResponse)(nil),  // 13: cladefs.peer.v1.MigrateReleaseResponse
+	(*Configuration)(nil),           // 14: cladefs.peer.v1.Configuration
+	(*ReplicaOf)(nil),               // 15: cladefs.peer.v1.ReplicaOf
+	(*IncarnationRequest)(nil),      // 16: cladefs.peer.v1.IncarnationRequest
+	(*IncarnationResponse)(nil),     // 17: cladefs.peer.v1.IncarnationResponse
+	(*AppendRequest)(nil),           // 18: cladefs.peer.v1.AppendRequest
+	(*AppendResponse)(nil),          // 19: cladefs.peer.v1.AppendResponse
+	(*FenceRequest)(nil),            // 20: cladefs.peer.v1.FenceRequest
+	(*FenceResponse)(nil),           // 21: cladefs.peer.v1.FenceResponse
+	(*LogEnd)(nil),                  // 22: cladefs.peer.v1.LogEnd
+	(*ReadLogRequest)(nil),          // 23: cladefs.peer.v1.ReadLogRequest
+	(*ReadLogResponse)(nil),         // 24: cladefs.peer.v1.ReadLogResponse
+	(*DropLogsRequest)(nil),         // 25: cladefs.peer.v1.DropLogsRequest
+	(*DropLogsResponse)(nil),        // 26: cladefs.peer.v1.DropLogsResponse
+	(*GetPartRequest)(nil),          // 27: cladefs.peer.v1.GetPartRequest
+	(*GetPartResponse)(nil),         // 28: cladefs.peer.v1.GetPartResponse
 }
 var file_cladefs_peer_v1_peer_proto_depIdxs = []int32{
 	2,  // 0: cladefs.peer.v1.MigrateFileRequest.holes:type_name -> cladefs.peer.v1.Range
 	5,  // 1: cladefs.peer.v1.MigrateHandOverRequest.files:type_name -> cladefs.peer.v1.FileDigest
-	10, // 2: cladefs.peer.v1.ReplicaOf.configuration:type_name -> cladefs.peer.v1.Configuration
-	11, // 3: cladefs.peer.v1.AppendRequest.of:type_name -> cladefs.peer.v1.ReplicaOf
-	11, // 4: cladefs.peer.v1.FenceRequest.of:type_name -> cladefs.peer.v1.ReplicaOf
-	18, // 5: cladefs.peer.v1.FenceResponse.logs:type_name -> cladefs.peer.v1.LogEnd
-	11, // 6: cladefs.peer.v1.ReadLogRequest.of:type_name -> cladefs.peer.v1.ReplicaOf
-	11, // 7: cladefs.peer.v1.DropLogsRequest.of:type_name -> cladefs.peer.v1.ReplicaOf
-	23, // 8: cladefs.peer.v1.Peer.GetPart:input_type -> cladefs.peer.v1.GetPartRequest
-	12, // 9: cladefs.peer.v1.Peer.Incarnation:input_type -> cladefs.peer.v1.IncarnationRequest
-	14, // 10: cladefs.peer.v1.Peer.Append:input_type -> cladefs.peer.v1.AppendRequest
-	16, // 11: cladefs.peer.v1.Peer.Fence:input_type -> cladefs.peer.v1.FenceRequest
-	19, // 12: cladefs.peer.v1.Peer.ReadLog:input_type -> cladefs.peer.v1.ReadLogRequest
-	21, // 13: cladefs.peer.v1.Peer.DropLogs:input_type -> cladefs.peer.v1.DropLogsRequest
+	14, // 2: cladefs.peer.v1.ReplicaOf.configuration:type_name -> cladefs.peer.v1.Configuration
+	15, // 3: cladefs.peer.v1.AppendRequest.of:type_name -> cladefs.peer.v1.ReplicaOf
+	15, // 4: cladefs.peer.v1.FenceRequest.of:type_name -> cladefs.peer.v1.ReplicaOf
+	22, // 5: cladefs.peer.v1.FenceResponse.logs:type_name -> cladefs.peer.v1.LogEnd
+	15, // 6: cladefs.peer.v1.ReadLogRequest.of:type_name -> cladefs.peer.v1.ReplicaOf
+	15, // 7: cladefs.peer.v1.DropLogsRequest.of:type_name -> cladefs.peer.v1.ReplicaOf
+	27, // 8: cladefs.peer.v1.Peer.GetPart:input_type -> cladefs.peer.v1.GetPartRequest
+	16, // 9: cladefs.peer.v1.Peer.Incarnation:input_type -> cladefs.peer.v1.IncarnationRequest
+	18, // 10: cladefs.peer.v1.Peer.Append:input_type -> cladefs.peer.v1.AppendRequest
+	20, // 11: cladefs.peer.v1.Peer.Fence:input_type -> cladefs.peer.v1.FenceRequest
+	23, // 12: cladefs.peer.v1.Peer.ReadLog:input_type -> cladefs.peer.v1.ReadLogRequest
+	25, // 13: cladefs.peer.v1.Peer.DropLogs:input_type -> cladefs.peer.v1.DropLogsRequest
 	0,  // 14: cladefs.peer.v1.Peer.MigratePrepare:input_type -> cladefs.peer.v1.MigratePrepareRequest
 	3,  // 15: cladefs.peer.v1.Peer.MigrateFile:input_type -> cladefs.peer.v1.MigrateFileRequest
 	6,  // 16: cladefs.peer.v1.Peer.MigrateHandOver:input_type -> cladefs.peer.v1.MigrateHandOverRequest
 	8,  // 17: cladefs.peer.v1.Peer.MigrateAbort:input_type -> cladefs.peer.v1.MigrateAbortRequest
-	24, // 18: cladefs.peer.v1.Peer.GetPart:output_type -> cladefs.peer.v1.GetPartResponse
-	13, // 19: cladefs.peer.v1.Peer.Incarnation:output_type -> cladefs.peer.v1.IncarnationResponse
-	15, // 20: cladefs.peer.v1.Peer.Append:output_type -> cladefs.peer.v1.AppendResponse
-	17, // 21: cladefs.peer.v1.Peer.Fence:output_type -> cladefs.peer.v1.FenceResponse
-	20, // 22: cladefs.peer.v1.Peer.ReadLog:output_type -> cladefs.peer.v1.ReadLogResponse
-	22, // 23: cladefs.peer.v1.Peer.DropLogs:output_type -> cladefs.peer.v1.DropLogsResponse
-	1,  // 24: cladefs.peer.v1.Peer.MigratePrepare:output_type -> cladefs.peer.v1.MigratePrepareResponse
-	4,  // 25: cladefs.peer.v1.Peer.MigrateFile:output_type -> cladefs.peer.v1.MigrateFileResponse
-	7,  // 26: cladefs.peer.v1.Peer.MigrateHandOver:output_type -> cladefs.peer.v1.MigrateHandOverResponse
-	9,  // 27: cladefs.peer.v1.Peer.MigrateAbort:output_type -> cladefs.peer.v1.MigrateAbortResponse
-	18, // [18:28] is the sub-list for method output_type
-	8,  // [8:18] is the sub-list for method input_type
+	10, // 18: cladefs.peer.v1.Peer.MigrateRenew:input_type -> cladefs.peer.v1.MigrateRenewRequest
+	12, // 19: cladefs.peer.v1.Peer.MigrateRelease:input_type -> cladefs.peer.v1.MigrateReleaseRequest
+	28, // 20: cladefs.peer.v1.Peer.GetPart:output_type -> cladefs.peer.v1.GetPartResponse
+	17, // 21: cladefs.peer.v1.Peer.Incarnation:output_type -> cladefs.peer.v1.IncarnationResponse
+	19, // 22: cladefs.peer.v1.Peer.Append:output_type -> cladefs.peer.v1.AppendResponse
+	21, // 23: cladefs.peer.v1.Peer.Fence:output_type -> cladefs.peer.v1.FenceResponse
+	24, // 24: cladefs.peer.v1.Peer.ReadLog:output_type -> cladefs.peer.v1.ReadLogResponse
+	26, // 25: cladefs.peer.v1.Peer.DropLogs:output_type -> cladefs.peer.v1.DropLogsResponse
+	1,  // 26: cladefs.peer.v1.Peer.MigratePrepare:output_type -> cladefs.peer.v1.MigratePrepareResponse
+	4,  // 27: cladefs.peer.v1.Peer.MigrateFile:output_type -> cladefs.peer.v1.MigrateFileResponse
+	7,  // 28: cladefs.peer.v1.Peer.MigrateHandOver:output_type -> cladefs.peer.v1.MigrateHandOverResponse
+	9,  // 29: cladefs.peer.v1.Peer.MigrateAbort:output_type -> cladefs.peer.v1.MigrateAbortResponse
+	11, // 30: cladefs.peer.v1.Peer.MigrateRenew:output_type -> cladefs.peer.v1.MigrateRenewResponse
+	13, // 31: cladefs.peer.v1.Peer.MigrateRelease:output_type -> cladefs.peer.v1.MigrateReleaseResponse
+	20, // [20:32] is the sub-list for method output_type
+	8,  // [8:20] is the sub-list for method input_type
 	8,  // [8:8] is the sub-list for extension type_name
 	8,  // [8:8] is the sub-list for extension extendee
 	0,  // [0:8] is the sub-list for field type_name
@@ -1662,14 +1876,14 @@ func file_cladefs_peer_v1_peer_proto_init() {
 		return
 	}
 	file_cladefs_peer_v1_peer_proto_msgTypes[5].OneofWrappers = []any{}
-	file_cladefs_peer_v1_peer_proto_msgTypes[21].OneofWrappers = []any{}
+	file_cladefs_peer_v1_peer_proto_msgTypes[25].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cladefs_peer_v1_peer_proto_rawDesc), len(file_cladefs_peer_v1_peer_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   25,
+			NumMessages:   29,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

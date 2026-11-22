@@ -42,6 +42,8 @@ const (
 	Peer_MigrateFile_FullMethodName     = "/cladefs.peer.v1.Peer/MigrateFile"
 	Peer_MigrateHandOver_FullMethodName = "/cladefs.peer.v1.Peer/MigrateHandOver"
 	Peer_MigrateAbort_FullMethodName    = "/cladefs.peer.v1.Peer/MigrateAbort"
+	Peer_MigrateRenew_FullMethodName    = "/cladefs.peer.v1.Peer/MigrateRenew"
+	Peer_MigrateRelease_FullMethodName  = "/cladefs.peer.v1.Peer/MigrateRelease"
 )
 
 // PeerClient is the client API for Peer service.
@@ -76,21 +78,32 @@ type PeerClient interface {
 	DropLogs(ctx context.Context, in *DropLogsRequest, opts ...grpc.CallOption) (*DropLogsResponse, error)
 	// Live migration of an ephemeral cell to this host (backlog doc-25, TASK-698.4;
 	// specs/ephemeral): the source prepares it here, which writes this host's reference to the
-	// cell's origin before taking anything (targetRefersFirst); sends its store's files, kept
+	// cell's origin before taking anything (targetRefersFirst); sends its cell's files, kept
 	// segments first, as rounds while its guest runs, the rest once it gave the cell up; then asks
 	// this host to take it over, naming every file it sent. FAILED_PRECONDITION on a host keeping no
-	// ephemeral cells (CLADEFSD_EPHEMERAL).
+	// ephemeral cells (CLADEFSD_EPHEMERAL). This host serves one request of a cell's migrations at a
+	// time (board 5732). Asked again, it prepares again, answering as before. A migration older than
+	// one of the cell it takes, by the cell's epoch, it refuses (ABORTED); one it takes it gives up
+	// for a newer (supersedes). UNAVAILABLE if its bucket calls timed out, what it noted undone.
 	MigratePrepare(ctx context.Context, in *MigratePrepareRequest, opts ...grpc.CallOption) (*MigratePrepareResponse, error)
-	// A piece of a file of the store being migrated, or its holes.
+	// A piece of a file of the cell being migrated, or its holes.
 	MigrateFile(ctx context.Context, in *MigrateFileRequest, opts ...grpc.CallOption) (*MigrateFileResponse, error)
 	// Takes the migrated cell over, if this host holds every file named whole (openAtNamed): its
-	// store put at its path, durably, and the migration remembered as accepted for good
-	// (remembersAccepted), so that this answers yes to it again, however often asked. Otherwise no,
-	// what it took dropped and its reference retired, so that it never takes that migration after
-	// (refuseFinal). No to a migration it never prepared, or of another incarnation of this host's.
+	// cell put at its path, durably, and the migration remembered as accepted (remembersAccepted)
+	// until its source releases it, so that this answers yes to it again, however often asked.
+	// Otherwise no, what it took dropped and its reference retired, so that it never takes that
+	// migration after (refuseFinal): a hand-over naming another take of it than its prepare's answer
+	// (boundToPrepare) among them. No to a migration it never prepared. FAILED_PRECONDITION, neither
+	// yes nor no, asked of another incarnation of this host's, which alone knows the migration.
 	MigrateHandOver(ctx context.Context, in *MigrateHandOverRequest, opts ...grpc.CallOption) (*MigrateHandOverResponse, error)
 	// Gives a migration up before its hand-over: what it took dropped, its reference retired.
 	MigrateAbort(ctx context.Context, in *MigrateAbortRequest, opts ...grpc.CallOption) (*MigrateAbortResponse, error)
+	// Says the migration goes on, its source there still: one this host heard nothing of for
+	// CLADEFSD_MIGRATION_IDLE it gives up (board 5734). NOT_FOUND if it gave it up.
+	MigrateRenew(ctx context.Context, in *MigrateRenewRequest, opts ...grpc.CallOption) (*MigrateRenewResponse, error)
+	// Forgets this host accepted the migration: its source let the cell go, and asks no more
+	// (board 5734).
+	MigrateRelease(ctx context.Context, in *MigrateReleaseRequest, opts ...grpc.CallOption) (*MigrateReleaseResponse, error)
 }
 
 type peerClient struct {
@@ -213,6 +226,26 @@ func (c *peerClient) MigrateAbort(ctx context.Context, in *MigrateAbortRequest, 
 	return out, nil
 }
 
+func (c *peerClient) MigrateRenew(ctx context.Context, in *MigrateRenewRequest, opts ...grpc.CallOption) (*MigrateRenewResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MigrateRenewResponse)
+	err := c.cc.Invoke(ctx, Peer_MigrateRenew_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *peerClient) MigrateRelease(ctx context.Context, in *MigrateReleaseRequest, opts ...grpc.CallOption) (*MigrateReleaseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MigrateReleaseResponse)
+	err := c.cc.Invoke(ctx, Peer_MigrateRelease_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PeerServer is the server API for Peer service.
 // All implementations must embed UnimplementedPeerServer
 // for forward compatibility.
@@ -245,21 +278,32 @@ type PeerServer interface {
 	DropLogs(context.Context, *DropLogsRequest) (*DropLogsResponse, error)
 	// Live migration of an ephemeral cell to this host (backlog doc-25, TASK-698.4;
 	// specs/ephemeral): the source prepares it here, which writes this host's reference to the
-	// cell's origin before taking anything (targetRefersFirst); sends its store's files, kept
+	// cell's origin before taking anything (targetRefersFirst); sends its cell's files, kept
 	// segments first, as rounds while its guest runs, the rest once it gave the cell up; then asks
 	// this host to take it over, naming every file it sent. FAILED_PRECONDITION on a host keeping no
-	// ephemeral cells (CLADEFSD_EPHEMERAL).
+	// ephemeral cells (CLADEFSD_EPHEMERAL). This host serves one request of a cell's migrations at a
+	// time (board 5732). Asked again, it prepares again, answering as before. A migration older than
+	// one of the cell it takes, by the cell's epoch, it refuses (ABORTED); one it takes it gives up
+	// for a newer (supersedes). UNAVAILABLE if its bucket calls timed out, what it noted undone.
 	MigratePrepare(context.Context, *MigratePrepareRequest) (*MigratePrepareResponse, error)
-	// A piece of a file of the store being migrated, or its holes.
+	// A piece of a file of the cell being migrated, or its holes.
 	MigrateFile(context.Context, *MigrateFileRequest) (*MigrateFileResponse, error)
 	// Takes the migrated cell over, if this host holds every file named whole (openAtNamed): its
-	// store put at its path, durably, and the migration remembered as accepted for good
-	// (remembersAccepted), so that this answers yes to it again, however often asked. Otherwise no,
-	// what it took dropped and its reference retired, so that it never takes that migration after
-	// (refuseFinal). No to a migration it never prepared, or of another incarnation of this host's.
+	// cell put at its path, durably, and the migration remembered as accepted (remembersAccepted)
+	// until its source releases it, so that this answers yes to it again, however often asked.
+	// Otherwise no, what it took dropped and its reference retired, so that it never takes that
+	// migration after (refuseFinal): a hand-over naming another take of it than its prepare's answer
+	// (boundToPrepare) among them. No to a migration it never prepared. FAILED_PRECONDITION, neither
+	// yes nor no, asked of another incarnation of this host's, which alone knows the migration.
 	MigrateHandOver(context.Context, *MigrateHandOverRequest) (*MigrateHandOverResponse, error)
 	// Gives a migration up before its hand-over: what it took dropped, its reference retired.
 	MigrateAbort(context.Context, *MigrateAbortRequest) (*MigrateAbortResponse, error)
+	// Says the migration goes on, its source there still: one this host heard nothing of for
+	// CLADEFSD_MIGRATION_IDLE it gives up (board 5734). NOT_FOUND if it gave it up.
+	MigrateRenew(context.Context, *MigrateRenewRequest) (*MigrateRenewResponse, error)
+	// Forgets this host accepted the migration: its source let the cell go, and asks no more
+	// (board 5734).
+	MigrateRelease(context.Context, *MigrateReleaseRequest) (*MigrateReleaseResponse, error)
 	mustEmbedUnimplementedPeerServer()
 }
 
@@ -299,6 +343,12 @@ func (UnimplementedPeerServer) MigrateHandOver(context.Context, *MigrateHandOver
 }
 func (UnimplementedPeerServer) MigrateAbort(context.Context, *MigrateAbortRequest) (*MigrateAbortResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method MigrateAbort not implemented")
+}
+func (UnimplementedPeerServer) MigrateRenew(context.Context, *MigrateRenewRequest) (*MigrateRenewResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MigrateRenew not implemented")
+}
+func (UnimplementedPeerServer) MigrateRelease(context.Context, *MigrateReleaseRequest) (*MigrateReleaseResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MigrateRelease not implemented")
 }
 func (UnimplementedPeerServer) mustEmbedUnimplementedPeerServer() {}
 func (UnimplementedPeerServer) testEmbeddedByValue()              {}
@@ -483,6 +533,42 @@ func _Peer_MigrateAbort_Handler(srv interface{}, ctx context.Context, dec func(i
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Peer_MigrateRenew_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MigrateRenewRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerServer).MigrateRenew(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Peer_MigrateRenew_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerServer).MigrateRenew(ctx, req.(*MigrateRenewRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Peer_MigrateRelease_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MigrateReleaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerServer).MigrateRelease(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Peer_MigrateRelease_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerServer).MigrateRelease(ctx, req.(*MigrateReleaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Peer_ServiceDesc is the grpc.ServiceDesc for Peer service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -521,6 +607,14 @@ var Peer_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "MigrateAbort",
 			Handler:    _Peer_MigrateAbort_Handler,
+		},
+		{
+			MethodName: "MigrateRenew",
+			Handler:    _Peer_MigrateRenew_Handler,
+		},
+		{
+			MethodName: "MigrateRelease",
+			Handler:    _Peer_MigrateRelease_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
