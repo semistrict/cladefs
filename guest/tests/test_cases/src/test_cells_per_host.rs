@@ -64,7 +64,7 @@
 //! version, a copy-on-write window the daemon serves, its pages shared with every other VM's but
 //! those it writes (TASK-456.3). Its guest, finding its connection to the zygote's host reset by
 //! the restore, thaws and goes on as a booted one's does. A step's `boot_p99_ms` is then its
-//! restores': a restore's start to its guest's word that it is ready, as the host hears it.
+//! restores': each its `/snapshot/load`, and its guest's reset found to its word that it is ready.
 
 use macros::{guest, host};
 
@@ -417,10 +417,9 @@ mod host {
     /// What one guest said.
     #[derive(Default)]
     struct Guest {
-        /// Its kernel's start to its first round done, in ms, once it said so.
+        /// Its kernel's start to its first round done, in ms, once it said so; a restored one's,
+        /// its restore's reset found to its first round done.
         ready_ms: Option<u64>,
-        /// When the host heard it was ready.
-        ready_at: Option<Instant>,
         /// When it last said anything.
         last: Option<Instant>,
         /// Why its reader stopped hearing it: it hung up, or said what is no line of its.
@@ -439,8 +438,7 @@ mod host {
                     heard.samples.push(micros);
                 } else if let Some(ms) = line.strip_prefix("ready uptime_ms=") {
                     let ms = ms.parse().map_err(|_| format!("it said {line:?}"))?;
-                    let guest = heard.vms.entry(vm).or_default();
-                    (guest.ready_ms, guest.ready_at) = (Some(ms), Some(Instant::now()));
+                    heard.vms.entry(vm).or_default().ready_ms = Some(ms);
                 } else if let Some(memory) = memory_of(&line) {
                     heard.vms.entry(vm).or_default().memory = Some(memory);
                 } else {
@@ -530,12 +528,12 @@ mod host {
     }
 
     /// A VM of the ramp, started: its name, its process, the socket its guest connects to, and,
-    /// restored, when its restore started, which its readiness is timed from.
+    /// restored, how long its restore took, its guest's readiness after it.
     struct Started {
         name: String,
         firecracker: Firecracker,
         listening: Listening,
-        restored: Option<Instant>,
+        restored: Option<Duration>,
     }
 
     impl Host<'_> {
@@ -599,7 +597,7 @@ mod host {
             let load = serde_json::json!({
                 "snapshot_path": zygote.snapshot,
                 "mem_backend": {
-                    "backend_type": "CellId",
+                    "backend_type": "Cell",
                     "backend_path": dir.join(format!("{name}-memory.root")),
                 },
                 "memory_cell": {
@@ -614,10 +612,11 @@ mod host {
                     { "id": "root", "path_on_host": dir.join(format!("{name}.root")) },
                 ],
             });
-            let restored = Instant::now();
+            let restoring = Instant::now();
             (firecracker.request("PUT", "/snapshot/load", &load))
                 .with_context(|| format!("restoring the zygote as {name}"))?;
-            Ok(Started { name, firecracker, listening, restored: Some(restored) })
+            let restored = Some(restoring.elapsed());
+            Ok(Started { name, firecracker, listening, restored })
         }
 
         /// Makes the zygote (the module's docs): boots it, and once its guest says it is frozen,
@@ -872,7 +871,7 @@ mod host {
                 let spawn_secs = spawned.elapsed().as_secs_f64();
                 let within = Duration::from_secs(settings.ready_secs);
                 let began: Vec<Instant> = booting.iter().map(|(began, _)| *began).collect();
-                let restored: Vec<Option<Instant>> =
+                let restored: Vec<Option<Duration>> =
                     booting.iter().map(|(_, started)| started.restored).collect();
                 for (at, (began, started)) in booting.into_iter().enumerate() {
                     let Started { name, mut firecracker, listening, .. } = started;
@@ -885,20 +884,16 @@ mod host {
                     cells.0.push(Cell { name, firecracker, to_guest });
                 }
                 let boots = loop {
-                    // A booted VM's kernel's start to its guest's word, as it says; a restored
-                    // one's restore's start to its guest's word, as the host heard it.
+                    // A booted VM's kernel's start to its first round done, as its guest says; a
+                    // restored one's restore, and its guest's reset found to its first round done.
                     let ready: Vec<Option<u64>> = {
                         let heard = heard.lock().unwrap();
                         (first..cells.0.len())
                             .zip(&restored)
                             .map(|(vm, restored)| {
-                                let guest = heard.vms.get(&vm)?;
-                                match restored {
-                                    Some(restored) => guest.ready_at.map(|at| {
-                                        at.saturating_duration_since(*restored).as_millis() as u64
-                                    }),
-                                    None => guest.ready_ms,
-                                }
+                                let said = heard.vms.get(&vm)?.ready_ms?;
+                                let restore = restored.map_or(0, |took| took.as_millis() as u64);
+                                Some(restore + said)
                             })
                             .collect()
                     };
@@ -1310,14 +1305,17 @@ mod guest {
     /// As the zygote (the module's docs): freezes the root, tells the host, and waits on the
     /// connection, which the zygote goes with; restored, a VM finds it reset, and thaws. Before a
     /// restore's reset no other connection is made: one made before it would be reset with it.
-    fn be_the_zygote() {
+    /// Returns when the reset was found.
+    fn be_the_zygote() -> Instant {
         use std::io::Read as _;
         freeze(FIFREEZE);
         let mut host = connect();
         host.write_all(b"frozen\n").expect("telling the host");
         let mut rest = Vec::new();
         let _ = host.read_to_end(&mut rest);
+        let restored = Instant::now();
         freeze(FITHAW);
+        restored
     }
 
     /// The connection to the host, on [`PORT`].
@@ -1335,11 +1333,13 @@ mod guest {
             let mut probes = Probes::new();
             // The boot's working set: what the probes read, read once.
             probes.round(Duration::ZERO);
-            if self.zygote {
-                be_the_zygote();
-            }
+            // Restored, ready as soon as it thawed: its probes' working set read already.
+            let ready_ms = match self.zygote {
+                true => be_the_zygote().elapsed().as_millis() as u64,
+                false => uptime_ms(),
+            };
             let mut to_host = connect();
-            writeln!(to_host, "ready uptime_ms={}", uptime_ms()).expect("telling the host");
+            writeln!(to_host, "ready uptime_ms={ready_ms}").expect("telling the host");
             let memory = |to_host: &mut fs::File| {
                 writeln!(to_host, "memory {}", crate::measure::itself()).expect("telling the host")
             };
