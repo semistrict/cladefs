@@ -87,6 +87,20 @@ const CMDLINE: &str = "console=ttyS0 loglevel=5 reboot=k panic=-1 8250.nr_uarts=
      i8042.dumbkbd sysctl.kernel.hung_task_timeout_secs=10 softlockup_panic=1 panic_print=0x1 \
      sysctl.kernel.softlockup_all_cpu_backtrace=1 init=/guest-agent";
 
+/// cladefs: whether a VM has a balloon of nothing, its free page reporting on, so that the pages
+/// its guest frees go back to the host, as a sandbox idle after a build gives back what the build
+/// took (board 5649; the user's call: on by default). The guest reports free blocks of
+/// `page_reporting.page_reporting_order` (the kernel's pageblock order unless CLADEFS_GUEST_CMDLINE
+/// says another), and the VMM discards them. CLADEFS_GUEST_BALLOON=0 leaves it out: the baseline it
+/// is measured against.
+fn balloon() -> anyhow::Result<bool> {
+    match std::env::var("CLADEFS_GUEST_BALLOON").as_deref() {
+        Ok("1") | Err(_) => Ok(true),
+        Ok("0") => Ok(false),
+        Ok(other) => anyhow::bail!("CLADEFS_GUEST_BALLOON is 0, 1 or unset, not {other:?}"),
+    }
+}
+
 impl Vm {
     /// A VM of `cpus` vCPUs and `ram_mib` MiB of memory.
     pub fn new(cpus: u8, ram_mib: u32) -> anyhow::Result<Self> {
@@ -97,7 +111,7 @@ impl Vm {
             Ok(other) => anyhow::bail!("CLADEFS_GUEST_HUGE_PAGES is 2M or unset, not {other:?}"),
             Err(_) => "None",
         };
-        let config = serde_json::json!({
+        let mut config = serde_json::json!({
             "machine-config": {
                 "vcpu_count": cpus,
                 "mem_size_mib": ram_mib,
@@ -107,6 +121,14 @@ impl Vm {
             "pmem": [],
             "cladefs": [],
         });
+        if balloon()? {
+            config["balloon"] = serde_json::json!({
+                "amount_mib": 0,
+                "deflate_on_oom": true,
+                "stats_polling_interval_s": 0,
+                "free_page_reporting": true,
+            });
+        }
         Ok(Self {
             config,
             args: Vec::new(),
