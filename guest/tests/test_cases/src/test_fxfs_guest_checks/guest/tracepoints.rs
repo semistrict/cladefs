@@ -367,11 +367,11 @@ pub(super) fn test_tracepoints(dax: bool) {
         "{private:?} isn't in what the load mapped, {mapped:x?}"
     );
     let id = private.number("id");
-    let private_end =
-        next(mapped_write, &mut at, "the PRIVATE's end", |e| e.name == "cladefs_window_private_end");
+    let private_end = next(mapped_write, &mut at, "the PRIVATE's end", |e| {
+        e.name == "cladefs_window_private_end"
+    });
     assert_eq!((private_end.number("id"), private_end.number("err")), (id, 0), "{private_end:?}");
-    let end =
-        next(mapped_write, &mut at, "the fault's end", |e| e.name == "cladefs_dax_fault_end");
+    let end = next(mapped_write, &mut at, "the fault's end", |e| e.name == "cladefs_dax_fault_end");
     assert!(ino_is(end) && end.number("pgoff") == 2, "{end:?}");
     assert_eq!(end.number("ret") & VM_FAULT_ERROR, 0, "the write's fault failed: {end:?}");
 

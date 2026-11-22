@@ -500,7 +500,8 @@ pub(super) fn test_rebind_against_loads_and_writes() {
         let exited = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
         assert!(exited, "{who}: {status:#x}");
     }
-    let fds = [from_loader, loader_says, loader_hears, to_loader, from_mapped_writer, mapped_writer_says];
+    let fds =
+        [from_loader, loader_says, loader_hears, to_loader, from_mapped_writer, mapped_writer_says];
     for fd in fds {
         unsafe { libc::close(fd) };
     }

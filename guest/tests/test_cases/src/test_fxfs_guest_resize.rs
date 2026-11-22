@@ -45,7 +45,11 @@ mod host {
 
     /// Resizes the cell at `cell_dir` through the daemon at `cladefsd` as the guest asks, at each
     /// step, on the connection `listener` takes, and answers with the outcome.
-    fn resize_steps(listener: UnixListener, cell_dir: &Path, cladefsd: &Path) -> std::io::Result<()> {
+    fn resize_steps(
+        listener: UnixListener,
+        cell_dir: &Path,
+        cladefsd: &Path,
+    ) -> std::io::Result<()> {
         let (stream, _) = listener.accept()?;
         let mut answers = stream.try_clone()?;
         let mut asked = BufReader::new(stream).lines();
