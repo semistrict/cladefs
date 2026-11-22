@@ -236,6 +236,15 @@ Models make tests and code agree by weakening the tests, and approve their own w
   the `verifying-reviewer` agent (`.claude/agents/`), and Codex through
   `scripts/review-change.sh`, given the same instructions. Both report only; a finding counts once
   its reproducer is written and red.
+- **Record every review in hotbed (`hotbed review`).** Before running any reviewer (load-bearing
+  dual reviews, `code-review`, `autoreview`, or ad-hoc agent reviews), request a pinned review in
+  hotbed (`hotbed review request`, which pins the exact `base` and `head`/dirty snapshot), have
+  each reviewer record `hotbed review start <id>` → `hotbed review findings <id>` → `hotbed review
+  finish <id>` (or `fail`), record `hotbed review accept`/`dismiss` for every finding as you act
+  on it, and include `hotbed review link <id>` when handing off. For network-isolated read-only
+  reviewers (such as `codex exec --sandbox read-only` or a read-only `research` subagent), the
+  reviewer emits a ```` ```json hotbed-findings ```` block and the caller (or
+  `scripts/review-change.sh`) records it into hotbed on the reviewer's behalf.
 
 ## Every bug exposes a blind spot: close it, then look around it
 
