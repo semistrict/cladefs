@@ -2516,7 +2516,13 @@ fn payloads_of_kinds_that_carry_none_end_their_connections() {
         said.len = MAX_PAYLOAD;
         let mut sent = &stream;
         std::io::Write::write_all(&mut sent, zerocopy::IntoBytes::as_bytes(&said)).unwrap();
-        std::io::Write::write_all(&mut sent, &[7; 4096]).unwrap();
+        // The daemon may end the connection on the header alone, before the payload is sent: what
+        // is checked, so a payload refused so is no failure (board 7053).
+        match std::io::Write::write_all(&mut sent, &[7; 4096]) {
+            Ok(()) => {}
+            Err(err) if super::shut(&err) => {}
+            Err(err) => panic!("sending the payload: {err}"),
+        }
         super::assert_let_go(&sender, &stream, WAIT);
     }
 }
