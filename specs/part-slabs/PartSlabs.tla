@@ -68,6 +68,11 @@
 (*   MAP or UNMAP ends one. The daemon no longer knows which pages are     *)
 (*   private: it sends evicts for every page it staged the slab at.        *)
 (*   Without it, an eviction drops the guest's write (NoLostWrite).        *)
+(* - mapsKeepPrivate (NoMapsKeepPrivate): a map leaves a private page too. *)
+(*   A fault installs the rest of its part with it, at the pages the       *)
+(*   daemon's ptes stage nothing at, which after an evict a private page   *)
+(*   is. Without it, the page-in after an eviction maps over the guest's   *)
+(*   write (NoLostWrite).                                                  *)
 (* - registerOnce (NoRegisterOnce): a part registers a window once,        *)
 (*   however often the guest MAPs it over its own range. Without it, every *)
 (*   such MAP adds an entry (TASK-602, board 2600) (WindowsOnce).          *)
@@ -79,6 +84,8 @@
 (* the daemon's answer at once (it maps what the window names when it      *)
 (* answers, its map after any unmap sent before, in order); a page-in      *)
 (* fills a slab in one step; a VM process's copy reads the slab's bytes    *)
+(* (a refill with another part's bytes is a punch here: one part an arena, *)
+(* the punch's zeros stand for any bytes but the part's)                   *)
 (* through its arena's memory object, a step (two without copyUnderLock).  *)
 (* Not modelled: the guest's own protocol of private pages (dirty sets,    *)
 (* writeback, rebinding), specs/dax-cow's; pages installed lazily, as      *)
@@ -101,7 +108,7 @@ CONSTANTS
     Rules           \* the protocol's rules in force (all, but in a mutation)
 
 AllRules == {"ownTokens", "waitsForStaged", "scopedWaits", "killBeforeLetGo", "copyUnderLock",
-             "evictionKeepsPrivate", "registerOnce", "watchdog"}
+             "evictionKeepsPrivate", "mapsKeepPrivate", "registerOnce", "watchdog"}
 AllCan == {"zeros", "freeze", "punch"}
 
 ASSUME Rules \subseteq AllRules
@@ -177,7 +184,7 @@ Send(v, op) ==
     /\ q' = [q EXCEPT ![v] = Append(@, [op EXCEPT !.id = sent[v] + 1])]
     /\ sent' = [sent EXCEPT ![v] = @ + 1]
 
-Op(kind, o, s, p) == [op |-> kind, o |-> o, s |-> s, p |-> p, id |-> 0]
+Op(kind, o, s, p) == [op |-> kind, o |-> o, os |-> {o}, s |-> s, p |-> p, id |-> 0]
 
 \* Whom the quarantine of slab s waits for: the VM processes it was staged to (waitsForStaged,
 \* scopedWaits); without scopedWaits, every one, as cladefsd's PEERS; without waitsForStaged,
@@ -212,20 +219,25 @@ MapReq(v, o, x) ==
        /\ UNCHANGED <<owner, held, slot, staged, quar, ev, vmVars, writes, evictions, freezes>>
 
 \* A fault on page o, where v has nothing: the part the window names there, in memory, staged: its
-\* slab mapped there; or zeros, the shared zeros page's, which is never evicted, no slab here.
+\* slab mapped there, and at every other page of v's window naming the part and staged nothing
+\* (the install of the rest of the part, `Window::resolve`'s fault-around), one map; or zeros, the
+\* shared zeros page's, which is never evicted, no slab here. The daemon stages a page its `ptes`
+\* say nothing is at, which a page private in the VM process may be: it knows of none.
 Fault(v, o) ==
-    LET p == win[v][o] IN
-    /\ vst[v] = "running" /\ inst[v][o].k = "none" /\ pte[v][o] = None /\ cp[v] = Nothing
-    /\ IF p = Zero THEN
-          /\ Send(v, Op("map", o, None, Zero))
-          /\ pte' = [pte EXCEPT ![v][o] = Zero]
-          /\ UNCHANGED staged
-       ELSE
-          /\ p \in Parts /\ slot[p].st = "present"
-          /\ Send(v, Op("map", o, slot[p].s, p))
-          /\ pte' = [pte EXCEPT ![v][o] = slot[p].s]
-          /\ staged' = [staged EXCEPT ![slot[p].s] = @ \cup {v}]
-    /\ UNCHANGED <<owner, held, slot, regs, quar, ev, win, vmVars, countVars>>
+    LET p == win[v][o]
+        around == {o2 \in Offsets : win[v][o2] = p /\ pte[v][o2] = None}
+    IN /\ vst[v] = "running" /\ inst[v][o].k = "none" /\ pte[v][o] = None /\ cp[v] = Nothing
+       /\ IF p = Zero THEN
+             /\ Send(v, Op("map", o, None, Zero))
+             /\ pte' = [pte EXCEPT ![v][o] = Zero]
+             /\ UNCHANGED staged
+          ELSE
+             /\ p \in Parts /\ slot[p].st = "present"
+             /\ Send(v, [Op("map", o, slot[p].s, p) EXCEPT !.os = around])
+             /\ pte' = [pte EXCEPT ![v] = [o2 \in Offsets |-> IF o2 \in around THEN slot[p].s
+                                                             ELSE pte[v][o2]]]
+             /\ staged' = [staged EXCEPT ![slot[p].s] = @ \cup {v}]
+       /\ UNCHANGED <<owner, held, slot, regs, quar, ev, win, vmVars, countVars>>
 
 \* A page-in of p, which a window names: its slab, free, filled, its slot's.
 Fill(p) ==
@@ -238,8 +250,9 @@ Fill(p) ==
     /\ staged' = [staged EXCEPT ![s] = {}]
     /\ UNCHANGED <<regs, quar, ev, winVars, vmVars, countVars>>
 
-\* Eviction thread e takes p's slab with a token of its own: every window page staged it to be
-\* sent an evict.
+\* Eviction thread e takes p's slab with a token of its own: every page staged it, of each window
+\* on the part's list (the code's `windows`, whose `unmap_pages_of` finds the pages), to be sent an
+\* evict.
 EvStart(e, p) ==
     LET s == slot[p].s IN
     /\ ev[e] = Idle /\ evictions < MaxEvictions
@@ -247,7 +260,8 @@ EvStart(e, p) ==
     /\ slot' = [slot EXCEPT ![p] = [st |-> "evicting", s |-> s, e |-> e]]
     /\ owner' = [owner EXCEPT ![s] = [k |-> "token", e |-> e]]
     /\ ev' = [ev EXCEPT ![e] = [pc |-> "unmap", s |-> s, p |-> p,
-                                todo |-> {vo \in VMs \X Offsets : pte[vo[1]][vo[2]] = s}]]
+                                todo |-> {vo \in VMs \X Offsets : regs[p][vo[1]] > 0
+                                                                  /\ pte[vo[1]][vo[2]] = s}]]
     /\ evictions' = evictions + 1
     /\ UNCHANGED <<held, staged, regs, quar, winVars, vmVars, maps, writes, freezes>>
 
@@ -318,7 +332,7 @@ LetGo(v) ==
 (* The VM processes. *)
 
 \* Makes the next operation it was sent, and acknowledges it: a map stages the slab, as the part,
-\* or zeros;
+\* or zeros, but where a page is private (mapsKeepPrivate);
 \* an unmap (a guest's MAP or UNMAP) ends what is there, a private page and its writes too; an
 \* evict takes the slab away, but a private page stays (evictionKeepsPrivate).
 Receive(v) ==
@@ -326,8 +340,12 @@ Receive(v) ==
         o == m.o
     IN /\ vst[v] = "running" /\ q[v] # <<>>
        /\ CASE m.op = "map" ->
-                 /\ inst' = [inst EXCEPT ![v][o] = IF m.p = Zero THEN [k |-> "zeros"]
-                                                  ELSE [k |-> "slab", s |-> m.s, p |-> m.p]]
+                 /\ inst' = [inst EXCEPT ![v] = [o2 \in Offsets |->
+                                IF o2 \notin m.os THEN inst[v][o2]
+                                ELSE IF inst[v][o2].k = "priv" /\ R("mapsKeepPrivate")
+                                     THEN inst[v][o2]
+                                ELSE IF m.p = Zero THEN [k |-> "zeros"]
+                                ELSE [k |-> "slab", s |-> m.s, p |-> m.p]]]
                  /\ UNCHANGED wrote
             [] m.op = "unmap" ->
                  /\ inst' = [inst EXCEPT ![v][o] = Nothing]
@@ -453,7 +471,8 @@ NoLostWrite ==
     \A v \in VMs, o \in Offsets :
         wrote[v][o] # 0 => inst[v][o].k = "priv" /\ inst[v][o].w = wrote[v][o]
 
-\* A VM process maps slabs of the arenas it holds alone: its tenant's, and the default.
+\* A VM process maps slabs of the arenas it holds alone: its tenant's, and the default. Holds by
+\* construction here (a window names only what its VM process holds), kept as a check.
 ArenasHeld ==
     \A v \in VMs, o \in Offsets :
         inst[v][o].k = "slab" => SlabArena(inst[v][o].s) \in Holds(v)

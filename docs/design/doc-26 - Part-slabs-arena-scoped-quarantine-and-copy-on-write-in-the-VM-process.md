@@ -21,7 +21,7 @@ Three pieces of the extent daemon's memory path do much more work than the data 
 **1. A 4 KiB page allocator under a 1 MiB cache.** The extent cache (`crates/cladefs/src/cache.rs`)
 brings in and evicts whole parts (`extent_frame::PART`, 1 MiB). It still breaks each part into
 256 `physmem::Page`s, from `physmem::alloc_run(self.arena, count, physmem::Wait::Yes)`, a slot
-each (`enum Slot { Absent, Filling, Present(physmem::Page), Evicting(physmem::Page), Failed }`).
+each (`enum Slot`: `Present(physmem::Page),`, `Evicting(physmem::Page),`).
 Behind that is `crates/physmem`, 3,543 lines ported from the Zircon kernel's PMM:
 - per-page `Frames`;
 - a buddy allocator (`pub(crate) struct FreeBlocks`), there to keep runs whole for the VM process's
@@ -123,7 +123,10 @@ grown with `ftruncate` and never shrunk, which costs no memory. The arena holds:
 - `free: BTreeSet<u32>`, the free slots, taken lowest first so that the object stays compact;
 - `spares: SmallVec<[u32; 2]>`, populated slots kept ready;
 - `smalls`: the small slabs with room, by their largest free run;
-- `staged: Vec<StagedTo>`, per slot, the peers it was staged to (Quarantine, below);
+- `staged`: per allocated run (a whole slab's, or a small slab's run, keyed by slot and first
+  page), the peers it was staged to (Quarantine, below), emptied as the run is allocated. Not per
+  slot: a small slab holds several parts' runs, and a run allocated in it must not forget the
+  peers another of its runs was staged to;
 - `cap: Option<u64>` in slabs, as `set_arena_cap` has it in chunks now.
 
 The total cap and the arenas' relief stay where they are: `Starved::{Arena, Total, Removed}`,
@@ -191,7 +194,8 @@ memory.
    PartSlot::Evicting(token))`. The slab moves into `Eviction { slab, token }` on this thread's
    stack. Faults on the part wait (`Filling | Evicting` wait, as now).
 2. Without the lock: each window in the part's window set sends an evict of every page it staged
-   the slab at (`STAGE_UNMAP | STAGE_KEEP_PRIVATE`).
+   the slab at (`STAGE_UNMAP | STAGE_KEEP_PRIVATE`). The spec's eviction finds its pages through
+   the part's window list too, as `unmap_pages_of` does.
 3. Under the lock again: the slot is `Evicting(token)` with this thread's token, so it becomes
    `Absent`. Then `drop(eviction.slab)`, which quarantines it (below).
 
@@ -240,8 +244,8 @@ process's run budget still follows `vm.max_map_count`, as it does today.
 
 A run was mapped into a VM process if, and only if, its window was sent a `STAGE_MAP` naming it.
 `Window::present` and `map_run` send it under the window's lock. At that point the window adds
-its peer to the run's slab entry in `staged` (`StagedTo`, a `SmallVec<[PeerId; 4]>` behind the
-arena's lock, set-like). This replaces `frame.mark_staged()`.
+its peer to the run's entry in `staged` (`StagedTo`, a `SmallVec<[PeerId; 4]>` behind the
+arena's lock, set-like), the run's own, not its slab's. This replaces `frame.mark_staged()`.
 
 Freeing a `PartSlab` whose `staged` is not empty creates `Quarantined { slab, waits }` with
 `waits = { (peer, peer.acks.sent()) : peer ∈ staged, peer alive }`, then parks it on each of those
@@ -325,7 +329,7 @@ rebuilt from 64 messages is now a loop over the range.
 
 | Operation | Sent when | A private page there |
 |---|---|---|
-| `STAGE_MAP` | the daemon stages a run at a page with nothing installed | stays. The daemon sends one per staging (its `ptes`, the spec's `pte`), and a page made private since asked nothing more, so a map arriving over one is a duplicate answer to two vCPUs' faults |
+| `STAGE_MAP` | the daemon stages a run at a page its `ptes` say nothing is at: the faulting page, and the rest of the part with it (`Window::resolve`'s `install`) | stays (spec rule `mapsKeepPrivate`). After an evict left a private page, the daemon's `ptes` stage nothing there, so the next fault on another page of the part maps over it; the daemon cannot tell, the VM process can |
 | `STAGE_UNMAP` | a guest's `MAP`, `MAP_ZEROS` or `UNMAP` over the page | ends it, as the guest replaced what it wrote (rebind, punch, truncate) |
 | `STAGE_UNMAP \| STAGE_KEEP_PRIVATE` | an eviction, a free's zeros (`Private::Keep` today), any host change | stays; only a staged mapping there goes |
 | `STAGE_MAPPED` | the window names pages anew | stays named; the page's new name is used when the guest next maps over it |
@@ -384,6 +388,18 @@ population on a request's path).
 - `lazy-restore-of-window-mappings.md`, `populate-chunks-in-one-madvise.md`,
   `idle-chunk-cache.md`: honoured above (eager restore; spares populated off the path).
 
+### Windows in the daemon's own process
+
+Tests and `pagein-bench` make windows in the calling process (`create_dax_window(…, None)`,
+`Translation::Host`), about 40 of `open_cell`'s tests among them. Their `map_run` maps the arena
+into the process already (`crate::pages::arena_memory(location.arena)`), as a VM process does, so
+Decision 2 leaves it as it is. Their copy on write read the daemon's physmap
+(`Held::Bytes(unsafe { std::slice::from_raw_parts(frame.as_ptr(), ps) }…)`); with no physmap,
+and with `Window::copy` gone, an in-process window copies as the VM process does: the same
+function (`pread` of the arena at the page's location into the window's private memory, under the
+window's lock), called from the in-process translation rather than from `dax::uffd`. One copy path,
+so the tests run what VM processes run (the rule that tests run production layers).
+
 ## The spec: `specs/part-slabs`
 
 `PartSlabs.tla` models two tenants' VM processes (va, vb), their arenas (A, B) and the default
@@ -413,11 +429,16 @@ Invariants:
 | `killBeforeLetGo` | NoKillBeforeLetGo | waits let go of a frozen VM process that then thaws (`NoStaleInstall`) |
 | `copyUnderLock` | NoCopyUnderLock | an evict made, acknowledged and the slab punched between the look and the copy (`NoStaleCopy`) |
 | `evictionKeepsPrivate` | NoEvictionKeepsPrivate | an eviction ends a private page (`NoLostWrite`) |
+| `mapsKeepPrivate` | NoMapsKeepPrivate | the page-in after an eviction maps the rest of the part over a private page (`NoLostWrite`) |
 | `registerOnce` | NoRegisterOnce | TASK-602 (`WindowsOnce`) |
 | `watchdog` | NoWatchdog | a frozen VM process holds its slabs for good (`QuarantineDrains`) |
 
-Models: PartSlabs (453,468 states, 4 s), PartSlabsLive (85,724, 10 s), and PartSlabsWide, deep:
-two pages a window, three MAPs (99 million states, 15 min). specs/dax-cow keeps the guest's side
+Models: PartSlabs (453,468 states), PartSlabsAround (two pages a window, faults installing the
+rest of the part: 248,274), PartSlabsLive (85,724), and PartSlabsWide, deep (two pages a window,
+three MAPs, two evictors, freezes: 99 million states, about 15 minutes, before fault-around was
+added). One part an arena: a slab refilled with another part's bytes is modelled by the punch's
+zeros, which stand for any bytes but the part's. `ArenasHeld` and `PrivateWithinMax` hold by the
+model's construction and are kept as checks. specs/dax-cow keeps the guest's side
 (dirty sets, writeback, rebinding, install-as-named), which this spec takes as given.
 
 ## Failure modes
@@ -462,7 +483,9 @@ passing.
    the local copy under `pages`, `PRIVATE` served locally, `STAGE_KEEP_PRIVATE`, `wire::VERSION`
    bumped, the deletions of Decision 5, the snapshot check in `Device::take_snapshot`, the zeros
    page's location in `OPEN`, and both arenas read-only. Tests: the dax Shuttle tests extended to
-   a fault racing an evict of the page it copies (`copyUnderLock`'s class), and the hostile
+   a fault racing an evict of the page it copies (`copyUnderLock`'s class), a page-in after an
+   eviction installing the rest of a part over a private page (`mapsKeepPrivate`'s), in-process
+   windows copying through the same function, and the hostile
    proptest's `PRIVATE` storms against the VM process's bound. Needs 2 (eviction's evicts).
 5. **Measure.** The nightly's `bench-fs-fxfs-guest-dax`, and fork-cold and fork-warm, A/B against
    the commit before step 1. Expected: fewer VM-process mappings and stage maps per MiB, no copy

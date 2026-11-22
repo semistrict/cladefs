@@ -173,7 +173,8 @@ At each checkpoint round, the candidates are the segments of the cell's own pref
 Candidates are taken most dead bytes first, until the round's budget is spent:
 - copied bytes ≤ bytes uploaded since the last round (write amplification ≤ 1);
 - ≤ `UPLOAD_BYTES / 4` in flight, so 128 MiB of the 512 MiB upload memory;
-- the fetches' memory is the fetcher's, under the governor (`HeldParts`, TASK-433);
+- the fetches' memory is the fetcher's, under the governor (TASK-433; whatever board 6029 leaves
+  of `HeldParts`);
 - the open segment's bytes are the cell's footprint. The disk governor admits a relocation only
   while the host disk has spare, never against the reserve: a relocation is optional, and a disk
   short of spare skips it (`dead-ends/enospc-on-dead-space.md`: never refuse a commit that frees
@@ -190,9 +191,18 @@ Nothing, at once. It is still named, read or kept by:
 
 Once neither holds, the next collector pass deletes it, as it deletes any segment no state reads
 (spec: ReachesRelocatedFreed reaches exactly this). A reader holding the old location from before
-the acknowledgement (the writer's own fetch in flight) may find the object gone. It reads the
-extent's location again from the writer's state, or the head again, as doc-7's "a reader that
-finds something its head named gone reads the head again" already says.
+the acknowledgement (the writer's own fetch in flight) may find the object gone, and must read the
+extent's location again. Today nothing does: a page-in reads the location once
+(`StoredExtent::read` → `local.read(id, …)` → `BucketData { location }` →
+`fetcher.read(id, data.location.clone(), …)`), and the collector's moves and its 60 s grace were
+what saved a fetch in flight. So step 1 adds the re-read: a fetch that finds its object gone
+(`Error::Lost`) reads the extent's location again from its cell's state, and fetches again if it
+changed. It changes only by an acknowledgement, which comes before any deletion of the old
+object, so an unchanged location means a real loss, reported as today. On another host, a peer's
+`GetPart` of the old key answers not found, and the asking host's fetcher re-reads the same way.
+The spec judges states, not fetches in flight, so the simulation checks this instead (step 1's
+tests). doc-7's "a reader that finds something its head named gone reads the head again" is
+recovery's rule, not a fetch's.
 
 ### Cells nobody writes, and versions already made
 
@@ -376,7 +386,7 @@ from the protocol (the commit's `Weakens-tests:` line says so).
 - **Board 6023** (`RoutedBucket<B>`) moves `Rewrites`' spacing per routed member. Step 4 keeps
   it where 6023 puts it.
 
-No step of this doc lands before 6017, 6020 and 6023.
+Steps 1 to 3 land after 6017, step 4 after 6020 and 6023.
 
 ## Order of work
 
@@ -389,8 +399,11 @@ simulations and `make check-tla` passing.
    simulation's collector keeps everything a recovery needs with relocations on (its
    `NothingNeededGone` oracle); a sim property that a cell freeing and writing at random stays
    under 2x space; and a bucket's bytes over a run of `bench-fs-fxfs-guest-dax` stay within the
-   bound. The collector still compacts too until step 2: both are safe together, as moves of a
-   relocated-from object are only ever named by states that read it.
+   bound; a page-in's fetch stalled across a relocation, a checkpoint naming it and a collector
+   pass re-reads its location and succeeds (a simulation fault). Fetches re-read a location found
+   gone. `Checkpoint::lengths` bumps the bucket FORMAT here. Step 1 also turns the collector's
+   compaction off (`compact_below` 0 by default), so that relocations and moves never run
+   together, a combination no spec checks; step 2 deletes it.
 2. **Moves go** (`collector.rs`, `moves.rs`, `fetch.rs`, `writer.rs`, `mirror.rs`, `local_cell`'s
    follow, `layout.rs`, rules, FORMAT bumped). Deleting their tests needs the user's OK
    (`OPEN_QUESTIONS.md`). Needs 1, and board 6017.
