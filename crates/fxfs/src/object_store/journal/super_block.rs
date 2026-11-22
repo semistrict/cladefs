@@ -305,14 +305,17 @@ impl Default for SuperBlockMetrics {
 
 /// Reads an individual (A/B) super-block instance and root_parent_store from device.
 /// Users should use SuperBlockManager::load() instead.
+/// cladefs: returns `Box<ObjectStore>` so `load` stays within 16 KiB guest kernel stacks
+/// (TASK-26.9).
 async fn read(
     device: Arc<dyn Device>,
     block_size: BlockSize,
     instance: SuperBlockInstance,
-) -> Result<(SuperBlockHeader, SuperBlockInstance, ObjectStore), Error> {
-    let (super_block_header, mut reader) = SuperBlockHeader::read_header(device.clone(), instance)
-        .await
-        .context("failed to read superblock")?;
+) -> Result<(SuperBlockHeader, SuperBlockInstance, Box<ObjectStore>), Error> {
+    let (super_block_header, mut reader) =
+        crate::boxed(|| SuperBlockHeader::read_header(device.clone(), instance))
+            .await
+            .context("failed to read superblock")?;
     let root_parent = ObjectStore::new_root_parent(
         device,
         block_size,
@@ -364,16 +367,19 @@ async fn write<S: HandleOwner>(
     //   Journal:     (Ver, JournalRecord(Ver)*, RESET, Ver2, JournalRecord(Ver2)*, ...)
     // We should abstract away the checksum code and implement these separately.
 
-    let mut writer =
+    // cladefs: box super-block writer stages in non-inlined frames to fit 16 KiB guest kernel
+    // stacks (TASK-26.9).
+    let mut writer = crate::boxed(|| {
         SuperBlockWriter::new(handle, super_block_header, object_manager.metadata_reservation())
-            .await?;
+    })
+    .await?;
     let mut merger = items.merger();
     let mut iter = LSMTree::major_iter(merger.query(Query::FullScan).await?).await?;
     while let Some(item) = iter.get() {
-        writer.write_root_parent_item(item.cloned()).await?;
+        crate::boxed(|| writer.write_root_parent_item(item.cloned())).await?;
         iter.advance().await?;
     }
-    writer.finalize().await
+    crate::boxed(|| writer.finalize()).await
 }
 
 // Compacts and returns the *old* snapshot of the root_parent store.
@@ -450,17 +456,21 @@ impl SuperBlockManager {
         &self,
         device: Arc<dyn Device>,
         block_size: BlockSize,
-    ) -> Result<(SuperBlockHeader, ObjectStore), Error> {
+    ) -> Result<(SuperBlockHeader, Box<ObjectStore>), Error> {
         // Superblocks consume a minimum of one block. We currently hard code the length of
         // this first extent. It should work with larger block sizes, but has not been tested.
         // TODO(https://fxbug.dev/42063349): Consider relaxing this.
         debug_assert!(MIN_SUPER_BLOCK_SIZE == block_size);
 
         *self.root.lock().await = Root::read(&*device).await?;
-        let (super_block, current_super_block, root_parent) = match futures::join!(
-            read(device.clone(), block_size, SuperBlockInstance::A),
-            read(device.clone(), block_size, SuperBlockInstance::B)
-        ) {
+        // cladefs: read A and B sequentially on fresh task stacks rather than `futures::join!` so
+        // two `read` futures and two `ObjectStore`s are never live on 16 KiB guest kernel stacks
+        // together (TASK-26.9).
+        let dev_a = device.clone();
+        let a = crate::offload(move || read(dev_a, block_size, SuperBlockInstance::A)).await;
+        let dev_b = device.clone();
+        let b = crate::offload(move || read(dev_b, block_size, SuperBlockInstance::B)).await;
+        let (super_block, current_super_block, root_parent) = match (a, b) {
             // cladefs: the first's error, whose kind it keeps (`FxfsError::InvalidVersion` for a
             // filesystem of another version), with the second's.
             (Err(e1), Err(e2)) => {
@@ -494,21 +504,30 @@ impl SuperBlockManager {
     ) -> Result<(), Error> {
         let root_store = filesystem.root_store();
         let instance = *self.next_instance.lock();
-        let handle = ObjectStore::open_object(
-            &root_store,
-            instance.object_id(),
-            HandleOptions { skip_journal_checks: true, ..Default::default() },
-            None,
-        )
+        // cladefs: box save stages in non-inlined frames to fit 16 KiB guest kernel stacks
+        // (TASK-26.9).
+        let handle = crate::boxed(|| {
+            ObjectStore::open_object(
+                &root_store,
+                instance.object_id(),
+                HandleOptions { skip_journal_checks: true, ..Default::default() },
+                None,
+            )
+        })
         .await
         .context("Failed to open superblock object")?;
-        let first_extent = write(&super_block_header, root_parent, handle).await?;
+        let header = super_block_header.clone();
+        let first_extent =
+            crate::offload(move || async move { write(&header, root_parent, handle).await })
+                .await?;
         // The root names the new super-block once it is written.
         let device = filesystem.device();
-        self.set_root(
-            |root| root.set_first_extent(instance, first_extent),
-            async |root| device.commit_root(&root).await.map(|()| true),
-        )
+        crate::boxed(|| {
+            self.set_root(
+                |root| root.set_first_extent(instance, first_extent),
+                async |root| device.commit_root(&root).await.map(|()| true),
+            )
+        })
         .await
         .context("Failed to commit the root")?;
         *self.next_instance.lock() = instance.next();
@@ -702,8 +721,9 @@ impl<'a, S: HandleOwner> SuperBlockWriter<'a, S> {
     ) -> Result<Self, Error> {
         // cladefs: the super-block is written to new extents, as extents are written once, and the
         // extents it was written to before are freed, giving the space back to `reservation`.
-        handle
-            .truncate_with_options(
+        // Box `truncate_with_options` in a non-inlined frame to fit 16 KiB stacks (TASK-26.9).
+        crate::boxed(|| {
+            handle.truncate_with_options(
                 Options {
                     skip_journal_checks: true,
                     borrow_metadata_space: true,
@@ -712,7 +732,8 @@ impl<'a, S: HandleOwner> SuperBlockWriter<'a, S> {
                 },
                 0,
             )
-            .await?;
+        })
+        .await?;
         let mut this = Self {
             handle,
             writer: JournalWriter::new(BLOCK_SIZE, 0),
@@ -733,25 +754,26 @@ impl<'a, S: HandleOwner> SuperBlockWriter<'a, S> {
             + 2 * DEFAULT_MAX_SERIALIZED_RECORD_SIZE;
         if min_len > self.size {
             // Need to allocate some more space.
-            let mut transaction = self
-                .handle
-                .new_transaction_with_options(Options {
+            // cladefs: box allocation stages in non-inlined frames to fit 16 KiB stacks
+            // (TASK-26.9).
+            let mut transaction = crate::boxed(|| {
+                self.handle.new_transaction_with_options(Options {
                     skip_journal_checks: true,
                     borrow_metadata_space: true,
                     allocator_reservation: Some(self.reservation),
                     ..Default::default()
                 })
-                .await?;
+            })
+            .await?;
             let mut file_range = self.size..self.size + SUPER_BLOCK_CHUNK_SIZE;
-            let allocated = self
-                .handle
-                .preallocate_range(&mut transaction, &mut file_range)
-                .await
-                .context("preallocate superblock")?;
+            let allocated =
+                crate::boxed(|| self.handle.preallocate_range(&mut transaction, &mut file_range))
+                    .await
+                    .context("preallocate superblock")?;
             if file_range.start < file_range.end {
                 bail!("preallocate_range returned too little space");
             }
-            transaction.commit().await?;
+            crate::boxed(|| transaction.commit()).await?;
             for device_range in allocated {
                 self.size += device_range.len();
                 self.first_extent.get_or_insert_with(|| device_range.clone());
@@ -769,11 +791,14 @@ impl<'a, S: HandleOwner> SuperBlockWriter<'a, S> {
         let first_extent = self.first_extent.clone().context("No root parent items")?;
         let mut buf = self.handle.allocate_buffer(self.writer.flushable_bytes()).await;
         let offset = self.writer.take_flushable(buf.as_mut());
-        self.handle.overwrite(offset, buf.as_mut(), OverwriteOptions::default()).await?;
+        // cladefs: box `overwrite` and `truncate_with_options` in non-inlined frames so
+        // `SuperBlockWriter::finalize` stays small on 16 KiB guest kernel stacks (TASK-26.9).
+        crate::boxed(|| self.handle.overwrite(offset, buf.as_mut(), OverwriteOptions::default()))
+            .await?;
         // The space allocated past what was written is freed.
         let len = self.writer.journal_file_checkpoint().file_offset;
-        self.handle
-            .truncate_with_options(
+        crate::boxed(|| {
+            self.handle.truncate_with_options(
                 Options {
                     skip_journal_checks: true,
                     borrow_metadata_space: true,
@@ -781,7 +806,8 @@ impl<'a, S: HandleOwner> SuperBlockWriter<'a, S> {
                 },
                 len,
             )
-            .await?;
+        })
+        .await?;
         Ok(first_extent)
     }
 }

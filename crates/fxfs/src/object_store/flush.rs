@@ -90,11 +90,13 @@ impl ObjectStore {
         }
 
         if matches!(&*self.lock_state.lock(), LockState::Locked) {
-            self.flush_locked().await.with_context(|| {
+            // cladefs: box flush stages in non-inlined frames to fit 16 KiB guest kernel stacks
+            // (TASK-26.9).
+            crate::boxed(|| self.flush_locked()).await.with_context(|| {
                 format!("Failed to flush object store {}", self.store_object_id)
             })?;
         } else {
-            self.flush_unlocked(reason).await.with_context(|| {
+            crate::boxed(|| self.flush_unlocked(reason)).await.with_context(|| {
                 format!("Failed to flush object store {}", self.store_object_id)
             })?;
         }
@@ -230,20 +232,26 @@ impl ObjectStore {
             _ => false,
         };
         let base_layers = new_store_info.base_layers.len();
-        let (layers_to_keep, old_layers) = tree::flush(
-            &self.tree,
-            writer,
-            matches!(reason, FlushReason::Journal(_))
-                .then(|| filesystem.journal().get_compaction_yielder()),
-            full_compaction,
-            base_layers,
-        )
+        // cladefs: box `tree::flush` and `layer_from_written_handle` in non-inlined frames so
+        // `flush_unlocked` fits in 16 KiB guest kernel stacks (TASK-26.9).
+        let (layers_to_keep, old_layers) = crate::boxed(|| {
+            tree::flush(
+                &self.tree,
+                writer,
+                matches!(reason, FlushReason::Journal(_))
+                    .then(|| filesystem.journal().get_compaction_yielder()),
+                full_compaction,
+                base_layers,
+            )
+        })
         .await
         .context("Failed to flush tree")?;
 
         // Finalise the compaction.
-        let mut new_layers =
-            vec![layer_from_written_handle(new_object_tree_layer, unwrapped_key, &kept).await?];
+        let mut new_layers = vec![
+            crate::boxed(|| layer_from_written_handle(new_object_tree_layer, unwrapped_key, &kept))
+                .await?,
+        ];
         new_layers.extend(layers_to_keep.iter().map(|l| (*l).clone()));
 
         // cladefs: those of the store's own, above its base layers.

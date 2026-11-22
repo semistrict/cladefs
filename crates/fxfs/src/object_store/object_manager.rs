@@ -770,10 +770,12 @@ impl ObjectManager {
         // As we iterate, keep track of the earliest version used by structs in these objects
         let mut earliest_version: Version = LATEST_VERSION;
         for (object_id, object) in objects {
-            let object_earliest_version = object
-                .flush(reason)
-                .await
-                .with_context(|| format!("Failed to flush oid {object_id}"))?;
+            // cladefs: offload each object's flush onto a fresh task stack so journal compaction
+            // stays well within 16 KiB guest kernel stacks (TASK-26.9).
+            let object_earliest_version =
+                crate::offload(move || async move { object.flush(reason).await })
+                    .await
+                    .with_context(|| format!("Failed to flush oid {object_id}"))?;
             if object_earliest_version < earliest_version {
                 earliest_version = object_earliest_version;
             }

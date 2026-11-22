@@ -157,7 +157,9 @@ impl Graveyard {
         // Wait and process reap requests.
         while let Some(message) = receiver.next().await {
             if self.batch_delay.is_none() {
-                self.process(message).await;
+                // cladefs: box large futures in non-inlined frames so spawning `reap_task` stays
+                // small on 16 KiB guest kernel stacks (TASK-26.9).
+                crate::boxed(|| self.process(message)).await;
                 continue;
             }
             // cladefs: the rest of the batch, its objects tombstoned many to a transaction, then a
@@ -170,7 +172,9 @@ impl Graveyard {
                     Err(TryRecvError::Empty) => break false,
                 }
             };
-            self.process_batch(batch).await;
+            // cladefs: box in a non-inlined frame to keep `reap_task` off 16 KiB stacks
+            // (TASK-26.9).
+            crate::boxed(|| self.process_batch(batch)).await;
             if closed {
                 return;
             }

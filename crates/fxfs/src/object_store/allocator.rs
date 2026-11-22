@@ -1625,6 +1625,12 @@ impl Allocator {
         Ok(())
     }
 
+    /// cladefs: whether dropped shared-extent allocations have unrecorded reaches that must be
+    /// journaled before a barrier seals them (TASK-213, board 6011).
+    pub fn has_unrecorded_reaches(&self) -> bool {
+        !self.inner.lock().unrecorded_reaches.is_empty()
+    }
+
     /// cladefs: records the ranges of shared extents alive that allocations which dropped took
     /// (`AllocatorMutation::Reach`), in transactions of their own: before a sync, whose barrier
     /// seals what was written there with nothing in the journal to say how far the extent reaches.
@@ -2122,8 +2128,10 @@ impl Allocator {
 
         let fs = self.filesystem.upgrade().unwrap();
         let mut flusher = Flusher::new(self, &fs).await;
-        let (new_layer_file, info) = flusher.start().await?;
-        flusher.finish(new_layer_file, info, reason).await
+        // cladefs: box `Flusher::start`/`finish` in non-inlined frames to keep `Allocator::flush`
+        // small on 16 KiB guest kernel stacks (TASK-26.9).
+        let (new_layer_file, info) = crate::boxed(|| flusher.start()).await?;
+        crate::boxed(|| flusher.finish(new_layer_file, info, reason)).await
     }
 }
 
@@ -2484,7 +2492,8 @@ impl<'a> Flusher<'a> {
             let block_size = layer_object_handle.block_size();
             let yielder = Some(self.fs.journal().get_compaction_yielder());
             // cladefs: only a compaction of all the layers leaves out removals, and the records of
-            // owners freed: the layers kept may hold records they hide.
+            // owners freed: the layers kept may hold records they hide. Box `compact_with_iterator`
+            // in both branches so `Flusher::finish` fits in 16 KiB guest kernel stacks (TASK-26.9).
             let bytes_written = if layers_to_keep.is_empty() {
                 let iter = filter_marked_for_deletion(
                     filter_tombstones(iter).await?,
@@ -2492,10 +2501,12 @@ impl<'a> Flusher<'a> {
                 )
                 .await?;
                 let iter = CoalescingIterator::new(iter).await?;
-                compact_with_iterator(iter, total_len, writer, block_size, yielder).await?
+                crate::boxed(|| compact_with_iterator(iter, total_len, writer, block_size, yielder))
+                    .await?
             } else {
                 let iter = CoalescingIterator::new(iter).await?;
-                compact_with_iterator(iter, total_len, writer, block_size, yielder).await?
+                crate::boxed(|| compact_with_iterator(iter, total_len, writer, block_size, yielder))
+                    .await?
             };
 
             self.allocator.tree.report_compaction_metrics(
@@ -2549,7 +2560,9 @@ impl<'a> Flusher<'a> {
         // cladefs: the layer written, with those kept, older, which the info names, and whose sizes
         // the reservation is for, as an object store's flush does.
         let layer_object_id = layer_object_handle.object_id();
-        let mut layers = vec![layer_from_handle(layer_object_handle, None).await?];
+        // cladefs: box `layer_from_handle` in a non-inlined frame to keep `Flusher::finish` small
+        // on 16 KiB guest kernel stacks (TASK-26.9).
+        let mut layers = vec![crate::boxed(|| layer_from_handle(layer_object_handle, None)).await?];
         layers.extend(layers_to_keep.iter().map(|layer| (*layer).clone()));
         info.layers = layers
             .iter()

@@ -607,7 +607,7 @@ impl Journal {
         &self,
         device: Arc<dyn Device>,
         block_size: BlockSize,
-    ) -> Result<(SuperBlockHeader, ObjectStore), Error> {
+    ) -> Result<(SuperBlockHeader, Box<ObjectStore>), Error> {
         self.super_block_manager.load(device, block_size).await
     }
 
@@ -732,10 +732,12 @@ impl Journal {
         Self::check_block_size(&filesystem)?;
         let block_size = filesystem.block_size();
 
+        // cladefs: box large replay stages in non-inlined frames to fit 16 KiB guest kernel stacks
+        // (TASK-26.9).
         let (super_block, root_parent) =
-            self.super_block_manager.load(filesystem.device(), block_size).await?;
+            crate::boxed(|| self.super_block_manager.load(filesystem.device(), block_size)).await?;
 
-        let root_parent = Arc::new(ObjectStore::attach_filesystem(root_parent, filesystem.clone()));
+        let root_parent = ObjectStore::attach_filesystem(root_parent, filesystem.clone());
 
         self.objects.set_root_parent_store(root_parent.clone());
         let allocator =
@@ -817,10 +819,11 @@ impl Journal {
         }
 
         let mut reader = JournalReader::new(handle, &super_block.journal_checkpoint);
-        let JournaledTransactions { mut transactions, device_flushed_offset, committed, .. } = self
-            .read_transactions(&mut reader, None, INVALID_OBJECT_ID)
-            .await
-            .context("Reading transactions for replay")?;
+        // cladefs: box in non-inlined frames to keep `Journal::replay`'s stack small (TASK-26.9).
+        let JournaledTransactions { mut transactions, device_flushed_offset, committed, .. } =
+            crate::boxed(|| self.read_transactions(&mut reader, None, INVALID_OBJECT_ID))
+                .await
+                .context("Reading transactions for replay")?;
 
         // Validate all the mutations.
         let mut checksum_list = ChecksumList::new(device_flushed_offset);
@@ -924,7 +927,14 @@ impl Journal {
         }
 
         // Now we can open the root store.
-        let root_store = ObjectStore::open(&root_parent, super_block.root_store_object_id, None)
+        // cladefs: offload deep replay stages onto fresh task stacks for 16 KiB stacks
+        // (TASK-26.9).
+        let rp = root_parent.clone();
+        let root_store_id = super_block.root_store_object_id;
+        let root_store =
+            crate::offload(
+                move || async move { ObjectStore::open(&rp, root_store_id, None).await },
+            )
             .await
             .context("Unable to open root store")?;
 
@@ -957,24 +967,28 @@ impl Journal {
         }
 
         // Now we can open the allocator.
-        allocator.open().await.context("Failed to open allocator")?;
+        let alloc = allocator.clone();
+        crate::offload(move || async move { alloc.open().await })
+            .await
+            .context("Failed to open allocator")?;
 
         // Now replay all other mutations.
         for JournaledTransaction { checkpoint, non_root_mutations, end_offset, .. } in transactions
         {
-            self.objects
-                .replay_mutations(
+            let context = ApplyContext { mode: ApplyMode::Replay, checkpoint };
+            crate::boxed(|| {
+                self.objects.replay_mutations(
                     non_root_mutations,
                     &journal_offsets,
-                    &ApplyContext { mode: ApplyMode::Replay, checkpoint },
+                    &context,
                     end_offset,
                 )
-                .await
-                .context("Failed to replay mutations")?;
+            })
+            .await
+            .context("Failed to replay mutations")?;
         }
 
-        allocator
-            .on_replay_complete(&discarded)
+        crate::boxed(|| allocator.on_replay_complete(&discarded))
             .await
             .context("Failed to complete replay for allocator")?;
 
@@ -1015,12 +1029,14 @@ impl Journal {
                      {journal_end} before a barrier"
                 )));
             }
-            let handle = ObjectStore::open_object(
-                &root_parent,
-                super_block.journal_object_id,
-                journal_handle_options(),
-                None,
-            )
+            let handle = crate::boxed(|| {
+                ObjectStore::open_object(
+                    &root_parent,
+                    super_block.journal_object_id,
+                    journal_handle_options(),
+                    None,
+                )
+            })
             .await
             .with_context(|| {
                 format!(
@@ -1052,8 +1068,9 @@ impl Journal {
             inner.output_reset_version = true;
         }
 
-        self.objects
-            .on_replay_complete()
+        // cladefs: offload onto a fresh task stack for 16 KiB stacks (TASK-26.9).
+        let objects = self.objects.clone();
+        crate::offload(move || async move { objects.on_replay_complete().await })
             .await
             .context("Failed to complete replay for object manager")?;
 
@@ -1404,7 +1421,9 @@ impl Journal {
             // Note: This should is the *filesystem* block size, not the device block size which
             // is currently always 4096 (https://fxbug.dev/42063349)
             let block_size = filesystem.block_size();
-            match self.read_superblocks(filesystem.device(), block_size).await {
+            // cladefs: box `read_superblocks` in a non-inlined frame so `init_empty` stays small
+            // on 16 KiB guest kernel stacks (TASK-26.9).
+            match crate::boxed(|| self.read_superblocks(filesystem.device(), block_size)).await {
                 Ok((super_block, _)) => {
                     log::info!(
                         "Found existing superblock with generation {}. Bumping by 1.",
@@ -1434,23 +1453,27 @@ impl Journal {
 
         let journal_handle;
         let root_store;
-        let mut transaction = root_parent
-            .new_transaction(
+        // cladefs: box init_empty stages in non-inlined frames to fit 16 KiB guest kernel stacks
+        // (TASK-26.9).
+        let mut transaction = crate::boxed(|| {
+            root_parent.new_transaction(
                 lock_keys![],
                 Options { skip_journal_checks: true, ..Default::default() },
             )
-            .await?;
-        root_store = root_parent
-            .new_child_store(
+        })
+        .await?;
+        root_store = crate::boxed(|| {
+            root_parent.new_child_store(
                 &mut transaction,
                 NewChildStoreOptions { object_id: INIT_ROOT_STORE_OBJECT_ID, ..Default::default() },
                 None,
             )
-            .await
-            .context("new_child_store")?;
+        })
+        .await
+        .context("new_child_store")?;
         self.objects.set_root_store(root_store.clone());
 
-        allocator.create(&mut transaction).await?;
+        crate::boxed(|| allocator.create(&mut transaction)).await?;
 
         // Create the super-block objects, which are empty until written (cladefs: to extents the
         // store's root names)...
@@ -1474,34 +1497,41 @@ impl Journal {
         root_store.update_last_object_id(SuperBlockInstance::B.object_id());
 
         // the journal object...
-        journal_handle = ObjectStore::create_object(
-            &root_parent,
-            &mut transaction,
-            journal_handle_options(),
-            None,
-        )
+        journal_handle = crate::boxed(|| {
+            ObjectStore::create_object(
+                &root_parent,
+                &mut transaction,
+                journal_handle_options(),
+                None,
+            )
+        })
         .await
         .context("create journal")?;
         if self.inner.lock().image_builder_mode.is_none() {
             let mut file_range = 0..CHUNK_SIZE;
-            journal_handle
-                .preallocate_range_in_extents_of(&mut transaction, &mut file_range, EXTENT_SIZE)
-                .await
-                .context("preallocate journal")?;
+            crate::boxed(|| {
+                journal_handle.preallocate_range_in_extents_of(
+                    &mut transaction,
+                    &mut file_range,
+                    EXTENT_SIZE,
+                )
+            })
+            .await
+            .context("preallocate journal")?;
             if file_range.start < file_range.end {
                 bail!("preallocate_range returned too little space");
             }
         }
 
         // Write the root store object info.
-        root_store.create(&mut transaction).await?;
+        crate::boxed(|| root_store.create(&mut transaction)).await?;
 
         // The root parent graveyard.
         root_parent.set_graveyard_directory_object_id(
-            Graveyard::create(&mut transaction, &root_parent).await?,
+            crate::boxed(|| Graveyard::create(&mut transaction, &root_parent)).await?,
         );
 
-        transaction.commit().await?;
+        crate::boxed(|| transaction.commit()).await?;
 
         self.inner.lock().super_block_header = SuperBlockHeader::new(
             current_generation,
@@ -1880,7 +1910,9 @@ impl Journal {
                 // (specs/journal, whose NoOffsetsAtPad finds it).
                 (journal_file_offsets, min_checkpoint) = self.objects.journal_file_offsets();
             }
-            self.flush_device(checkpoint.file_offset, false)
+            // cladefs: box `flush_device` and `save` in non-inlined frames so `write_super_block`
+            // fits in 16 KiB guest kernel stacks (TASK-26.9).
+            crate::boxed(|| self.flush_device(checkpoint.file_offset, false))
                 .await
                 .context("flush failed when writing superblock")?;
         }
@@ -1896,13 +1928,14 @@ impl Journal {
         new_super_block_header.journal_file_offsets = journal_file_offsets;
         new_super_block_header.borrowed_metadata_space = borrowed;
 
-        self.super_block_manager
-            .save(
+        crate::boxed(|| {
+            self.super_block_manager.save(
                 new_super_block_header.clone(),
                 self.objects.root_parent_store().filesystem(),
                 old_layers,
             )
-            .await?;
+        })
+        .await?;
         {
             let mut inner = self.inner.lock();
             let start = new_super_block_header.journal_checkpoint.file_offset;
@@ -2322,7 +2355,9 @@ impl Journal {
                             if now {
                                 flush_timer = None;
                                 inner.lazy_flush_armed = false;
-                                flush_fut = Some(Box::pin(self.flush(flushable)));
+                                // cladefs: box in non-inlined frames to keep `flush_task` small on
+                                // 16 KiB guest kernel stacks (TASK-26.9).
+                                flush_fut = Some(crate::boxed(|| self.flush(flushable)));
                             }
                         }
                     }
@@ -2347,7 +2382,7 @@ impl Journal {
                         && inner.image_builder_mode.is_none()
                         && self.should_compact(&inner, journal_bytes)
                     {
-                        compact_fut = Some(Box::pin(self.compact()));
+                        compact_fut = Some(crate::boxed(|| self.compact()));
                         inner.compaction_running = true;
                     }
                     inner.flush_waker = Some(ctx.waker().clone());
@@ -2395,8 +2430,26 @@ impl Journal {
         CompactionYielder::new(self)
     }
 
-    async fn flush(&self, amount: usize) -> Result<(), Error> {
+    async fn flush(&self, mut amount: usize) -> Result<(), Error> {
         let handle = self.handle.get().unwrap();
+        // cladefs: with `barriers_enabled`, even a lazy flush issues `PRE_BARRIER`, which seals
+        // open shared extents; record any dropped shared-extent reaches and seal them in this
+        // flush so crash recovery never undercounts extent size (TASK-213, board 6011).
+        let needs_reaches = {
+            let inner = self.inner.lock();
+            inner.needs_barrier && inner.barriers_enabled
+        } && self.objects.allocator().has_unrecorded_reaches();
+        let mut recorded_reaches = false;
+        if needs_reaches {
+            let allocator = self.objects.allocator();
+            crate::boxed(|| allocator.record_reaches()).await?;
+            {
+                let _guard = self.writer_mutex.lock();
+                self.pad_to_block()?;
+            }
+            amount = self.inner.lock().writer.flushable_bytes();
+            recorded_reaches = true;
+        }
         let mut buf = handle.allocate_buffer(amount).await;
         let (range, barrier_on_first_write, mut barrier_after_last_write) = {
             let mut inner = self.inner.lock();
@@ -2407,7 +2460,7 @@ impl Journal {
             inner.needs_barrier = false;
             // cladefs: as far as a sync flushing the device wants a barrier after.
             let range = offset..offset + buf.len() as u64;
-            let barrier_after = inner.position.wants_barrier_after(&range);
+            let barrier_after = inner.position.wants_barrier_after(&range) || recorded_reaches;
             (range, barrier_on_first_write, barrier_after)
         };
         let handle = self.handle.get().unwrap();
@@ -2417,36 +2470,41 @@ impl Journal {
             // cladefs: the barrier records how far the journal is written, in the root it sets
             // (`Root::journal_end`), unless a super-block yet to be written records the journal's
             // tail, which a replay from the last can't read.
-            let mut barrier = async |root: Option<&[u8]>| {
-                let options = OverwriteOptions {
-                    barrier_on_first_write,
-                    barrier_after_last_write: true,
-                    root,
-                    ..Default::default()
-                };
-                let Err(error) = handle.overwrite(range.start, buf.as_mut(), options).await else {
-                    return Ok(true);
-                };
-                // cladefs: the barrier failing, as a full store's commit does, fails the sync that
-                // wanted it (its flush of the device, which fails too), not the journal: written
-                // again without it. The blocks are still open: a commit that fails seals nothing.
-                warn!(error:?; "The barrier after a journal write failed");
-                let options = OverwriteOptions { barrier_on_first_write, ..Default::default() };
-                handle.overwrite(range.start, buf.as_mut(), options).await?;
-                Ok(false)
-            };
             barrier_after_last_write = if self.inner.lock().tail_unrecorded {
-                barrier(None).await?
+                crate::boxed(|| {
+                    Self::flush_with_barrier(
+                        handle,
+                        range.start,
+                        buf.as_mut(),
+                        barrier_on_first_write,
+                        None,
+                    )
+                })
+                .await?
             } else {
                 let written = range.end;
                 let manager = &self.super_block_manager;
                 let journal_end =
                     |root: &mut Root| root.journal_end = root.journal_end.max(written);
-                manager.set_root(journal_end, async |root| barrier(Some(&root)).await).await?
+                crate::boxed(|| {
+                    manager.set_root(journal_end, async |root| {
+                        Self::flush_with_barrier(
+                            handle,
+                            range.start,
+                            buf.as_mut(),
+                            barrier_on_first_write,
+                            Some(&root),
+                        )
+                        .await
+                    })
+                })
+                .await?
             };
         } else {
             let options = OverwriteOptions { barrier_on_first_write, ..Default::default() };
-            handle.overwrite(range.start, buf.as_mut(), options).await?;
+            // cladefs: box `overwrite` in a non-inlined frame to keep `Journal::flush` small on
+            // 16 KiB stacks (TASK-26.9).
+            crate::boxed(|| handle.overwrite(range.start, buf.as_mut(), options)).await?;
         }
 
         let mut inner = self.inner.lock();
@@ -2455,6 +2513,49 @@ impl Journal {
         }
         inner.position.flushed(range, barrier_after_last_write);
         Ok(())
+    }
+
+    /// cladefs: writes a journal buffer with `POST_BARRIER` (and optional `PRE_BARRIER` + `root`),
+    /// retrying without barriers only when `POST_BARRIER` failed after block 0 landed (board 6011,
+    /// TASK-26.9).
+    async fn flush_with_barrier(
+        handle: &DataObjectHandle<ObjectStore>,
+        start: u64,
+        mut buf: storage_device::buffer::MutableBufferRef<'_>,
+        barrier_on_first_write: bool,
+        root: Option<&[u8]>,
+    ) -> Result<bool, Error> {
+        let options = OverwriteOptions {
+            barrier_on_first_write,
+            barrier_after_last_write: true,
+            root,
+            ..Default::default()
+        };
+        let Err(error) = crate::boxed(|| handle.overwrite(start, buf.reborrow(), options)).await
+        else {
+            return Ok(true);
+        };
+        // cladefs: the barrier failing, as a full store's commit does, fails the sync that wanted
+        // it (its flush of the device, which fails too), not the journal: written again without it.
+        // The blocks are still open: a commit that fails seals nothing. With
+        // `barrier_on_first_write`, never resend `PRE_BARRIER` after block 0 landed (which would
+        // seal block 0 and fail `SealedExtent`), and never clear `PRE_BARRIER` unless block 0 is
+        // already on the device (proving `PRE_BARRIER` succeeded before `POST_BARRIER` failed;
+        // board 6011).
+        warn!(error:?; "The barrier after a journal write failed");
+        if barrier_on_first_write {
+            let first_len = (BLOCK_SIZE.get() as usize).min(buf.len());
+            let mut check = handle.allocate_buffer(first_len).await;
+            let pre_barrier_ran = handle.read_aligned(start, check.as_mut()).await.is_ok_and(|n| {
+                n == first_len && check.as_ref().to_vec() == buf.subslice(..first_len).to_vec()
+            });
+            if !pre_barrier_ran {
+                return Err(error);
+            }
+        }
+        let options = OverwriteOptions::default();
+        crate::boxed(|| handle.overwrite(start, buf, options)).await?;
+        Ok(false)
     }
 
     /// Whether the journal, holding `journal_bytes` not yet flushed to layer files, should compact:
@@ -2539,13 +2640,14 @@ impl Journal {
         if trace {
             info!("J: start compaction, force_major={force_major:?}");
         }
-        let earliest_version = self
-            .objects
-            .flush(FlushReason::Journal(force_major))
-            .await
-            .context("Failed to flush objects")?;
+        // cladefs: box large compaction stages in non-inlined frames so `compact` and `flush_task`
+        // stay small on 16 KiB guest kernel stacks (TASK-26.9).
+        let earliest_version =
+            crate::boxed(|| self.objects.flush(FlushReason::Journal(force_major)))
+                .await
+                .context("Failed to flush objects")?;
         self.inner.lock().super_block_header.earliest_version = earliest_version;
-        self.write_super_block().await.context("Failed to write superblock")?;
+        crate::boxed(|| self.write_super_block()).await.context("Failed to write superblock")?;
         if trace {
             info!("J: end compaction");
         }
@@ -2598,7 +2700,9 @@ impl Journal {
             inner.compaction_running = false;
             self.reclaim_event.notify(usize::MAX);
         }
-        self.compact().await
+        // cladefs: box `compact` in a non-inlined frame so `force_compact` stays small on 16 KiB
+        // guest kernel stacks (TASK-26.9).
+        crate::boxed(|| self.compact()).await
     }
 
     pub async fn stop_compactions(&self) {

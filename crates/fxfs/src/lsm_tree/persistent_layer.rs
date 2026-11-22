@@ -1392,7 +1392,9 @@ pub struct PersistentLayerWriter<W: WriteBytes, K: Key, V: LayerValue> {
     _value: PhantomData<V>,
 }
 
-impl<W: WriteBytes, K: Key, V: LayerValue> PersistentLayerWriter<W, K, V> {
+// cladefs: require `W: Send` so `write_bytes` calls can be boxed via `crate::boxed` in non-inlined
+// frames to fit 16 KiB guest kernel stacks (TASK-26.9).
+impl<W: WriteBytes + Send, K: Key, V: LayerValue> PersistentLayerWriter<W, K, V> {
     /// Creates a new writer that will serialize items to the object accessible via |object_handle|
     pub async fn new(writer: W, num_items: usize, block_size: BlockSize) -> Result<Self, Error> {
         Self::new_with_version(writer, num_items, block_size, LATEST_VERSION).await
@@ -1416,7 +1418,10 @@ impl<W: WriteBytes, K: Key, V: LayerValue> PersistentLayerWriter<W, K, V> {
             version.serialize_into(&mut cursor)?;
             header.serialize_into(&mut cursor)?;
         }
-        writer.write_bytes(&buf[..]).await?;
+        // cladefs: box `write_bytes` / `complete` calls in non-inlined frames so
+        // `PersistentLayerWriter`'s async frames stay small on 16 KiB guest kernel stacks
+        // (TASK-26.9).
+        crate::boxed(|| writer.write_bytes(&buf[..])).await?;
 
         let seed: u64 = rand::random();
         Ok(Self {
@@ -1454,7 +1459,9 @@ impl<W: WriteBytes, K: Key, V: LayerValue> PersistentLayerWriter<W, K, V> {
         for &offset in &self.block_offsets {
             cursor.write_u16::<LittleEndian>(offset)?;
         }
-        self.writer.write_bytes(cursor.get_ref()).await?;
+        // cladefs: box `write_bytes` in a non-inlined frame to keep `PersistentLayerWriter` small
+        // on 16 KiB stacks (TASK-26.9).
+        crate::boxed(|| self.writer.write_bytes(cursor.get_ref())).await?;
         debug!(item_count = *self.buf_item_count, byte_count = self.buf.len(); "wrote items");
         self.buf.clear();
         *self.buf_item_count = 0;
@@ -1482,7 +1489,9 @@ impl<W: WriteBytes, K: Key, V: LayerValue> PersistentLayerWriter<W, K, V> {
             LittleEndian::write_u64(&mut self.buf[len..len + std::mem::size_of::<u64>()], *key);
             len += std::mem::size_of::<u64>();
         }
-        self.writer.write_bytes(&self.buf).await?;
+        // cladefs: box `write_bytes` in a non-inlined frame to keep `PersistentLayerWriter` small
+        // on 16 KiB stacks (TASK-26.9).
+        crate::boxed(|| self.writer.write_bytes(&self.buf)).await?;
         Ok(size)
     }
 
@@ -1520,7 +1529,9 @@ impl<W: WriteBytes, K: Key, V: LayerValue> PersistentLayerWriter<W, K, V> {
         self.buf.resize(to_skip + actual_len, 0);
         self.buf.copy_within(0..actual_len, to_skip);
         self.buf[..to_skip].fill(0);
-        self.writer.write_bytes(&self.buf).await?;
+        // cladefs: box `write_bytes` in a non-inlined frame to keep `PersistentLayerWriter` small
+        // on 16 KiB stacks (TASK-26.9).
+        crate::boxed(|| self.writer.write_bytes(&self.buf)).await?;
         Ok(())
     }
 
@@ -1536,7 +1547,9 @@ impl<W: WriteBytes, K: Key, V: LayerValue> PersistentLayerWriter<W, K, V> {
         self.buf.resize(size, 0);
         let mut cursor = std::io::Cursor::new(&mut self.buf);
         self.bloom_filter.write(&mut cursor)?;
-        self.writer.write_bytes(&self.buf).await?;
+        // cladefs: box `write_bytes` in a non-inlined frame to keep `PersistentLayerWriter` small
+        // on 16 KiB stacks (TASK-26.9).
+        crate::boxed(|| self.writer.write_bytes(&self.buf)).await?;
         Ok(self.bloom_filter.serialized_size())
     }
 
@@ -1615,12 +1628,14 @@ impl<W: WriteBytes + Send, K: Key, V: LayerValue> LayerWriter<K, V>
     }
 
     async fn complete(mut self) -> Result<u64, Error> {
-        self.write_block().await?;
+        // cladefs: box each stage in a non-inlined frame so `complete` doesn't inline five
+        // `DirectWriter` futures onto 16 KiB guest kernel stacks (TASK-26.9).
+        crate::boxed(|| self.write_block()).await?;
         let data_blocks = self.data_blocks() as u64;
-        let bloom_filter_len = self.write_bloom_filter().await?;
-        let seek_table_len = self.write_seek_table().await?;
-        self.write_info(data_blocks, bloom_filter_len, seek_table_len).await?;
-        self.writer.complete().await
+        let bloom_filter_len = crate::boxed(|| self.write_bloom_filter()).await?;
+        let seek_table_len = crate::boxed(|| self.write_seek_table()).await?;
+        crate::boxed(|| self.write_info(data_blocks, bloom_filter_len, seek_table_len)).await?;
+        crate::boxed(|| self.writer.complete()).await
     }
 }
 

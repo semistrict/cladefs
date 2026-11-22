@@ -729,12 +729,14 @@ impl ObjectStore {
 
     /// Cycle breaker constructor that returns an ObjectStore without a filesystem.
     /// This should only be used from super block code.
+    /// cladefs: returns `Box<Self>` so `SuperBlockManager::load` never keeps `ObjectStore` structs
+    /// by value on 16 KiB guest kernel stacks (TASK-26.9).
     pub fn new_root_parent(
         device: Arc<dyn Device>,
         block_size: BlockSize,
         store_object_id: u64,
-    ) -> Self {
-        ObjectStore {
+    ) -> Box<Self> {
+        Box::new(ObjectStore {
             parent_store: None,
             store_object_id,
             device,
@@ -754,14 +756,19 @@ impl ObjectStore {
             graveyard_entries: AtomicU64::new(0),
             last_object_id: Mutex::new(LastObjectId::Unencrypted { id: 0 }),
             flush_callback: Mutex::new(None),
-        }
+        })
     }
 
     /// Used to set filesystem on root_parent stores at bootstrap time after the filesystem has
     /// been created.
-    pub fn attach_filesystem(mut this: ObjectStore, filesystem: Arc<FxFilesystem>) -> ObjectStore {
+    /// cladefs: takes `Box<ObjectStore>` and promotes to `Arc` without moving `ObjectStore` onto
+    /// the stack (TASK-26.9).
+    pub fn attach_filesystem(
+        mut this: Box<ObjectStore>,
+        filesystem: Arc<FxFilesystem>,
+    ) -> Arc<ObjectStore> {
         this.filesystem = Arc::downgrade(&filesystem);
-        this
+        Arc::from(this)
     }
 
     /// Acquires appropriate locks and starts a new transaction.  A transaction should be associated
@@ -2258,11 +2265,15 @@ impl ObjectStore {
         };
 
         // Open layers (uses crypt).
-        let (layers, _) = open_layers(
-            self.parent_store.as_ref().unwrap(),
-            store_info.layers.iter().cloned(),
-            Some(crypt.clone()),
-        )
+        // cladefs: box large sub-futures in non-inlined frames to fit 16 KiB guest kernel stacks
+        // (TASK-26.9).
+        let (layers, _) = crate::boxed(|| {
+            open_layers(
+                self.parent_store.as_ref().unwrap(),
+                store_info.layers.iter().cloned(),
+                Some(crypt.clone()),
+            )
+        })
         .await
         .context("Failed to read object tree layer file contents")?;
 
@@ -2357,8 +2368,8 @@ impl ObjectStore {
         // This assumes that the journal has no buffered mutations for this store (see Self::lock).
         let journaled = EncryptedMutations::from_replayed_mutations(
             self.store_object_id,
-            fs.journal()
-                .read_transactions_for_object(self.store_object_id)
+            // cladefs: box large sub-future to fit 16 KiB guest kernel stacks (TASK-26.9).
+            crate::boxed(|| fs.journal().read_transactions_for_object(self.store_object_id))
                 .await
                 .context("Failed to read encrypted mutations from journal")?,
         );
