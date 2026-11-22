@@ -27,9 +27,11 @@ from guest_results import case_lines, case_logs  # noqa: E402
 
 CASES = ("cells-per-host", "cells-per-host-dax")
 
-# The fewest VMs each case may hold, by case: none until a run on the test host is recorded
-# (docs/measurements), then that run's with a margin.
-FLOORS = {}
+# The fewest VMs each case may hold, by case: a run on the test host recorded (docs/measurements),
+# with a margin. cells-per-host-dax held 181 VMs in 16 GiB on ubu1 (r5649d, 2026-11-22,
+# docs/measurements/ubu1-cells-per-host-dax-2026-11-22.md), 180 and 181 again; 160 leaves runs'
+# spread and others' load. cells-per-host, without DAX, has none: DAX is what density is for.
+FLOORS = {"cells-per-host-dax": 160}
 
 PREFIX = "cells-per-host: "
 FIELD = re.compile(r"(\w+)=(\S+)")

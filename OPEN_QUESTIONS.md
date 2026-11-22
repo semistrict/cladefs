@@ -41,6 +41,12 @@ Decided without you:
 - **The balloon is in every VM `Vm` configures**, of nothing, free page reporting on, at the
   kernel's reporting order (2 MiB blocks); CLADEFS_GUEST_BALLOON=0 leaves it out for the baseline,
   and CLADEFS_GUEST_CMDLINE's `page_reporting.page_reporting_order=` tries a smaller order.
+  Measured (2026-11-22, docs/measurements/ubu1-cells-per-host-dax-2026-11-22.md): no change to
+  idle cells, 181 VMs with it and 180 without, as an idle guest frees almost nothing; kept on, your
+  call, for guests that take memory and free it, which cells-per-host doesn't run.
+- **cells-per-host's runs are 16 GiB**, not 20: ubu1 had no 20 GiB to guarantee a hotbed
+  measurement beside others' work. The driver's default and the DAX case's floor (160, of 181
+  held) are 16 GiB's. *Undo:* cells-per-host-host.sh's CLADEFS_TEST_HOST_MEM and FLOORS.
 - **Fxfs's 16 MiB transfer heap stays 16 MiB, zeroed as buffers first reach it** rather than all at
   mount. *Instead:* a heap sized by RAM, which the task suggested: an allocation past the heap
   panics the guest, and nothing bounds Fxfs's largest. *Undo:* `BufferSource::touch`.
