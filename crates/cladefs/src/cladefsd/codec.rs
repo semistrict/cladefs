@@ -2,37 +2,37 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: the messages of the wire ([`super::wire`]) as types, each encoded and decoded here
-//! alone, so that both ends read a field at the index they write it at (TASK-160.9): the requests a
-//! VM process makes ([`Request`]), what it says of the stage operations it made ([`Made`]), what
-//! the daemon tells it unasked ([`Told`]), its stage operations among that ([`Stage`]), and what
-//! replies say besides their status ([`Opened`], [`Info`], [`Advanced`], [`mappings`]). The bytes
-//! are those each end wrote by hand before.
+//! cladefs: the messages of the wire ([`super::wire`]) as typed `#[repr(C)]` `zerocopy` structs,
+//! each encoded and decoded here alone (TASK-160.9, board 6917): the requests a VM process makes
+//! ([`Request`]), what it says of the stage operations it made ([`Made`]), what the daemon tells
+//! it unasked ([`Told`]), its stage operations among that ([`Stage`]), and what replies say
+//! besides their status ([`Opened`], [`Info`], [`Advanced`], [`Forked`], [`mappings`]).
 //!
-//! An [`OPEN`] and its reply say their sender's wire [`VERSION`] ([`version`], TASK-141.3): one of
-//! another is refused (`EPROTONOSUPPORT`) before anything else of it, as nothing else of it may
-//! mean what this version has it mean.
+//! An [`OPEN`] and its reply carry their sender's wire [`VERSION`] at [`VERSION_OFFSET`] inside
+//! [`Header::body`] ([`version`], TASK-141.3): one of another version is refused
+//! (`EPROTONOSUPPORT`) before anything else of it is decoded.
 //!
 //! Decoding refuses (`EINVAL`) what a message's kind gives no meaning: a flag it doesn't know, or
-//! flags it knows together that it doesn't, an argument out of its range, a payload or descriptors
-//! it has no use for, a status, which replies alone have, and a path that is empty or holds a NUL.
-//! The words a kind doesn't use it ignores. What a request names is checked as far as the message
-//! goes: whether its tenant may name it, and its cell holds it, is the daemon's to say. cladefs:
-//! and the values it carries, as far as no meaning is theirs: an extent's sequence the last, which
-//! no cell's next sequence is past; a range whose end is past a u64's, or a window's past
-//! [`MAX_WINDOW`], as no window is larger (board 2762, 2776). The daemon is a trust boundary
-//! (AGENTS.md): past decoding, nothing it does with a request's values overflows.
+//! flags it knows together that it doesn't, non-zero trailing or reserved body bytes, an argument
+//! out of its range, a payload or descriptors it has no use for, a non-zero status on a request,
+//! and a path that is empty or holds a NUL. Shared limits, doc-4 flag bits, and checked range /
+//! extent-ID / root / stats validators come from [`crate::protocol`], enforced independently at
+//! this trust boundary (AGENTS.md, board 5702).
 
 use super::wire::*;
 use crate::pages::{ArenaId, PhysLocation};
-use crate::{Commit, Errno, ExtentId, ExtentInfo, MappingContents};
-use crate::{WindowMapping, WriteBarriers};
+use crate::protocol::{
+    check_extent_id, check_mapping, check_range_ends, check_root_len, check_stats_text,
+    check_window_range, decode_commit_flags, decode_write_barriers,
+};
+use crate::{Commit, Errno, ExtentId, ExtentInfo, MappingContents, WindowMapping, WriteBarriers};
 use bucket_cell::cell::Kind;
 use std::borrow::Cow;
 use std::num::NonZeroU64;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use zerocopy::{FromBytes, IntoBytes};
 
 /// A request, of a VM process to the daemon, which a reply ([`REPLY`]) answers.
 #[derive(Debug)]
@@ -172,8 +172,13 @@ pub(crate) struct Encoded<'a> {
 }
 
 impl<'a> Encoded<'a> {
-    fn new(kind: u32, flags: u32, args: [u64; 5]) -> Self {
-        let header = Header { kind, flags, args, ..Default::default() };
+    fn empty(kind: u32, flags: u32) -> Self {
+        let header = Header::new(kind, 0).with_flags(flags);
+        Self { header, payload: Default::default(), fd: None }
+    }
+
+    fn with_body<T: IntoBytes + zerocopy::Immutable>(kind: u32, flags: u32, body: &T) -> Self {
+        let header = Header::new(kind, 0).with_flags(flags).with_body(body);
         Self { header, payload: Default::default(), fd: None }
     }
 
@@ -195,16 +200,9 @@ fn known_flags(kind: u32) -> Result<u32, Errno> {
     Ok(match kind {
         OPEN => OPEN_CREATE | OPEN_FORK | OPEN_READ_ONLY | OPEN_SQLITE | OPEN_MEMORY,
         READ => READ_TRANSFER,
-        WRITE => {
-            WRITE_BARRIER
-                | WRITE_COMMIT
-                | WRITE_UPLOADED
-                | WRITE_LOCAL
-                | WRITE_TRANSFER
-                | WRITE_ROOT
-        }
+        WRITE => crate::protocol::WRITE_SHARED_FLAGS | WRITE_TRANSFER | WRITE_LOCAL,
         MAP => MAP_ZEROS,
-        COMMIT => COMMIT_ROOT | COMMIT_UPLOADED | COMMIT_LOCAL,
+        COMMIT => crate::protocol::COMMIT_SHARED_FLAGS | COMMIT_LOCAL,
         FAULT => FAULT_PAGE | FAULT_PROBE,
         WINDOW => WINDOW_COPYING,
         FORK => FORK_QUIESCENT | FORK_DROP,
@@ -213,6 +211,21 @@ fn known_flags(kind: u32) -> Result<u32, Errno> {
         | UNPIN | TRANSFER | BUILD | MAP_MANY => 0,
         _ => return Err(Errno::EINVAL),
     })
+}
+
+/// Encodes `barriers` into `WRITE` flags (excluding `WRITE_TRANSFER`).
+fn write_barrier_flags(barriers: WriteBarriers<'_>) -> u32 {
+    let mut flags = if barriers.before { WRITE_BARRIER } else { 0 };
+    flags |= match barriers.after {
+        None => 0,
+        Some(Commit::Ordered) => WRITE_COMMIT,
+        Some(Commit::Local) => WRITE_COMMIT | WRITE_LOCAL,
+        Some(Commit::Uploaded) => WRITE_COMMIT | WRITE_UPLOADED,
+    };
+    if barriers.root.is_some() {
+        flags |= WRITE_ROOT;
+    }
+    flags
 }
 
 impl<'a> Request<'a> {
@@ -255,116 +268,182 @@ impl<'a> Request<'a> {
         .into_iter()
     }
 
+    /// Header and optional root slice for an inline [`WRITE`] of `data_len` bytes, shared between
+    /// [`Request::encode`] and streaming writes (TASK-661).
+    pub fn write_inline_header<'r>(
+        extent: ExtentId,
+        offset: u64,
+        data_len: u64,
+        barriers: WriteBarriers<'r>,
+    ) -> (Header, &'r [u8]) {
+        let flags = write_barrier_flags(barriers);
+        let body = WriteBody {
+            cell: extent.cell,
+            sequence: extent.sequence,
+            offset,
+            transfer_at: 0,
+            data_len,
+        };
+        let header = Header::new(WRITE, 0).with_flags(flags).with_body(&body);
+        (header, barriers.root.unwrap_or_default())
+    }
+
     /// It, as the wire has it.
     pub fn encode(&self) -> Encoded<'_> {
-        let message = |flags, args| Encoded::new(self.kind(), flags, args);
         let flag = |set: bool, bit: u32| if set { bit } else { 0 };
         match self {
             Request::Open { path, opening } => {
                 let path = path.as_os_str().as_bytes();
-                let mut open = match opening {
-                    Opening::Existing => message(0, [0; 5]).carrying(path),
+                let (flags, body) = match opening {
+                    Opening::Existing => (0, OpenBody { version: VERSION, ..Default::default() }),
                     Opening::Create(capacity, kind) => {
                         let flags = OPEN_CREATE
                             | flag(*kind == Kind::Sqlite, OPEN_SQLITE)
                             | flag(*kind == Kind::Memory, OPEN_MEMORY);
-                        message(flags, [*capacity, 0, 0, 0, 0]).carrying(path)
+                        (
+                            flags,
+                            OpenBody {
+                                capacity: *capacity,
+                                version: VERSION,
+                                ..Default::default()
+                            },
+                        )
                     }
-                    Opening::ForkOf { tenant, cell, version, capacity } => {
-                        let args = [*capacity, *cell, *version, *tenant, 0];
-                        message(OPEN_FORK, args).carrying(path)
+                    Opening::ForkOf { tenant, cell, version, capacity } => (
+                        OPEN_FORK,
+                        OpenBody {
+                            capacity: *capacity,
+                            cell: *cell,
+                            cell_version: *version,
+                            tenant: *tenant,
+                            version: VERSION,
+                        },
+                    ),
+                    Opening::ReadOnly => {
+                        (OPEN_READ_ONLY, OpenBody { version: VERSION, ..Default::default() })
                     }
-                    Opening::ReadOnly => message(OPEN_READ_ONLY, [0; 5]).carrying(path),
                 };
-                open.header = with_version(open.header);
-                open
+                Encoded::with_body(OPEN, flags, &body).carrying(path)
             }
-            Request::Read { extent, offset, len, into } => match into {
-                ReadInto::Reply => message(0, [extent.cell, extent.sequence, *offset, *len, 0]),
-                ReadInto::Transfer { at } => {
-                    let args = [extent.cell, extent.sequence, *offset, *len, *at];
-                    message(READ_TRANSFER, args)
+            Request::Read { extent, offset, len, into } => {
+                let (flags, transfer_at) = match *into {
+                    ReadInto::Reply => (0, 0),
+                    ReadInto::Transfer { at } => (READ_TRANSFER, at),
+                };
+                let body = ReadBody {
+                    cell: extent.cell,
+                    sequence: extent.sequence,
+                    offset: *offset,
+                    len: *len,
+                    transfer_at,
+                };
+                Encoded::with_body(READ, flags, &body)
+            }
+            Request::Write { extent, offset, data, barriers } => match *data {
+                Data::Inline(data) => {
+                    let (header, root) =
+                        Self::write_inline_header(*extent, *offset, data.len() as u64, *barriers);
+                    Encoded { header, payload: Default::default(), fd: None }
+                        .carrying(data)
+                        .followed_by(root)
+                }
+                Data::Transfer { at, len } => {
+                    let flags = write_barrier_flags(*barriers) | WRITE_TRANSFER;
+                    let body = WriteBody {
+                        cell: extent.cell,
+                        sequence: extent.sequence,
+                        offset: *offset,
+                        transfer_at: at,
+                        data_len: len,
+                    };
+                    Encoded::with_body(WRITE, flags, &body)
+                        .carrying(barriers.root.unwrap_or_default())
                 }
             },
-            Request::Write { extent, offset, data, barriers } => {
-                let mut flags = flag(barriers.before, WRITE_BARRIER);
-                flags |= match barriers.after {
-                    None => 0,
-                    Some(Commit::Ordered) => WRITE_COMMIT,
-                    Some(Commit::Local) => WRITE_COMMIT | WRITE_LOCAL,
-                    Some(Commit::Uploaded) => WRITE_COMMIT | WRITE_UPLOADED,
-                };
-                // cladefs: the root the commit sets, after the data in the payload (TASK-153.13).
-                flags |= flag(barriers.root.is_some(), WRITE_ROOT);
-                let root = barriers.root.unwrap_or_default();
-                let (cell, sequence) = (extent.cell, extent.sequence);
-                match data {
-                    Data::Inline(data) => {
-                        let args = [cell, sequence, *offset, 0, data.len() as u64];
-                        message(flags, args).carrying(*data).followed_by(root)
-                    }
-                    Data::Transfer { at, len } => {
-                        let args = [cell, sequence, *offset, *at, *len];
-                        message(flags | WRITE_TRANSFER, args).carrying(root)
-                    }
-                }
-            }
             Request::Free(extent) | Request::Pin(extent) | Request::Unpin(extent) => {
-                message(0, [extent.cell, extent.sequence, 0, 0, 0])
+                let body = ExtentBody { cell: extent.cell, sequence: extent.sequence };
+                Encoded::with_body(self.kind(), 0, &body)
             }
             Request::FreeMany { first, rest } => {
-                let args = [first.cell, first.sequence, 0, 0, 0];
-                message(0, args).carrying(extent_ids_payload(rest))
+                let body = ExtentBody { cell: first.cell, sequence: first.sequence };
+                Encoded::with_body(FREE_MANY, 0, &body).carrying(extent_ids_payload(rest))
             }
-            Request::Map(WindowMapping { window_offset, len, contents }) => match *contents {
-                MappingContents::Extent { extent, offset } => {
-                    message(0, [extent.cell, extent.sequence, offset, *len, *window_offset])
-                }
-                MappingContents::Zeros => message(MAP_ZEROS, [0, 0, 0, *len, *window_offset]),
-            },
-            Request::MapMany(mappings) => message(0, [0; 5]).carrying(mappings_payload(mappings)),
-            Request::Unmap { window_offset, len } => message(0, [*window_offset, *len, 0, 0, 0]),
+            Request::Map(WindowMapping { window_offset, len, contents }) => {
+                let (flags, body) = match *contents {
+                    MappingContents::Extent { extent, offset } => (
+                        0,
+                        MapBody {
+                            cell: extent.cell,
+                            sequence: extent.sequence,
+                            offset,
+                            len: *len,
+                            window_offset: *window_offset,
+                        },
+                    ),
+                    MappingContents::Zeros => (
+                        MAP_ZEROS,
+                        MapBody { len: *len, window_offset: *window_offset, ..Default::default() },
+                    ),
+                };
+                Encoded::with_body(MAP, flags, &body)
+            }
+            Request::MapMany(mappings) => {
+                Encoded::empty(MAP_MANY, 0).carrying(mappings_payload(mappings))
+            }
+            Request::Unmap { window_offset, len } => {
+                let body = RangeBody { offset: *window_offset, len: *len };
+                Encoded::with_body(UNMAP, 0, &body)
+            }
             Request::Commit { commit, root } => {
                 let flags = flag(root.is_some(), COMMIT_ROOT)
                     | flag(*commit == Commit::Local, COMMIT_LOCAL)
                     | flag(*commit == Commit::Uploaded, COMMIT_UPLOADED);
-                message(flags, [0; 5]).carrying(root.unwrap_or_default())
+                Encoded::empty(COMMIT, flags).carrying(root.unwrap_or_default())
             }
             Request::Root | Request::Info | Request::Mappings | Request::Advance => {
-                message(0, [0; 5])
+                Encoded::empty(self.kind(), 0)
             }
             Request::Window { size, copying, budget } => {
-                message(flag(*copying, WINDOW_COPYING), [*size, 0, *budget, 0, 0])
+                let body = WindowBody { size: *size, budget: *budget };
+                Encoded::with_body(WINDOW, flag(*copying, WINDOW_COPYING), &body)
             }
             Request::Fault(Fault { offset, page, probe }) => {
                 let flags = flag(*page, FAULT_PAGE) | flag(*probe, FAULT_PROBE);
-                message(flags, [*offset, 0, 0, 0, 0])
+                Encoded::with_body(FAULT, flags, &FaultBody { offset: *offset })
             }
-            Request::Fork { path } => message(0, [0; 5]).carrying(path.as_os_str().as_bytes()),
-            Request::Version => message(FORK_QUIESCENT, [0; 5]),
-            Request::DropVersion { version } => message(FORK_DROP, [*version, 0, 0, 0, 0]),
+            Request::Fork { path } => Encoded::empty(FORK, 0).carrying(path.as_os_str().as_bytes()),
+            Request::Version => Encoded::empty(FORK, FORK_QUIESCENT),
+            Request::DropVersion { version } => {
+                Encoded::with_body(FORK, FORK_DROP, &DropVersionBody { version: *version })
+            }
             Request::Resized { capacity, took } => {
-                message(0, [*capacity, u64::from(*took), 0, 0, 0])
+                let body = ResizedBody { capacity: *capacity, took: u64::from(*took) };
+                Encoded::with_body(RESIZED, 0, &body)
             }
-            Request::LetGo { commit } => message(0, [*commit, 0, 0, 0, 0]),
-            Request::Transfer { len, area } => {
-                Encoded { fd: Some(area.0), ..message(0, [*len, 0, 0, 0, 0]) }
+            Request::LetGo { commit } => {
+                Encoded::with_body(LET_GO, 0, &CommitBody { commit: *commit })
             }
-            Request::Build(commit) => message(0, [0; 5]).carrying(commit.as_bytes()),
-            Request::Stats { ask, guest } => {
-                let args = [*ask, 0, 0, 0, 0];
-                message(flag(guest.is_some(), STATS_GUEST), args)
-                    .carrying(guest.unwrap_or_default().as_bytes())
-            }
+            Request::Transfer { len, area } => Encoded {
+                fd: Some(area.0),
+                ..Encoded::with_body(TRANSFER, 0, &TransferBody { len: *len })
+            },
+            Request::Build(commit) => Encoded::empty(BUILD, 0).carrying(commit.as_bytes()),
+            Request::Stats { ask, guest } => Encoded::with_body(
+                STATS,
+                flag(guest.is_some(), STATS_GUEST),
+                &StatsBody { ask: *ask },
+            )
+            .carrying(guest.unwrap_or_default().as_bytes()),
         }
     }
 
     /// The request `message` is: `EINVAL` unless it is one its kind allows; cladefs:
     /// `EPROTONOSUPPORT` for an [`OPEN`] of another wire version, whatever else it holds
     /// (TASK-141.3).
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
     pub fn decode(message: &'a Message) -> Result<Self, Errno> {
         let Message { header, fds, .. } = message;
-        let Header { kind, flags, args, status, .. } = *header;
+        let Header { kind, flags, status, .. } = *header;
         if kind == OPEN && version(header) != VERSION {
             return Err(Errno::EPROTONOSUPPORT);
         }
@@ -375,135 +454,139 @@ impl<'a> Request<'a> {
         let (_, payload) = guest_request(message)?;
         let flags = flags & !REQUEST;
         // A request's descriptors: a TRANSFER's one, and none of any other.
-        let fd = match (kind, &fds[..]) {
+        let fd = match (kind, fds.as_slice()) {
             (TRANSFER, [fd]) => Some(fd.as_fd()),
             (_, []) if kind != TRANSFER => None,
             _ => return Err(Errno::EINVAL),
         };
         let has = |flag: u32| flags & flag != 0;
-        // The payload of a request that carries none.
         let nothing = || if payload.is_empty() { Ok(()) } else { Err(Errno::EINVAL) };
-        let extent = || extent_of(args[0], args[1]);
         Ok(match kind {
             OPEN => {
-                let (named, opening) = match flags {
-                    0 => (&payload[..], Opening::Existing),
-                    OPEN_CREATE => (&payload[..], Opening::Create(args[0], Kind::Fxfs)),
+                let body: OpenBody = header.decode_body()?;
+                let opening = match flags {
+                    0 => Opening::Existing,
+                    OPEN_CREATE => Opening::Create(body.capacity, Kind::Fxfs),
                     flags if flags == OPEN_CREATE | OPEN_SQLITE => {
-                        (&payload[..], Opening::Create(args[0], Kind::Sqlite))
+                        Opening::Create(body.capacity, Kind::Sqlite)
                     }
                     flags if flags == OPEN_CREATE | OPEN_MEMORY => {
-                        (&payload[..], Opening::Create(args[0], Kind::Memory))
+                        Opening::Create(body.capacity, Kind::Memory)
                     }
-                    OPEN_READ_ONLY => (&payload[..], Opening::ReadOnly),
-                    OPEN_FORK => {
-                        let (capacity, cell, version, tenant) =
-                            (args[0], args[1], args[2], args[3]);
-                        (&payload[..], Opening::ForkOf { tenant, cell, version, capacity })
-                    }
+                    OPEN_READ_ONLY => Opening::ReadOnly,
+                    OPEN_FORK => Opening::ForkOf {
+                        tenant: body.tenant,
+                        cell: body.cell,
+                        version: body.cell_version,
+                        capacity: body.capacity,
+                    },
                     // Two ways of opening at once.
                     _ => return Err(Errno::EINVAL),
                 };
-                Request::Open { path: path(named)?, opening }
+                Request::Open { path: path(payload)?, opening }
             }
             READ => {
                 nothing()?;
-                let len = args[3];
+                let body: ReadBody = header.decode_body()?;
                 let into = match has(READ_TRANSFER) {
-                    true => ReadInto::Transfer { at: args[4] },
+                    true => ReadInto::Transfer { at: body.transfer_at },
                     // cladefs: a reply holds no more (TASK-79.16).
-                    false if len > MAX_PAYLOAD => return Err(Errno::EINVAL),
+                    false if body.len > MAX_PAYLOAD => return Err(Errno::EINVAL),
                     false => ReadInto::Reply,
                 };
-                ends(args[2], len)?;
-                Request::Read { extent: extent()?, offset: args[2], len, into }
+                check_range_ends(body.offset, body.len)?;
+                let extent = check_extent_id(body.cell, body.sequence)?;
+                Request::Read { extent, offset: body.offset, len: body.len, into }
             }
             WRITE => {
-                // A commit's flags, without a commit.
-                if !has(WRITE_COMMIT) && has(WRITE_UPLOADED | WRITE_LOCAL | WRITE_ROOT) {
-                    return Err(Errno::EINVAL);
-                }
-                // Local and uploaded at once.
-                if has(WRITE_UPLOADED) && has(WRITE_LOCAL) {
-                    return Err(Errno::EINVAL);
-                }
+                let body: WriteBody = header.decode_body()?;
+                let (mut barriers, has_root) =
+                    decode_write_barriers(flags & !WRITE_TRANSFER, Some(WRITE_LOCAL))?;
                 // The data, and the root after it in the payload, if any.
                 let (data, root) = match has(WRITE_TRANSFER) {
-                    true => (Data::Transfer { at: args[3], len: args[4] }, &payload[..]),
-                    false if has(WRITE_ROOT) => {
-                        let len = usize::try_from(args[4]).map_err(|_| Errno::EINVAL)?;
-                        let data = payload.get(..len).ok_or(Errno::EINVAL)?;
-                        (Data::Inline(data), &payload[len..])
+                    true => (Data::Transfer { at: body.transfer_at, len: body.data_len }, payload),
+                    false if has_root => {
+                        let len = usize::try_from(body.data_len).map_err(|_| Errno::EINVAL)?;
+                        let (data, root) = payload.split_at_checked(len).ok_or(Errno::EINVAL)?;
+                        (Data::Inline(data), root)
                     }
-                    false => (Data::Inline(&payload[..]), &[][..]),
+                    false => (Data::Inline(payload), &[][..]),
                 };
-                if (!has(WRITE_ROOT) && !root.is_empty()) || root.len() > MAX_ROOT {
+                if !has_root && !root.is_empty() {
                     return Err(Errno::EINVAL);
                 }
-                let after =
-                    has(WRITE_COMMIT).then_some(match (has(WRITE_UPLOADED), has(WRITE_LOCAL)) {
-                        (true, _) => Commit::Uploaded,
-                        (false, true) => Commit::Local,
-                        (false, false) => Commit::Ordered,
-                    });
-                let root = has(WRITE_ROOT).then_some(root);
-                let barriers = WriteBarriers { before: has(WRITE_BARRIER), after, root };
+                check_root_len(root.len())?;
+                barriers.root = has_root.then_some(root);
                 let len = match data {
                     Data::Inline(data) => data.len() as u64,
                     Data::Transfer { len, .. } => len,
                 };
-                ends(args[2], len)?;
-                Request::Write { extent: extent()?, offset: args[2], data, barriers }
+                check_range_ends(body.offset, len)?;
+                let extent = check_extent_id(body.cell, body.sequence)?;
+                Request::Write { extent, offset: body.offset, data, barriers }
             }
-            FREE => {
+            FREE | PIN | UNPIN => {
                 nothing()?;
-                Request::Free(extent()?)
+                let body: ExtentBody = header.decode_body()?;
+                let extent = check_extent_id(body.cell, body.sequence)?;
+                match kind {
+                    FREE => Request::Free(extent),
+                    PIN => Request::Pin(extent),
+                    _ => Request::Unpin(extent),
+                }
             }
             FREE_MANY => {
-                let rest: Cow<'a, [ExtentId]> = Cow::Owned(extent_ids(payload)?.collect());
-                Request::FreeMany { first: extent()?, rest }
+                let body: ExtentBody = header.decode_body()?;
+                let first = check_extent_id(body.cell, body.sequence)?;
+                let rest = Cow::Owned(extent_ids(payload)?);
+                Request::FreeMany { first, rest }
             }
             MAP => {
                 nothing()?;
+                let body: MapBody = header.decode_body()?;
                 let contents = match has(MAP_ZEROS) {
-                    false => MappingContents::Extent { extent: extent()?, offset: args[2] },
+                    false => MappingContents::Extent {
+                        extent: check_extent_id(body.cell, body.sequence)?,
+                        offset: body.offset,
+                    },
                     true => MappingContents::Zeros,
                 };
-                Request::Map(mapping(WindowMapping {
-                    window_offset: args[4],
-                    len: args[3],
+                Request::Map(check_mapping(WindowMapping {
+                    window_offset: body.window_offset,
+                    len: body.len,
                     contents,
                 })?)
             }
             // cladefs: one mapping at least (TASK-92.14).
-            MAP_MANY => match mappings(payload)? {
-                mappings if mappings.is_empty() => return Err(Errno::EINVAL),
-                mappings => Request::MapMany(Cow::Owned(mappings)),
-            },
+            MAP_MANY => {
+                header.decode_empty()?;
+                match mappings(payload)? {
+                    mappings if mappings.is_empty() => return Err(Errno::EINVAL),
+                    mappings => Request::MapMany(Cow::Owned(mappings)),
+                }
+            }
             UNMAP => {
                 nothing()?;
-                in_window(args[0], args[1])?;
-                Request::Unmap { window_offset: args[0], len: args[1] }
+                let body: RangeBody = header.decode_body()?;
+                check_window_range(body.offset, body.len)?;
+                Request::Unmap { window_offset: body.offset, len: body.len }
             }
             COMMIT => {
-                let root = has(COMMIT_ROOT).then_some(&payload[..]);
-                if root.is_none() {
+                header.decode_empty()?;
+                let (commit, has_root) = decode_commit_flags(flags, Some(COMMIT_LOCAL))?;
+                let root = if has_root {
+                    // cladefs: no more than a root holds (TASK-149.17).
+                    check_root_len(payload.len())?;
+                    Some(payload)
+                } else {
                     nothing()?;
-                }
-                // cladefs: no more than a root holds (TASK-149.17).
-                if root.is_some_and(|root| root.len() > MAX_ROOT) {
-                    return Err(Errno::EINVAL);
-                }
-                let commit = match (has(COMMIT_UPLOADED), has(COMMIT_LOCAL)) {
-                    (true, true) => return Err(Errno::EINVAL),
-                    (true, false) => Commit::Uploaded,
-                    (false, true) => Commit::Local,
-                    (false, false) => Commit::Ordered,
+                    None
                 };
                 Request::Commit { commit, root }
             }
             ROOT | INFO | MAPPINGS | ADVANCE => {
                 nothing()?;
+                header.decode_empty()?;
                 match kind {
                     ROOT => Request::Root,
                     INFO => Request::Info,
@@ -513,66 +596,76 @@ impl<'a> Request<'a> {
             }
             WINDOW => {
                 nothing()?;
+                let body: WindowBody = header.decode_body()?;
                 // cladefs: past it, the daemon's room for its VM process's replies (TASK-150.3).
-                if args[0] > MAX_WINDOW {
+                if body.size > MAX_WINDOW {
                     return Err(Errno::EINVAL);
                 }
-                // cladefs: its private pages are its VM process's to bound (doc-26).
-                if args[1] != 0 {
-                    return Err(Errno::EINVAL);
+                Request::Window {
+                    size: body.size,
+                    copying: has(WINDOW_COPYING),
+                    budget: body.budget,
                 }
-                Request::Window { size: args[0], copying: has(WINDOW_COPYING), budget: args[2] }
             }
             FAULT => {
                 nothing()?;
+                let body: FaultBody = header.decode_body()?;
                 // cladefs: a probe is of a page alone.
                 let probe = has(FAULT_PROBE);
                 if probe && !has(FAULT_PAGE) {
                     return Err(Errno::EINVAL);
                 }
-                Request::Fault(Fault { offset: args[0], page: has(FAULT_PAGE), probe })
+                Request::Fault(Fault { offset: body.offset, page: has(FAULT_PAGE), probe })
             }
             FORK if has(FORK_QUIESCENT) && has(FORK_DROP) => return Err(Errno::EINVAL),
             FORK if has(FORK_QUIESCENT) => {
                 nothing()?;
+                header.decode_empty()?;
                 Request::Version
             }
             FORK if has(FORK_DROP) => {
                 nothing()?;
-                Request::DropVersion { version: args[0] }
+                let body: DropVersionBody = header.decode_body()?;
+                Request::DropVersion { version: body.version }
             }
-            FORK => Request::Fork { path: path(payload)? },
+            FORK => {
+                header.decode_empty()?;
+                Request::Fork { path: path(payload)? }
+            }
             RESIZED => {
                 nothing()?;
-                let took = match args[1] {
+                let body: ResizedBody = header.decode_body()?;
+                let took = match body.took {
                     0 => false,
                     1 => true,
                     _ => return Err(Errno::EINVAL),
                 };
-                Request::Resized { capacity: args[0], took }
+                Request::Resized { capacity: body.capacity, took }
             }
             LET_GO => {
                 nothing()?;
-                Request::LetGo { commit: args[0] }
-            }
-            PIN | UNPIN => {
-                nothing()?;
-                if kind == PIN { Request::Pin(extent()?) } else { Request::Unpin(extent()?) }
+                let body: CommitBody = header.decode_body()?;
+                Request::LetGo { commit: body.commit }
             }
             TRANSFER => {
                 nothing()?;
-                Request::Transfer { len: args[0], area: Area(fd.ok_or(Errno::EINVAL)?) }
+                let body: TransferBody = header.decode_body()?;
+                Request::Transfer { len: body.len, area: Area(fd.ok_or(Errno::EINVAL)?) }
             }
-            BUILD => Request::Build(build(payload)?),
+            BUILD => {
+                header.decode_empty()?;
+                Request::Build(build(payload)?)
+            }
             STATS => {
+                let body: StatsBody = header.decode_body()?;
                 let guest = match has(STATS_GUEST) {
-                    true => Some(stats_text(payload)?),
+                    true => Some(check_stats_text(payload)?),
                     false => {
                         nothing()?;
                         None
                     }
                 };
-                Request::Stats { ask: args[0], guest }
+                Request::Stats { ask: body.ask, guest }
             }
             _ => return Err(Errno::EINVAL),
         })
@@ -587,9 +680,12 @@ impl<'a> Request<'a> {
 /// daemon makes of a payload besides, as long as it holds the payload, counted too (TASK-614): a
 /// `FREE_MANY`'s extents, decoded, as many bytes again; a `MAP_MANY`'s mappings, and the window's
 /// pieces mapping them makes, [`MAP_MANY_HELD`] times its payload in all.
+#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 pub(crate) fn stream_bytes(header: &Header) -> u64 {
     match header.kind {
-        READ if header.flags & READ_TRANSFER == 0 => header.len + header.args[3].min(MAX_PAYLOAD),
+        READ if header.flags & READ_TRANSFER == 0 => {
+            header.len.saturating_add(header.read_body::<ReadBody>().len.min(MAX_PAYLOAD))
+        }
         FREE_MANY => header.len.saturating_mul(2),
         MAP_MANY => header.len.saturating_mul(MAP_MANY_HELD),
         _ => header.len,
@@ -604,6 +700,7 @@ pub(crate) const MAP_MANY_HELD: u64 = 4;
 /// cladefs: the guest request the request `message` is a call for, if it says one ([`REQUEST`]),
 /// and the rest of its payload, its kind's: `EINVAL` if it says one it doesn't hold, or 0
 /// (TASK-260).
+#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 pub(crate) fn guest_request(message: &Message) -> Result<(Option<NonZeroU64>, &[u8]), Errno> {
     if message.header.flags & REQUEST == 0 {
         return Ok((None, &message.payload));
@@ -622,6 +719,7 @@ pub(crate) fn request_bytes(guest: NonZeroU64) -> [u8; REQUEST_BYTES] {
 }
 
 /// The path `bytes` hold: `EINVAL` if empty, or holding a NUL, which no path does.
+#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 fn path(bytes: &[u8]) -> Result<PathBuf, Errno> {
     if bytes.is_empty() || bytes.contains(&0) {
         return Err(Errno::EINVAL);
@@ -636,6 +734,7 @@ fn path(bytes: &[u8]) -> Result<PathBuf, Errno> {
 
 /// cladefs: the commit a [`BUILD`]'s payload says: `EINVAL` unless a label's characters, as many as
 /// [`MAX_BUILD`] at most (TASK-111.7).
+#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 fn build(payload: &[u8]) -> Result<&str, Errno> {
     let commit = std::str::from_utf8(payload).map_err(|_| Errno::EINVAL)?;
     let label = |byte: u8| byte.is_ascii_alphanumeric() || b"._-".contains(&byte);
@@ -645,70 +744,22 @@ fn build(payload: &[u8]) -> Result<&str, Errno> {
     Ok(commit)
 }
 
-/// cladefs: the guest's stats a [`STATS`]'s payload holds: `EINVAL` unless UTF-8, [`MAX_STATS`]
-/// bytes at most (TASK-111.4).
-fn stats_text(payload: &[u8]) -> Result<&str, Errno> {
-    if payload.len() > MAX_STATS {
-        return Err(Errno::EINVAL);
-    }
-    std::str::from_utf8(payload).map_err(|_| Errno::EINVAL)
-}
-
 /// cladefs: `extents`, as a [`FREE_MANY`]'s payload names them.
 fn extent_ids_payload(extents: &[ExtentId]) -> Vec<u8> {
-    (extents.iter())
-        .flat_map(|extent| [extent.cell, extent.sequence])
-        .flat_map(u64::to_le_bytes)
-        .collect()
+    let mut bytes = Vec::with_capacity(extents.len() * EXTENT_ID_BYTES);
+    for extent in extents {
+        let wire = ExtentIdWire { cell: extent.cell.into(), sequence: extent.sequence.into() };
+        bytes.extend_from_slice(wire.as_bytes());
+    }
+    bytes
 }
 
-/// cladefs: the extents a [`FREE_MANY`]'s payload names: `EINVAL` unless it is whole IDs, each
-/// one [`extent_of`] takes.
+/// cladefs: the extents a [`FREE_MANY`]'s payload names: `EINVAL` unless it is whole
+/// [`ExtentIdWire`]s, each passing [`check_extent_id`].
 #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
-fn extent_ids(payload: &[u8]) -> Result<impl Iterator<Item = ExtentId> + '_, Errno> {
-    let (ids, []) = payload.as_chunks::<EXTENT_ID_BYTES>() else {
-        return Err(Errno::EINVAL);
-    };
-    let ids = ids.iter().map(|id| {
-        let ([cell, sequence], []) = id.as_chunks::<8>() else { unreachable!("16 bytes") };
-        extent_of(u64::from_le_bytes(*cell), u64::from_le_bytes(*sequence))
-    });
-    // Checked before any is used: none names the last sequence.
-    let ids: Vec<ExtentId> = ids.collect::<Result<_, _>>()?;
-    Ok(ids.into_iter())
-}
-
-/// cladefs: the extent `cell` and `sequence` name, a request's: `EINVAL` for the last sequence,
-/// past which no cell's next sequence is, nor a spent run's end (board 2762).
-fn extent_of(cell: u64, sequence: u64) -> Result<ExtentId, Errno> {
-    match sequence {
-        u64::MAX => Err(Errno::EINVAL),
-        sequence => Ok(ExtentId { cell, sequence }),
-    }
-}
-
-/// cladefs: `EINVAL` unless the `len` bytes at `offset` end within a u64 (board 2776).
-fn ends(offset: u64, len: u64) -> Result<(), Errno> {
-    offset.checked_add(len).map(drop).ok_or(Errno::EINVAL)
-}
-
-/// cladefs: `EINVAL` unless the `len` bytes at `offset` of a window end within [`MAX_WINDOW`], as
-/// every window does (board 2776): so that what sums them, as a `MAP_MANY`'s pieces, holds.
-fn in_window(offset: u64, len: u64) -> Result<(), Errno> {
-    match offset.checked_add(len) {
-        Some(end) if end <= MAX_WINDOW => Ok(()),
-        _ => Err(Errno::EINVAL),
-    }
-}
-
-/// cladefs: `mapping`, its range in the window within [`MAX_WINDOW`] and its range in its extent
-/// within a u64 ([`in_window`], [`ends`]).
-fn mapping(mapping: WindowMapping) -> Result<WindowMapping, Errno> {
-    in_window(mapping.window_offset, mapping.len)?;
-    if let MappingContents::Extent { offset, .. } = mapping.contents {
-        ends(offset, mapping.len)?;
-    }
-    Ok(mapping)
+fn extent_ids(payload: &[u8]) -> Result<Vec<ExtentId>, Errno> {
+    let ids = <[ExtentIdWire]>::ref_from_bytes(payload).map_err(|_| Errno::EINVAL)?;
+    ids.iter().map(|id| check_extent_id(id.cell.get(), id.sequence.get())).collect()
 }
 
 /// What a VM process says of the stage operations it made, which nothing replies to.
@@ -739,18 +790,25 @@ pub(crate) struct StageCounts {
 
 impl StageCounts {
     #[cfg(target_os = "linux")]
-    fn args(&self) -> [u64; 5] {
+    fn to_body(self) -> StageCountsBody {
         let [ops, ns, overwrites, leave_outs] = self.costs;
-        let now = (self.installed & u64::from(u32::MAX)) | self.private << 32;
-        [ops, ns, overwrites, leave_outs, now]
+        StageCountsBody {
+            ops,
+            ns,
+            overwrites,
+            leave_outs,
+            installed: u32::try_from(self.installed).unwrap_or(u32::MAX),
+            private: u32::try_from(self.private).unwrap_or(u32::MAX),
+        }
     }
 
-    /// cladefs: `args[4]` holds the runs installed, its low 32 bits, and the private pages, its
-    /// high 32 (doc-26), a window of [`MAX_WINDOW`] having fewer of each.
-    fn from_args(args: [u64; 5]) -> Self {
-        let [ops, ns, overwrites, leave_outs, now] = args;
-        let (installed, private) = (now & u64::from(u32::MAX), now >> 32);
-        Self { costs: [ops, ns, overwrites, leave_outs], installed, private }
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+    fn from_body(body: StageCountsBody) -> Self {
+        Self {
+            costs: [body.ops, body.ns, body.overwrites, body.leave_outs],
+            installed: u64::from(body.installed),
+            private: u64::from(body.private),
+        }
     }
 }
 
@@ -763,24 +821,33 @@ impl Made {
     #[cfg(target_os = "linux")]
     pub fn encode(&self) -> Header {
         match *self {
-            Made::Ack { id, counts } => Header::new(ACK, id).with_args(&counts.args()),
-            Made::Counts(counts) => Header::new(STAGE_COUNTS, 0).with_args(&counts.args()),
-            Made::PrivateCounts(counts) => Header::new(STAGE_PRIVATE_COUNTS, 0).with_args(&counts),
+            Made::Ack { id, counts } => Header::new(ACK, id).with_body(&counts.to_body()),
+            Made::Counts(counts) => Header::new(STAGE_COUNTS, 0).with_body(&counts.to_body()),
+            Made::PrivateCounts([runs, pages, ns, requests, request_ns]) => {
+                let body = PrivateCountsBody { runs, pages, ns, requests, request_ns };
+                Header::new(STAGE_PRIVATE_COUNTS, 0).with_body(&body)
+            }
         }
     }
 
     /// What `message` says: `EINVAL` unless it is an [`ACK`], a [`STAGE_COUNTS`] or a
     /// [`STAGE_PRIVATE_COUNTS`], of no flags, payload or descriptors.
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
     pub fn decode(message: &Message) -> Result<Self, Errno> {
-        let Header { kind, flags, id, args, status, .. } = message.header;
+        let Header { kind, flags, id, status, .. } = message.header;
         if flags != 0 || status != 0 || !message.payload.is_empty() || !message.fds.is_empty() {
             return Err(Errno::EINVAL);
         }
-        let counts = StageCounts::from_args(args);
         match kind {
-            ACK => Ok(Made::Ack { id, counts }),
-            STAGE_COUNTS => Ok(Made::Counts(counts)),
-            STAGE_PRIVATE_COUNTS => Ok(Made::PrivateCounts(args)),
+            ACK => {
+                Ok(Made::Ack { id, counts: StageCounts::from_body(message.header.decode_body()?) })
+            }
+            STAGE_COUNTS => Ok(Made::Counts(StageCounts::from_body(message.header.decode_body()?))),
+            STAGE_PRIVATE_COUNTS => {
+                let PrivateCountsBody { runs, pages, ns, requests, request_ns } =
+                    message.header.decode_body()?;
+                Ok(Made::PrivateCounts([runs, pages, ns, requests, request_ns]))
+            }
             _ => Err(Errno::EINVAL),
         }
     }
@@ -804,16 +871,20 @@ impl Told {
     pub fn encode(&self) -> Header {
         match *self {
             Told::Stage(stage) => stage.encode(),
-            Told::Capacity { capacity, ask } => (Header::new(CAPACITY, 0).with_args(&[capacity]))
-                .with_flags(if ask { CAPACITY_ASK } else { 0 }),
-            Told::Committed { commit } => Header::new(COMMITTED, 0).with_args(&[commit]),
-            Told::Stats { ask } => Header::new(STATS_ASK, 0).with_args(&[ask]),
+            Told::Capacity { capacity, ask } => Header::new(CAPACITY, 0)
+                .with_flags(if ask { CAPACITY_ASK } else { 0 })
+                .with_body(&CapacityBody { capacity }),
+            Told::Committed { commit } => {
+                Header::new(COMMITTED, 0).with_body(&CommitBody { commit })
+            }
+            Told::Stats { ask } => Header::new(STATS_ASK, 0).with_body(&StatsBody { ask }),
         }
     }
 
     /// What the message of `header` says: `EINVAL` unless one of these, as its kind allows.
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
     pub fn decode(header: &Header) -> Result<Self, Errno> {
-        let Header { kind, flags, args, status, fds, len, .. } = *header;
+        let Header { kind, flags, status, fds, len, .. } = *header;
         if status != 0 || fds != 0 || len != 0 {
             return Err(Errno::EINVAL);
         }
@@ -821,10 +892,19 @@ impl Told {
         match kind {
             CAPACITY => {
                 known(CAPACITY_ASK)?;
-                Ok(Told::Capacity { capacity: args[0], ask: flags & CAPACITY_ASK != 0 })
+                let body: CapacityBody = header.decode_body()?;
+                Ok(Told::Capacity { capacity: body.capacity, ask: flags & CAPACITY_ASK != 0 })
             }
-            COMMITTED => known(0).map(|()| Told::Committed { commit: args[0] }),
-            STATS_ASK => known(0).map(|()| Told::Stats { ask: args[0] }),
+            COMMITTED => {
+                known(0)?;
+                let body: CommitBody = header.decode_body()?;
+                Ok(Told::Committed { commit: body.commit })
+            }
+            STATS_ASK => {
+                known(0)?;
+                let body: StatsBody = header.decode_body()?;
+                Ok(Told::Stats { ask: body.ask })
+            }
             _ => Stage::decode(header).map(Told::Stage),
         }
     }
@@ -864,38 +944,59 @@ impl StageOp {
 
 impl Stage {
     pub fn encode(&self) -> Header {
-        let (kind, args, keep) = match self.op {
+        let mut header = match self.op {
             StageOp::Map { offset, phys, len } => {
-                (STAGE_MAP, [offset, phys.offset, len, 0, phys.arena.0.into()], 0)
+                let body = StageMapBody {
+                    offset,
+                    phys_offset: phys.offset,
+                    len,
+                    arena: phys.arena.0,
+                    reserved: 0,
+                };
+                Header::new(STAGE_MAP, self.id).with_body(&body)
             }
             StageOp::Unmap { offset, len, keep_private } => {
                 let keep = if keep_private { STAGE_KEEP_PRIVATE } else { 0 };
-                (STAGE_UNMAP, [offset, len, 0, 0, 0], keep)
+                Header::new(STAGE_UNMAP, self.id)
+                    .with_flags(keep)
+                    .with_body(&RangeBody { offset, len })
             }
-            StageOp::Mapped { offset, len } => (STAGE_MAPPED, [offset, len, 0, 0, 0], 0),
+            StageOp::Mapped { offset, len } => {
+                Header::new(STAGE_MAPPED, self.id).with_body(&RangeBody { offset, len })
+            }
         };
-        let flags = if self.op.taking() { STAGE_ACK } else { 0 } | keep;
-        Header { kind, flags, id: self.id, args, ..Default::default() }
+        if self.op.taking() {
+            header.flags |= STAGE_ACK;
+        }
+        header
     }
 
     /// The stage operation the message of `header` is: `EINVAL` unless one, acknowledged as it
     /// takes access away or not, of no payload or descriptors.
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
     pub fn decode(header: &Header) -> Result<Self, Errno> {
-        let Header { kind, flags, id, args, status, fds, len } = *header;
+        let Header { kind, flags, id, status, fds, len, .. } = *header;
         if status != 0 || fds != 0 || len != 0 {
             return Err(Errno::EINVAL);
         }
         let op = match kind {
             STAGE_MAP => {
-                let arena = ArenaId(u32::try_from(args[4]).map_err(|_| Errno::EINVAL)?);
-                let phys = PhysLocation { arena, offset: args[1] };
-                StageOp::Map { offset: args[0], phys, len: args[2] }
+                let body: StageMapBody = header.decode_body()?;
+                if body.reserved != 0 {
+                    return Err(Errno::EINVAL);
+                }
+                let phys = PhysLocation { arena: ArenaId(body.arena), offset: body.phys_offset };
+                StageOp::Map { offset: body.offset, phys, len: body.len }
             }
             STAGE_UNMAP => {
+                let body: RangeBody = header.decode_body()?;
                 let keep_private = flags & STAGE_KEEP_PRIVATE != 0;
-                StageOp::Unmap { offset: args[0], len: args[1], keep_private }
+                StageOp::Unmap { offset: body.offset, len: body.len, keep_private }
             }
-            STAGE_MAPPED => StageOp::Mapped { offset: args[0], len: args[1] },
+            STAGE_MAPPED => {
+                let body: RangeBody = header.decode_body()?;
+                StageOp::Mapped { offset: body.offset, len: body.len }
+            }
             _ => return Err(Errno::EINVAL),
         };
         let acknowledged = if op.taking() { STAGE_ACK } else { 0 };
@@ -910,19 +1011,21 @@ impl Stage {
     }
 }
 
-/// cladefs: where an [`OPEN`] and its reply say their sender's wire [`VERSION`] (TASK-141.3).
-const VERSION_ARG: usize = 4;
-
 /// cladefs: the wire version the [`OPEN`], or the reply to one, of `header` says: its sender's
-/// (TASK-141.3), whatever the rest of it holds, as no version moves where it is said.
+/// (TASK-141.3), whatever the rest of it holds, as no version moves [`VERSION_OFFSET`].
+#[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 pub(crate) fn version(header: &Header) -> u64 {
-    header.args[VERSION_ARG]
+    let Some((_, tail)) = header.body.0.split_at_checked(VERSION_OFFSET) else {
+        unreachable!("VERSION_OFFSET is within BODY_BYTES");
+    };
+    u64::read_from_prefix(tail).expect("8 bytes at VERSION_OFFSET").0
 }
 
 /// cladefs: `header`, an [`OPEN`] or a reply to one, saying this end's wire [`VERSION`]: as a
 /// daemon's reply refusing an `OPEN` of another version does too (TASK-141.3).
 pub(crate) fn with_version(mut header: Header) -> Header {
-    header.args[VERSION_ARG] = VERSION;
+    header.body.0[VERSION_OFFSET..VERSION_OFFSET + size_of::<u64>()]
+        .copy_from_slice(VERSION.as_bytes());
     header
 }
 
@@ -943,20 +1046,31 @@ pub(crate) struct Opened {
 }
 
 impl Opened {
-    /// Its arguments, with this daemon's wire [`VERSION`], last ([`VERSION_ARG`]).
-    pub fn args(&self) -> [u64; 5] {
-        [self.cell, self.arena.0.into(), self.commit, self.max_map_count.unwrap_or(0), VERSION]
+    /// Its typed wire body, with this daemon's wire [`VERSION`] at [`VERSION_OFFSET`].
+    pub fn to_body(self) -> OpenedBody {
+        OpenedBody {
+            cell: self.cell,
+            commit: self.commit,
+            max_map_count: self.max_map_count.unwrap_or(0),
+            arena: self.arena.0,
+            reserved: 0,
+            version: VERSION,
+        }
     }
 
-    /// What a reply of `args` says: `EINVAL` of an arena that is none; cladefs: `EPROTONOSUPPORT`
-    /// from a daemon of another wire version, before anything else of it (TASK-141.3).
-    pub fn from_args(args: [u64; 5]) -> Result<Self, Errno> {
-        if args[VERSION_ARG] != VERSION {
+    /// What an `OPEN` reply `header` says: `EPROTONOSUPPORT` from a daemon of another wire
+    /// version, before anything else of it (TASK-141.3); `EINVAL` on non-zero reserved bytes.
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+    pub fn decode(header: &Header) -> Result<Self, Errno> {
+        if version(header) != VERSION {
             return Err(Errno::EPROTONOSUPPORT);
         }
-        let arena = ArenaId(u32::try_from(args[1]).map_err(|_| Errno::EINVAL)?);
-        let max_map_count = (args[3] != 0).then_some(args[3]);
-        Ok(Self { cell: args[0], arena, commit: args[2], max_map_count })
+        let body: OpenedBody = header.decode_body()?;
+        if body.reserved != 0 {
+            return Err(Errno::EINVAL);
+        }
+        let max_map_count = (body.max_map_count != 0).then_some(body.max_map_count);
+        Ok(Self { cell: body.cell, arena: ArenaId(body.arena), commit: body.commit, max_map_count })
     }
 }
 
@@ -965,14 +1079,16 @@ impl Opened {
 pub(crate) struct Info(pub ExtentInfo);
 
 impl Info {
-    pub fn args(&self) -> [u64; 5] {
+    pub fn to_body(self) -> InfoBody {
         let ExtentInfo { capacity, used, available, next_sequence, sequence_floor } = self.0;
-        [capacity, used, available, next_sequence, sequence_floor]
+        InfoBody { capacity, used, available, next_sequence, sequence_floor }
     }
 
-    pub fn from_args(args: [u64; 5]) -> Self {
-        let [capacity, used, available, next_sequence, sequence_floor] = args;
-        Self(ExtentInfo { capacity, used, available, next_sequence, sequence_floor })
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+    pub fn decode(header: &Header) -> Result<Self, Errno> {
+        let InfoBody { capacity, used, available, next_sequence, sequence_floor } =
+            header.decode_body()?;
+        Ok(Self(ExtentInfo { capacity, used, available, next_sequence, sequence_floor }))
     }
 }
 
@@ -982,7 +1098,21 @@ pub(crate) struct Advanced {
     pub commit: u64,
 }
 
+impl Advanced {
+    pub fn to_body(self) -> CommitBody {
+        CommitBody { commit: self.commit }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+    pub fn decode(header: &Header) -> Result<Self, Errno> {
+        let CommitBody { commit } = header.decode_body()?;
+        Ok(Self { commit })
+    }
+}
+
 /// cladefs: a [`FORK`]'s reply: the fork's cell's ID, the bucket's to give (TASK-364).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Forked {
     pub cell: u64,
     /// cladefs: of a quiescent [`FORK`], the version of the cell made, a VM snapshot's, and
@@ -992,61 +1122,66 @@ pub(crate) struct Forked {
 }
 
 impl Forked {
-    pub fn args(&self) -> [u64; 5] {
-        [self.cell, self.version, self.tenant, 0, 0]
+    pub fn to_body(self) -> ForkedBody {
+        ForkedBody { cell: self.cell, version: self.version, tenant: self.tenant }
     }
 
-    pub fn from_args(args: [u64; 5]) -> Self {
-        Self { cell: args[0], version: args[1], tenant: args[2] }
-    }
-}
-
-impl Advanced {
-    pub fn args(&self) -> [u64; 5] {
-        [self.commit, 0, 0, 0, 0]
-    }
-
-    #[cfg(target_os = "linux")]
-    pub fn from_args(args: [u64; 5]) -> Self {
-        Self { commit: args[0] }
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+    pub fn decode(header: &Header) -> Result<Self, Errno> {
+        let ForkedBody { cell, version, tenant } = header.decode_body()?;
+        Ok(Self { cell, version, tenant })
     }
 }
 
 /// `mappings`, as a reply to [`MAPPINGS`], or a [`MAP_MANY`], carries them: each
 /// [`MAPPING_BYTES`].
 pub(crate) fn mappings_payload(mappings: &[WindowMapping]) -> Vec<u8> {
-    (mappings.iter())
-        .flat_map(|mapping| {
-            let words = match mapping.contents {
-                MappingContents::Extent { extent, offset } => {
-                    [extent.cell, extent.sequence, offset, 0]
-                }
-                MappingContents::Zeros => [0, 0, 0, MAPPING_ZEROS],
-            };
-            [mapping.window_offset, mapping.len].into_iter().chain(words)
-        })
-        .flat_map(u64::to_le_bytes)
-        .collect()
+    let mut bytes = Vec::with_capacity(mappings.len() * size_of::<MappingWire>());
+    for mapping in mappings {
+        let wire = match mapping.contents {
+            MappingContents::Extent { extent, offset } => MappingWire {
+                window_offset: mapping.window_offset.into(),
+                len: mapping.len.into(),
+                cell: extent.cell.into(),
+                sequence: extent.sequence.into(),
+                offset: offset.into(),
+                flags: 0u64.into(),
+            },
+            MappingContents::Zeros => MappingWire {
+                window_offset: mapping.window_offset.into(),
+                len: mapping.len.into(),
+                cell: 0u64.into(),
+                sequence: 0u64.into(),
+                offset: 0u64.into(),
+                flags: MAPPING_ZEROS.into(),
+            },
+        };
+        bytes.extend_from_slice(wire.as_bytes());
+    }
+    bytes
 }
 
 /// The mappings a reply to [`MAPPINGS`], or a [`MAP_MANY`], carries, `payload`: `EINVAL` unless
-/// whole ones, of flags known.
+/// whole [`MappingWire`]s, of flags known, passing [`check_mapping`].
 #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 pub(crate) fn mappings(payload: &[u8]) -> Result<Vec<WindowMapping>, Errno> {
-    let (mappings, []) = payload.as_chunks::<{ MAPPING_BYTES as usize }>() else {
-        return Err(Errno::EINVAL);
-    };
-    (mappings.iter())
-        .map(|bytes| {
-            let (words, []) = bytes.as_chunks::<8>() else { unreachable!("48 bytes") };
-            let words: [[u8; 8]; 6] = words.try_into().expect("48 bytes are 6 words");
-            let [window_offset, len, cell, sequence, offset, flags] = words.map(u64::from_le_bytes);
-            let contents = match flags {
-                0 => MappingContents::Extent { extent: extent_of(cell, sequence)?, offset },
+    let entries = <[MappingWire]>::ref_from_bytes(payload).map_err(|_| Errno::EINVAL)?;
+    entries
+        .iter()
+        .map(|entry| {
+            let contents = match entry.flags.get() {
+                0 => MappingContents::Extent {
+                    extent: check_extent_id(entry.cell.get(), entry.sequence.get())?,
+                    offset: entry.offset.get(),
+                },
                 MAPPING_ZEROS => MappingContents::Zeros,
                 _ => return Err(Errno::EINVAL),
             };
-            mapping(WindowMapping { window_offset, len, contents })
+            check_mapping(WindowMapping {
+                window_offset: entry.window_offset.get(),
+                len: entry.len.get(),
+                contents,
+            })
         })
         .collect()
 }
@@ -1054,6 +1189,8 @@ pub(crate) fn mappings(payload: &[u8]) -> Result<Vec<WindowMapping>, Errno> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+    use std::os::fd::OwnedFd;
 
     /// TASK-614: a `FREE_MANY`'s and a `MAP_MANY`'s stream bytes count what the daemon decodes of
     /// their payloads besides them; every other request's, its payload alone, a `READ`'s reply
@@ -1073,8 +1210,6 @@ mod tests {
         let made = size_of::<WindowMapping>() + 2 * size_of::<crate::dax::DaxMapping>();
         assert!(made as u64 <= (MAP_MANY_HELD - 1) * MAPPING_BYTES, "{made} bytes a mapping");
     }
-    use proptest::prelude::*;
-    use std::os::fd::OwnedFd;
 
     /// What one of each shape of request is made of.
     #[derive(Clone, Debug)]
@@ -1092,13 +1227,37 @@ mod tests {
         copying: bool,
     }
 
+    /// Edge-heavy u64 strategy reaching 0, 1, protocol limits, their neighbours, and u64::MAX
+    /// (AGENTS.md: trust boundaries).
+    fn edge_u64() -> BoxedStrategy<u64> {
+        prop_oneof![
+            Just(0),
+            Just(1),
+            Just(MAX_ROOT as u64),
+            Just(MAX_STATS as u64),
+            Just(MAX_PAYLOAD),
+            Just(MAX_PAYLOAD - 1),
+            Just(MAX_WINDOW),
+            Just(MAX_WINDOW - 1),
+            Just(u64::MAX - 1),
+            Just(u64::MAX),
+            any::<u64>(),
+        ]
+        .boxed()
+    }
+
     fn fields() -> impl Strategy<Value = Fields> {
         let extent =
-            (any::<u64>(), any::<u64>()).prop_map(|(cell, sequence)| ExtentId { cell, sequence });
+            (edge_u64(), edge_u64()).prop_map(|(cell, sequence)| ExtentId { cell, sequence });
         let path = || "[a-z0-9/._-]{1,24}".prop_map(PathBuf::from);
         let bytes = || proptest::collection::vec(any::<u8>(), 0..64);
         (
-            (any::<[u64; 5]>(), any::<[bool; 3]>(), bytes(), bytes()),
+            (
+                [edge_u64(), edge_u64(), edge_u64(), edge_u64(), edge_u64()],
+                any::<[bool; 3]>(),
+                bytes(),
+                bytes(),
+            ),
             (path(), proptest::collection::vec(extent, 0..8)),
             ("[a-zA-Z0-9._-]{1,64}", "(\\PC{0,16}\n){0,8}"),
             prop_oneof![Just(Commit::Ordered), Just(Commit::Local), Just(Commit::Uploaded)],
@@ -1126,8 +1285,6 @@ mod tests {
     /// each of its ways.
     fn requests<'a>(fields: &'a Fields, area: BorrowedFd<'a>) -> Vec<Request<'a>> {
         let Fields { words: [a, b, c, d, e], flags: [one, two, three], .. } = *fields;
-        // cladefs: each value as far as it means anything (board 2762, 2776), what decoding refuses
-        // otherwise (`values_meaning_nothing_are_refused`).
         let (extent, other) = (known(a, b), known(c, d));
         let (window_offset, window_len) = windowed(d, e);
         let path = fields.path.clone();
@@ -1209,19 +1366,14 @@ mod tests {
         ]
     }
 
-    /// cladefs: the extent of `cell` and `sequence`, as far as its sequence means one: the last
-    /// none (board 2762).
     fn known(cell: u64, sequence: u64) -> ExtentId {
         ExtentId { cell, sequence: sequence.min(u64::MAX - 1) }
     }
 
-    /// cladefs: `offset`, as far as the `len` bytes there end within a u64 (board 2776).
     fn ending(offset: u64, len: u64) -> u64 {
         offset.min(u64::MAX - len)
     }
 
-    /// cladefs: a range of a window of `offset` and `len`, as far as it ends within
-    /// [`MAX_WINDOW`] (board 2776).
     fn windowed(offset: u64, len: u64) -> (u64, u64) {
         let len = len % (MAX_WINDOW + 1);
         (offset % (MAX_WINDOW - len + 1), len)
@@ -1238,27 +1390,133 @@ mod tests {
         };
         let refused = Some(Errno::EINVAL);
         let last = u64::MAX;
-        for (kind, args, past, inside) in [
-            (WRITE, [1, 1, 0, 0, 0], [1, last, 0, 0, 0], [1, last - 1, 0, 0, 0]),
-            (FREE, [1, 1, 0, 0, 0], [1, last, 0, 0, 0], [1, last - 1, 0, 0, 0]),
-            (PIN, [1, 1, 0, 0, 0], [1, last, 0, 0, 0], [1, last - 1, 0, 0, 0]),
-            (READ, [1, 1, 0, 4096, 0], [1, 1, last - 4095, 4096, 0], [1, 1, last - 4096, 4096, 0]),
-            (UNMAP, [0, 4096, 0, 0, 0], [MAX_WINDOW, 1, 0, 0, 0], [MAX_WINDOW - 1, 1, 0, 0, 0]),
-            (MAP, [1, 1, 0, 4096, 0], [1, 1, last, 1, 0], [1, 1, last - 1, 1, 0]),
-            (MAP, [1, 1, 0, 4096, 0], [1, 1, 0, 2, MAX_WINDOW - 1], [1, 1, 0, 1, MAX_WINDOW - 1]),
-        ] {
-            let payload = if kind == WRITE { vec![7; 4096] } else { vec![] };
-            let header = |args: [u64; 5]| Header::new(kind, 1).with_args(&args);
-            assert_eq!(decoded(header(args), payload.clone()), None, "{kind} {args:?}");
-            assert_eq!(decoded(header(past), payload.clone()), refused, "{kind} {past:?}");
-            assert_eq!(decoded(header(inside), payload), None, "{kind} {inside:?}");
+        let check = |ok_h: Header, past_h: Header, inside_h: Header, payload: Vec<u8>| {
+            assert_eq!(decoded(ok_h, payload.clone()), None, "{ok_h:?}");
+            assert_eq!(decoded(past_h, payload.clone()), refused, "{past_h:?}");
+            assert_eq!(decoded(inside_h, payload), None, "{inside_h:?}");
+        };
+        check(
+            Header::new(WRITE, 1).with_body(&WriteBody {
+                cell: 1,
+                sequence: 1,
+                ..Default::default()
+            }),
+            Header::new(WRITE, 1).with_body(&WriteBody {
+                cell: 1,
+                sequence: last,
+                ..Default::default()
+            }),
+            Header::new(WRITE, 1).with_body(&WriteBody {
+                cell: 1,
+                sequence: last - 1,
+                ..Default::default()
+            }),
+            vec![7; 4096],
+        );
+        for kind in [FREE, PIN, UNPIN] {
+            check(
+                Header::new(kind, 1).with_body(&ExtentBody { cell: 1, sequence: 1 }),
+                Header::new(kind, 1).with_body(&ExtentBody { cell: 1, sequence: last }),
+                Header::new(kind, 1).with_body(&ExtentBody { cell: 1, sequence: last - 1 }),
+                vec![],
+            );
         }
-        let ids = |sequence: u64| [1u64, sequence].map(u64::to_le_bytes).concat();
-        let freeing = Header::new(FREE_MANY, 1).with_args(&[1, 1]);
+        check(
+            Header::new(READ, 1).with_body(&ReadBody {
+                cell: 1,
+                sequence: 1,
+                offset: 0,
+                len: 4096,
+                transfer_at: 0,
+            }),
+            Header::new(READ, 1).with_body(&ReadBody {
+                cell: 1,
+                sequence: 1,
+                offset: last - 4095,
+                len: 4096,
+                transfer_at: 0,
+            }),
+            Header::new(READ, 1).with_body(&ReadBody {
+                cell: 1,
+                sequence: 1,
+                offset: last - 4096,
+                len: 4096,
+                transfer_at: 0,
+            }),
+            vec![],
+        );
+        check(
+            Header::new(UNMAP, 1).with_body(&RangeBody { offset: 0, len: 4096 }),
+            Header::new(UNMAP, 1).with_body(&RangeBody { offset: MAX_WINDOW, len: 1 }),
+            Header::new(UNMAP, 1).with_body(&RangeBody { offset: MAX_WINDOW - 1, len: 1 }),
+            vec![],
+        );
+        check(
+            Header::new(MAP, 1).with_body(&MapBody {
+                cell: 1,
+                sequence: 1,
+                offset: 0,
+                len: 4096,
+                window_offset: 0,
+            }),
+            Header::new(MAP, 1).with_body(&MapBody {
+                cell: 1,
+                sequence: 1,
+                offset: last,
+                len: 1,
+                window_offset: 0,
+            }),
+            Header::new(MAP, 1).with_body(&MapBody {
+                cell: 1,
+                sequence: 1,
+                offset: last - 1,
+                len: 1,
+                window_offset: 0,
+            }),
+            vec![],
+        );
+        check(
+            Header::new(MAP, 1).with_body(&MapBody {
+                cell: 1,
+                sequence: 1,
+                offset: 0,
+                len: 4096,
+                window_offset: 0,
+            }),
+            Header::new(MAP, 1).with_body(&MapBody {
+                cell: 1,
+                sequence: 1,
+                offset: 0,
+                len: 2,
+                window_offset: MAX_WINDOW - 1,
+            }),
+            Header::new(MAP, 1).with_body(&MapBody {
+                cell: 1,
+                sequence: 1,
+                offset: 0,
+                len: 1,
+                window_offset: MAX_WINDOW - 1,
+            }),
+            vec![],
+        );
+        let ids = |sequence: u64| {
+            ExtentIdWire { cell: 1u64.into(), sequence: sequence.into() }.as_bytes().to_vec()
+        };
+        let freeing = Header::new(FREE_MANY, 1).with_body(&ExtentBody { cell: 1, sequence: 1 });
         assert_eq!(decoded(freeing, ids(last)), refused);
         assert_eq!(decoded(freeing, ids(last - 1)), None);
-        let mapping =
-            |len: u64, sequence: u64| [0, len, 1, sequence, 0, 0].map(u64::to_le_bytes).concat();
+        let mapping = |len: u64, sequence: u64| {
+            MappingWire {
+                window_offset: 0u64.into(),
+                len: len.into(),
+                cell: 1u64.into(),
+                sequence: sequence.into(),
+                offset: 0u64.into(),
+                flags: 0u64.into(),
+            }
+            .as_bytes()
+            .to_vec()
+        };
         for (bad, why) in [(mapping(last, 1), "its length"), (mapping(1, last), "its sequence")] {
             assert_eq!(mappings(&bad).err(), refused, "{why}");
             assert_eq!(decoded(Header::new(MAP_MANY, 1), bad), refused, "{why}");
@@ -1353,28 +1611,19 @@ mod tests {
     }
 
     /// TASK-160.9: a request with a flag its kind doesn't know, any of them, is refused, as is one
-    /// with flags it knows that mean nothing together. Before, the daemon ignored them: a `WRITE`
-    /// of a flag it didn't know was written as though it had none.
+    /// with flags it knows that mean nothing together.
     #[test]
     fn requests_with_flags_their_kinds_dont_know_are_refused() {
-        // What each kind knows, as doc-4 and the wire's docs have it.
         let known = |kind: u32| -> u32 {
             match kind {
                 OPEN => 0b111,
                 READ => 0b1,
-                // cladefs: bit 5, WRITE_LOCAL (TASK-301).
                 WRITE => 0b11_1111,
-                // cladefs: zeros, at doc-4's bit 3; bit 0, writably, writable DAX's, is gone
-                // (backlog doc-13).
                 MAP => 0b1000,
-                // cladefs: bit 2, COMMIT_LOCAL (TASK-301).
                 COMMIT => 0b111,
-                // cladefs: bit 0, a write, is gone: a VM process copies itself (doc-26).
                 FAULT => 0b10,
-                // cladefs: copying on write (doc-26).
                 WINDOW => 0b1,
                 FORK => 0b1,
-                // cladefs: the guest's (TASK-111.4).
                 STATS => 0b1,
                 _ => 0,
             }
@@ -1397,7 +1646,6 @@ mod tests {
             let request = requests.iter().find(|request| request.kind() == kind).unwrap();
             let mut message = sent(request, 1);
             assert!(Request::decode(&message).is_ok(), "{request:?}");
-            // cladefs: REQUEST, which any request may have, aside (TASK-260).
             let unknown = |bit: &u32| (known(kind) | REQUEST) & *bit == 0;
             for bit in (0..32).map(|bit| 1u32 << bit).filter(unknown) {
                 message.header.flags = bit;
@@ -1405,9 +1653,12 @@ mod tests {
                 assert_eq!(decoded.err(), Some(Errno::EINVAL), "kind {kind}, flag {bit:#x}");
             }
         }
-        // Flags known, that mean nothing together.
         let refused = |kind, flags, payload: &[u8]| {
-            let header = with_version(Header::new(kind, 1).with_flags(flags));
+            let header = if kind == OPEN {
+                with_version(Header::new(kind, 1).with_flags(flags))
+            } else {
+                Header::new(kind, 1).with_flags(flags)
+            };
             let message = Message { header, payload: payload.to_vec(), fds: vec![] };
             assert_eq!(Request::decode(&message).err(), Some(Errno::EINVAL), "{kind}, {flags:#x}");
         };
@@ -1417,15 +1668,10 @@ mod tests {
         refused(WRITE, WRITE_UPLOADED, b"data");
         refused(WRITE, WRITE_LOCAL, b"data");
         refused(WRITE, WRITE_ROOT, b"data");
-        // cladefs: local and uploaded at once (TASK-301).
         refused(WRITE, WRITE_COMMIT | WRITE_UPLOADED | WRITE_LOCAL, b"data");
         refused(COMMIT, COMMIT_UPLOADED | COMMIT_LOCAL, b"");
-        // cladefs: a probe is of a page alone, to read.
         refused(FAULT, FAULT_PROBE, b"");
-        // cladefs: bit 0 said a write once, which a VM process copies itself now (doc-26).
         refused(FAULT, 1 << 0, b"");
-        // What the daemon tells, and VM processes say of their stage operations, the same: a
-        // stage operation is acknowledged if, and only if, it takes access away.
         let phys = PhysLocation { arena: ArenaId::DEFAULT, offset: 0 };
         let ops = [
             StageOp::Map { offset: 0, phys, len: 4096 },
@@ -1443,7 +1689,6 @@ mod tests {
             assert_eq!(Told::decode(&header), Ok(told));
             for bit in (0..32).map(|bit| 1u32 << bit) {
                 let flipped = Header { flags: header.flags ^ bit, ..header };
-                // cladefs: an unmap keeps the private pages there, or ends them (doc-26).
                 let known = matches!(told, Told::Capacity { .. }) && bit == CAPACITY_ASK
                     || matches!(told, Told::Stage(Stage { op: StageOp::Unmap { .. }, .. }))
                         && bit == STAGE_KEEP_PRIVATE;
@@ -1457,34 +1702,69 @@ mod tests {
         }
     }
 
-    /// TASK-160.9: what is refused besides: a payload, or descriptors, a request has no use for,
-    /// arguments out of range, a status, and paths that name nothing.
+    /// TASK-160.9, board 6917: what is refused besides: a payload, or descriptors, a request has
+    /// no use for, arguments out of range, non-zero trailing or reserved body bytes, a status, and
+    /// paths that name nothing.
     #[test]
     fn requests_malformed_otherwise_are_refused() {
         let refused = |header: Header, payload: &[u8], fds: Vec<OwnedFd>| {
             let message = Message { header, payload: payload.to_vec(), fds };
             assert_eq!(Request::decode(&message).err(), Some(Errno::EINVAL), "{header:?}");
         };
-        refused(Header::new(READ, 1).with_args(&[1, 1, 0, 4096]), b"extra", vec![]);
-        refused(Header::new(READ, 1).with_args(&[1, 1, 0, MAX_PAYLOAD + 1]), b"", vec![]);
+        let read_body = ReadBody { cell: 1, sequence: 1, offset: 0, len: 4096, transfer_at: 0 };
+        refused(Header::new(READ, 1).with_body(&read_body), b"extra", vec![]);
+        let too_big = ReadBody { len: MAX_PAYLOAD + 1, ..read_body };
+        refused(Header::new(READ, 1).with_body(&too_big), b"", vec![]);
         refused(Header::new(INFO, 1), b"", vec![area()]);
-        refused(Header::new(TRANSFER, 1).with_args(&[4096]), b"", vec![]);
-        refused(Header::new(TRANSFER, 1).with_args(&[4096]), b"", vec![area(), area()]);
-        refused(Header::new(WINDOW, 1).with_args(&[MAX_WINDOW + 1]), b"", vec![]);
-        // cladefs: a window saying its private pages, which its VM process bounds (doc-26).
-        refused(Header::new(WINDOW, 1).with_args(&[1 << 20, 1]), b"", vec![]);
-        refused(Header::new(RESIZED, 1).with_args(&[4096, 2]), b"", vec![]);
+        refused(Header::new(TRANSFER, 1).with_body(&TransferBody { len: 4096 }), b"", vec![]);
+        refused(
+            Header::new(TRANSFER, 1).with_body(&TransferBody { len: 4096 }),
+            b"",
+            vec![area(), area()],
+        );
+        refused(
+            Header::new(WINDOW, 1).with_body(&WindowBody { size: MAX_WINDOW + 1, budget: 0 }),
+            b"",
+            vec![],
+        );
+        // Non-zero trailing bytes past a typed body struct (or on an empty-body kind) are refused.
+        let mut dirty_window =
+            Header::new(WINDOW, 1).with_body(&WindowBody { size: 1 << 20, budget: 0 });
+        dirty_window.body.0[size_of::<WindowBody>()] = 1;
+        refused(dirty_window, b"", vec![]);
+        let mut dirty_info = Header::new(INFO, 1);
+        dirty_info.body.0[0] = 1;
+        refused(dirty_info, b"", vec![]);
+        refused(
+            Header::new(RESIZED, 1).with_body(&ResizedBody { capacity: 4096, took: 2 }),
+            b"",
+            vec![],
+        );
         refused(Header { status: -1, ..Header::new(INFO, 1) }, b"", vec![]);
-        refused(Header::new(FREE_MANY, 1).with_args(&[1, 1]), &[0; EXTENT_ID_BYTES + 8], vec![]);
-        // cladefs: no mapping, part of one, or one of flags unknown (TASK-92.14).
+        refused(
+            Header::new(FREE_MANY, 1).with_body(&ExtentBody { cell: 1, sequence: 1 }),
+            &[0; EXTENT_ID_BYTES + 8],
+            vec![],
+        );
         refused(Header::new(MAP_MANY, 1), b"", vec![]);
         refused(Header::new(MAP_MANY, 1), &[0; MAPPING_BYTES as usize - 8], vec![]);
-        let unknown = [0u64, 4096, 1, 1, 0, 1].map(u64::to_le_bytes).concat();
-        refused(Header::new(MAP_MANY, 1), &unknown, vec![]);
-        let write = Header::new(WRITE, 1).with_args(&[1, 1, 0, 0, 8]);
-        refused(write.with_flags(WRITE_COMMIT | WRITE_ROOT), b"data", vec![]);
-        let transfer = Header::new(WRITE, 1).with_args(&[1, 1, 0, 0, 8]);
-        refused(transfer.with_flags(WRITE_TRANSFER), b"no root", vec![]);
+        let unknown = MappingWire {
+            window_offset: 0u64.into(),
+            len: 4096u64.into(),
+            cell: 1u64.into(),
+            sequence: 1u64.into(),
+            offset: 0u64.into(),
+            flags: 1u64.into(),
+        };
+        refused(Header::new(MAP_MANY, 1), unknown.as_bytes(), vec![]);
+        let write = Header::new(WRITE, 1)
+            .with_body(&WriteBody { cell: 1, sequence: 1, offset: 0, transfer_at: 0, data_len: 8 })
+            .with_flags(WRITE_COMMIT | WRITE_ROOT);
+        refused(write, b"data", vec![]);
+        let transfer = Header::new(WRITE, 1)
+            .with_body(&WriteBody { cell: 1, sequence: 1, offset: 0, transfer_at: 0, data_len: 8 })
+            .with_flags(WRITE_TRANSFER);
+        refused(transfer, b"no root", vec![]);
         refused(Header::new(COMMIT, 1), b"no root", vec![]);
         let open = |flags| with_version(Header::new(OPEN, 1).with_flags(flags));
         for path in [&b""[..], &b"a\0b"[..]] {
@@ -1499,27 +1779,28 @@ mod tests {
         );
         refused(Header::new(BUILD, 1), b"a\"b", vec![]);
         refused(Header::new(BUILD, 1), &[b'a'; MAX_BUILD + 1], vec![]);
-        // cladefs: a guest's stats, without the flag that says it carries them; past their most;
-        // not text (TASK-111.4).
         refused(Header::new(STATS, 1), b"seals 1\n", vec![]);
         let guest = Header::new(STATS, 1).with_flags(STATS_GUEST);
         refused(guest, &[b'\n'; MAX_STATS + 1], vec![]);
         refused(guest, b"seals \xff\n", vec![]);
     }
 
-    /// TASK-160.9: the bytes are those the VM process and the daemon wrote by hand before.
+    /// board 6917: each request, stage op, told and made message encodes into its exact typed
+    /// `#[repr(C)]` wire struct.
     #[test]
-    fn requests_are_the_bytes_they_were() {
+    fn requests_encode_into_their_typed_bodies() {
         let extent = ExtentId { cell: 7, sequence: 9 };
         let area = area();
         let root =
             WriteBarriers { before: true, after: Some(Commit::Uploaded), root: Some(&b"r"[..]) };
-        let header =
-            |kind, flags, args: &[u64]| Header::new(kind, 0).with_args(args).with_flags(flags);
         let cases: Vec<(Request<'_>, Header, Vec<u8>)> = vec![
             (
                 Request::Open { path: "s".into(), opening: Opening::Create(4096, Kind::Fxfs) },
-                header(OPEN, OPEN_CREATE, &[4096, 0, 0, 0, VERSION]),
+                Header::new(OPEN, 0).with_flags(OPEN_CREATE).with_body(&OpenBody {
+                    capacity: 4096,
+                    version: VERSION,
+                    ..Default::default()
+                }),
                 b"s".to_vec(),
             ),
             (
@@ -1527,22 +1808,42 @@ mod tests {
                     path: "s".into(),
                     opening: Opening::ForkOf { tenant: 2, cell: 3, version: 9, capacity: 4096 },
                 },
-                header(OPEN, OPEN_FORK, &[4096, 3, 9, 2, VERSION]),
+                Header::new(OPEN, 0).with_flags(OPEN_FORK).with_body(&OpenBody {
+                    capacity: 4096,
+                    cell: 3,
+                    cell_version: 9,
+                    tenant: 2,
+                    version: VERSION,
+                }),
                 b"s".to_vec(),
             ),
             (
                 Request::Open { path: "s".into(), opening: Opening::ReadOnly },
-                header(OPEN, OPEN_READ_ONLY, &[0, 0, 0, 0, VERSION]),
+                Header::new(OPEN, 0)
+                    .with_flags(OPEN_READ_ONLY)
+                    .with_body(&OpenBody { version: VERSION, ..Default::default() }),
                 b"s".to_vec(),
             ),
             (
                 Request::Read { extent, offset: 1, len: 2, into: ReadInto::Reply },
-                header(READ, 0, &[7, 9, 1, 2]),
+                Header::new(READ, 0).with_body(&ReadBody {
+                    cell: 7,
+                    sequence: 9,
+                    offset: 1,
+                    len: 2,
+                    transfer_at: 0,
+                }),
                 vec![],
             ),
             (
                 Request::Read { extent, offset: 1, len: 2, into: ReadInto::Transfer { at: 3 } },
-                header(READ, READ_TRANSFER, &[7, 9, 1, 2, 3]),
+                Header::new(READ, 0).with_flags(READ_TRANSFER).with_body(&ReadBody {
+                    cell: 7,
+                    sequence: 9,
+                    offset: 1,
+                    len: 2,
+                    transfer_at: 3,
+                }),
                 vec![],
             ),
             (
@@ -1552,7 +1853,13 @@ mod tests {
                     data: Data::Inline(&b"dd"[..]),
                     barriers: root,
                 },
-                header(WRITE, 0b1111, &[7, 9, 1, 0, 2]),
+                Header::new(WRITE, 0).with_flags(0b1111).with_body(&WriteBody {
+                    cell: 7,
+                    sequence: 9,
+                    offset: 1,
+                    transfer_at: 0,
+                    data_len: 2,
+                }),
                 b"ddr".to_vec(),
             ),
             (
@@ -1562,13 +1869,19 @@ mod tests {
                     data: Data::Transfer { at: 3, len: 2 },
                     barriers: WriteBarriers::default(),
                 },
-                header(WRITE, WRITE_TRANSFER, &[7, 9, 1, 3, 2]),
+                Header::new(WRITE, 0).with_flags(WRITE_TRANSFER).with_body(&WriteBody {
+                    cell: 7,
+                    sequence: 9,
+                    offset: 1,
+                    transfer_at: 3,
+                    data_len: 2,
+                }),
                 vec![],
             ),
             (
                 Request::FreeMany { first: extent, rest: Cow::Owned(vec![extent]) },
-                header(FREE_MANY, 0, &[7, 9]),
-                [7u64.to_le_bytes(), 9u64.to_le_bytes()].concat(),
+                Header::new(FREE_MANY, 0).with_body(&ExtentBody { cell: 7, sequence: 9 }),
+                ExtentIdWire { cell: 7u64.into(), sequence: 9u64.into() }.as_bytes().to_vec(),
             ),
             (
                 Request::Map(WindowMapping {
@@ -1576,7 +1889,13 @@ mod tests {
                     len: 4,
                     contents: MappingContents::Extent { extent, offset: 3 },
                 }),
-                header(MAP, 0, &[7, 9, 3, 4, 5]),
+                Header::new(MAP, 0).with_body(&MapBody {
+                    cell: 7,
+                    sequence: 9,
+                    offset: 3,
+                    len: 4,
+                    window_offset: 5,
+                }),
                 vec![],
             ),
             (
@@ -1585,7 +1904,11 @@ mod tests {
                     len: 4,
                     contents: MappingContents::Zeros,
                 }),
-                header(MAP, MAP_ZEROS, &[0, 0, 0, 4, 5]),
+                Header::new(MAP, 0).with_flags(MAP_ZEROS).with_body(&MapBody {
+                    len: 4,
+                    window_offset: 5,
+                    ..Default::default()
+                }),
                 vec![],
             ),
             (
@@ -1597,52 +1920,66 @@ mod tests {
                     },
                     WindowMapping { window_offset: 6, len: 4, contents: MappingContents::Zeros },
                 ])),
-                header(MAP_MANY, 0, &[]),
+                Header::new(MAP_MANY, 0),
                 [5u64, 4, 7, 9, 3, 0, 6, 4, 0, 0, 0, MAPPING_ZEROS].map(u64::to_le_bytes).concat(),
             ),
             (
                 Request::Commit { commit: Commit::Uploaded, root: Some(&b"r"[..]) },
-                header(COMMIT, COMMIT_ROOT | COMMIT_UPLOADED, &[]),
+                Header::new(COMMIT, 0).with_flags(COMMIT_ROOT | COMMIT_UPLOADED),
                 b"r".to_vec(),
             ),
             (
                 Request::Fault(Fault { offset: 5, page: true, probe: false }),
-                header(FAULT, FAULT_PAGE, &[5]),
+                Header::new(FAULT, 0).with_flags(FAULT_PAGE).with_body(&FaultBody { offset: 5 }),
                 vec![],
             ),
             (
                 Request::Fault(Fault { offset: 5, page: true, probe: true }),
-                header(FAULT, FAULT_PAGE | FAULT_PROBE, &[5]),
+                Header::new(FAULT, 0)
+                    .with_flags(FAULT_PAGE | FAULT_PROBE)
+                    .with_body(&FaultBody { offset: 5 }),
                 vec![],
             ),
-            (Request::Version, header(FORK, FORK_QUIESCENT, &[]), vec![]),
-            (Request::DropVersion { version: 5 }, header(FORK, FORK_DROP, &[5]), vec![]),
+            (Request::Version, Header::new(FORK, 0).with_flags(FORK_QUIESCENT), vec![]),
+            (
+                Request::DropVersion { version: 5 },
+                Header::new(FORK, 0)
+                    .with_flags(FORK_DROP)
+                    .with_body(&DropVersionBody { version: 5 }),
+                vec![],
+            ),
             (
                 Request::Resized { capacity: 4096, took: true },
-                header(RESIZED, 0, &[4096, 1]),
+                Header::new(RESIZED, 0).with_body(&ResizedBody { capacity: 4096, took: 1 }),
                 vec![],
             ),
             (
                 Request::Transfer { len: 4096, area: Area(area.as_fd()) },
-                header(TRANSFER, 0, &[4096]),
+                Header::new(TRANSFER, 0).with_body(&TransferBody { len: 4096 }),
                 vec![],
             ),
             (
                 Request::Window { size: 8192, copying: false, budget: 0 },
-                header(WINDOW, 0, &[8192]),
+                Header::new(WINDOW, 0).with_body(&WindowBody { size: 8192, budget: 0 }),
                 vec![],
             ),
             (
                 Request::Window { size: 8192, copying: true, budget: 3 },
-                header(WINDOW, WINDOW_COPYING, &[8192, 0, 3]),
+                Header::new(WINDOW, 0)
+                    .with_flags(WINDOW_COPYING)
+                    .with_body(&WindowBody { size: 8192, budget: 3 }),
                 vec![],
             ),
             (
                 Request::Stats { ask: 5, guest: Some("seals 1\n") },
-                header(STATS, STATS_GUEST, &[5]),
+                Header::new(STATS, 0).with_flags(STATS_GUEST).with_body(&StatsBody { ask: 5 }),
                 b"seals 1\n".to_vec(),
             ),
-            (Request::Stats { ask: 5, guest: None }, header(STATS, 0, &[5]), vec![]),
+            (
+                Request::Stats { ask: 5, guest: None },
+                Header::new(STATS, 0).with_body(&StatsBody { ask: 5 }),
+                vec![],
+            ),
         ];
         for (request, header, payload) in cases {
             let encoded = request.encode();
@@ -1658,22 +1995,56 @@ mod tests {
                 len: 3,
             },
         };
-        assert_eq!(map.encode(), Header::new(STAGE_MAP, 4).with_args(&[1, 2, 3, 0, 6]));
+        assert_eq!(
+            map.encode(),
+            Header::new(STAGE_MAP, 4).with_body(&StageMapBody {
+                offset: 1,
+                phys_offset: 2,
+                len: 3,
+                arena: 6,
+                reserved: 0,
+            })
+        );
         let unmap = Stage { id: 4, op: StageOp::Unmap { offset: 1, len: 2, keep_private: false } };
-        let acked = Header::new(STAGE_UNMAP, 4).with_args(&[1, 2]).with_flags(STAGE_ACK);
+        let acked = Header::new(STAGE_UNMAP, 4)
+            .with_flags(STAGE_ACK)
+            .with_body(&RangeBody { offset: 1, len: 2 });
         assert_eq!(unmap.encode(), acked);
-        // cladefs: the host's own, keeping the private pages there (doc-26).
         let kept = Stage { id: 4, op: StageOp::Unmap { offset: 1, len: 2, keep_private: true } };
         assert_eq!(kept.encode(), acked.with_flags(STAGE_ACK | STAGE_KEEP_PRIVATE));
         let ask = Told::Capacity { capacity: 4096, ask: true }.encode();
-        assert_eq!(ask, Header::new(CAPACITY, 0).with_args(&[4096]).with_flags(CAPACITY_ASK));
+        assert_eq!(
+            ask,
+            Header::new(CAPACITY, 0)
+                .with_flags(CAPACITY_ASK)
+                .with_body(&CapacityBody { capacity: 4096 })
+        );
         let counts = StageCounts { costs: [1, 2, 3, 4], installed: 5, private: 6 };
         let ack = Made::Ack { id: 4, counts }.encode();
-        assert_eq!(ack, Header::new(ACK, 4).with_args(&[1, 2, 3, 4, 5 | 6 << 32]));
+        assert_eq!(
+            ack,
+            Header::new(ACK, 4).with_body(&StageCountsBody {
+                ops: 1,
+                ns: 2,
+                overwrites: 3,
+                leave_outs: 4,
+                installed: 5,
+                private: 6,
+            })
+        );
         let asked = Told::Stats { ask: 6 }.encode();
-        assert_eq!(asked, Header::new(STATS_ASK, 0).with_args(&[6]));
+        assert_eq!(asked, Header::new(STATS_ASK, 0).with_body(&StatsBody { ask: 6 }));
         let private = Made::PrivateCounts([1, 64, 5, 2, 9]).encode();
-        assert_eq!(private, Header::new(STAGE_PRIVATE_COUNTS, 0).with_args(&[1, 64, 5, 2, 9]));
+        assert_eq!(
+            private,
+            Header::new(STAGE_PRIVATE_COUNTS, 0).with_body(&PrivateCountsBody {
+                runs: 1,
+                pages: 64,
+                ns: 5,
+                requests: 2,
+                request_ns: 9,
+            })
+        );
     }
 
     proptest! {
@@ -1723,7 +2094,8 @@ mod tests {
         ) {
             let max_map_count = (c != 0).then_some(c);
             let opened = Opened { cell: a, arena: ArenaId(arena), commit: b, max_map_count };
-            prop_assert_eq!(Opened::from_args(opened.args()), Ok(opened));
+            let header = Header::new(REPLY, 1).with_body(&opened.to_body());
+            prop_assert_eq!(Opened::decode(&header), Ok(opened));
             let info = Info(ExtentInfo {
                 capacity: a,
                 used: b,
@@ -1731,12 +2103,16 @@ mod tests {
                 next_sequence: d,
                 sequence_floor: e,
             });
-            prop_assert_eq!(Info::from_args(info.args()), info);
+            let header = Header::new(REPLY, 1).with_body(&info.to_body());
+            prop_assert_eq!(Info::decode(&header), Ok(info));
             let advanced = Advanced { commit: a };
-            prop_assert_eq!(Advanced::from_args(advanced.args()), advanced);
+            let header = Header::new(REPLY, 1).with_body(&advanced.to_body());
+            prop_assert_eq!(Advanced::decode(&header), Ok(advanced));
+            let forked = Forked { cell: a, version: b, tenant: c };
+            let header = Header::new(REPLY, 1).with_body(&forked.to_body());
+            prop_assert_eq!(Forked::decode(&header), Ok(forked));
             let mapped: Vec<WindowMapping> = (mappings_of.into_iter())
                 .map(|([window_offset, len, cell, sequence, offset], zeros)| {
-                    // cladefs: as far as they mean anything (board 2762, 2776).
                     let (window_offset, len) = windowed(window_offset, len);
                     WindowMapping {
                         window_offset,
@@ -1757,14 +2133,52 @@ mod tests {
         }
     }
 
-    /// Replies malformed: an arena that is none, mappings of part of one, or of flags unknown or
-    /// meaning nothing together.
+    /// Replies and stage operations malformed: non-zero reserved/trailing bytes, mappings of part
+    /// of one, or of flags unknown or meaning nothing together.
     #[test]
     fn replies_malformed_are_refused() {
-        assert_eq!(Opened::from_args([1, 1 << 32, 0, 0, VERSION]).err(), Some(Errno::EINVAL));
-        let mapping = |flags: u64| [0u64, 4096, 1, 1, 0, flags].map(u64::to_le_bytes).concat();
+        let mut bad_opened = OpenedBody {
+            cell: 1,
+            commit: 0,
+            max_map_count: 0,
+            arena: 1,
+            reserved: 1,
+            version: VERSION,
+        };
+        assert_eq!(
+            Opened::decode(&Header::new(REPLY, 1).with_body(&bad_opened)).err(),
+            Some(Errno::EINVAL)
+        );
+        bad_opened.reserved = 0;
+        assert!(Opened::decode(&Header::new(REPLY, 1).with_body(&bad_opened)).is_ok());
+
+        let bad_stage = Header::new(STAGE_MAP, 1).with_body(&StageMapBody {
+            offset: 0,
+            phys_offset: 0,
+            len: 4096,
+            arena: 0,
+            reserved: 1,
+        });
+        assert_eq!(Stage::decode(&bad_stage).err(), Some(Errno::EINVAL));
+
+        let mut dirty_forked =
+            Header::new(REPLY, 1).with_body(&ForkedBody { cell: 1, version: 2, tenant: 3 });
+        dirty_forked.body.0[size_of::<ForkedBody>()] = 1;
+        assert_eq!(Forked::decode(&dirty_forked).err(), Some(Errno::EINVAL));
+
+        let mapping = |flags: u64| {
+            MappingWire {
+                window_offset: 0u64.into(),
+                len: 4096u64.into(),
+                cell: 1u64.into(),
+                sequence: 1u64.into(),
+                offset: 0u64.into(),
+                flags: flags.into(),
+            }
+            .as_bytes()
+            .to_vec()
+        };
         assert_eq!(mappings(&mapping(0)[..40]).err(), Some(Errno::EINVAL));
-        // cladefs: bit 0, writable, writable DAX's (backlog doc-13).
         for flags in [1, MAPPING_ZEROS | 1, 1 << 2, 1 << 63] {
             assert_eq!(mappings(&mapping(flags)).err(), Some(Errno::EINVAL), "{flags:#x}");
         }
@@ -1780,8 +2194,9 @@ mod tests {
             for open in opens {
                 let mut message = sent(&open, id);
                 prop_assert_eq!(version(&message.header), VERSION);
-                for other in [0, VERSION + 1, u64::MAX] {
-                    message.header.args[4] = other;
+                for other in [0, VERSION - 1, VERSION + 1, u64::MAX] {
+                    message.header.body.0[VERSION_OFFSET..VERSION_OFFSET + 8]
+                        .copy_from_slice(other.as_bytes());
                     let refused = Some(Errno::EPROTONOSUPPORT);
                     prop_assert_eq!(Request::decode(&message).err(), refused);
                     message.header.flags = flags;
@@ -1790,27 +2205,28 @@ mod tests {
             }
         });
         let opened = Opened { cell: 1, arena: ArenaId::DEFAULT, commit: 0, max_map_count: None };
-        assert_eq!(version(&Header::new(REPLY, 1).with_args(&opened.args())), VERSION);
-        for other in [0, VERSION + 1] {
-            let [cell, arena, commit, max_map_count, _] = opened.args();
-            let args = [cell, arena, commit, max_map_count, other];
-            assert_eq!(Opened::from_args(args).err(), Some(Errno::EPROTONOSUPPORT), "{other}");
-            // Before its arena, which another version may say otherwise.
-            let args = [cell, u64::MAX, commit, max_map_count, other];
-            assert_eq!(Opened::from_args(args).err(), Some(Errno::EPROTONOSUPPORT), "{other}");
+        assert_eq!(version(&Header::new(REPLY, 1).with_body(&opened.to_body())), VERSION);
+        for other in [0, VERSION - 1, VERSION + 1] {
+            let body = OpenedBody { version: other, ..opened.to_body() };
+            let header = Header::new(REPLY, 1).with_body(&body);
+            assert_eq!(Opened::decode(&header).err(), Some(Errno::EPROTONOSUPPORT), "{other}");
+            // Before its reserved field, which another version may use otherwise.
+            let body = OpenedBody { reserved: u32::MAX, version: other, ..opened.to_body() };
+            let header = Header::new(REPLY, 1).with_body(&body);
+            assert_eq!(Opened::decode(&header).err(), Some(Errno::EPROTONOSUPPORT), "{other}");
         }
     }
 
     /// TASK-141.3: the wire as this [`VERSION`] has it, as a fingerprint of everything its two ends
     /// must agree on: what each kind of message encodes to, of fixed fields, and decodes from (the
-    /// flags each kind knows), the replies' arguments, the [`Header`]'s layout, and the bounds.
+    /// flags each kind knows), the replies' bodies, the [`Header`]'s layout, and the bounds.
     /// A change to any of it without a new `VERSION` fails here: a VM process and a daemon of the
     /// two would meet as of one version, and serve each other with what neither means.
     #[test]
     fn the_wire_is_its_version() {
         /// The version, and the fingerprint of the wire it is. A change to the wire is a new
         /// version, both changed together, never the fingerprint alone.
-        const WIRE: (u64, u64) = (13, 0xfb14_df49_06a8_8e2c);
+        const WIRE: (u64, u64) = (14, 0xd329aff7f4e6c6e8);
         let fingerprint = fingerprint();
         assert_eq!(
             (VERSION, fingerprint),
@@ -1857,7 +2273,6 @@ mod tests {
         for kind in 0..256 {
             hashed(&known_flags(kind).map_or(u64::MAX, u64::from).to_le_bytes());
         }
-        // cladefs: what any request says of its guest request (TASK-260).
         hashed(&REQUEST.to_le_bytes());
         hashed(&request_bytes(NonZeroU64::new(5).unwrap()));
         let phys = PhysLocation { arena: ArenaId(6), offset: 1 << 21 };
@@ -1893,10 +2308,11 @@ mod tests {
             next_sequence: 12,
             sequence_floor: 1 << 40,
         };
-        let replies = [opened.args(), Info(info).args(), Advanced { commit: 12 }.args()];
-        hashed(
-            &replies.as_flattened().iter().flat_map(|word| word.to_le_bytes()).collect::<Vec<_>>(),
-        );
+        let forked = Forked { cell: 3, version: 4, tenant: 5 };
+        hashed(opened.to_body().as_bytes());
+        hashed(Info(info).to_body().as_bytes());
+        hashed(Advanced { commit: 12 }.to_body().as_bytes());
+        hashed(forked.to_body().as_bytes());
         let extent =
             MappingContents::Extent { extent: ExtentId { cell: 3, sequence: 4 }, offset: 8192 };
         hashed(&mappings_payload(&[

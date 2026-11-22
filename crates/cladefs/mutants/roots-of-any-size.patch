@@ -4,12 +4,14 @@
 # Killer: cladefsd::tests::hostile::what_requests_hold_is_within_the_credit
 --- a/crates/cladefs/src/cladefsd/codec.rs
 +++ b/crates/cladefs/src/cladefsd/codec.rs
-@@ -471,7 +471,7 @@ impl<'a> Request<'a> {
+@@ -458,7 +458,9 @@
+                 let (commit, has_root) = decode_commit_flags(flags, Some(COMMIT_LOCAL))?;
+                 let root = if has_root {
+                     // cladefs: no more than a root holds (TASK-149.17).
+-                    check_root_len(payload.len())?;
++                    if payload.len() > MAX_PAYLOAD as usize {
++                        return Err(Errno::EINVAL);
++                    }
+                     Some(payload)
+                 } else {
                      nothing()?;
-                 }
-                 // cladefs: no more than a root holds (TASK-149.17).
--                if root.is_some_and(|root| root.len() > MAX_ROOT) {
-+                if root.is_some_and(|root| root.len() > MAX_PAYLOAD as usize) {
-                     return Err(Errno::EINVAL);
-                 }
-                 let commit = match (has(COMMIT_UPLOADED), has(COMMIT_LOCAL)) {

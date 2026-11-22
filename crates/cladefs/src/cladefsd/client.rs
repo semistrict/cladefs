@@ -113,7 +113,7 @@ impl CellClient {
             ))),
             errno => Error::from(errno),
         })?;
-        let opened = Opened::from_args(reply.header.args).map_err(|errno| match errno {
+        let opened = Opened::decode(&reply.header).map_err(|errno| match errno {
             Errno::EPROTONOSUPPORT => Error::new(anyhow::Error::new(errno).context(format!(
                 "the extent daemon is of wire version {}, this VM process of {VERSION}",
                 super::codec::version(&reply.header)
@@ -182,7 +182,7 @@ impl CellClient {
     /// [`CellClient::advance`], waiting for the daemon holding no thread.
     pub async fn advance_async(&self) -> Result<u64> {
         let reply = self.client.request(&Request::Advance).await?;
-        Ok(Advanced::from_args(reply.header.args).commit)
+        Ok(Advanced::decode(&reply.header).map_err(|_| Errno::EIO)?.commit)
     }
 
     /// cladefs: lets go of what a follower's view held of the commits before the one
@@ -282,7 +282,8 @@ impl CellClient {
 
     /// [`CellClient::info`], waiting for the daemon holding no thread.
     pub async fn info_async(&self) -> Result<ExtentInfo> {
-        Ok(Info::from_args(self.client.request(&Request::Info).await?.header.args).0)
+        let reply = self.client.request(&Request::Info).await?;
+        Ok(Info::decode(&reply.header).map_err(|_| Errno::EIO)?.0)
     }
 
     /// Reads into `buffers` the bytes at `offset` in `extent` (`READ`).
@@ -350,22 +351,18 @@ impl CellClient {
         buffers: &[VolatileSlice<'_>],
         barriers: WriteBarriers<'_>,
     ) -> Result<()> {
-        let len = buffers.iter().map(VolatileSlice::len).sum();
-        let gather = |data: &mut [u8]| {
-            let mut at = 0;
-            for buffer in buffers {
-                at += buffer.copy_to(&mut data[at..]);
-            }
-        };
-        let write = |data| Request::Write { extent, offset, data, barriers };
+        let len: usize = buffers.iter().map(VolatileSlice::len).sum();
         if let Some(mut slot) = Transfer::take(&self.transfer, len) {
-            gather(slot.bytes_mut(len));
+            crate::memory::gather(buffers, 0, slot.bytes_mut(len));
             let data = Data::Transfer { at: slot.offset(), len: len as u64 };
-            return self.client.request_keeping(&write(data), &slot).await.map(drop);
+            let write = Request::Write { extent, offset, data, barriers };
+            return self.client.request_keeping(&write, &slot).await.map(drop);
         }
-        let mut data = vec![0; len];
-        gather(&mut data);
-        self.client.request(&write(Data::Inline(&data))).await.map(drop)
+        // cladefs TASK-661: acquire request-credit backpressure before reading guest buffers, and
+        // stream `buffers` through the sender's single bounded scratch buffer instead of gathering
+        // a multi-MiB `Vec` per write on the VMM heap.
+        let reply = self.client.write_inline(extent, offset, len as u64, buffers, barriers);
+        reply.await.map(drop)
     }
 
     /// The transfer area's slots, taken until dropped, which no read or write then has.
@@ -455,7 +452,7 @@ impl CellClient {
     pub fn fork(&self, path: &Path) -> Result<u64> {
         let fork = Request::Fork { path: path.to_owned() };
         let reply = self.client.request_blocking(&fork)?;
-        Ok(Forked::from_args(reply.header.args).cell)
+        Ok(Forked::decode(&reply.header).map_err(|_| Errno::EIO)?.cell)
     }
 
     /// Makes a version of the cell, once nothing is open
@@ -470,7 +467,8 @@ impl CellClient {
             return Err(Errno::EBUSY);
         }
         let reply = self.client.request_blocking(&Request::Version)?;
-        let Forked { cell, version, tenant } = Forked::from_args(reply.header.args);
+        let Forked { cell, version, tenant } =
+            Forked::decode(&reply.header).map_err(|_| Errno::EIO)?;
         Ok(CellVersion { tenant, cell, version })
     }
 
@@ -489,19 +487,35 @@ impl CellClient {
         super::codec::mappings(&payload).map_err(|_| Errno::EIO)
     }
 
-    /// cladefs: maps `mappings`, a snapshot's
-    /// [`window_mappings`](CellClient::window_mappings), again, each at the same offset in
-    /// the window, its extent's bytes or zeros, in order, the first that fails failing the call,
-    /// those before it mapped: in as few requests as their payloads hold (`MAP_MANY`), each one
-    /// change of the window, rather than a `MAP` each, a round trip and a change apiece
-    /// (TASK-92.14).
+    /// cladefs: maps `mappings`, each at its offset in the window, its extent's bytes or zeros, in
+    /// order, the first that fails failing the call, those before it mapped: a single mapping uses
+    /// `MAP`, and two or more use as few `MAP_MANY` requests as their payloads hold, each one
+    /// change of the window (TASK-92.14, board 6917).
     pub fn map_many(&self, mappings: &[WindowMapping]) -> Result<()> {
-        let most = (MAX_PAYLOAD / MAPPING_BYTES) as usize;
-        for mappings in mappings.chunks(most) {
-            let map = Request::MapMany(Cow::Borrowed(mappings));
-            self.client.request_blocking(&map)?;
+        blocking(self.map_many_async(mappings))
+    }
+
+    /// [`CellClient::map_many`], waiting for the daemon holding no thread.
+    pub async fn map_many_async(&self, mappings: &[WindowMapping]) -> Result<()> {
+        match mappings {
+            [] => Ok(()),
+            [single] => match single.contents {
+                MappingContents::Extent { extent, offset } => {
+                    self.map_async(extent, offset, single.len, single.window_offset).await
+                }
+                MappingContents::Zeros => {
+                    self.map_zeros_async(single.window_offset, single.len).await
+                }
+            },
+            mappings => {
+                let most = (MAX_PAYLOAD / MAPPING_BYTES) as usize;
+                for mappings in mappings.chunks(most) {
+                    let map = Request::MapMany(Cow::Borrowed(mappings));
+                    self.client.request(&map).await?;
+                }
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     /// Maps `len` bytes at `offset` in `extent`, sealed, into the window at `window_offset`,
@@ -979,14 +993,43 @@ impl Client {
         blocking(self.request(request))
     }
 
+    /// Sends an inline [`WRITE`] whose payload bytes live in `buffers`, acquiring request-credit
+    /// backpressure before touching guest memory and streaming through [`Sender::send_stream`]
+    /// without allocating a multi-MiB payload `Vec` (TASK-661).
+    fn write_inline(
+        &self,
+        extent: ExtentId,
+        offset: u64,
+        data_len: u64,
+        buffers: &[VolatileSlice<'_>],
+        barriers: WriteBarriers<'_>,
+    ) -> BoxFuture<'static, Reply> {
+        let (header, root) = Request::write_inline_header(extent, offset, data_len, barriers);
+        self.call_stream(header, &[], buffers, &[root], &[], None)
+    }
+
     /// Sends `header`, `payload`'s parts and `fds`, a request, and returns its reply: once the
     /// protocol's bounds of what is in flight leave room for it, waiting for replies to make it,
     /// but on the thread receiving them (TASK-79.16). `kept` it holds until the daemon answers
     /// ([`Client::request_keeping`]).
     fn call(
         &self,
-        mut header: Header,
+        header: Header,
         payload: &[&[u8]],
+        fds: &[std::os::fd::BorrowedFd<'_>],
+        kept: Option<Kept>,
+    ) -> BoxFuture<'static, Reply> {
+        self.call_stream(header, payload, &[], &[], fds, kept)
+    }
+
+    /// Sends `header` with `prefix`, volatile `buffers` (streamed after backpressure), `suffix`,
+    /// and `fds`.
+    fn call_stream(
+        &self,
+        mut header: Header,
+        prefix: &[&[u8]],
+        buffers: &[VolatileSlice<'_>],
+        suffix: &[&[u8]],
         fds: &[std::os::fd::BorrowedFd<'_>],
         kept: Option<Kept>,
     ) -> BoxFuture<'static, Reply> {
@@ -995,15 +1038,18 @@ impl Client {
         // daemon serves the call with (`super::codec::guest_request`, TASK-260).
         let guest = crate::request::current_guest().map(super::codec::request_bytes);
         let with_guest: Vec<&[u8]>;
-        let payload = match &guest {
+        let prefix = match &guest {
             Some(guest) => {
                 header.flags |= REQUEST;
-                with_guest = std::iter::once(&guest[..]).chain(payload.iter().copied()).collect();
+                with_guest = std::iter::once(&guest[..]).chain(prefix.iter().copied()).collect();
                 &with_guest[..]
             }
-            None => payload,
+            None => prefix,
         };
-        header.len = payload.iter().map(|part| part.len() as u64).sum();
+        let prefix_len: u64 = prefix.iter().map(|part| part.len() as u64).sum();
+        let stream_len: u64 = buffers.iter().map(|buf| buf.len() as u64).sum();
+        let suffix_len: u64 = suffix.iter().map(|part| part.len() as u64).sum();
+        header.len = prefix_len + stream_len + suffix_len;
         let bytes = stream_bytes(&header);
         let (reply, replied) = oneshot::channel();
         {
@@ -1023,7 +1069,7 @@ impl Client {
                 None => return Box::pin(std::future::ready(Err(Errno::EIO))),
             }
         }
-        if let Err(err) = self.sender.send_parts(header, payload, fds) {
+        if let Err(err) = self.sender.send_stream(header, prefix, buffers, suffix, fds) {
             log::error!("sending to the extent daemon: {err}");
             self.answered(header.id);
             return Box::pin(std::future::ready(Err(Errno::EIO)));

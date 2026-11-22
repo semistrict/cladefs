@@ -509,7 +509,10 @@ fn a_dropped_read_keeps_its_transfer_slot_until_answered() {
 /// ranges past the end of the one it has.
 #[test]
 fn transfer_areas_are_checked() {
-    use super::wire::{Header, READ, READ_TRANSFER, TRANSFER, WRITE, WRITE_TRANSFER};
+    use super::wire::{
+        Header, READ, READ_TRANSFER, ReadBody, TRANSFER, TransferBody, WRITE, WRITE_TRANSFER,
+        WriteBody,
+    };
     use std::os::fd::AsFd;
     host();
     let dir = tempfile::tempdir().unwrap();
@@ -523,7 +526,7 @@ fn transfer_areas_are_checked() {
         <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd)
     });
     file.set_len(1 << 20).unwrap();
-    let unsealed = Header::new(TRANSFER, 0).with_args(&[1 << 20]);
+    let unsealed = Header::new(TRANSFER, 0).with_body(&TransferBody { len: 1 << 20 });
     assert_eq!(client.call(unsealed, &[], &[file.as_fd()]).err(), Some(Errno::EINVAL));
 
     // The cell's own area, given at its opening: once.
@@ -546,16 +549,28 @@ fn transfer_areas_are_checked() {
         )
     };
     assert_eq!(seal, 0);
-    let again = Header::new(TRANSFER, 0).with_args(&[1 << 20]);
+    let again = Header::new(TRANSFER, 0).with_body(&TransferBody { len: 1 << 20 });
     assert_eq!(client.call(again, &[], &[sealed.as_fd()]).err(), Some(Errno::EEXIST));
     let extent = [client.cell(), 1];
     let area = 8 * super::client::TRANSFER_SLOT as u64;
     let past = Header::new(READ, 0)
-        .with_args(&[extent[0], extent[1], 0, BLOCK as u64, area - BLOCK as u64 + 1])
+        .with_body(&ReadBody {
+            cell: extent[0],
+            sequence: extent[1],
+            offset: 0,
+            len: BLOCK as u64,
+            transfer_at: area - BLOCK as u64 + 1,
+        })
         .with_flags(READ_TRANSFER);
     assert_eq!(client.call(past, &[], &[]).err(), Some(Errno::EINVAL));
     let wrapping = Header::new(WRITE, 0)
-        .with_args(&[extent[0], extent[1], 0, u64::MAX, 2])
+        .with_body(&WriteBody {
+            cell: extent[0],
+            sequence: extent[1],
+            offset: 0,
+            transfer_at: u64::MAX,
+            data_len: 2,
+        })
         .with_flags(WRITE_TRANSFER);
     assert_eq!(client.call(wrapping, &[], &[]).err(), Some(Errno::EINVAL));
     drop(client);
@@ -2079,12 +2094,17 @@ impl ServedArea {
         unsafe { addr.write_bytes(1, len / 2) };
         let (sender, mut receiver, stream, cell) =
             raw_connection(&socket, &dir.path().join("store"), 1 << 24);
-        let transfer = Header::new(TRANSFER, 2).with_args(&[len as u64]);
+        let transfer = Header::new(TRANSFER, 2).with_body(&TransferBody { len: len as u64 });
         sender.send(transfer, &[], &[file.as_fd()]).unwrap();
         assert_eq!(receiver.receive(|| 0).unwrap().unwrap().header.status, 0);
         let mut served =
             Self { _dir: dir, file, addr, len, sender, receiver, _stream: stream, cell };
-        let written = Header::new(WRITE, 3).with_args(&[cell, 1]);
+        let written = Header::new(WRITE, 3).with_body(&WriteBody {
+            cell,
+            sequence: 1,
+            data_len: BLOCK as u64,
+            ..Default::default()
+        });
         assert_eq!(served.call(written, &pattern(2, BLOCK)), 0);
         served
     }
@@ -2098,7 +2118,13 @@ impl ServedArea {
     fn read_into(&mut self, id: u64, at: usize) -> i32 {
         use super::wire::*;
         let read = Header::new(READ, id)
-            .with_args(&[self.cell, 1, 0, BLOCK as u64, at as u64])
+            .with_body(&ReadBody {
+                cell: self.cell,
+                sequence: 1,
+                offset: 0,
+                len: BLOCK as u64,
+                transfer_at: at as u64,
+            })
             .with_flags(READ_TRANSFER);
         self.call(read, &[])
     }
@@ -2384,7 +2410,7 @@ async fn requests_attach_nothing() {
     for kind in (0..REPLY).filter(|kind| ![ACK, STAGE_COUNTS, STAGE_PRIVATE_COUNTS].contains(kind))
     {
         for (cell, sequence) in [(extent.cell, 1), (0, 0)] {
-            let header = Header::new(kind, 0).with_args(&[cell, sequence, 0, 4096]);
+            let header = Header::new(kind, 0).with_body(&[cell, sequence, 0u64, 4096]);
             let _ = vm.call(header, base.as_os_str().as_bytes(), &[]);
         }
     }
@@ -2406,7 +2432,9 @@ fn vm_processes_are_handed_their_memory_read_only() {
     let stream = UnixStream::connect(&socket).unwrap();
     let (sender, mut receiver) =
         (Sender::new(stream.try_clone().unwrap()), Receiver::new(stream.try_clone().unwrap()));
-    let open = Header::new(OPEN, 1).with_args(&[1 << 24, 0, 0, 0, VERSION]).with_flags(OPEN_CREATE);
+    let open = Header::new(OPEN, 1)
+        .with_body(&OpenBody { capacity: 1 << 24, version: VERSION, ..Default::default() })
+        .with_flags(OPEN_CREATE);
     let path = dir.path().join("store");
     sender.send(open, std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()), &[]).unwrap();
     let opened = receiver.receive(|| 0).unwrap().unwrap();
@@ -2714,7 +2742,7 @@ fn window_mappings_past_a_messages_payload_arrive() {
             let (mut payload, mut fds) = (Vec::new(), Vec::new());
             match request.header.kind {
                 OPEN => {
-                    reply.args = opened_args(7);
+                    reply.set_body(&opened_body(7));
                     fds = vec![own.as_fd(), public.as_fd()];
                 }
                 MAPPINGS => {
@@ -2780,7 +2808,7 @@ fn requests_failed_by_the_daemons_going_find_it_gone() {
             let mut fds = Vec::new();
             match request.header.kind {
                 OPEN => {
-                    reply.args = opened_args(7);
+                    reply.set_body(&opened_body(7));
                     fds = vec![own.as_fd(), public.as_fd()];
                 }
                 BUILD | TRANSFER => {}
@@ -2847,12 +2875,13 @@ fn raw_connection(
     let stream = UnixStream::connect(socket).unwrap();
     let (sender, mut receiver) =
         (Sender::new(stream.try_clone().unwrap()), Receiver::new(stream.try_clone().unwrap()));
-    let open =
-        Header::new(OPEN, 1).with_args(&[capacity, 0, 0, 0, VERSION]).with_flags(OPEN_CREATE);
+    let open = Header::new(OPEN, 1)
+        .with_body(&OpenBody { capacity, version: VERSION, ..Default::default() })
+        .with_flags(OPEN_CREATE);
     sender.send(open, std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()), &[]).unwrap();
     let opened = receiver.receive(|| 0).unwrap().unwrap();
     assert_eq!(opened.header.status, 0);
-    (sender, receiver, stream, opened.header.args[0])
+    (sender, receiver, stream, opened.header.read_body::<OpenedBody>().cell)
 }
 
 /// Sends `requests`, of no payload, until the daemon lets the VM process go, as it may before the
@@ -2920,10 +2949,17 @@ fn vm_processes_that_stop_reading_hold_up_no_other() {
     // An extent, read back whole in one reply, many times what the socket holds, which it never
     // reads.
     let len = 4 << 20;
-    let written = Header::new(WRITE, 2).with_args(&[cell, 1, 0]);
+    let written =
+        Header::new(WRITE, 2).with_body(&WriteBody { cell, sequence: 1, ..Default::default() });
     sender.send(written, &pattern(1, len), &[]).unwrap();
     assert_eq!(receiver.receive(|| 0).unwrap().unwrap().header.status, 0);
-    let read = Header::new(READ, 3).with_args(&[cell, 1, 0, len as u64]);
+    let read = Header::new(READ, 3).with_body(&ReadBody {
+        cell,
+        sequence: 1,
+        offset: 0,
+        len: len as u64,
+        transfer_at: 0,
+    });
     sender.send(read, &[], &[]).unwrap();
     while unread(&stream) == 0 {
         std::thread::yield_now();
@@ -2958,10 +2994,19 @@ fn vm_processes_that_leave_replies_unread_are_let_go() {
     let (sender, mut receiver, stream, cell) =
         raw_connection(&socket, &dir.path().join("store"), 1 << 24);
     let len = 8 << 20;
-    let written = Header::new(WRITE, 2).with_args(&[cell, 1, 0]);
+    let written =
+        Header::new(WRITE, 2).with_body(&WriteBody { cell, sequence: 1, ..Default::default() });
     sender.send(written, &pattern(1, len), &[]).unwrap();
     assert_eq!(receiver.receive(|| 0).unwrap().unwrap().header.status, 0);
-    let reads = (3..67).map(|id| Header::new(READ, id).with_args(&[cell, 1, 0, len as u64]));
+    let reads = (3..67).map(|id| {
+        Header::new(READ, id).with_body(&ReadBody {
+            cell,
+            sequence: 1,
+            offset: 0,
+            len: len as u64,
+            transfer_at: 0,
+        })
+    });
     send_until_let_go(&sender, reads);
     assert_let_go(&sender, &stream, WAIT);
     drop((sender, receiver, stream));
@@ -2980,12 +3025,23 @@ fn vm_processes_naming_vast_windows_are_let_go_all_the_same() {
     std::thread::spawn(move || serve(listener));
     let (sender, mut receiver, stream, cell) =
         raw_connection(&socket, &dir.path().join("store"), 1 << 24);
-    let window = Header::new(WINDOW, 2).with_args(&[1 << 60]).with_flags(WINDOW_COPYING);
+    let window = Header::new(WINDOW, 2)
+        .with_body(&WindowBody { size: 1 << 60, budget: 0 })
+        .with_flags(WINDOW_COPYING);
     let answered = call(&sender, &mut receiver, window, &[]).header.status;
     let len = 8 << 20;
-    let written = Header::new(WRITE, 3).with_args(&[cell, 1, 0]);
+    let written =
+        Header::new(WRITE, 3).with_body(&WriteBody { cell, sequence: 1, ..Default::default() });
     assert_eq!(call(&sender, &mut receiver, written, &pattern(1, len)).header.status, 0);
-    let reads = (4..68).map(|id| Header::new(READ, id).with_args(&[cell, 1, 0, len as u64]));
+    let reads = (4..68).map(|id| {
+        Header::new(READ, id).with_body(&ReadBody {
+            cell,
+            sequence: 1,
+            offset: 0,
+            len: len as u64,
+            transfer_at: 0,
+        })
+    });
     send_until_let_go(&sender, reads);
     assert_let_go(&sender, &stream, WAIT);
     assert_eq!(answered, -Errno::EINVAL.raw());
@@ -3007,7 +3063,9 @@ fn windows_go_up_to_the_most_the_daemon_makes_room_for() {
         let (sender, mut receiver, _stream, _) =
             raw_connection(&socket, &dir.path().join(name), 1 << 24);
         // cladefs: a writer's, copying on write (backlog doc-13).
-        let window = Header::new(WINDOW, 2).with_args(&[size]).with_flags(WINDOW_COPYING);
+        let window = Header::new(WINDOW, 2)
+            .with_body(&WindowBody { size, budget: 0 })
+            .with_flags(WINDOW_COPYING);
         assert_eq!(call(&sender, &mut receiver, window, &[]).header.status, status, "{name}");
     }
 }
@@ -3066,8 +3124,11 @@ fn connections_open_one_cell_at_a_time() {
     let stream = UnixStream::connect(&socket).unwrap();
     let sender = Sender::new(stream.try_clone().unwrap());
     let mut receiver = Receiver::new(stream.try_clone().unwrap());
-    let open =
-        |id| Header::new(OPEN, id).with_args(&[1 << 24, 0, 0, 0, VERSION]).with_flags(OPEN_CREATE);
+    let open = |id| {
+        Header::new(OPEN, id)
+            .with_body(&OpenBody { capacity: 1 << 24, version: VERSION, ..Default::default() })
+            .with_flags(OPEN_CREATE)
+    };
     sender.send(open(1), first.as_os_str().as_bytes(), &[]).unwrap();
     while !table().is_waited_for(&key) {
         std::thread::yield_now();
@@ -3607,9 +3668,16 @@ fn daemons_of_other_wire_versions_are_refused() {
             let mut fds = Vec::new();
             served.push(request.header.kind);
             match request.header.kind {
-                // As a daemon of no wire version replied: its args[4] 0.
+                // As a daemon of no wire version replied: its version 0.
                 OPEN => {
-                    reply.args = [7, 1, 0, 0, 0];
+                    reply.set_body(&OpenedBody {
+                        cell: 7,
+                        arena: 1,
+                        reserved: 0,
+                        commit: 0,
+                        max_map_count: 0,
+                        version: 0,
+                    });
                     fds = vec![own.as_fd(), public.as_fd()];
                 }
                 _ => reply.status = -Errno::EINVAL.raw(),
@@ -3651,8 +3719,9 @@ fn vm_processes_of_other_wire_versions_are_refused() {
     for (id, other) in [(1, 0), (2, VERSION + 1), (3, u64::MAX)] {
         // Flags this version doesn't know, as another's OPEN may have.
         for flags in [OPEN_CREATE, u32::MAX] {
-            let open =
-                Header::new(OPEN, id).with_args(&[1 << 24, 0, 0, 0, other]).with_flags(flags);
+            let open = Header::new(OPEN, id)
+                .with_body(&OpenBody { capacity: 1 << 24, version: other, ..Default::default() })
+                .with_flags(flags);
             sender.send(open, named, &[]).unwrap();
             let reply = receiver.receive(|| 0).unwrap().unwrap();
             let said = (reply.header.id, reply.header.status, super::codec::version(&reply.header));
@@ -3690,7 +3759,7 @@ fn openings_fail_on_refusals_of_what_they_ask() {
                 served.push(request.header.kind);
                 match request.header.kind {
                     OPEN => {
-                        reply.args = opened_args(7);
+                        reply.set_body(&opened_body(7));
                         fds = vec![own.as_fd(), public.as_fd()];
                     }
                     kind if kind == refusing => reply.status = -Errno::EINVAL.raw(),
@@ -3715,9 +3784,9 @@ fn openings_fail_on_refusals_of_what_they_ask() {
 
 /// What a daemon by hand replies to an `OPEN`, of its cell of `cell`: the default arena's memory
 /// its own, as of the default tenant, and its wire version this one.
-fn opened_args(cell: u64) -> [u64; 5] {
+fn opened_body(cell: u64) -> super::wire::OpenedBody {
     let arena = crate::pages::ArenaId(1);
-    super::codec::Opened { cell, arena, commit: 0, max_map_count: None }.args()
+    super::codec::Opened { cell, arena, commit: 0, max_map_count: None }.to_body()
 }
 
 /// TASK-216: a VM booted again on the cell its VM crashed out of opens it at once, while what
@@ -4069,11 +4138,13 @@ fn followers_that_stop_reading_are_told_of_the_latest_commit() {
     // its writer is done.
     let stream = UnixStream::connect(&socket).unwrap();
     let (sender, mut receiver) = (Sender::new(stream.try_clone().unwrap()), Receiver::new(stream));
-    let open = Header::new(OPEN, 1).with_args(&[0, 0, 0, 0, VERSION]).with_flags(OPEN_READ_ONLY);
+    let open = Header::new(OPEN, 1)
+        .with_body(&OpenBody { version: VERSION, ..Default::default() })
+        .with_flags(OPEN_READ_ONLY);
     sender.send(open, std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()), &[]).unwrap();
     let opened = receiver.receive(|| 0).unwrap().unwrap();
     assert_eq!(opened.header.status, 0);
-    let mut commit = opened.header.args[2];
+    let mut commit = opened.header.read_body::<OpenedBody>().commit;
 
     // Commits, many times what its socket holds, each told of as the writer makes it, each of an
     // extent of its own.
@@ -4096,8 +4167,9 @@ fn followers_that_stop_reading_are_told_of_the_latest_commit() {
         while commit < latest {
             let told = receiver.receive(|| 0).unwrap().unwrap();
             assert_eq!(told.header.kind, COMMITTED);
-            assert!(told.header.args[0] > commit, "told of {} after {commit}", told.header.args[0]);
-            commit = told.header.args[0];
+            let next = told.header.read_body::<CommitBody>().commit;
+            assert!(next > commit, "told of {next} after {commit}");
+            commit = next;
         }
         commit
     });
@@ -4154,18 +4226,42 @@ async fn shrinks_return_once_the_pages_they_evict_are_free() {
         reply
     };
     for sequence in 1..=2 {
-        let written = Header::new(WRITE, sequence).with_args(&[cell, sequence, 0]);
+        let written = Header::new(WRITE, sequence).with_body(&WriteBody {
+            cell,
+            sequence,
+            ..Default::default()
+        });
         served(written, &pattern(sequence as u8, CHUNK as usize));
     }
     served(Header::new(COMMIT, 3).with_flags(COMMIT_UPLOADED), &[]);
     for sequence in 1..=2 {
-        let read = Header::new(READ, 3 + sequence).with_args(&[cell, sequence, 0, CHUNK]);
+        let read = Header::new(READ, 3 + sequence).with_body(&ReadBody {
+            cell,
+            sequence,
+            offset: 0,
+            len: CHUNK,
+            transfer_at: 0,
+        });
         assert_eq!(served(read, &[]).payload, pattern(sequence as u8, CHUNK as usize));
     }
-    served(Header::new(WINDOW, 6).with_args(&[2 * CHUNK]).with_flags(WINDOW_COPYING), &[]);
+    served(
+        Header::new(WINDOW, 6)
+            .with_body(&WindowBody { size: 2 * CHUNK, budget: 0 })
+            .with_flags(WINDOW_COPYING),
+        &[],
+    );
     for sequence in 1..=2 {
         let at = (sequence - 1) * CHUNK;
-        served(Header::new(MAP, 6 + sequence).with_args(&[cell, sequence, 0, CHUNK, at]), &[]);
+        served(
+            Header::new(MAP, 6 + sequence).with_body(&MapBody {
+                cell,
+                sequence,
+                offset: 0,
+                len: CHUNK,
+                window_offset: at,
+            }),
+            &[],
+        );
     }
     assert_eq!(super::memory::shrink(Some(1), u64::MAX).await, Ok(2 * CHUNK));
 
@@ -4174,7 +4270,8 @@ async fn shrinks_return_once_the_pages_they_evict_are_free() {
     let mut unmapped = Vec::new();
     while let Ok(Some(message)) = receiver.receive(|| 0) {
         assert_eq!(message.header.kind, STAGE_UNMAP, "{:?}", message.header);
-        unmapped.push(message.header.args[..2].to_vec());
+        let range = message.header.read_body::<RangeBody>();
+        unmapped.push(vec![range.offset, range.len]);
     }
     assert_eq!((shrinking.await.unwrap(), unmapped), (Ok(CHUNK), vec![vec![0, CHUNK]]));
 }
@@ -4197,29 +4294,29 @@ impl HandVm {
         Self { sender, receiver, stream, cell, next: 2 }
     }
 
-    /// Sends the request `kind`, of `args` and `payload`, and returns its reply, which must
+    /// Sends the request `kind`, of `body` and `payload`, and returns its reply, which must
     /// succeed, and the stage operations sent before it, acknowledged if `ack`.
-    fn call(
+    fn call<T: zerocopy::IntoBytes + zerocopy::Immutable>(
         &mut self,
         kind: u32,
-        args: &[u64],
+        body: &T,
         payload: &[u8],
         ack: bool,
     ) -> (super::wire::Message, Vec<super::wire::Header>) {
-        self.call_flagged(kind, 0, args, payload, ack)
+        self.call_flagged(kind, 0, body, payload, ack)
     }
 
     /// As [`HandVm::call`], the request of `flags`.
-    fn call_flagged(
+    fn call_flagged<T: zerocopy::IntoBytes + zerocopy::Immutable>(
         &mut self,
         kind: u32,
         flags: u32,
-        args: &[u64],
+        body: &T,
         payload: &[u8],
         ack: bool,
     ) -> (super::wire::Message, Vec<super::wire::Header>) {
         use super::wire::*;
-        let header = Header::new(kind, self.next).with_args(args).with_flags(flags);
+        let header = Header::new(kind, self.next).with_body(body).with_flags(flags);
         self.next += 1;
         self.sender.send(header, payload, &[]).unwrap();
         let mut staged = Vec::new();
@@ -4251,8 +4348,13 @@ impl HandVm {
     fn write_an_extent(&mut self, len: u64) -> ExtentId {
         use super::wire::*;
         let cell = self.cell;
-        self.call(WRITE, &[cell, 1, 0], &pattern(1, len as usize), true);
-        self.call(COMMIT, &[], &[], true);
+        self.call(
+            WRITE,
+            &WriteBody { cell, sequence: 1, ..Default::default() },
+            &pattern(1, len as usize),
+            true,
+        );
+        self.call(COMMIT, &(), &[], true);
         ExtentId { cell, sequence: 1 }
     }
 
@@ -4261,14 +4363,22 @@ impl HandVm {
     fn map_an_extent(&mut self, extent: ExtentId, len: u64) -> Vec<crate::pages::PhysLocation> {
         use super::wire::*;
         let (cell, sequence) = (extent.cell, extent.sequence);
-        self.call(READ, &[cell, sequence, 0, len], &[], true);
-        self.call_flagged(WINDOW, WINDOW_COPYING, &[len], &[], true);
-        let (_, staged) = self.call(MAP, &[cell, sequence, 0, len, 0], &[], true);
+        self.call(READ, &ReadBody { cell, sequence, offset: 0, len, transfer_at: 0 }, &[], true);
+        self.call_flagged(WINDOW, WINDOW_COPYING, &WindowBody { size: len, budget: 0 }, &[], true);
+        let (_, staged) = self.call(
+            MAP,
+            &MapBody { cell, sequence, offset: 0, len, window_offset: 0 },
+            &[],
+            true,
+        );
         (staged.into_iter())
             .filter(|header| header.kind == STAGE_MAP)
-            .map(|header| crate::pages::PhysLocation {
-                arena: crate::pages::ArenaId(header.args[4] as u32),
-                offset: header.args[1],
+            .map(|header| {
+                let mapped = header.read_body::<StageMapBody>();
+                crate::pages::PhysLocation {
+                    arena: crate::pages::ArenaId(mapped.arena),
+                    offset: mapped.phys_offset,
+                }
             })
             .collect()
     }
@@ -4278,7 +4388,12 @@ impl HandVm {
     fn freeze_with_an_unmap(&mut self, extent: ExtentId, len: u64) {
         use super::wire::*;
         let (cell, sequence) = (extent.cell, extent.sequence);
-        let (_, staged) = self.call(MAP, &[cell, sequence, 0, len, 0], &[], false);
+        let (_, staged) = self.call(
+            MAP,
+            &MapBody { cell, sequence, offset: 0, len, window_offset: 0 },
+            &[],
+            false,
+        );
         assert!(staged.iter().any(|header| header.kind == STAGE_UNMAP), "{staged:?}");
     }
 }
@@ -4328,7 +4443,7 @@ async fn frozen_vm_processes_hold_no_other_tenants_memory() {
     let took = started.elapsed();
     assert!(took < super::server::UNRESPONSIVE, "tenant 2's shrink took {took:?}");
     // Served still: not let go.
-    frozen.call(super::wire::INFO, &[], &[], false);
+    frozen.call(super::wire::INFO, &(), &[], false);
     stream.shutdown(std::net::Shutdown::Both).unwrap();
     acking.join().unwrap();
 }
@@ -4390,11 +4505,11 @@ async fn public_slabs_wait_for_the_vm_processes_they_were_staged_to_alone() {
         let unmap = vm.receiver.receive(|| 0).unwrap().unwrap().header;
         assert_eq!(unmap.kind, super::wire::STAGE_UNMAP, "{unmap:?}");
         vm.ack(unmap.id);
-        vm.call(super::wire::INFO, &[], &[], true);
+        vm.call(super::wire::INFO, &(), &[], true);
         let free = page_is_free(at.arena, at.offset);
         assert_eq!(free, n == 1, "free once both acknowledged, after VM process {n}");
     }
-    frozen.call(super::wire::INFO, &[], &[], false);
+    frozen.call(super::wire::INFO, &(), &[], false);
 }
 
 /// TASK-79.35: the daemon's metrics are served on through a failure to accept a scrape's
@@ -4650,7 +4765,9 @@ fn window_mappings_are_answered_beside_the_stream_data_in_flight() {
     std::thread::spawn(move || serve(listener));
     let path = dir.path().join("store");
     let (sender, mut receiver, _stream, cell) = raw_connection(&socket, &path, 1 << 30);
-    let window = Header::new(WINDOW, 2).with_args(&[2 * count * ps]).with_flags(WINDOW_COPYING);
+    let window = Header::new(WINDOW, 2)
+        .with_body(&WindowBody { size: 2 * count * ps, budget: 0 })
+        .with_flags(WINDOW_COPYING);
     call(&sender, &mut receiver, window, &[]);
     // The mappings, as many in flight as a thread taking their replies leaves room for.
     let sender = std::sync::Arc::new(sender);
@@ -4679,8 +4796,8 @@ fn window_mappings_are_answered_beside_the_stream_data_in_flight() {
         if n >= 1024 {
             answers.recv().unwrap();
         }
-        let args = [0, 0, 0, ps, 2 * n * ps];
-        let zeros = Header::new(MAP, 3 + n).with_args(&args).with_flags(MAP_ZEROS);
+        let body = MapBody { cell: 0, sequence: 0, offset: 0, len: ps, window_offset: 2 * n * ps };
+        let zeros = Header::new(MAP, 3 + n).with_body(&body).with_flags(MAP_ZEROS);
         sender.send(zeros, &[], &[]).unwrap();
     }
     let mut receiver = receiving.join().unwrap();
@@ -4689,11 +4806,18 @@ fn window_mappings_are_answered_beside_the_stream_data_in_flight() {
     // window's mappings, their replies unread, which the daemon holds.
     let id = 3 + count;
     let extent = pattern(4, MAX_PAYLOAD as usize);
-    let written = Header::new(WRITE, id).with_args(&[cell, 1, 0]);
+    let written =
+        Header::new(WRITE, id).with_body(&WriteBody { cell, sequence: 1, ..Default::default() });
     assert_eq!(call(&sender, &mut receiver, written, &extent).header.status, 0);
     let reads = MAX_STREAM_BYTES / MAX_PAYLOAD;
     for n in 1..=reads {
-        let read = Header::new(READ, id + n).with_args(&[cell, 1, 0, MAX_PAYLOAD]);
+        let read = Header::new(READ, id + n).with_body(&ReadBody {
+            cell,
+            sequence: 1,
+            offset: 0,
+            len: MAX_PAYLOAD,
+            transfer_at: 0,
+        });
         sender.send(read, &[], &[]).unwrap();
     }
     sender.send(Header::new(MAPPINGS, id + reads + 1), &[], &[]).unwrap();
@@ -5005,14 +5129,13 @@ fn whatever_a_vm_process_says_harms_no_other() {
                     while let Ok(Some(message)) = receiver.receive(|| u64::MAX) {
                         if message.header.kind == REPLY && message.header.status == 0 {
                             served.fetch_add(1, Ordering::Relaxed);
+                            let first_word = message.header.read_body::<OpenedBody>().cell;
                             if message.header.id == RESTORE {
                                 restored.fetch_add(1, Ordering::Relaxed);
-                                own.store(message.header.args[0], Ordering::Relaxed);
+                                own.store(first_word, Ordering::Relaxed);
                             }
                             // The other tenant's cell, or what it wrote.
-                            if message.header.args[0] == kept.cell
-                                || message.payload == *their_bytes
-                            {
+                            if first_word == kept.cell || message.payload == *their_bytes {
                                 stolen.fetch_add(1, Ordering::Relaxed);
                             }
                         }
@@ -5029,7 +5152,9 @@ fn whatever_a_vm_process_says_harms_no_other() {
                 })
             };
             let (flags, private) = copying;
-            let window = Header::new(WINDOW, 2).with_args(&[window, private]).with_flags(flags);
+            let window = Header::new(WINDOW, 2)
+                .with_body(&WindowBody { size: window, budget: private })
+                .with_flags(flags);
             sender.send(window, &[], &[]).unwrap();
             if transfer {
                 // SAFETY: Makes a descriptor, which is owned below.
@@ -5046,7 +5171,8 @@ fn whatever_a_vm_process_says_harms_no_other() {
                         0
                     );
                 }
-                let area = Header::new(TRANSFER, 3).with_args(&[TRANSFER_BYTES]);
+                let area =
+                    Header::new(TRANSFER, 3).with_body(&TransferBody { len: TRANSFER_BYTES });
                 sender.send(area, &[], &[fd.as_fd()]).unwrap();
             }
             let named_word = |word: u64| match word {
@@ -5066,7 +5192,7 @@ fn whatever_a_vm_process_says_harms_no_other() {
             };
             for (kind, flags, id, args, payload) in messages {
                 let args = args.map(named_word);
-                let message = Header::new(kind, id).with_args(&args).with_flags(flags);
+                let message = Header::new(kind, id).with_body(&args).with_flags(flags);
                 let payload = in_vms(payload);
                 // The daemon may have let it go by now.
                 let _ = sender.send(message, &payload, &[]);
@@ -5762,4 +5888,151 @@ fn forgetting_keys_halts_open_ephemeral_cells() {
     let later = ExtentId { cell: second.id, sequence: 2 };
     assert_eq!(write(&theirs, later, 0, &pattern(5, ps)), Err(Errno::EACCES));
     assert_eq!(theirs.commit(None), Err(Errno::EACCES));
+}
+
+/// TASK-661 (board 2764): large inline `write_with_barriers_async` calls waiting for request
+/// credits or for daemon replies never gather their payloads into per-request `Vec<u8>` buffers:
+/// `Client::call_stream` acquires waiting room first and streams `&[VolatileSlice]` directly into
+/// the socket through one bounded scratch buffer, keeping VMM heap flat even with 96 concurrent
+/// 4 MiB writes (384 MiB total, exceeding `MAX_STREAM_BYTES`) in flight while replies are held.
+#[test]
+fn large_writes_waiting_for_replies_do_not_gather_unbounded_payloads() {
+    use super::wire::*;
+    use std::io::Read as _;
+    use std::os::fd::AsFd;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, mpsc};
+    use zerocopy::FromBytes as _;
+
+    const WRITES: usize = 96;
+    // Exceeds TRANSFER_SLOT (1 MiB) so every write takes the inline streaming path.
+    const WRITE_LEN: usize = 4 << 20;
+    const ROOT: &[u8] = b"streamed-root";
+    let in_window = (MAX_STREAM_BYTES / (WRITE_LEN + ROOT.len()) as u64) as usize;
+    assert!(in_window > 0 && in_window < WRITES, "in_window={in_window}");
+
+    let ps = page_size();
+    let (stream, mut daemon) = UnixStream::pair().unwrap();
+    let sender = Sender::new(daemon.try_clone().unwrap());
+    let (all_window_received, window_received) = mpsc::channel();
+    let (release_replies, replies_released) = mpsc::channel();
+    let drained = Arc::new(AtomicUsize::new(0));
+    let drained_server = drained.clone();
+    let answering = std::thread::spawn(move || {
+        let (own, public) = (memfd(ps), memfd(ps));
+        let mut scratch = vec![0u8; 64 << 10];
+        let mut held_ids = Vec::new();
+        let mut released = false;
+        let mut header_bytes = [0u8; size_of::<Header>()];
+        // Drain handshake (OPEN, BUILD, TRANSFER) using Receiver so SCM_RIGHTS fds are consumed.
+        let mut receiver = Receiver::new(daemon.try_clone().unwrap());
+        loop {
+            let request = receiver.receive(|| 0).unwrap().unwrap();
+            let mut reply = Header::new(REPLY, request.header.id);
+            let mut fds = Vec::new();
+            let kind = request.header.kind;
+            match kind {
+                OPEN => {
+                    reply.set_body(&opened_body(7));
+                    fds = vec![own.as_fd(), public.as_fd()];
+                }
+                BUILD | TRANSFER => {}
+                other => panic!("unexpected handshake kind {other}"),
+            }
+            sender.send(reply, &[], &fds).unwrap();
+            if kind == TRANSFER {
+                break;
+            }
+        }
+        drop(receiver);
+
+        // Drain every WRITE raw into the fixed 64 KiB scratch buffer (zero per-write heap
+        // allocation on the server side too), checking its byte pattern and trailing root.
+        while daemon.read_exact(&mut header_bytes).is_ok() {
+            let header = Header::read_from_bytes(&header_bytes).unwrap();
+            assert_eq!(header.kind, WRITE);
+            let body = header.read_body::<WriteBody>();
+            assert_eq!(body.data_len, WRITE_LEN as u64);
+            let expected_len = WRITE_LEN + ROOT.len();
+            assert_eq!(header.len as usize, expected_len);
+            let mut seen = 0usize;
+            let mut root_buf = Vec::with_capacity(ROOT.len());
+            while seen < expected_len {
+                let want = (expected_len - seen).min(scratch.len());
+                daemon.read_exact(&mut scratch[..want]).unwrap();
+                let data_part = want.min(WRITE_LEN.saturating_sub(seen));
+                assert!(scratch[..data_part].iter().all(|&b| b == 0xab), "corrupt write byte");
+                if data_part < want {
+                    root_buf.extend_from_slice(&scratch[data_part..want]);
+                }
+                seen += want;
+            }
+            assert_eq!(root_buf, ROOT, "corrupt trailing root");
+            let count = drained_server.fetch_add(1, Ordering::SeqCst) + 1;
+            if released {
+                sender.send(Header::new(REPLY, header.id), &[], &[]).unwrap();
+            } else {
+                held_ids.push(header.id);
+                if count == in_window {
+                    all_window_received.send(()).unwrap();
+                    replies_released.recv().unwrap();
+                    released = true;
+                    for id in held_ids.drain(..) {
+                        sender.send(Header::new(REPLY, id), &[], &[]).unwrap();
+                    }
+                }
+            }
+            if count == WRITES {
+                break;
+            }
+        }
+    });
+
+    let client = Arc::new(
+        CellClient::over(stream, Path::new("store"), Opening::Create(1 << 24, Kind::Fxfs)).unwrap(),
+    );
+    // One 4 KiB page aliased 1024 times to make a 4 MiB write without allocating 4 MiB.
+    let page = vec![0xab; 4096];
+    let slices: Vec<VolatileSlice<'_>> =
+        (0..WRITE_LEN / page.len()).map(|_| VolatileSlice::from(&page[..])).collect();
+    let barriers = WriteBarriers { before: false, after: Some(Commit::Ordered), root: Some(ROOT) };
+    let peak = crate::heap::peak_while(|| {
+        std::thread::scope(|scope| {
+            let releaser = scope.spawn(move || {
+                window_received.recv_timeout(WAIT).expect("in-window writes reached the server");
+                // Give excess threads a moment to prove backpressure held them before sending.
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                assert_eq!(
+                    drained.load(Ordering::SeqCst),
+                    in_window,
+                    "writes past MAX_STREAM_BYTES were sent before replies arrived"
+                );
+                release_replies.send(()).unwrap();
+            });
+            let writers: Vec<_> = (1..=WRITES as u64)
+                .map(|sequence| {
+                    let client = client.clone();
+                    let slices = &slices;
+                    scope.spawn(move || {
+                        let extent = ExtentId { cell: client.cell(), sequence };
+                        futures::executor::block_on(
+                            client.write_with_barriers_async(extent, 0, slices, barriers),
+                        )
+                    })
+                })
+                .collect();
+            for writer in writers {
+                assert_eq!(writer.join().unwrap(), Ok(()));
+            }
+            releaser.join().unwrap();
+        });
+    });
+    drop(client);
+    answering.join().unwrap();
+    // 96 * 4 MiB = 384 MiB total; streaming keeps peak heap to a few MiB at most.
+    assert!(
+        peak < 16 << 20,
+        "peak heap {} MiB for {WRITES} concurrent 4 MiB writes (expected < 16 MiB)",
+        peak >> 20
+    );
 }

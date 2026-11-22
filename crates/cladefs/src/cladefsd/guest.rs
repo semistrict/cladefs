@@ -76,7 +76,7 @@ impl Guest {
     pub async fn open(&self, path: &Path, capacity: u64) -> Result<u64, Errno> {
         let opening = Opening::Create(capacity, Kind::Fxfs);
         let reply = self.call(&Request::Open { path: path.to_owned(), opening }).await?;
-        Ok(Opened::from_args(reply.header.args)?.cell)
+        Ok(Opened::decode(&reply.header)?.cell)
     }
 
     /// Writes `data` at `offset` in `extent`.
@@ -101,7 +101,7 @@ impl Guest {
     /// mints from.
     pub async fn next_sequence(&self) -> Result<u64, Errno> {
         let reply = self.call(&Request::Info).await?;
-        Ok(super::codec::Info::from_args(reply.header.args).0.next_sequence)
+        Ok(super::codec::Info::decode(&reply.header)?.0.next_sequence)
     }
 
     /// Frees `extent`.
@@ -113,7 +113,7 @@ impl Guest {
     /// version, as `CellClient::make_version` reads it, not its first argument, the cell's
     /// (TASK-698.5 found it so).
     pub async fn make_version(&self) -> Result<u64, Errno> {
-        Ok(Forked::from_args(self.call(&Request::Version).await?.header.args).version)
+        Ok(Forked::decode(&self.call(&Request::Version).await?.header)?.version)
     }
 
     /// Closes its connection, as a VM process that exits does: the daemon lets its cell go once

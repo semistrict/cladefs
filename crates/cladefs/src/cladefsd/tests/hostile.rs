@@ -559,10 +559,15 @@ fn message() -> BoxedStrategy<Said> {
     let storms = prop_oneof![
         (prop_oneof![Just(UNMAP), Just(FAULT)], page(), pages(), 16u16..128).prop_map(
             |(kind, at, len, repeat)| {
-                let flags = if kind == FAULT { FAULT_PAGE } else { 0 };
+                let (flags, second) = if kind == FAULT { (FAULT_PAGE, Is(0)) } else { (0, len) };
                 Said {
                     repeat,
-                    ..said(kind, flags, [at, len, Is(0), Is(0), Is(0)], Payload::Bytes(Vec::new()))
+                    ..said(
+                        kind,
+                        flags,
+                        [at, second, Is(0), Is(0), Is(0)],
+                        Payload::Bytes(Vec::new()),
+                    )
                 }
             }
         ),
@@ -610,17 +615,21 @@ fn message() -> BoxedStrategy<Said> {
         1 => (theirs(), proptest::collection::vec((theirs(), 1u64..16), 0..8)).prop_map(|(whose, rest)| {
             said(FREE_MANY, 0, [whose, Is(1), Is(0), Is(0), Is(0)], Payload::Extents(rest))
         }),
-        // Forks of its own cell to another's cell, or its own.
-        1 => (0u8..4, prop_oneof![Just(Alice), Just(Bob), Just(Given), Just(Own), any::<u64>().prop_map(Is)], 0u32..2)
-            .prop_map(|(own, cell, flags)| {
-                said(FORK, flags, [cell, Is(0), Is(0), Is(0), Is(0)], Payload::Path(Place::Own(own)))
+        // Forks of its own cell to another's path or its own, and drops of another's version.
+        1 => (0u8..4, 0u32..2)
+            .prop_map(|(own, flags)| {
+                said(FORK, flags, [Is(0); 5], Payload::Path(Place::Own(own)))
+            }),
+        1 => prop_oneof![Just(Alice), Just(Bob), Just(Given), Just(Own), Just(GivenVersion), any::<u64>().prop_map(Is)]
+            .prop_map(|version| {
+                said(FORK, FORK_DROP, [version, Is(0), Is(0), Is(0), Is(0)], Payload::Bytes(Vec::new()))
             }),
         3 => (place(), prop_oneof![Just(0), Just(OPEN_CREATE), Just(OPEN_READ_ONLY)]).prop_map(|(at, flags)| {
             said(OPEN, flags, [Is(CELL_BYTES), Is(0), Is(0), Is(0), Is(VERSION)], Payload::Path(at))
         }),
         // Forks of its own cell to anywhere it names.
         1 => (place(), 0u32..2).prop_map(|(to, flags)| {
-            said(FORK, flags, [Is(0xf0f0), Is(0), Is(0), Is(0), Is(0)], Payload::Path(to))
+            said(FORK, flags, [Is(0); 5], Payload::Path(to))
         }),
         // Restores, of versions there are or not, of any cell it names, of any tenant's.
         1 => ((0u8..4).prop_map(Place::Own), prop_oneof![Just(Alice), Just(Bob), Just(Given)], prop_oneof![Just(GivenVersion), any::<u64>().prop_map(Is)], prop_oneof![Just(GivenTenant), (0u64..4).prop_map(Is)])
@@ -1478,7 +1487,8 @@ fn receive(
     while let Ok(Some(message)) = receiver.receive(|| u64::MAX) {
         let header = message.header;
         let theirs_named = |word: &u64| theirs.cells.contains(word);
-        let mut said = header.args.iter().any(theirs_named);
+        let words: [u64; 5] = header.read_body();
+        let mut said = words.iter().any(theirs_named);
         // A window's mappings name their extents' cells.
         said |= message
             .payload
@@ -1497,7 +1507,7 @@ fn receive(
         }
         // Each page it maps of its tenant's arena, or the public one, as KVM would map it.
         let arena = match header.kind {
-            STAGE_MAP => Some(header.args[4]),
+            STAGE_MAP => Some(u64::from(header.read_body::<StageMapBody>().arena)),
             _ => None,
         };
         if let Some(arena) = arena
@@ -1516,13 +1526,13 @@ fn receive(
                 seen.served += 1;
                 match request {
                     Some(request) if request.kind == OPEN && request.flags != OPEN_READ_ONLY => {
-                        shared.own.store(header.args[0], Ordering::Relaxed);
+                        shared.own.store(header.read_body::<OpenedBody>().cell, Ordering::Relaxed);
                         shared.writer.store(true, Ordering::Relaxed);
                         seen.wrote = shared.paths.lock().unwrap().get(&header.id).cloned();
                         seen.restored += u64::from(request.flags == OPEN_FORK);
                     }
                     Some(request) if request.kind == WINDOW => {
-                        let size = request.args[0];
+                        let size = request.read_body::<WindowBody>().size;
                         if size > MAX_WINDOW {
                             seen.vast.push(size);
                         } else {
@@ -1631,7 +1641,7 @@ fn run_hostile(
     };
     if let Some(path) = opened {
         let open = Header::new(OPEN, id())
-            .with_args(&[CELL_BYTES, 0, 0, 0, VERSION])
+            .with_body(&OpenBody { capacity: CELL_BYTES, version: VERSION, ..Default::default() })
             .with_flags(OPEN_CREATE);
         if let Ok(id) = send(open, path.as_os_str().as_bytes(), None) {
             shared.answers.wait(id);
@@ -1641,7 +1651,11 @@ fn run_hostile(
         let opens: Vec<_> = ["a", "b"]
             .map(|which| {
                 let path = names.vms.join(format!("{}-t{index}{which}", names.case));
-                let open = Header::new(OPEN, id()).with_args(&[CELL_BYTES, 0, 0, 0, VERSION]);
+                let open = Header::new(OPEN, id()).with_body(&OpenBody {
+                    capacity: CELL_BYTES,
+                    version: VERSION,
+                    ..Default::default()
+                });
                 send(open.with_flags(OPEN_CREATE), path.as_os_str().as_bytes(), None)
             })
             .into_iter()
@@ -1653,7 +1667,13 @@ fn run_hostile(
     if hostile.opens == Opens::Restores {
         let to = names.vms.join(format!("{}-r{index}", names.case));
         let restore = Header::new(OPEN, id())
-            .with_args(&[CELL_BYTES, names.given, names.given_version, names.given_tenant, VERSION])
+            .with_body(&OpenBody {
+                capacity: CELL_BYTES,
+                cell: names.given,
+                cell_version: names.given_version,
+                tenant: names.given_tenant,
+                version: VERSION,
+            })
             .with_flags(OPEN_FORK);
         if let Ok(id) = send(restore, to.as_os_str().as_bytes(), None) {
             shared.answers.wait(id);
@@ -1661,10 +1681,11 @@ fn run_hostile(
     }
     let (size, copying) = hostile.window;
     let flags = if copying { WINDOW_COPYING } else { 0 };
-    let window = Header::new(WINDOW, id()).with_args(&[size]).with_flags(flags);
+    let window =
+        Header::new(WINDOW, id()).with_body(&WindowBody { size, budget: 0 }).with_flags(flags);
     let window = send(window, &[], None);
     if let Some(area) = hostile.area {
-        let transfer = Header::new(TRANSFER, id()).with_args(&[area_len(area)]);
+        let transfer = Header::new(TRANSFER, id()).with_body(&TransferBody { len: area_len(area) });
         let _ = send(transfer, &[], area_fd(area, &shared.memories));
     }
     let ps = page_size();
@@ -1674,14 +1695,22 @@ fn run_hostile(
         super::super::super::cache::evict_least_used(Some(names.arena), |_| false);
         for sequence in 1..=GIVEN_EXTENTS {
             let at = (sequence - 1) * ps;
-            let mapped = Header::new(MAP, id()).with_args(&[names.given, sequence, 0, ps, at]);
+            let mapped = Header::new(MAP, id()).with_body(&MapBody {
+                cell: names.given,
+                sequence,
+                offset: 0,
+                len: ps,
+                window_offset: at,
+            });
             shared.flooding.lock().unwrap().insert(mapped.id);
             let _ = send(mapped, &[], None);
         }
         for _ in 0..times {
             for sequence in 1..=GIVEN_EXTENTS {
                 let at = (sequence - 1) * ps;
-                let faulted = Header::new(FAULT, id()).with_args(&[at]).with_flags(FAULT_PAGE);
+                let faulted = Header::new(FAULT, id())
+                    .with_body(&FaultBody { offset: at })
+                    .with_flags(FAULT_PAGE);
                 let _ = send(faulted, &[], None);
             }
         }
@@ -1711,7 +1740,11 @@ fn run_hostile(
                 let own = shared.own.load(Ordering::Relaxed);
                 for _ in 0..*extents {
                     let sequence = FILL_EXTENT + filled.len() as u64;
-                    let written = Header::new(WRITE, id()).with_args(&[own, sequence, 0]);
+                    let written = Header::new(WRITE, id()).with_body(&WriteBody {
+                        cell: own,
+                        sequence,
+                        ..Default::default()
+                    });
                     let written = send(written, &noise(own ^ sequence, 1 << 20), None);
                     filled.push(written.ok().and_then(|id| shared.answers.wait(id)));
                 }
@@ -1725,7 +1758,7 @@ fn run_hostile(
                 args[0] = (args[0].wrapping_add(time * 7 * ps)) % WINDOW_BYTES;
             }
             let id = said.id.unwrap_or_else(&mut id);
-            let header = Header::new(said.kind, id).with_args(&args).with_flags(said.flags);
+            let header = Header::new(said.kind, id).with_body(&args).with_flags(said.flags);
             let payload = names.payload(&said.payload, own);
             // The daemon may have let it go by now.
             let sent =
@@ -1756,7 +1789,11 @@ fn run_hostile(
         committed = shared.writer.load(Ordering::Relaxed).then_some(status);
         if hostile.flood {
             let own = shared.own.load(Ordering::Relaxed);
-            let written = Header::new(WRITE, id()).with_args(&[own, FLOOD_EXTENT, 0]);
+            let written = Header::new(WRITE, id()).with_body(&WriteBody {
+                cell: own,
+                sequence: FLOOD_EXTENT,
+                ..Default::default()
+            });
             let written = send(written, &vec![0x3c; FLOOD_READ as usize], None);
             flood = Some(written.ok().and_then(|id| shared.answers.wait(id)));
         }
@@ -1771,7 +1808,13 @@ fn run_hostile(
         let own = shared.own.load(Ordering::Relaxed);
         let reads = credit(shared.granted.load(Ordering::Relaxed)) / FLOOD_READ + 64;
         for _ in 0..reads {
-            let read = Header::new(READ, id()).with_args(&[own, FLOOD_EXTENT, 0, FLOOD_READ]);
+            let read = Header::new(READ, id()).with_body(&ReadBody {
+                cell: own,
+                sequence: FLOOD_EXTENT,
+                offset: 0,
+                len: FLOOD_READ,
+                transfer_at: 0,
+            });
             if sender.send(read, &[], &[]).is_err() {
                 break;
             }
@@ -2221,12 +2264,12 @@ fn what_requests_hold_is_within_the_credit() {
         super::raw_connection(&socket, &dir.path().join("store"), 1 << 33);
     let len = MAX_PAYLOAD;
     let area = area_fd(Area::Sealed(len), &Mutex::default()).unwrap();
-    let transfer = Header::new(TRANSFER, 1).with_args(&[len]);
+    let transfer = Header::new(TRANSFER, 1).with_body(&TransferBody { len });
     sender.send(transfer, &[], &[area.as_fd()]).unwrap();
     let transferred = receiver.receive(|| 0).unwrap().unwrap().header;
     assert_eq!((transferred.id, transferred.status), (1, 0));
-    let extent = |sequence| [cell, sequence];
-    let written = Header::new(WRITE, 2).with_args(&extent(1));
+    let written =
+        Header::new(WRITE, 2).with_body(&WriteBody { cell, sequence: 1, ..Default::default() });
     assert_eq!(
         super::call(&sender, &mut receiver, written, &vec![7; len as usize]).header.status,
         0
@@ -2234,7 +2277,13 @@ fn what_requests_hold_is_within_the_credit() {
     let committed = Header::new(COMMIT, 3);
     assert_eq!(super::call(&sender, &mut receiver, committed, &[]).header.status, 0);
     // In the extent cache, so that what bringing it in holds isn't counted here.
-    let warm = Header::new(READ, 4).with_args(&[cell, 1, 0, len]);
+    let warm = Header::new(READ, 4).with_body(&ReadBody {
+        cell,
+        sequence: 1,
+        offset: 0,
+        len,
+        transfer_at: 0,
+    });
     assert_eq!(super::call(&sender, &mut receiver, warm, &[]).header.status, 0);
     // Its root, no larger than a root holds, read back as many at once as the connection serves:
     // one as large as a payload refused, as it would be copied into each reply, uncounted.
@@ -2267,16 +2316,38 @@ fn what_requests_hold_is_within_the_credit() {
     };
     let stream = (MAX_STREAM_BYTES / len) as usize;
     let many = 16;
-    let reads = (0..many).map(|id| Header::new(READ, 10 + id).with_args(&[cell, 1, 0, len]));
+    let reads = (0..many).map(|id| {
+        Header::new(READ, 10 + id).with_body(&ReadBody {
+            cell,
+            sequence: 1,
+            offset: 0,
+            len,
+            transfer_at: 0,
+        })
+    });
     let into_area = (0..many).map(|id| {
-        Header::new(READ, 100 + id).with_args(&[cell, 1, 0, len, 0]).with_flags(READ_TRANSFER)
+        Header::new(READ, 100 + id)
+            .with_body(&ReadBody { cell, sequence: 1, offset: 0, len, transfer_at: 0 })
+            .with_flags(READ_TRANSFER)
     });
     let from_area = (0..many).map(|id| {
         Header::new(WRITE, 200 + id)
-            .with_args(&[cell, 2 + id, 0, 0, len])
+            .with_body(&WriteBody {
+                cell,
+                sequence: 2 + id,
+                offset: 0,
+                transfer_at: 0,
+                data_len: len,
+            })
             .with_flags(WRITE_TRANSFER)
     });
-    let writes = (0..many).map(|id| Header::new(WRITE, 300 + id).with_args(&[cell, 20 + id, 0]));
+    let writes = (0..many).map(|id| {
+        Header::new(WRITE, 300 + id).with_body(&WriteBody {
+            cell,
+            sequence: 20 + id,
+            ..Default::default()
+        })
+    });
     let roots = (0..many).map(|id| Header::new(ROOT, 400 + id));
     let held = [
         burst("roots", roots.collect(), &[], many as usize),
@@ -2371,17 +2442,19 @@ async fn page_ins_in_flight_are_bounded() {
             replies.recv_timeout(WAIT).unwrap_or_else(|_| panic!("no reply to request {id}"));
         answered.borrow_mut().insert(replied, status);
     };
-    let window = Header::new(WINDOW, 2).with_args(&[EXTENTS * MIB]).with_flags(WINDOW_COPYING);
+    let window = Header::new(WINDOW, 2)
+        .with_body(&WindowBody { size: EXTENTS * MIB, budget: 0 })
+        .with_flags(WINDOW_COPYING);
     sender.send(window, &[], &[]).unwrap();
     assert_eq!(answer(2), 0);
     for sequence in 1..=EXTENTS {
-        let mapped = Header::new(MAP, 2 + sequence).with_args(&[
-            cell.id,
+        let mapped = Header::new(MAP, 2 + sequence).with_body(&MapBody {
+            cell: cell.id,
             sequence,
-            0,
-            MIB,
-            (sequence - 1) * MIB,
-        ]);
+            offset: 0,
+            len: MIB,
+            window_offset: (sequence - 1) * MIB,
+        });
         sender.send(mapped, &[], &[]).unwrap();
         assert_eq!(answer(2 + sequence), 0, "MAP {sequence}");
     }
@@ -2417,11 +2490,19 @@ async fn page_ins_in_flight_are_bounded() {
     };
     let faults = (1..=EXTENTS).map(|sequence| {
         let at = (sequence - 1) * MIB;
-        Header::new(FAULT, 1000 + sequence).with_args(&[at]).with_flags(FAULT_PAGE)
+        Header::new(FAULT, 1000 + sequence)
+            .with_body(&FaultBody { offset: at })
+            .with_flags(FAULT_PAGE)
     });
     // A page of each, through the stream.
     let reads = (1..=EXTENTS).map(|sequence| {
-        Header::new(READ, 2000 + sequence).with_args(&[cell.id, sequence, 0, page_size()])
+        Header::new(READ, 2000 + sequence).with_body(&ReadBody {
+            cell: cell.id,
+            sequence,
+            offset: 0,
+            len: page_size(),
+            transfer_at: 0,
+        })
     });
     let held = [burst("faults", faults.collect()), burst("reads", reads.collect())];
     // A connection's page-ins, each a part and those it reads ahead, as many at once as it
@@ -2470,7 +2551,8 @@ fn connections_lost_mid_payload_hold_none_of_their_tenants_bytes_in_flight() {
     {
         let (sender, receiver, stream, cell) =
             super::raw_connection(&socket, &cells.join("store"), 1 << 30);
-        let mut written = Header::new(WRITE, 2).with_args(&[cell, 1]);
+        let mut written =
+            Header::new(WRITE, 2).with_body(&WriteBody { cell, sequence: 1, ..Default::default() });
         written.len = MAX_PAYLOAD;
         let mut sent = &stream;
         std::io::Write::write_all(&mut sent, zerocopy::IntoBytes::as_bytes(&written)).unwrap();
@@ -2493,7 +2575,8 @@ fn connections_lost_mid_payload_hold_none_of_their_tenants_bytes_in_flight() {
     assert_eq!(mallory.in_flight().held(), 0, "the lost connection's bytes in flight");
     let (sender, mut receiver, _stream, cell) =
         super::raw_connection(&socket, &cells.join("other"), 1 << 30);
-    let written = Header::new(WRITE, 2).with_args(&[cell, 1]);
+    let written =
+        Header::new(WRITE, 2).with_body(&WriteBody { cell, sequence: 1, ..Default::default() });
     let data = super::pattern(1, 1 << 20);
     let answered = within(WAIT, move || super::call(&sender, &mut receiver, written, &data))
         .expect("the write answered");
@@ -2542,7 +2625,9 @@ fn mappings_asked_for_past_the_credit_let_their_vm_process_go() {
     // A window every other page of which is mapped, zeros: their reply holds 32 MiB.
     let (ps, count) = (page_size(), (32 << 20) / MAPPING_BYTES);
     let size = 2 * count * ps;
-    let window = Header::new(WINDOW, 2).with_args(&[size]).with_flags(WINDOW_COPYING);
+    let window = Header::new(WINDOW, 2)
+        .with_body(&WindowBody { size, budget: 0 })
+        .with_flags(WINDOW_COPYING);
     assert_eq!(super::call(&sender, &mut receiver, window, &[]).header.status, 0);
     let mapping = |n: u64| crate::WindowMapping {
         window_offset: 2 * n * ps,
@@ -2621,14 +2706,24 @@ fn a_tenants_in_flight_data_is_bounded() {
         std::thread::spawn(move || {
             let (sender, mut receiver, _stream, cell) =
                 super::raw_connection(&socket, &path, 1 << 30);
-            let written = Header::new(WRITE, 2).with_args(&[cell, 1]);
+            let written = Header::new(WRITE, 2).with_body(&WriteBody {
+                cell,
+                sequence: 1,
+                ..Default::default()
+            });
             sender.send(written, &super::pattern(1, MIB as usize), &[]).unwrap();
             assert_eq!(receiver.receive(|| 0).unwrap().unwrap().header.status, 0);
             // Reads past any room, none of whose replies it reads: what the daemon admits of them
             // it queues, held in the tenant's bytes in flight; the rest block here, as a full
             // socket does.
             for id in 0..300u64 {
-                let read = Header::new(READ, 100 + id).with_args(&[cell, 1, 0, MIB]);
+                let read = Header::new(READ, 100 + id).with_body(&ReadBody {
+                    cell,
+                    sequence: 1,
+                    offset: 0,
+                    len: MIB,
+                    transfer_at: 0,
+                });
                 if sender.send(read, &[], &[]).is_err() {
                     break;
                 }
@@ -2663,7 +2758,11 @@ fn a_tenants_in_flight_data_is_bounded() {
     // answers.
     let (asender, mut areceiver, _astream, acell) =
         super::raw_connection(&asocket, &adir.join("store"), 1 << 24);
-    let awritten = Header::new(WRITE, 2).with_args(&[acell, 1]);
+    let awritten = Header::new(WRITE, 2).with_body(&WriteBody {
+        cell: acell,
+        sequence: 1,
+        ..Default::default()
+    });
     let alice_write =
         super::call(&asender, &mut areceiver, awritten, &super::pattern(2, MIB as usize))
             .header
@@ -2673,7 +2772,13 @@ fn a_tenants_in_flight_data_is_bounded() {
     let alice_read = super::call(
         &asender,
         &mut areceiver,
-        Header::new(READ, 4).with_args(&[acell, 1, 0, MIB]),
+        Header::new(READ, 4).with_body(&ReadBody {
+            cell: acell,
+            sequence: 1,
+            offset: 0,
+            len: MIB,
+            transfer_at: 0,
+        }),
         &[],
     );
     let alice_budget = alice.in_flight().budget();

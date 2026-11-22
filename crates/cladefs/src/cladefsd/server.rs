@@ -895,20 +895,20 @@ impl Answer {
                 let used = open_cell.info().map(|info| (info.used, info.capacity));
                 let disk = open_cell.disk_bytes();
                 log::warn!(
-                    "cladefsd: request {} (flags {:#x}, args {:#x?}) found the cell full: \
+                    "cladefsd: request {} (flags {:#x}, body {:#x?}) found the cell full: \
                      used and capacity {used:?}, {disk} bytes of the host's disk",
                     header.kind,
                     header.flags,
-                    header.args
+                    header.body
                 );
             }
             // A request the cell refuses as malformed is the guest's mistake: which it was.
             if errno == Errno::EINVAL {
                 log::warn!(
-                    "cladefsd: request {} refused with EINVAL: flags {:#x}, args {:#x?}",
+                    "cladefsd: request {} refused with EINVAL: flags {:#x}, body {:#x?}",
                     header.kind,
                     header.flags,
-                    header.args
+                    header.body
                 );
             }
             reply.status = -errno.raw();
@@ -1519,7 +1519,9 @@ impl Connection {
             let cell = Box::pin(self.follow(path)).await?;
             let commit = self.cell().ok_or(Errno::EBADF)?.view_commit()?;
             let max_map_count = max_map_count();
-            reply.args = Opened { cell, arena: self.arena_id(), commit, max_map_count }.args();
+            reply.set_body(
+                &Opened { cell, arena: self.arena_id(), commit, max_map_count }.to_body(),
+            );
             fds.extend(self.memories());
             return Ok(());
         }
@@ -1607,7 +1609,7 @@ impl Connection {
             }
             Request::Root => open_cell.root().map(|root| *payload = root),
             Request::Advance => {
-                open_cell.advance().map(|commit| reply.args = Advanced { commit }.args())
+                open_cell.advance().map(|commit| reply.set_body(&Advanced { commit }.to_body()))
             }
             Request::LetGo { commit } => open_cell.let_go(*commit),
             Request::Pin(extent) => open_cell.pin(*extent),
@@ -1625,7 +1627,7 @@ impl Connection {
                 })?;
                 self.versions_made.with(Mutex::lock).insert(version);
                 let cell = open_cell.cell();
-                reply.args = Forked { cell: cell.id, version, tenant: cell.tenant }.args();
+                reply.set_body(&Forked { cell: cell.id, version, tenant: cell.tenant }.to_body());
                 Ok(())
             }
             // cladefs: a version it made, which a VM snapshot failing past it names nowhere
@@ -1655,10 +1657,10 @@ impl Connection {
                 })?;
                 // cladefs: the fork made, its reply lost: its guest takes it to have failed.
                 fail::fail_point!("cladefsd::forked", |_| Err(Errno::EIO));
-                reply.args = Forked { cell: cell.id, version: 0, tenant: 0 }.args();
+                reply.set_body(&Forked { cell: cell.id, version: 0, tenant: 0 }.to_body());
                 Ok(())
             }
-            Request::Info => open_cell.info().map(|info| reply.args = Info(info).args()),
+            Request::Info => open_cell.info().map(|info| reply.set_body(&Info(info).to_body())),
             // No larger than the daemon makes room for, the codec has it (TASK-150.3).
             Request::Window { size, copying, budget } => {
                 let (sender, acks) = (self.peer.sender.clone(), self.peer.acks.clone());
@@ -1798,7 +1800,7 @@ impl Connection {
         let fds = match &opened {
             Ok(cell) => {
                 let (cell, arena, max_map_count) = (*cell, self.arena_id(), max_map_count());
-                reply.args = Opened { cell, arena, commit: 0, max_map_count }.args();
+                reply.set_body(&Opened { cell, arena, commit: 0, max_map_count }.to_body());
                 Vec::from(self.memories())
             }
             // Not opened: no memories to send; the failure goes in the answer.

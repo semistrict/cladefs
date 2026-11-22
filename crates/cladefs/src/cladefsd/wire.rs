@@ -6,7 +6,7 @@
 //!
 //! Each message is a [`Header`], followed by `len` bytes of payload. A message may carry up to
 //! [`MAX_FDS`] file descriptors, as `SCM_RIGHTS`, with its first bytes: the daemon's reply to
-//! [`OPEN`] carries its physical memory, the VM process's tenant's arena of it, `args[1]`,
+//! [`OPEN`] carries its physical memory, the VM process's tenant's arena of it (`OpenedBody::arena`),
 //! the default tenant's if it is of none, and the default arena, read-only (TASK-43, TASK-79.17).
 //!
 //! cladefs: each message's fields, its flags and arguments, payload and descriptors, are encoded
@@ -144,9 +144,37 @@ impl Socket {
         return self.stream.hung_up();
     }
 }
-use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
-/// A message's header: what it is, the request it is for, and its arguments.
+/// The fixed-size inline body of a [`Header`], holding one typed `#[repr(C)]` wire struct (up to
+/// `BODY_BYTES` bytes), zero-padded to the end.
+pub(crate) const BODY_BYTES: usize = 40;
+
+/// The byte offset inside [`Body`] where [`OpenBody::version`] and [`OpenedBody::version`] sit
+/// (byte offset 48 of [`Header`]), fixed across every wire version so a version mismatch is
+/// refused with `EPROTONOSUPPORT` before decoding anything else (TASK-141.3).
+pub(crate) const VERSION_OFFSET: usize = 32;
+
+/// The 40-byte, 8-byte-aligned inline body of a [`Header`].
+#[repr(C, align(8))]
+#[derive(Clone, Copy, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout)]
+pub(crate) struct Body(pub [u8; BODY_BYTES]);
+
+impl Default for Body {
+    fn default() -> Self {
+        Self([0; BODY_BYTES])
+    }
+}
+
+impl std::fmt::Debug for Body {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let words: [u64; 5] =
+            FromBytes::read_from_bytes(&self.0).expect("BODY_BYTES is five u64 words");
+        f.debug_list().entries(words).finish()
+    }
+}
+
+/// A message's header: what it is, the request it is for, and its typed inline [`Body`].
 #[repr(C)]
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
@@ -158,8 +186,8 @@ pub(crate) struct Header {
     pub flags: u32,
     /// The request a reply answers, or the stage operation an acknowledgement does.
     pub id: u64,
-    /// The kind's arguments.
-    pub args: [u64; 5],
+    /// The kind's typed inline body (`#[repr(C)]` `zerocopy` struct, zero-padded to [`BODY_BYTES`]).
+    pub body: Body,
     /// A reply's status: 0, or a -errno.
     pub status: i32,
     /// cladefs: how many descriptors the message carries, which come with its first bytes
@@ -175,16 +203,339 @@ impl Header {
         Self { kind, id, ..Default::default() }
     }
 
-    pub fn with_args(mut self, args: &[u64]) -> Self {
-        self.args[..args.len()].copy_from_slice(args);
-        self
-    }
-
     pub fn with_flags(mut self, flags: u32) -> Self {
         self.flags = flags;
         self
     }
+
+    /// Writes `body` into the start of `self.body`, zeroing any trailing bytes.
+    pub fn with_body<T: IntoBytes + Immutable>(mut self, body: &T) -> Self {
+        self.set_body(body);
+        self
+    }
+
+    /// Replaces `self.body` with `body`, zeroing any trailing bytes.
+    pub fn set_body<T: IntoBytes + Immutable>(&mut self, body: &T) {
+        const { assert!(size_of::<T>() <= BODY_BYTES) };
+        self.body = Body::default();
+        self.body.0[..size_of::<T>()].copy_from_slice(body.as_bytes());
+    }
+
+    /// Reads `T` from the start of `self.body`, ignoring trailing bytes (for pre-payload
+    /// admission such as [`super::codec::stream_bytes`]).
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+    pub fn read_body<T: FromBytes>(&self) -> T {
+        const { assert!(size_of::<T>() <= BODY_BYTES) };
+        T::read_from_prefix(&self.body.0).expect("body holds T").0
+    }
+
+    /// Decodes `T` from the start of `self.body`, refusing (`EINVAL`) any non-zero trailing bytes
+    /// past `T`.
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+    pub fn decode_body<T: FromBytes>(&self) -> Result<T, crate::Errno> {
+        const { assert!(size_of::<T>() <= BODY_BYTES) };
+        let (body, rest) = T::read_from_prefix(&self.body.0).map_err(|_| crate::Errno::EINVAL)?;
+        if rest.iter().any(|&byte| byte != 0) {
+            return Err(crate::Errno::EINVAL);
+        }
+        Ok(body)
+    }
+
+    /// Refuses (`EINVAL`) any non-zero bytes in `self.body` for kinds that carry no inline fields.
+    #[deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+    pub fn decode_empty(&self) -> Result<(), crate::Errno> {
+        if self.body.0.iter().any(|&byte| byte != 0) {
+            return Err(crate::Errno::EINVAL);
+        }
+        Ok(())
+    }
 }
+
+// Typed #[repr(C)] zerocopy wire structs for Header::body and variable-length payloads.
+
+/// Inline body of [`OPEN`]. `version` sits at [`VERSION_OFFSET`], fixed across every wire version.
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
+)]
+pub(crate) struct OpenBody {
+    pub capacity: u64,
+    pub cell: u64,
+    pub cell_version: u64,
+    pub tenant: u64,
+    pub version: u64,
+}
+
+/// Inline body of [`READ`].
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
+)]
+pub(crate) struct ReadBody {
+    pub cell: u64,
+    pub sequence: u64,
+    pub offset: u64,
+    pub len: u64,
+    pub transfer_at: u64,
+}
+
+/// Inline body of [`WRITE`].
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
+)]
+pub(crate) struct WriteBody {
+    pub cell: u64,
+    pub sequence: u64,
+    pub offset: u64,
+    pub transfer_at: u64,
+    pub data_len: u64,
+}
+
+/// Inline body of [`FREE`], [`FREE_MANY`], [`PIN`] and [`UNPIN`].
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
+)]
+pub(crate) struct ExtentBody {
+    pub cell: u64,
+    pub sequence: u64,
+}
+
+/// Inline body of [`MAP`].
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
+)]
+pub(crate) struct MapBody {
+    pub cell: u64,
+    pub sequence: u64,
+    pub offset: u64,
+    pub len: u64,
+    pub window_offset: u64,
+}
+
+/// Inline body of [`UNMAP`], [`STAGE_UNMAP`] and [`STAGE_MAPPED`].
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
+)]
+pub(crate) struct RangeBody {
+    pub offset: u64,
+    pub len: u64,
+}
+
+/// Inline body of [`WINDOW`].
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
+)]
+pub(crate) struct WindowBody {
+    pub size: u64,
+    pub budget: u64,
+}
+
+/// Inline body of [`FAULT`].
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
+)]
+pub(crate) struct FaultBody {
+    pub offset: u64,
+}
+
+/// Inline body of [`FORK`] with [`FORK_DROP`].
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
+)]
+pub(crate) struct DropVersionBody {
+    pub version: u64,
+}
+
+/// Inline body of [`RESIZED`].
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
+)]
+pub(crate) struct ResizedBody {
+    pub capacity: u64,
+    pub took: u64,
+}
+
+/// Inline body of [`LET_GO`], [`COMMITTED`] and an [`ADVANCE`] reply.
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
+)]
+pub(crate) struct CommitBody {
+    pub commit: u64,
+}
+
+/// Inline body of [`TRANSFER`].
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
+)]
+pub(crate) struct TransferBody {
+    pub len: u64,
+}
+
+/// Inline body of [`STATS`] and [`STATS_ASK`].
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
+)]
+pub(crate) struct StatsBody {
+    pub ask: u64,
+}
+
+/// Inline body of [`CAPACITY`].
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
+)]
+pub(crate) struct CapacityBody {
+    pub capacity: u64,
+}
+
+/// Inline body of [`ACK`] and [`STAGE_COUNTS`].
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
+)]
+pub(crate) struct StageCountsBody {
+    pub ops: u64,
+    pub ns: u64,
+    pub overwrites: u64,
+    pub leave_outs: u64,
+    pub installed: u32,
+    pub private: u32,
+}
+
+/// Inline body of [`STAGE_PRIVATE_COUNTS`].
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
+)]
+pub(crate) struct PrivateCountsBody {
+    pub runs: u64,
+    pub pages: u64,
+    pub ns: u64,
+    pub requests: u64,
+    pub request_ns: u64,
+}
+
+/// Inline body of [`STAGE_MAP`].
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
+)]
+pub(crate) struct StageMapBody {
+    pub offset: u64,
+    pub phys_offset: u64,
+    pub len: u64,
+    pub arena: u32,
+    pub reserved: u32,
+}
+
+/// Inline body of a reply to [`OPEN`]. `version` sits at [`VERSION_OFFSET`], fixed across every
+/// wire version.
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
+)]
+pub(crate) struct OpenedBody {
+    pub cell: u64,
+    pub commit: u64,
+    pub max_map_count: u64,
+    pub arena: u32,
+    pub reserved: u32,
+    pub version: u64,
+}
+
+/// Inline body of a reply to [`INFO`].
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
+)]
+pub(crate) struct InfoBody {
+    pub capacity: u64,
+    pub used: u64,
+    pub available: u64,
+    pub next_sequence: u64,
+    pub sequence_floor: u64,
+}
+
+/// Inline body of a reply to [`FORK`] (both fork and quiescent version).
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
+)]
+pub(crate) struct ForkedBody {
+    pub cell: u64,
+    pub version: u64,
+    pub tenant: u64,
+}
+
+/// Wire layout of one extent ID in a [`FREE_MANY`] payload (little-endian, unaligned).
+#[repr(C)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    FromBytes,
+    IntoBytes,
+    Immutable,
+    KnownLayout,
+    Unaligned,
+)]
+pub(crate) struct ExtentIdWire {
+    pub cell: zerocopy::byteorder::little_endian::U64,
+    pub sequence: zerocopy::byteorder::little_endian::U64,
+}
+
+/// Wire layout of one window mapping in a [`MAPPINGS`] reply or [`MAP_MANY`] payload
+/// (little-endian, unaligned).
+#[repr(C)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    FromBytes,
+    IntoBytes,
+    Immutable,
+    KnownLayout,
+    Unaligned,
+)]
+pub(crate) struct MappingWire {
+    pub window_offset: zerocopy::byteorder::little_endian::U64,
+    pub len: zerocopy::byteorder::little_endian::U64,
+    pub cell: zerocopy::byteorder::little_endian::U64,
+    pub sequence: zerocopy::byteorder::little_endian::U64,
+    pub offset: zerocopy::byteorder::little_endian::U64,
+    pub flags: zerocopy::byteorder::little_endian::U64,
+}
+
+const _: () = {
+    assert!(size_of::<Header>() == 72);
+    assert!(std::mem::offset_of!(Header, body) == 16);
+    assert!(std::mem::offset_of!(OpenBody, version) == VERSION_OFFSET);
+    assert!(std::mem::offset_of!(OpenedBody, version) == VERSION_OFFSET);
+    assert!(size_of::<OpenBody>() == BODY_BYTES);
+    assert!(size_of::<OpenedBody>() == BODY_BYTES);
+    assert!(size_of::<StageCountsBody>() == BODY_BYTES);
+    assert!(size_of::<PrivateCountsBody>() == BODY_BYTES);
+    assert!(size_of::<InfoBody>() == BODY_BYTES);
+    assert!(size_of::<ExtentIdWire>() == EXTENT_ID_BYTES);
+    assert!(size_of::<MappingWire>() as u64 == MAPPING_BYTES);
+};
 
 /// cladefs: the wire's version (TASK-141.3), which a change to any message, its kinds, flags,
 /// arguments, payloads, bounds or what they mean, makes a new one: the VM process says its own in
@@ -210,8 +561,10 @@ impl Header {
 /// (TASK-581). Version 13: a VM process copies on write itself (doc-26): no `FAULT_WRITE`,
 /// `PRIVATE` or `STAGE_PRIVATE`; a [`WINDOW`] says it copies with [`WINDOW_COPYING`], not its
 /// private pages; a [`STAGE_UNMAP`] keeps the private pages there with [`STAGE_KEEP_PRIVATE`];
-/// [`STAGE_COUNTS`] says the private pages.
-pub(crate) const VERSION: u64 = 13;
+/// [`STAGE_COUNTS`] says the private pages. Version 14: typed `#[repr(C)]` `zerocopy` inline
+/// message bodies replace positional `args: [u64; 5]`, refusing non-zero trailing/reserved bytes
+/// (board 6917).
+pub(crate) const VERSION: u64 = 14;
 
 /// cladefs: a flag of any request, which says the guest request it is a call for, the guest's
 /// number of it (`crate::request`, TASK-260): little-endian, not 0, in the first
@@ -330,7 +683,7 @@ pub(crate) const MAX_TRANSFER_AREA: u64 = 64 << 20;
 /// it chooses, which sizes what the daemon keeps for it, a mapping a page, and the room it holds
 /// its replies in, whatever else it asks (TASK-150.3). 750 MiB of those at most, of 4 KiB pages;
 /// the suites' guests' 2 GiB windows, and their soak's, are far within it.
-pub(crate) const MAX_WINDOW: u64 = 64 << 30;
+pub(crate) const MAX_WINDOW: u64 = crate::protocol::MAX_WINDOW;
 /// cladefs: the stage operations the VM process has made of the connection's, `args[0]`, the
 /// nanoseconds they took it, `args[1]`, and those of them that took access away from pages it had
 /// installed, by how, `args[2..4]` (`Stats::stage_overwrites`), so far, which the daemon counts as
@@ -353,10 +706,11 @@ pub(crate) const MAX_BUILD: usize = 64;
 /// (TASK-149.17). A VM process's was as large as a payload, 64 MiB, which its cell kept, and wrote
 /// with its commits, and which each `ROOT` copied into its reply, uncounted: 16 of them at once
 /// held 768 MiB.
-pub(crate) const MAX_ROOT: usize = storage_device::MAX_ROOT;
+#[cfg(test)]
+pub(crate) const MAX_ROOT: usize = crate::protocol::MAX_ROOT;
 // 30 made a window's pages private, doc-4's `PRIVATE`, which a VM process serves itself now
 // (doc-26), not reused.
-/// cladefs: the VM process's answer to the daemon's [`STATS_ASK`] `args[0]`: with [`STATS_GUEST`],
+/// cladefs: the VM process's answer to the daemon's [`STATS_ASK`] `ask`: with [`STATS_GUEST`],
 /// its guest's stats, the payload, UTF-8 text of [`MAX_STATS`] bytes at most, as the guest's
 /// driver said them (backlog doc-4's `STATS`): lines of a name and a value, a number, or a
 /// histogram's numbers between commas, and its build, `commit COMMIT`. Without, it has no guest to
@@ -368,7 +722,8 @@ pub(crate) const STATS: u32 = 31;
 pub(crate) const STATS_GUEST: u32 = 1 << 0;
 /// cladefs: the most bytes of a guest's stats a [`STATS`] carries, many times what the guest's
 /// Fxfs says (a few KiB).
-pub(crate) const MAX_STATS: usize = 64 << 10;
+#[cfg(any(target_os = "linux", test))]
+pub(crate) const MAX_STATS: usize = crate::protocol::MAX_STATS;
 /// cladefs: maps each mapping the payload holds, as a reply to [`MAPPINGS`] has them, in order,
 /// each as [`MAP`] would, in one change of the window: the first that fails fails the request,
 /// those before it mapped. A VM restored from a snapshot maps its window's mappings again so, the
@@ -399,26 +754,26 @@ pub(crate) const OPEN_MEMORY: u32 = 1 << 4;
 /// cladefs: doc-4's `MAP_ZEROS`, at its bit. Bit 0 was writable DAX's; doc-4's bits 1 and 2,
 /// `MAP_MANY` and `MAP_PREFAULT`, are no flags here: [`MAP_MANY`] is a request of its own, and a VM
 /// process prefaults by itself.
-pub(crate) const MAP_ZEROS: u32 = 1 << 3;
+pub(crate) const MAP_ZEROS: u32 = crate::protocol::MAP_ZEROS;
 pub(crate) const FORK_QUIESCENT: u32 = 1 << 0;
 /// cladefs: a [`FORK`] that drops a version the connection made (TASK-575).
 pub(crate) const FORK_DROP: u32 = 1 << 1;
 pub(crate) const MAPPING_ZEROS: u64 = 1 << 1;
 /// cladefs: a `COMMIT` that completes once uploaded, not once ordered: doc-4's `COMMIT_UPLOADED`,
 /// at its bit, as every flag doc-4 has too is here.
-pub(crate) const COMMIT_UPLOADED: u32 = 1 << 0;
+pub(crate) const COMMIT_UPLOADED: u32 = crate::protocol::COMMIT_UPLOADED;
 /// A `COMMIT` that sets the root: doc-4's `COMMIT_ROOT`, at its bit.
-pub(crate) const COMMIT_ROOT: u32 = 1 << 1;
+pub(crate) const COMMIT_ROOT: u32 = crate::protocol::COMMIT_ROOT;
 /// cladefs: a `COMMIT` that completes once local, synced to the host's disk, not waiting for the
 /// bucket (TASK-301): not with [`COMMIT_UPLOADED`]. Not doc-4's.
 pub(crate) const COMMIT_LOCAL: u32 = 1 << 2;
-pub(crate) const WRITE_BARRIER: u32 = 1 << 0;
-pub(crate) const WRITE_COMMIT: u32 = 1 << 1;
+pub(crate) const WRITE_BARRIER: u32 = crate::protocol::WRITE_BARRIER;
+pub(crate) const WRITE_COMMIT: u32 = crate::protocol::WRITE_COMMIT;
 /// A `WRITE`'s commit completes once uploaded: doc-4's `WRITE_UPLOADED`, at its bit, as are
 /// [`WRITE_BARRIER`], [`WRITE_COMMIT`] and [`WRITE_ROOT`].
-pub(crate) const WRITE_UPLOADED: u32 = 1 << 2;
+pub(crate) const WRITE_UPLOADED: u32 = crate::protocol::WRITE_UPLOADED;
 /// cladefs: a `WRITE`'s commit sets the root.
-pub(crate) const WRITE_ROOT: u32 = 1 << 3;
+pub(crate) const WRITE_ROOT: u32 = crate::protocol::WRITE_ROOT;
 /// Not doc-4's: a `WRITE`'s data is in the transfer area.
 pub(crate) const WRITE_TRANSFER: u32 = 1 << 4;
 /// cladefs: a `WRITE`'s commit completes once local, synced to the host's disk (TASK-301): not
@@ -501,12 +856,24 @@ pub(crate) struct Message {
 /// through, each waiting for room as the socket fills: the daemon's is an [`AsyncSender`].
 /// cladefs: Linux's alone, as its client is.
 #[cfg(target_os = "linux")]
-pub(crate) struct Sender(Mutex<UnixStream>);
+pub(crate) struct Sender(Mutex<SenderInner>);
+
+#[cfg(target_os = "linux")]
+struct SenderInner {
+    stream: UnixStream,
+    /// Bounded scratch buffer for streaming volatile write payloads without gathering multi-MiB
+    /// `Vec`s in the VMM (TASK-661).
+    scratch: Vec<u8>,
+}
+
+/// The most bytes [`Sender::send_stream`] copies at once from guest memory into the socket.
+#[cfg(target_os = "linux")]
+const STREAM_CHUNK: usize = 64 << 10;
 
 #[cfg(target_os = "linux")]
 impl Sender {
     pub fn new(stream: UnixStream) -> Self {
-        Self(Mutex::new(stream))
+        Self(Mutex::new(SenderInner { stream, scratch: Vec::new() }))
     }
 
     /// Sends `header`, with `payload` as its payload, and `fds`, at most [`MAX_FDS`].
@@ -518,31 +885,70 @@ impl Sender {
     /// `fds`, at most [`MAX_FDS`]: a write's data and its root, which no copy joins (TASK-160.9).
     pub fn send_parts(
         &self,
-        mut header: Header,
+        header: Header,
         payload: &[&[u8]],
         fds: &[BorrowedFd<'_>],
     ) -> io::Result<()> {
+        self.send_stream(header, payload, &[], &[], fds)
+    }
+
+    /// cladefs: sends `header`, followed by `prefix`, the bytes of `buffers` streamed through one
+    /// bounded scratch buffer ([`STREAM_CHUNK`]), and `suffix`, with `fds`, at most [`MAX_FDS`]:
+    /// avoids gathering multi-MiB `WRITE` payloads into VMM heap `Vec`s (TASK-661).
+    pub fn send_stream(
+        &self,
+        mut header: Header,
+        prefix: &[&[u8]],
+        buffers: &[crate::VolatileSlice<'_>],
+        suffix: &[&[u8]],
+        fds: &[BorrowedFd<'_>],
+    ) -> io::Result<()> {
         assert!(fds.len() <= MAX_FDS, "too many descriptors for a message");
-        header.len = payload.iter().map(|part| part.len() as u64).sum();
+        let prefix_len: u64 = prefix.iter().map(|part| part.len() as u64).sum();
+        let stream_len: u64 = buffers.iter().map(|buf| buf.len() as u64).sum();
+        let suffix_len: u64 = suffix.iter().map(|part| part.len() as u64).sum();
+        header.len = prefix_len + stream_len + suffix_len;
         header.fds = fds.len() as u32;
-        let stream = self.0.lock().unwrap();
-        let header = header.as_bytes();
+        let mut inner = self.0.lock().unwrap();
+        let SenderInner { stream, scratch } = &mut *inner;
+        let header_bytes = header.as_bytes();
         // The daemon's connections are non-blocking, for their receivers (TASK-34): a full one is
         // waited for.
         let sent = loop {
-            match send_with_fds(&stream, header, fds) {
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => wait_writable(&stream)?,
+            match send_with_fds(stream, header_bytes, fds) {
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => wait_writable(stream)?,
                 sent => break sent?,
             }
         };
-        write_all(&stream, &header[sent..])?;
-        payload.iter().try_for_each(|part| write_all(&stream, part))
+        write_all(stream, &header_bytes[sent..])?;
+        for part in prefix {
+            write_all(stream, part)?;
+        }
+        if stream_len > 0 {
+            let total = stream_len as usize;
+            let chunk_len = total.min(STREAM_CHUNK);
+            if scratch.len() < chunk_len {
+                scratch.resize(chunk_len, 0);
+            }
+            let mut at = 0;
+            while at < total {
+                let take = (total - at).min(chunk_len);
+                let copied = crate::memory::gather(buffers, at, &mut scratch[..take]);
+                debug_assert_eq!(copied, take);
+                write_all(stream, &scratch[..copied])?;
+                at += copied;
+            }
+        }
+        for part in suffix {
+            write_all(stream, part)?;
+        }
+        Ok(())
     }
 
     /// Shuts the connection down, which ends its receiver's messages.
     pub fn shutdown(&self) {
         // Shut down already, or never connected: nothing more to end.
-        let _ = self.0.lock().unwrap().shutdown(std::net::Shutdown::Both);
+        let _ = self.0.lock().unwrap().stream.shutdown(std::net::Shutdown::Both);
     }
 }
 
@@ -1331,20 +1737,24 @@ mod tests {
             assert_eq!(receiver.take_change(&mut first).unwrap(), Vec::<Anew>::new());
             let mut next = unmap(2, 8192, 4096).encode();
             match variation {
-                0 => next.args[0] += 4096,
+                0 => {
+                    let mut body = next.read_body::<RangeBody>();
+                    body.offset += 4096;
+                    next.set_body(&body);
+                }
                 // An unmap keeping the private pages, after one ending them (doc-26).
                 1 => next.flags |= STAGE_KEEP_PRIVATE,
                 2 => next.flags = 0,
-                3 => next.args = [u64::MAX - 1024, 4096, 0, 0, 0],
+                3 => next.set_body(&RangeBody { offset: u64::MAX - 1024, len: 4096 }),
                 4 => {}
                 5 => next.len = 3,
                 _ => unreachable!(),
             }
             if variation == 4 {
-                write_all(&sender.0.lock().unwrap(), &next.as_bytes()[..17]).unwrap();
+                write_all(&sender.0.lock().unwrap().stream, &next.as_bytes()[..17]).unwrap();
                 assert_eq!(receiver.take_change(&mut first).unwrap(), Vec::<Anew>::new());
                 assert_eq!(first, unmap(1, 4096, 4096));
-                write_all(&sender.0.lock().unwrap(), &next.as_bytes()[17..]).unwrap();
+                write_all(&sender.0.lock().unwrap().stream, &next.as_bytes()[17..]).unwrap();
                 assert_eq!(receiver.take_change(&mut first).unwrap(), Vec::<Anew>::new());
                 assert_eq!(first, unmap(2, 4096, 8192));
             } else {
@@ -1389,15 +1799,14 @@ mod tests {
         let (file, other) = (tempfile::tempfile().unwrap(), tempfile::tempfile().unwrap());
         let big = vec![7u8; 3 << 20];
         let sent = std::thread::spawn(move || {
-            sender.send(Header::new(READ, 1).with_args(&[1, 2, 3]), b"", &[]).unwrap();
+            let body = ReadBody { cell: 1, sequence: 2, offset: 3, len: 0, transfer_at: 0 };
+            sender.send(Header::new(READ, 1).with_body(&body), b"", &[]).unwrap();
             let fds = [file.as_fd(), other.as_fd()];
             sender.send(Header::new(WRITE, 2).with_flags(5), &big, &fds).unwrap();
         });
         let first = receiver.receive(|| 0).unwrap().unwrap();
-        assert_eq!(
-            first.header,
-            Header { kind: READ, id: 1, args: [1, 2, 3, 0, 0], ..Default::default() }
-        );
+        let body = ReadBody { cell: 1, sequence: 2, offset: 3, len: 0, transfer_at: 0 };
+        assert_eq!(first.header, Header::new(READ, 1).with_body(&body));
         assert!(first.payload.is_empty() && first.fds.is_empty());
         let second = receiver.receive(|| 0).unwrap().unwrap();
         assert_eq!((second.header.kind, second.header.id, second.header.flags), (WRITE, 2, 5));
